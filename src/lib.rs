@@ -1420,6 +1420,7 @@ pub type CK_NOTIFY =
 pub type CK_C_Initialize =
     ::std::option::Option<unsafe extern "C" fn(init_args: *mut ::std::os::raw::c_void) -> CK_RV>;
 
+#[no_mangle]
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     println!("C_Initialize called");
     return CKR_OK.into();
