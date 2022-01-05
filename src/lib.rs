@@ -1437,22 +1437,24 @@ pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
 pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut _CK_INFO) -> CK_RV>;
 
 #[no_mangle]
-pub extern "C" fn C_GetInfo(infoptr: *mut _CK_INFO) -> CK_RV {
+pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
     eprintln!("C_GetInfo called");
 
     unsafe {
-        let mut info = infoptr.as_mut().expect("C_GetInfo got null ptr");
-
-        info.cryptokiVersion.major = 2;
-        info.cryptokiVersion.minor = 40;
-        info.libraryVersion.major = 1;
-        info.libraryVersion.minor = 0;
-        info.flags = 0;
-        info.libraryDescription.fill(65u8);
-        info.manufacturerID.fill(66u8);
+        match info_ptr.as_mut() {
+            Some(info) => {
+                info.cryptokiVersion.major = 2;
+                info.cryptokiVersion.minor = 40;
+                info.libraryVersion.major = 1;
+                info.libraryVersion.minor = 0;
+                info.flags = 0;
+                info.libraryDescription.fill(65u8);
+                info.manufacturerID.fill(66u8);
+                CKR_OK
+            },
+            None => CKR_ARGUMENTS_BAD
+        }.into()
     }
-
-    CKR_OK.into()
 }
 
 pub type CK_C_GetFunctionList =
@@ -1561,10 +1563,15 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
             G_FUNCTION_LIST = Some(Box::into_raw(fun));
             eprintln!("C_GetFunctionList created {:?}", G_FUNCTION_LIST);
         }
-        *function_list = G_FUNCTION_LIST.unwrap();
-        eprintln!("C_GetFunctionList returning {:?}", *function_list);
+        match G_FUNCTION_LIST {
+            Some(func_list) => {
+                eprintln!("C_GetFunctionList returning {:?}", func_list);
+                *function_list = func_list;
+                CKR_OK
+            },
+            None => CKR_HOST_MEMORY
+        }.into()
     }
-    CKR_OK.into()
 }
 
 pub type CK_C_GetSlotList =
@@ -1604,22 +1611,24 @@ pub type CK_C_GetSlotInfo = ::std::option::Option<
 >;
 
 #[no_mangle]
-pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, infoptr: *mut _CK_SLOT_INFO) -> CK_RV {
+pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO) -> CK_RV {
     eprintln!("C_GetSlotInfo {} called", slotID);
 
     unsafe {
-        let mut info = infoptr.as_mut().expect("C_GetSlotInfo got null ptr");
-
-        info.hardwareVersion.major = 1;
-        info.hardwareVersion.minor = 0;
-        info.firmwareVersion.major = 1;
-        info.firmwareVersion.minor = 0;
-        info.flags = if slotID == 2 { CKF_TOKEN_PRESENT | CKF_HW_SLOT | CKF_REMOVABLE_DEVICE } else { CKF_HW_SLOT | CKF_REMOVABLE_DEVICE } as u64;
-        info.slotDescription.fill(65u8);
-        info.manufacturerID.fill(66u8);
+        match info_ptr.as_mut() {
+            Some(info) => {
+                info.hardwareVersion.major = 1;
+                info.hardwareVersion.minor = 0;
+                info.firmwareVersion.major = 1;
+                info.firmwareVersion.minor = 0;
+                info.flags = if slotID == 2 { CKF_TOKEN_PRESENT | CKF_HW_SLOT | CKF_REMOVABLE_DEVICE } else { CKF_HW_SLOT | CKF_REMOVABLE_DEVICE } as u64;
+                info.slotDescription.fill(65u8);
+                info.manufacturerID.fill(66u8);
+                CKR_OK
+            },
+            None => CKR_ARGUMENTS_BAD
+        }.into()
     }
-
-    CKR_OK.into()
 }
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
@@ -1629,35 +1638,37 @@ pub type CK_C_GetTokenInfo = ::std::option::Option<
 >;
 
 #[no_mangle]
-pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, infoptr: *mut _CK_TOKEN_INFO) -> CK_RV {
+pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_INFO) -> CK_RV {
     eprintln!("C_GetTokenInfo {} called", slotID);
 
     unsafe {
-        let mut info = infoptr.as_mut().expect("C_GetTokenInfo got null ptr");
-
-        info.label.fill(65u8);
-        info.manufacturerID.fill(66u8);
-        info.model.fill(67u8);
-        info.serialNumber.fill(0x30u8);
-        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as u64;
-        info.ulMaxSessionCount = 0;
-        info.ulSessionCount = 0;
-        info.ulMaxRwSessionCount = 0;
-        info.ulRwSessionCount = 0;
-        info.ulMaxPinLen = 34;
-        info.ulMinPinLen = 4;
-        info.ulTotalPublicMemory = 0;
-        info.ulFreePublicMemory = 0;
-        info.ulTotalPrivateMemory = 0;
-        info.ulFreePrivateMemory = 0;
-        info.hardwareVersion.major = 5;
-        info.hardwareVersion.minor = 43;
-        info.firmwareVersion.major = 5;
-        info.firmwareVersion.minor = 43;
-        info.utcTime.fill(0u8);
+        match info_ptr.as_mut() {
+            Some(info) => {
+                info.label.fill(65u8);
+                info.manufacturerID.fill(66u8);
+                info.model.fill(67u8);
+                info.serialNumber.fill(0x30u8);
+                info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as u64;
+                info.ulMaxSessionCount = 0;
+                info.ulSessionCount = 0;
+                info.ulMaxRwSessionCount = 0;
+                info.ulRwSessionCount = 0;
+                info.ulMaxPinLen = 34;
+                info.ulMinPinLen = 4;
+                info.ulTotalPublicMemory = 0;
+                info.ulFreePublicMemory = 0;
+                info.ulTotalPrivateMemory = 0;
+                info.ulFreePrivateMemory = 0;
+                info.hardwareVersion.major = 5;
+                info.hardwareVersion.minor = 43;
+                info.firmwareVersion.major = 5;
+                info.firmwareVersion.minor = 43;
+                info.utcTime.fill(0u8);
+                CKR_OK
+            }
+            None => CKR_ARGUMENTS_BAD
+        }.into()
     }
-
-    CKR_OK.into()
 }
 
 pub type CK_C_WaitForSlotEvent =
@@ -1803,19 +1814,21 @@ pub type CK_C_GetSessionInfo =
     >;
 
 #[no_mangle]
-pub extern "C" fn C_GetSessionInfo(_session: CK_SESSION_HANDLE, infoptr: *mut _CK_SESSION_INFO) -> CK_RV {
+pub extern "C" fn C_GetSessionInfo(_session: CK_SESSION_HANDLE, info_ptr: *mut _CK_SESSION_INFO) -> CK_RV {
     eprintln!("C_GetSessionInfo called");
 
     unsafe {
-        let mut info = infoptr.as_mut().expect("C_GetSessionInfo got null ptr");
-
-        info.slotID = 1;
-        info.state = CKS_RW_PUBLIC_SESSION as u64;
-        info.flags = 0;
-        info.ulDeviceError = 0;
+        match info_ptr.as_mut() {
+            Some(info) => { 
+                info.slotID = 1;
+                info.state = CKS_RW_PUBLIC_SESSION as u64;
+                info.flags = 0;
+                info.ulDeviceError = 0;
+                CKR_OK
+            },
+            None => CKR_ARGUMENTS_BAD
+        }.into()
     }
-
-    CKR_OK.into()
 }
 
 pub type CK_C_GetOperationState =
