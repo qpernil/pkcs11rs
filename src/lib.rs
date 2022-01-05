@@ -1501,9 +1501,9 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_GetMechanismList: Some(C_GetMechanismList),
                 C_GetMechanismInfo: Some(C_GetMechanismInfo),
 
-                C_InitToken: None,
-                C_InitPIN: None,
-                C_SetPIN: None,
+                C_InitToken: Some(C_InitToken),
+                C_InitPIN: Some(C_InitPIN),
+                C_SetPIN: Some(C_SetPIN),
 
                 C_OpenSession: Some(C_OpenSession),
                 C_CloseSession: Some(C_CloseSession),
@@ -1575,8 +1575,9 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
 
                 C_GetFunctionStatus: None,
                 C_CancelFunction: None,
-                C_WaitForSlotEvent: None,
+                C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
             });
+            eprintln!("C_GetFunctionList created {:?}", fun);
             G_FUNCTION_LIST = Some(Box::into_raw(fun));
             eprintln!("C_GetFunctionList created {:?}", G_FUNCTION_LIST);
         }
@@ -1610,9 +1611,9 @@ pub extern "C" fn C_GetSlotList(
         match G_SLOTS.as_mut() {
             Some(slots) => {
                 if slots.is_empty() {
-                    slots.insert(5, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()} );
-                    slots.insert(7, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS, _sessions: HashMap::new()});
-                    slots.insert(9, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()});
+                    slots.insert(0, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()} );
+                    slots.insert(1, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS, _sessions: HashMap::new()});
+                    slots.insert(2, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()});
                     eprintln!("C_GetSlotList initialized {:?}", slots);
                 }
                 match slot_list.as_mut() {
@@ -1736,13 +1737,15 @@ pub type CK_C_WaitForSlotEvent =
                              pReserved: *mut ::std::os::raw::c_void)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_WaitForSlotEvent(
-        flags: CK_FLAGS,
-        slot: *mut CK_SLOT_ID,
-        pReserved: *mut ::std::os::raw::c_void,
-    ) -> CK_RV;
+
+pub extern "C" fn C_WaitForSlotEvent(
+    _flags: CK_FLAGS,
+    _slot: *mut CK_SLOT_ID,
+    _pReserved: *mut ::std::os::raw::c_void,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_GetMechanismList =
     ::std::option::Option<
         unsafe extern "C" fn(slotID: CK_SLOT_ID,
@@ -1767,11 +1770,14 @@ pub extern "C" fn C_GetMechanismList(
                             Some(_) => {
                                 let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
                                 for i in 0..*count {
-                                    list[i as usize] = 0;
+                                    list[i as usize] = i;
                                 }
                                 CKR_OK
                             },
-                            None => CKR_ARGUMENTS_BAD
+                            None => {
+                                *count = 7;
+                                CKR_OK
+                            }
                         }
                     }
                     None => CKR_SLOT_ID_INVALID
@@ -1796,7 +1802,7 @@ pub extern "C" fn C_GetMechanismInfo(
     type_: CK_MECHANISM_TYPE,
     info_ptr: *mut _CK_MECHANISM_INFO,
 ) -> CK_RV {
-    eprintln!("C_GetMechanismList called with {:?}", (slotID, type_, info_ptr));
+    eprintln!("C_GetMechanismInfo called with {:?}", (slotID, type_, info_ptr));
     unsafe {
         match G_SLOTS.as_ref() {
             Some(slots) => {
@@ -1804,8 +1810,8 @@ pub extern "C" fn C_GetMechanismInfo(
                     Some(_slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                info.ulMinKeySize = 0;
-                                info.ulMaxKeySize = 100;
+                                info.ulMinKeySize = 128;
+                                info.ulMaxKeySize = 256;
                                 info.flags = 0;
                                 CKR_OK
                             },
@@ -1828,14 +1834,17 @@ pub type CK_C_InitToken =
                              label: *mut ::std::os::raw::c_uchar)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_InitToken(
-        slotID: CK_SLOT_ID,
-        pin: *mut ::std::os::raw::c_uchar,
-        pin_len: ::std::os::raw::c_ulong,
-        label: *mut ::std::os::raw::c_uchar,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_InitToken(
+    _slotID: CK_SLOT_ID,
+    _pin: *mut ::std::os::raw::c_uchar,
+    _pin_len: ::std::os::raw::c_ulong,
+    _label: *mut ::std::os::raw::c_uchar,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_InitPIN =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -1843,13 +1852,16 @@ pub type CK_C_InitPIN =
                              pin_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_InitPIN(
-        session: CK_SESSION_HANDLE,
-        pin: *mut ::std::os::raw::c_uchar,
-        pin_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_InitPIN(
+    _session: CK_SESSION_HANDLE,
+    _pin: *mut ::std::os::raw::c_uchar,
+    _pin_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SetPIN =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -1859,15 +1871,18 @@ pub type CK_C_SetPIN =
                              new_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SetPIN(
-        session: CK_SESSION_HANDLE,
-        old_pin: *mut ::std::os::raw::c_uchar,
-        old_len: ::std::os::raw::c_ulong,
-        new_pin: *mut ::std::os::raw::c_uchar,
-        new_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SetPIN(
+    _session: CK_SESSION_HANDLE,
+    _old_pin: *mut ::std::os::raw::c_uchar,
+    _old_len: ::std::os::raw::c_ulong,
+    _new_pin: *mut ::std::os::raw::c_uchar,
+    _new_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_OpenSession =
     ::std::option::Option<
         unsafe extern "C" fn(slotID: CK_SLOT_ID,
