@@ -1418,26 +1418,29 @@ pub type CK_NOTIFY =
 pub type CK_C_Initialize =
     ::std::option::Option<extern "C" fn(init_args: *mut ::std::os::raw::c_void) -> CK_RV>;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct Slot {
     flags: CK_FLAGS,
-    _sessions: HashMap<CK_SESSION_HANDLE, Session>
 }
 
 #[derive(Debug, Copy, Clone)]
 struct Session {
-    _slot: CK_SLOT_ID
+    slotID: CK_SLOT_ID,
+    flags: CK_FLAGS
 }
 
+static mut G_FUNCTION_LIST: Option<CK_FUNCTION_LIST_PTR> = None;
 static mut G_SLOTS: Option<HashMap<CK_SLOT_ID, Slot>> = None;
+static mut G_SESSIONS: Option<HashMap<CK_SESSION_HANDLE, Session>> = None;
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Initialize called");
     unsafe {
         G_SLOTS = Some(HashMap::new());
-    }
-    CKR_OK.into()
+        G_SESSIONS = Some(HashMap::new());
+        CKR_OK
+    }.into()
 }
 
 pub type CK_C_Finalize =
@@ -1448,8 +1451,9 @@ pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called");
     unsafe {
         G_SLOTS = None;
-    }
-    CKR_OK.into()
+        G_SESSIONS = None;
+        CKR_OK
+    }.into()
 }
 
 pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut _CK_INFO) -> CK_RV>;
@@ -1467,11 +1471,12 @@ pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
                 info.flags = 0;
                 info.libraryDescription.fill(65u8);
                 info.manufacturerID.fill(66u8);
+                eprintln!("C_GetInfo returning {:?}", info);
                 CKR_OK
             },
             None => CKR_ARGUMENTS_BAD
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetFunctionList =
@@ -1479,12 +1484,10 @@ pub type CK_C_GetFunctionList =
         unsafe extern "C" fn(function_list: *mut *mut _CK_FUNCTION_LIST) -> CK_RV,
     >;
 
-static mut G_FUNCTION_LIST: Option<CK_FUNCTION_LIST_PTR> = None;
-
 #[no_mangle]
 pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) -> CK_RV {
     unsafe {
-        eprintln!("C_GetFunctionList called with {:?}", G_FUNCTION_LIST);
+        eprintln!("C_GetFunctionList called");
         if G_FUNCTION_LIST.is_none() {
             let fun = Box::new(CK_FUNCTION_LIST {
                 version : CK_VERSION {major: 2, minor: 40},
@@ -1513,8 +1516,8 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_GetOperationState: None,
                 C_SetOperationState: None,
 
-                C_Login: None,
-                C_Logout: None,
+                C_Login: Some(C_Login),
+                C_Logout: Some(C_Logout),
 
                 C_CreateObject: None,
                 C_CopyObject: None,
@@ -1524,9 +1527,9 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_GetAttributeValue: None,
                 C_SetAttributeValue: None,
 
-                C_FindObjectsInit: None,
-                C_FindObjects: None,
-                C_FindObjectsFinal: None,
+                C_FindObjectsInit: Some(C_FindObjectsInit),
+                C_FindObjects: Some(C_FindObjects),
+                C_FindObjectsFinal: Some(C_FindObjectsFinal),
 
                 C_EncryptInit: None,
                 C_Encrypt: None,
@@ -1573,13 +1576,12 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_SeedRandom: Some(C_SeedRandom),
                 C_GenerateRandom: Some(C_GenerateRandom),
 
-                C_GetFunctionStatus: None,
-                C_CancelFunction: None,
+                C_GetFunctionStatus: Some(C_GetFunctionStatus),
+                C_CancelFunction: Some(C_CancelFunction),
                 C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
             });
             eprintln!("C_GetFunctionList created {:?}", fun);
             G_FUNCTION_LIST = Some(Box::into_raw(fun));
-            eprintln!("C_GetFunctionList created {:?}", G_FUNCTION_LIST);
         }
         match G_FUNCTION_LIST {
             Some(func_list) => {
@@ -1588,8 +1590,8 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 CKR_OK
             },
             None => CKR_HOST_MEMORY
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetSlotList =
@@ -1611,9 +1613,9 @@ pub extern "C" fn C_GetSlotList(
         match G_SLOTS.as_mut() {
             Some(slots) => {
                 if slots.is_empty() {
-                    slots.insert(0, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()} );
-                    slots.insert(1, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS, _sessions: HashMap::new()});
-                    slots.insert(2, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS, _sessions: HashMap::new()});
+                    slots.insert(0, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
+                    slots.insert(1, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                    slots.insert(2, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS});
                     eprintln!("C_GetSlotList initialized {:?}", slots);
                 }
                 match slot_list.as_mut() {
@@ -1639,8 +1641,8 @@ pub extern "C" fn C_GetSlotList(
                 }
             },
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetSlotInfo = ::std::option::Option<
@@ -1667,6 +1669,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.slotDescription.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.flags = slot.flags;
+                                eprintln!("C_GetSlotInfo returning {:?}", info);
                                 CKR_OK
                             },
                             None => CKR_ARGUMENTS_BAD
@@ -1676,8 +1679,8 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                 }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
@@ -1717,6 +1720,7 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                                 info.firmwareVersion.major = 5;
                                 info.firmwareVersion.minor = 43;
                                 info.utcTime.fill(0u8);
+                                eprintln!("C_GetTokenInfo returning {:?}", info);
                                 CKR_OK
                             },
                             None => CKR_ARGUMENTS_BAD
@@ -1726,8 +1730,8 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                 }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_WaitForSlotEvent =
@@ -1772,9 +1776,11 @@ pub extern "C" fn C_GetMechanismList(
                                 for i in 0..*count {
                                     list[i as usize] = i;
                                 }
+                                eprintln!("C_GetMechanismList returning {:?}", list);
                                 CKR_OK
                             },
                             None => {
+                                eprintln!("C_GetMechanismList returning {:?}", 7);
                                 *count = 7;
                                 CKR_OK
                             }
@@ -1784,8 +1790,8 @@ pub extern "C" fn C_GetMechanismList(
                 }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetMechanismInfo =
@@ -1813,6 +1819,7 @@ pub extern "C" fn C_GetMechanismInfo(
                                 info.ulMinKeySize = 128;
                                 info.ulMaxKeySize = 256;
                                 info.flags = 0;
+                                eprintln!("C_GetMechanismInfo returning {:?}", info);
                                 CKR_OK
                             },
                             None => CKR_ARGUMENTS_BAD
@@ -1822,8 +1829,8 @@ pub extern "C" fn C_GetMechanismInfo(
                 }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_InitToken =
@@ -1897,40 +1904,62 @@ pub type CK_C_OpenSession =
 pub extern "C" fn C_OpenSession(
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
-    application: *mut ::std::os::raw::c_void,
-    notify: CK_NOTIFY,
+    _application: *mut ::std::os::raw::c_void,
+    _notify: CK_NOTIFY,
     session: *mut CK_SESSION_HANDLE,
 ) -> CK_RV {
-    eprintln!("C_OpenSession called with {:?}", (slotID, flags, application, notify, session));
+    eprintln!("C_OpenSession called with {:?}", (slotID, flags));
     unsafe {
         match G_SLOTS.as_ref() {
             Some(slots) => {
                 match slots.get(&slotID) {
                     Some(_slot) => {
-                        CKR_OK
+                        match G_SESSIONS.as_mut() {
+                            Some(sessions) => {
+                                let k = match sessions.keys().max() {
+                                    Some(v) => v + 1,
+                                    None => 1
+                                };
+                                eprintln!("C_OpenSession sessions before {:?}", sessions);
+                                sessions.insert(k, Session {slotID, flags});
+                                eprintln!("C_OpenSession sessions after {:?}", sessions);
+                                eprintln!("C_OpenSession returning {:?}", k);
+                                *session = k;
+                                CKR_OK
+                            },
+                            None => CKR_HOST_MEMORY
+                        }
                     }
                     None => CKR_SLOT_ID_INVALID
                 }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_CloseSession =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
 #[no_mangle]
-pub extern "C" fn C_CloseSession(_session: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_CloseSession called");
+pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    eprintln!("C_CloseSession called with {:?}", session_handle);
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(_slots) => {
-                CKR_OK
+        match G_SESSIONS.as_mut() {
+            Some(sessions) => {
+                eprintln!("C_CloseSession sessions before {:?}", sessions);
+                match sessions.remove(&session_handle) {
+                    Some(session) => {
+                        eprintln!("C_CloseSession removed {:?}", (session_handle, session));
+                        eprintln!("C_CloseSession sessions after {:?}", sessions);
+                        CKR_OK
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_CloseAllSessions = ::std::option::Option<
@@ -1942,18 +1971,16 @@ pub type CK_C_CloseAllSessions = ::std::option::Option<
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     eprintln!("C_CloseAllSessions called with {:?}", slotID);
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
-                    Some(_slot) => {
-                        CKR_OK
-                    }
-                    None => CKR_SLOT_ID_INVALID
-                }
+        match G_SESSIONS.as_mut() {
+            Some(sessions) => {
+                eprintln!("C_CloseAllSessions sessions before {:?}", sessions);
+                sessions.retain(|_k, v| v.slotID != slotID);
+                eprintln!("C_CloseAllSessions sessions after {:?}", sessions);
+                CKR_OK
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetSessionInfo =
@@ -1964,25 +1991,31 @@ pub type CK_C_GetSessionInfo =
     >;
 
 #[no_mangle]
-pub extern "C" fn C_GetSessionInfo(_session: CK_SESSION_HANDLE, info_ptr: *mut _CK_SESSION_INFO) -> CK_RV {
-    eprintln!("C_GetSessionInfo called");
+pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut _CK_SESSION_INFO) -> CK_RV {
+    eprintln!("C_GetSessionInfo called with {:?}", session_handle);
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(_slots) => {
-                match info_ptr.as_mut() {
-                    Some(info) => { 
-                        info.slotID = 1;
-                        info.state = CKS_RO_PUBLIC_SESSION as u64;
-                        info.flags = 0;
-                        info.ulDeviceError = 0;
-                        CKR_OK
-                    },
-                    None => CKR_ARGUMENTS_BAD
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(session) => {
+                        match info_ptr.as_mut() {
+                            Some(info) => { 
+                                info.slotID = session.slotID;
+                                info.state = CKS_RW_PUBLIC_SESSION as u64;
+                                info.flags = session.flags;
+                                info.ulDeviceError = 0;
+                                eprintln!("C_GetSessionInfo returning {:?}", info);
+                                CKR_OK
+                            },
+                            None => CKR_ARGUMENTS_BAD
+                        }
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
                 }
             },
             None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }.into()
-    }
+        }
+    }.into()
 }
 
 pub type CK_C_GetOperationState =
@@ -2025,21 +2058,56 @@ pub type CK_C_Login =
                              pin_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Login(
-        session: CK_SESSION_HANDLE,
-        user_type: CK_USER_TYPE,
-        pin: *mut ::std::os::raw::c_uchar,
-        pin_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+pub extern "C" fn C_Login(
+    session_handle: CK_SESSION_HANDLE,
+    user_type: CK_USER_TYPE,
+    pin: *mut ::std::os::raw::c_uchar,
+    pin_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    eprintln!("C_Login called with {:?}", (session_handle, user_type, pin, pin_len));
+    unsafe {
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(_session) => {
+                        match pin.as_ref() {
+                            Some(_pin) => { 
+                                CKR_OK
+                            },
+                            None => CKR_ARGUMENTS_BAD
+                        }
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
+
 pub type CK_C_Logout = ::std::option::Option<
     unsafe extern "C" fn(session: CK_SESSION_HANDLE)
                          -> CK_RV,
 >;
-extern "C" {
-    pub fn C_Logout(session: CK_SESSION_HANDLE) -> CK_RV;
+    
+pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    eprintln!("C_Logout called with {:?}", session_handle);
+    unsafe {
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(_session) => {
+                        CKR_OK
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
+
 pub type CK_C_CreateObject =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2136,13 +2204,35 @@ pub type CK_C_FindObjectsInit =
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_FindObjectsInit(
-        session: CK_SESSION_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+pub extern "C" fn C_FindObjectsInit(
+    session_handle: CK_SESSION_HANDLE,
+    templ: *mut _CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    eprintln!("C_FindObjectsInit called with {:?}", (session_handle, templ, count));
+    unsafe {
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(_session) => {
+                        match templ.as_ref() {
+                            Some(_info) => { 
+                                CKR_OK
+                            },
+                            None => {
+                                CKR_OK
+                            }
+                        }
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
+
 pub type CK_C_FindObjects =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2151,19 +2241,56 @@ pub type CK_C_FindObjects =
                              object_count: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_FindObjects(
-        session: CK_SESSION_HANDLE,
-        object: *mut CK_OBJECT_HANDLE,
-        max_object_count: ::std::os::raw::c_ulong,
-        object_count: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+pub extern "C" fn C_FindObjects(
+    session_handle: CK_SESSION_HANDLE,
+    object: *mut CK_OBJECT_HANDLE,
+    max_object_count: ::std::os::raw::c_ulong,
+    object_count: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    eprintln!("C_FindObjects called with {:?}", (session_handle, object, max_object_count, object_count));
+    unsafe {
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(_session) => {
+                        match object.as_mut() {
+                            Some(_info) => {
+                                eprintln!("C_FindObjects returning {:?}", 0);
+                                *object_count = 0;
+                                CKR_OK
+                            },
+                            None => CKR_ARGUMENTS_BAD
+                        }
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
+
 pub type CK_C_FindObjectsFinal =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
-extern "C" {
-    pub fn C_FindObjectsFinal(session: CK_SESSION_HANDLE) -> CK_RV;
+
+pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
+    unsafe {
+        match G_SESSIONS.as_ref() {
+            Some(sessions) => {
+                match sessions.get(&session_handle) {
+                    Some(_session) => {
+                        CKR_OK
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
+
 pub type CK_C_EncryptInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2714,7 +2841,6 @@ pub extern "C" fn C_SeedRandom(
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_SeedRandom called");
-
     CKR_OK.into()
 }
 
@@ -2733,20 +2859,25 @@ pub extern "C" fn C_GenerateRandom(
     _random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_GenerateRandom called");
-
     CKR_OK.into()
 }
 
 pub type CK_C_GetFunctionStatus =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
-extern "C" {
-    pub fn C_GetFunctionStatus(session: CK_SESSION_HANDLE) -> CK_RV;
+
+pub extern "C" fn C_GetFunctionStatus(session: CK_SESSION_HANDLE) -> CK_RV {
+    eprintln!("C_GetFunctionStatus called with {:?}", session);
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_CancelFunction =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
-extern "C" {
-    pub fn C_CancelFunction(session: CK_SESSION_HANDLE) -> CK_RV;
+
+pub extern "C" fn C_CancelFunction(session: CK_SESSION_HANDLE) -> CK_RV {
+    eprintln!("C_CancelFunction called with {:?}", session);
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct _CK_FUNCTION_LIST {
