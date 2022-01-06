@@ -1,6 +1,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+use std::ptr;
 use core::slice;
 use std::collections::HashMap;
 
@@ -1601,7 +1602,7 @@ pub type CK_C_GetSlotList =
                              count: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
- 
+
 #[no_mangle]
 pub extern "C" fn C_GetSlotList(
     token_present: ::std::os::raw::c_uchar,
@@ -1618,23 +1619,26 @@ pub extern "C" fn C_GetSlotList(
                     slots.insert(2, Slot {flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS});
                     eprintln!("C_GetSlotList initialized {:?}", slots);
                 }
+                let keys = if token_present == 0 {
+                    Vec::from_iter(slots.keys().map(|x| *x))
+                } else {
+                    Vec::from_iter(slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0))
+                };
                 match slot_list.as_mut() {
                     Some(_) => {
-                        let list = slice::from_raw_parts_mut(slot_list, *count as usize);
-                        if token_present == 0 {
-                            slots.iter().enumerate().for_each(|x| list[x.0] = *x.1.0);
+                        if *count >= keys.len() as u64 {
+                            ptr::copy(keys.as_ptr(), slot_list, keys.len());
+                            *count = keys.len() as u64;
+                            eprintln!("C_GetSlotList returning {:?}", keys);
+                            CKR_OK
                         } else {
-                            slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).enumerate().for_each(|x| list[x.0] = *x.1.0);
+                            *count = keys.len() as u64;
+                            eprintln!("C_GetSlotList returning {:?}", *count);
+                            CKR_BUFFER_TOO_SMALL
                         }
-                        eprintln!("C_GetSlotList returning {:?}", list);
-                        CKR_OK
                     },
                     None => {
-                        *count = if token_present == 0 {
-                            slots.len() as u64
-                        } else {
-                            slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).count() as u64
-                        };
+                        *count = keys.len() as u64;
                         eprintln!("C_GetSlotList returning {:?}", *count);
                         CKR_OK
                     }
@@ -1664,8 +1668,8 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                             Some(info) => {
                                 info.hardwareVersion.major = 1;
                                 info.hardwareVersion.minor = 0;
-                                info.firmwareVersion.major = 1;
-                                info.firmwareVersion.minor = 0;
+                                info.firmwareVersion.major = 5;
+                                info.firmwareVersion.minor = 43;
                                 info.slotDescription.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.flags = slot.flags;
@@ -2841,7 +2845,7 @@ pub extern "C" fn C_SeedRandom(
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_SeedRandom called");
-    CKR_OK.into()
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
 
 pub type CK_C_GenerateRandom =
