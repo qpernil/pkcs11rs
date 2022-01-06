@@ -11,3 +11,4 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 
 [dependencies]
 libusb = "0.3.0"
+pcsc = "2.6.0"
