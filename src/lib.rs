@@ -1,6 +1,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
+extern crate libusb;
+
 use std::ptr;
 use core::slice;
 use std::collections::HashMap;
@@ -1437,6 +1439,16 @@ static mut G_SESSIONS: Option<HashMap<CK_SESSION_HANDLE, Session>> = None;
 #[no_mangle]
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Initialize called");
+    if let Ok(ctx) = libusb::Context::new() {
+        if let Ok(res) = ctx.devices() {
+            for dev in res.iter() {
+                if let Ok(desc) = dev.device_descriptor() {
+                    eprintln!("C_Initialize {:?}", desc);
+                }
+            }
+        } 
+    }
+    
     unsafe {
         G_SLOTS = Some(HashMap::new());
         G_SESSIONS = Some(HashMap::new());
