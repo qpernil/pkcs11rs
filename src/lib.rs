@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 
 extern crate libusb;
+extern crate pcsc;
 
 use std::ptr;
 use core::slice;
@@ -1439,14 +1440,23 @@ static mut G_SESSIONS: Option<HashMap<CK_SESSION_HANDLE, Session>> = None;
 #[no_mangle]
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Initialize called");
+
     if let Ok(ctx) = libusb::Context::new() {
         if let Ok(res) = ctx.devices() {
             for dev in res.iter() {
                 if let Ok(desc) = dev.device_descriptor() {
-                    eprintln!("C_Initialize {:?}", desc);
+                    eprintln!("libusb {:?}", desc);
                 }
             }
         } 
+    }
+
+    if let Ok(ctx) = pcsc::Context::establish(pcsc::Scope::System) {
+        if let Ok(readers) = ctx.list_readers_owned() {
+            for reader in readers {
+                eprintln!("pcsc {:?}", reader);
+            }
+        }
     }
     
     unsafe {
