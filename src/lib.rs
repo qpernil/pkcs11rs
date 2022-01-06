@@ -1746,6 +1746,7 @@ pub type CK_C_WaitForSlotEvent =
                              -> CK_RV,
     >;
 
+#[no_mangle]
 pub extern "C" fn C_WaitForSlotEvent(
     _flags: CK_FLAGS,
     _slot: *mut CK_SLOT_ID,
@@ -2063,6 +2064,7 @@ pub type CK_C_Login =
                              -> CK_RV,
     >;
 
+#[no_mangle]
 pub extern "C" fn C_Login(
     session_handle: CK_SESSION_HANDLE,
     user_type: CK_USER_TYPE,
@@ -2095,6 +2097,7 @@ pub type CK_C_Logout = ::std::option::Option<
                          -> CK_RV,
 >;
     
+#[no_mangle]
 pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_Logout called with {:?}", session_handle);
     unsafe {
@@ -2209,6 +2212,7 @@ pub type CK_C_FindObjectsInit =
                              -> CK_RV,
     >;
 
+#[no_mangle]
 pub extern "C" fn C_FindObjectsInit(
     session_handle: CK_SESSION_HANDLE,
     templ: *mut _CK_ATTRIBUTE,
@@ -2246,6 +2250,7 @@ pub type CK_C_FindObjects =
                              -> CK_RV,
     >;
 
+#[no_mangle]
 pub extern "C" fn C_FindObjects(
     session_handle: CK_SESSION_HANDLE,
     object: *mut CK_OBJECT_HANDLE,
@@ -2278,6 +2283,7 @@ pub extern "C" fn C_FindObjects(
 pub type CK_C_FindObjectsFinal =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
+#[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
     unsafe {
@@ -2869,6 +2875,7 @@ pub extern "C" fn C_GenerateRandom(
 pub type CK_C_GetFunctionStatus =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
+#[no_mangle]
 pub extern "C" fn C_GetFunctionStatus(session: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_GetFunctionStatus called with {:?}", session);
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -2877,6 +2884,7 @@ pub extern "C" fn C_GetFunctionStatus(session: CK_SESSION_HANDLE) -> CK_RV {
 pub type CK_C_CancelFunction =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
+#[no_mangle]
 pub extern "C" fn C_CancelFunction(session: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_CancelFunction called with {:?}", session);
     CKR_FUNCTION_NOT_SUPPORTED.into()
