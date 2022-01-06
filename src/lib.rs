@@ -1514,19 +1514,19 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_CloseAllSessions: Some(C_CloseAllSessions),
                 C_GetSessionInfo: Some(C_GetSessionInfo),
 
-                C_GetOperationState: None,
-                C_SetOperationState: None,
+                C_GetOperationState: Some(C_GetOperationState),
+                C_SetOperationState: Some(C_SetOperationState),
 
                 C_Login: Some(C_Login),
                 C_Logout: Some(C_Logout),
 
-                C_CreateObject: None,
-                C_CopyObject: None,
-                C_DestroyObject: None,
-                C_GetObjectSize: None,
+                C_CreateObject: Some(C_CreateObject),
+                C_CopyObject: Some(C_CopyObject),
+                C_DestroyObject: Some(C_DestroyObject),
+                C_GetObjectSize: Some(C_GetObjectSize),
 
-                C_GetAttributeValue: None,
-                C_SetAttributeValue: None,
+                C_GetAttributeValue: Some(C_GetAttributeValue),
+                C_SetAttributeValue: Some(C_SetAttributeValue),
 
                 C_FindObjectsInit: Some(C_FindObjectsInit),
                 C_FindObjects: Some(C_FindObjects),
@@ -1567,12 +1567,12 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) 
                 C_SignEncryptUpdate: None,
                 C_DecryptVerifyUpdate: None,
 
-                C_GenerateKey: None,
-                C_GenerateKeyPair: None,
+                C_GenerateKey: Some(C_GenerateKey),
+                C_GenerateKeyPair: Some(C_GenerateKeyPair),
 
-                C_WrapKey: None,
-                C_UnwrapKey: None,
-                C_DeriveKey: None,
+                C_WrapKey: Some(C_WrapKey),
+                C_UnwrapKey: Some(C_UnwrapKey),
+                C_DeriveKey: Some(C_DeriveKey),
 
                 C_SeedRandom: Some(C_SeedRandom),
                 C_GenerateRandom: Some(C_GenerateRandom),
@@ -2030,13 +2030,16 @@ pub type CK_C_GetOperationState =
                              operation_state_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_GetOperationState(
-        session: CK_SESSION_HANDLE,
-        operation_state: *mut ::std::os::raw::c_uchar,
-        operation_state_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_GetOperationState(
+    _session: CK_SESSION_HANDLE,
+    _operation_state: *mut ::std::os::raw::c_uchar,
+    _operation_state_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SetOperationState =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2046,15 +2049,18 @@ pub type CK_C_SetOperationState =
                              authentiation_key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SetOperationState(
-        session: CK_SESSION_HANDLE,
-        operation_state: *mut ::std::os::raw::c_uchar,
-        operation_state_len: ::std::os::raw::c_ulong,
-        encryption_key: CK_OBJECT_HANDLE,
-        authentiation_key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SetOperationState(
+    _session: CK_SESSION_HANDLE,
+    _operation_state: *mut ::std::os::raw::c_uchar,
+    _operation_state_len: ::std::os::raw::c_ulong,
+    _encryption_key: CK_OBJECT_HANDLE,
+    _authentiation_key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Login =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2123,14 +2129,17 @@ pub type CK_C_CreateObject =
                              object: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_CreateObject(
-        session: CK_SESSION_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-        object: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_CreateObject(
+    _session: CK_SESSION_HANDLE,
+    _templ: *mut _CK_ATTRIBUTE,
+    _count: ::std::os::raw::c_ulong,
+    _object: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_CopyObject =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2140,24 +2149,30 @@ pub type CK_C_CopyObject =
                              new_object: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_CopyObject(
-        session: CK_SESSION_HANDLE,
-        object: CK_OBJECT_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-        new_object: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_CopyObject(
+    _session: CK_SESSION_HANDLE,
+    _object: CK_OBJECT_HANDLE,
+    _templ: *mut _CK_ATTRIBUTE,
+    _count: ::std::os::raw::c_ulong,
+    _new_object: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DestroyObject =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                              object: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DestroyObject(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DestroyObject(_session: CK_SESSION_HANDLE, _object: CK_OBJECT_HANDLE) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_GetObjectSize =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2165,13 +2180,16 @@ pub type CK_C_GetObjectSize =
                              size: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_GetObjectSize(
-        session: CK_SESSION_HANDLE,
-        object: CK_OBJECT_HANDLE,
-        size: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_GetObjectSize(
+    _session: CK_SESSION_HANDLE,
+    _object: CK_OBJECT_HANDLE,
+    _size: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_GetAttributeValue =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2180,14 +2198,17 @@ pub type CK_C_GetAttributeValue =
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_GetAttributeValue(
-        session: CK_SESSION_HANDLE,
-        object: CK_OBJECT_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_GetAttributeValue(
+    _session: CK_SESSION_HANDLE,
+    _object: CK_OBJECT_HANDLE,
+    _templ: *mut _CK_ATTRIBUTE,
+    _count: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SetAttributeValue =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2196,14 +2217,17 @@ pub type CK_C_SetAttributeValue =
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SetAttributeValue(
-        session: CK_SESSION_HANDLE,
-        object: CK_OBJECT_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SetAttributeValue(
+    _session: CK_SESSION_HANDLE,
+    _object: CK_OBJECT_HANDLE,
+    _templ: *mut _CK_ATTRIBUTE,
+    _count: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_FindObjectsInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2750,28 +2774,34 @@ pub type CK_C_GenerateKey =
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_GenerateKey(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        templ: *mut _CK_ATTRIBUTE,
-        count: ::std::os::raw::c_ulong,
-        key: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_GenerateKey(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _templ: *mut _CK_ATTRIBUTE,
+    _count: ::std::os::raw::c_ulong,
+    _key: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_GenerateKeyPair = :: std :: option :: Option < unsafe extern "C" fn (session : CK_SESSION_HANDLE , mechanism : * mut _CK_MECHANISM , public_key_template : * mut _CK_ATTRIBUTE , public_key_attribute_count : :: std :: os :: raw :: c_ulong , private_key_template : * mut _CK_ATTRIBUTE , private_key_attribute_count : :: std :: os :: raw :: c_ulong , public_key : * mut CK_OBJECT_HANDLE , private_key : * mut CK_OBJECT_HANDLE) -> CK_RV > ;
-extern "C" {
-    pub fn C_GenerateKeyPair(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        public_key_template: *mut _CK_ATTRIBUTE,
-        public_key_attribute_count: ::std::os::raw::c_ulong,
-        private_key_template: *mut _CK_ATTRIBUTE,
-        private_key_attribute_count: ::std::os::raw::c_ulong,
-        public_key: *mut CK_OBJECT_HANDLE,
-        private_key: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_GenerateKeyPair(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _public_key_template: *mut _CK_ATTRIBUTE,
+    _public_key_attribute_count: ::std::os::raw::c_ulong,
+    _private_key_template: *mut _CK_ATTRIBUTE,
+    _private_key_attribute_count: ::std::os::raw::c_ulong,
+    _public_key: *mut CK_OBJECT_HANDLE,
+    _private_key: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_WrapKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2782,16 +2812,19 @@ pub type CK_C_WrapKey =
                              wrapped_key_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_WrapKey(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        wrapping_key: CK_OBJECT_HANDLE,
-        key: CK_OBJECT_HANDLE,
-        wrapped_key: *mut ::std::os::raw::c_uchar,
-        wrapped_key_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_WrapKey(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _wrapping_key: CK_OBJECT_HANDLE,
+    _key: CK_OBJECT_HANDLE,
+    _wrapped_key: *mut ::std::os::raw::c_uchar,
+    _wrapped_key_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_UnwrapKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2804,18 +2837,21 @@ pub type CK_C_UnwrapKey =
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_UnwrapKey(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        unwrapping_key: CK_OBJECT_HANDLE,
-        wrapped_key: *mut ::std::os::raw::c_uchar,
-        wrapped_key_len: ::std::os::raw::c_ulong,
-        templ: *mut _CK_ATTRIBUTE,
-        attribute_count: ::std::os::raw::c_ulong,
-        key: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_UnwrapKey(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _unwrapping_key: CK_OBJECT_HANDLE,
+    _wrapped_key: *mut ::std::os::raw::c_uchar,
+    _wrapped_key_len: ::std::os::raw::c_ulong,
+    _templ: *mut _CK_ATTRIBUTE,
+    _attribute_count: ::std::os::raw::c_ulong,
+    _key: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DeriveKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2826,16 +2862,19 @@ pub type CK_C_DeriveKey =
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DeriveKey(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        base_key: CK_OBJECT_HANDLE,
-        templ: *mut _CK_ATTRIBUTE,
-        attribute_count: ::std::os::raw::c_ulong,
-        key: *mut CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DeriveKey(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _base_key: CK_OBJECT_HANDLE,
+    _templ: *mut _CK_ATTRIBUTE,
+    _attribute_count: ::std::os::raw::c_ulong,
+    _key: *mut CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SeedRandom =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2851,7 +2890,7 @@ pub extern "C" fn C_SeedRandom(
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_SeedRandom called");
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    CKR_OK.into()
 }
 
 pub type CK_C_GenerateRandom =
@@ -2876,8 +2915,7 @@ pub type CK_C_GetFunctionStatus =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
 #[no_mangle]
-pub extern "C" fn C_GetFunctionStatus(session: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_GetFunctionStatus called with {:?}", session);
+pub extern "C" fn C_GetFunctionStatus(_session: CK_SESSION_HANDLE) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
 
@@ -2885,8 +2923,7 @@ pub type CK_C_CancelFunction =
     ::std::option::Option<unsafe extern "C" fn(session: CK_SESSION_HANDLE) -> CK_RV>;
 
 #[no_mangle]
-pub extern "C" fn C_CancelFunction(session: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_CancelFunction called with {:?}", session);
+pub extern "C" fn C_CancelFunction(_session: CK_SESSION_HANDLE) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
 
