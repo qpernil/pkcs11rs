@@ -1515,8 +1515,11 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
 
 #[derive(Debug)]
 struct Slot {
+    flags: CK_FLAGS,
     name: String,
-    flags: CK_FLAGS
+    manufacturer : String,
+    product: String,
+    serial: String 
 }
 
 #[derive(Debug)]
@@ -1607,21 +1610,25 @@ fn InitSlots(slots: &mut HashMap<u64, Slot>) {
                     //eprintln!("C_GetSlotList usb desc {:?}", desc);
                     if let Ok(mut handle) = device.open() {
                         if let Ok(langs) = handle.read_languages(TIMEOUT) {
-                            let manu = handle.read_manufacturer_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            let prod = handle.read_product_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            let name = handle.read_serial_number_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            eprintln!("InitSlots libusb {:?}", (&manu, &prod, &name));
+                            eprintln!("InitSlots libusb {:?}", langs);
+                            let manufacturer = handle.read_manufacturer_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
+                            let product = handle.read_product_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
+                            let serial = handle.read_serial_number_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
+                            let name = format!("{} {}", manufacturer, product);
+                            eprintln!("InitSlots libusb {:?}", name);
                             if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
-                                let k = slots.len() as u64;
-                                if let Ok(_) = handle.claim_interface(0) {
-                                    let wr = handle.write_bulk(1, &[1u8, 0u8, 3u8, 1u8, 2u8, 3u8], TIMEOUT);
-                                    eprintln!("InitSlots wrote {:?}", wr);
-                                    let mut buf = [0u8; 65];
+                                if handle.claim_interface(0).is_ok() {
+                                    let ibuf = [6u8, 0u8, 0u8];
+                                    let wr = handle.write_bulk(1, &ibuf, TIMEOUT);
+                                    eprintln!("InitSlots wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
+                                    let mut buf = [0u8; 2064];
                                     let rr = handle.read_bulk(0x81, &mut buf, TIMEOUT);
-                                    eprintln!("InitSlots read {:?}", (rr, buf));
-                                    let rrr = handle.release_interface(0);
-                                    eprintln!("InitSlots released {:?}", rrr);
-                                    slots.insert(k, Slot {name, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
+                                    let ret = &buf[..rr.unwrap_or_default()];
+                                    eprintln!("InitSlots read {:?}", (ret.len(), ret));
+                                    let ir = handle.release_interface(0);
+                                    eprintln!("InitSlots released {:?}", ir);
+                                    let k = slots.len() as u64;
+                                    slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
                                 }
                             }
                         }
@@ -1635,9 +1642,12 @@ fn InitSlots(slots: &mut HashMap<u64, Slot>) {
         if let Ok(readers) = ctx.list_readers_owned() {
             for reader in readers {
                 if let Ok(name) = reader.into_string() {
+                    let manufacturer = String::from("Yubico");
+                    let product = String::from("YubiKey");
+                    let serial = String::new();
                     eprintln!("InitSlots pcsc {:?}", name);
                     let k = slots.len() as u64;
-                    slots.insert(k, Slot {name, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                    slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
                 }
             }
         }
