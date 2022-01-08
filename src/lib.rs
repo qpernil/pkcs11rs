@@ -1600,6 +1600,13 @@ pub type CK_C_GetSlotList =
                              -> CK_RV,
     >;
 
+fn NextKey(slots: &HashMap<u64, Slot>) -> u64 {
+    match slots.keys().max() {
+        Some(k) => k + 1,
+        None => 0
+    }
+}
+
 fn InitSlots(slots: &mut HashMap<u64, Slot>) {
 
     if let Ok(ctx) = libusb::Context::new() {
@@ -1627,7 +1634,7 @@ fn InitSlots(slots: &mut HashMap<u64, Slot>) {
                                     eprintln!("InitSlots read {:?}", (ret.len(), ret));
                                     let ir = handle.release_interface(0);
                                     eprintln!("InitSlots released {:?}", ir);
-                                    let k = slots.len() as u64;
+                                    let k = NextKey(slots);
                                     slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
                                 }
                             }
@@ -1646,7 +1653,7 @@ fn InitSlots(slots: &mut HashMap<u64, Slot>) {
                     let product = String::from("YubiKey");
                     let serial = String::new();
                     eprintln!("InitSlots pcsc {:?}", name);
-                    let k = slots.len() as u64;
+                    let k = NextKey(slots);
                     slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
                 }
             }
