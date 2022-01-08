@@ -538,7 +538,7 @@ pub const FALSE: u32 = 0;
 pub const TRUE: u32 = 1;
 pub type CK_FLAGS = ::std::os::raw::c_ulong;
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct _CK_VERSION {
     pub major: ::std::os::raw::c_uchar,
     pub minor: ::std::os::raw::c_uchar,
@@ -1513,7 +1513,7 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Slot {
     flags: CK_FLAGS,
     name: String,
@@ -1522,7 +1522,7 @@ struct Slot {
     serial: String 
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Session {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS
@@ -2988,7 +2988,7 @@ pub extern "C" fn C_CancelFunction(_session: CK_SESSION_HANDLE) -> CK_RV {
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone)]
 pub struct _CK_FUNCTION_LIST {
     pub version: _CK_VERSION,
     pub C_Initialize: CK_C_Initialize,
