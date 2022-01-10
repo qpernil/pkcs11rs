@@ -1463,40 +1463,40 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_FindObjects: Some(C_FindObjects),
     C_FindObjectsFinal: Some(C_FindObjectsFinal),
 
-    C_EncryptInit: None,
-    C_Encrypt: None,
-    C_EncryptUpdate: None,
-    C_EncryptFinal: None,
+    C_EncryptInit: Some(C_EncryptInit),
+    C_Encrypt: Some(C_Encrypt),
+    C_EncryptUpdate: Some(C_EncryptUpdate),
+    C_EncryptFinal: Some(C_EncryptFinal),
 
-    C_DecryptInit: None,
-    C_Decrypt: None,
-    C_DecryptUpdate: None,
-    C_DecryptFinal: None,
+    C_DecryptInit: Some(C_DecryptInit),
+    C_Decrypt: Some(C_Decrypt),
+    C_DecryptUpdate: Some(C_DecryptUpdate),
+    C_DecryptFinal: Some(C_DecryptFinal),
 
-    C_DigestInit: None,
-    C_Digest: None,
-    C_DigestUpdate: None,
-    C_DigestKey: None,
-    C_DigestFinal: None,
+    C_DigestInit: Some(C_DigestInit),
+    C_Digest: Some(C_Digest),
+    C_DigestUpdate: Some(C_DigestUpdate),
+    C_DigestKey: Some(C_DigestKey),
+    C_DigestFinal: Some(C_DigestFinal),
 
-    C_SignInit: None,
-    C_Sign: None,
-    C_SignUpdate: None,
-    C_SignFinal: None,
-    C_SignRecoverInit: None,
-    C_SignRecover: None,
+    C_SignInit: Some(C_SignInit),
+    C_Sign: Some(C_Sign),
+    C_SignUpdate: Some(C_SignUpdate),
+    C_SignFinal: Some(C_SignFinal),
+    C_SignRecoverInit: Some(C_SignRecoverInit),
+    C_SignRecover: Some(C_SignRecover),
 
-    C_VerifyInit: None,
-    C_Verify: None,
-    C_VerifyUpdate: None,
-    C_VerifyFinal: None,
-    C_VerifyRecoverInit: None,
-    C_VerifyRecover: None,
+    C_VerifyInit: Some(C_VerifyInit),
+    C_Verify: Some(C_Verify),
+    C_VerifyUpdate: Some(C_VerifyUpdate),
+    C_VerifyFinal: Some(C_VerifyFinal),
+    C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
+    C_VerifyRecover: Some(C_VerifyRecover),
 
-    C_DigestEncryptUpdate: None,
-    C_DecryptDigestUpdate: None,
-    C_SignEncryptUpdate: None,
-    C_DecryptVerifyUpdate: None,
+    C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
+    C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
+    C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
+    C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
 
     C_GenerateKey: Some(C_GenerateKey),
     C_GenerateKeyPair: Some(C_GenerateKeyPair),
@@ -1579,16 +1579,15 @@ impl<'a> Context<'a> {
     }
 
     fn init(&'a mut self) {
-        self.slots.clear();
         if let Ok(ctx) = self.libusb.as_ref() {
+            let timeout = Duration::from_millis(100);
             if let Ok(devices) = ctx.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
-                        //eprintln!("libusb {:?}", desc);
+                        eprintln!("libusb vendor {:?} product {:?} usb {:?} device {:?}", desc.vendor_id(), desc.product_id(), desc.usb_version(), desc.device_version());
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
                             match device.open() {
                                 Ok(mut handle) => {
-                                    let timeout = Duration::from_millis(100);
                                     match handle.read_languages(timeout) {
                                         Ok(langs) => {
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
@@ -1625,7 +1624,7 @@ impl<'a> Context<'a> {
             if let Ok(readers) = ctx.list_readers_owned() {
                 for reader in readers {
                     eprintln!("pcsc {:?}", reader);
-                    match ctx.connect(&reader, pcsc::ShareMode::Shared, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
+                    match ctx.connect(&reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
                         Ok(card) => {
                             let name = reader.to_str().unwrap_or_default().to_owned();
                             let serial = String::new();
@@ -2478,13 +2477,16 @@ pub type CK_C_EncryptInit =
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_EncryptInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_EncryptInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Encrypt =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2494,15 +2496,18 @@ pub type CK_C_Encrypt =
                              encrypted_data_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Encrypt(
-        session: CK_SESSION_HANDLE,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: ::std::os::raw::c_ulong,
-        encrypted_data: *mut ::std::os::raw::c_uchar,
-        encrypted_data_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_Encrypt(
+    _session: CK_SESSION_HANDLE,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: ::std::os::raw::c_ulong,
+    _encrypted_data: *mut ::std::os::raw::c_uchar,
+    _encrypted_data_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_EncryptUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2512,23 +2517,29 @@ pub type CK_C_EncryptUpdate =
                              encrypted_part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_EncryptUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_EncryptUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_EncryptFinal = :: std :: option :: Option < unsafe extern "C" fn (session : CK_SESSION_HANDLE , last_encrypted_part : * mut :: std :: os :: raw :: c_uchar , last_encrypted_part_len : * mut :: std :: os :: raw :: c_ulong) -> CK_RV > ;
-extern "C" {
-    pub fn C_EncryptFinal(
-        session: CK_SESSION_HANDLE,
-        last_encrypted_part: *mut ::std::os::raw::c_uchar,
-        last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_EncryptFinal(
+    _session: CK_SESSION_HANDLE,
+    _last_encrypted_part: *mut ::std::os::raw::c_uchar,
+    _last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DecryptInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2536,13 +2547,16 @@ pub type CK_C_DecryptInit =
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DecryptInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DecryptInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Decrypt =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2552,15 +2566,18 @@ pub type CK_C_Decrypt =
                              data_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Decrypt(
-        session: CK_SESSION_HANDLE,
-        encrypted_data: *mut ::std::os::raw::c_uchar,
-        encrypted_data_len: ::std::os::raw::c_ulong,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_Decrypt(
+    _session: CK_SESSION_HANDLE,
+    _encrypted_data: *mut ::std::os::raw::c_uchar,
+    _encrypted_data_len: ::std::os::raw::c_ulong,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DecryptUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2570,15 +2587,18 @@ pub type CK_C_DecryptUpdate =
                              part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DecryptUpdate(
-        session: CK_SESSION_HANDLE,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: ::std::os::raw::c_ulong,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DecryptUpdate(
+    _session: CK_SESSION_HANDLE,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: ::std::os::raw::c_ulong,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DecryptFinal =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2586,22 +2606,30 @@ pub type CK_C_DecryptFinal =
                              last_part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DecryptFinal(
-        session: CK_SESSION_HANDLE,
-        last_part: *mut ::std::os::raw::c_uchar,
-        last_part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DecryptFinal(
+    _session: CK_SESSION_HANDLE,
+    _last_part: *mut ::std::os::raw::c_uchar,
+    _last_part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DigestInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                              mechanism: *mut _CK_MECHANISM)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DigestInit(session: CK_SESSION_HANDLE, mechanism: *mut _CK_MECHANISM) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DigestInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Digest =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2611,15 +2639,18 @@ pub type CK_C_Digest =
                              digest_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Digest(
-        session: CK_SESSION_HANDLE,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: ::std::os::raw::c_ulong,
-        digest: *mut ::std::os::raw::c_uchar,
-        digest_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_Digest(
+    _session: CK_SESSION_HANDLE,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: ::std::os::raw::c_ulong,
+    _digest: *mut ::std::os::raw::c_uchar,
+    _digest_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DigestUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2627,21 +2658,29 @@ pub type CK_C_DigestUpdate =
                              part_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DigestUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DigestUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DigestKey = ::std::option::Option<
     unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                          key: CK_OBJECT_HANDLE)
                          -> CK_RV,
 >;
-extern "C" {
-    pub fn C_DigestKey(session: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DigestKey(
+    _session: CK_SESSION_HANDLE,
+    _key: CK_OBJECT_HANDLE) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DigestFinal =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2649,26 +2688,32 @@ pub type CK_C_DigestFinal =
                              digest_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DigestFinal(
-        session: CK_SESSION_HANDLE,
-        digest: *mut ::std::os::raw::c_uchar,
-        digest_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DigestFinal(
+    _session: CK_SESSION_HANDLE,
+    _digest: *mut ::std::os::raw::c_uchar,
+    _digest_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignInit = ::std::option::Option<
     unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                          mechanism: *mut _CK_MECHANISM,
                          key: CK_OBJECT_HANDLE)
                          -> CK_RV,
 >;
-extern "C" {
-    pub fn C_SignInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Sign =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2678,15 +2723,18 @@ pub type CK_C_Sign =
                              signature_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Sign(
-        session: CK_SESSION_HANDLE,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: ::std::os::raw::c_ulong,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_Sign(
+    _session: CK_SESSION_HANDLE,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: ::std::os::raw::c_ulong,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2694,13 +2742,16 @@ pub type CK_C_SignUpdate =
                              part_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SignUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignFinal =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2708,13 +2759,16 @@ pub type CK_C_SignFinal =
                              signature_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SignFinal(
-        session: CK_SESSION_HANDLE,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignFinal(
+    _session: CK_SESSION_HANDLE,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignRecoverInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2722,13 +2776,16 @@ pub type CK_C_SignRecoverInit =
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SignRecoverInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignRecoverInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignRecover =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2738,15 +2795,18 @@ pub type CK_C_SignRecover =
                              signature_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SignRecover(
-        session: CK_SESSION_HANDLE,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: ::std::os::raw::c_ulong,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignRecover(
+    _session: CK_SESSION_HANDLE,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: ::std::os::raw::c_ulong,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_VerifyInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2754,13 +2814,16 @@ pub type CK_C_VerifyInit =
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_VerifyInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_VerifyInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_Verify =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2770,15 +2833,18 @@ pub type CK_C_Verify =
                              signature_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_Verify(
-        session: CK_SESSION_HANDLE,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: ::std::os::raw::c_ulong,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_Verify(
+    _session: CK_SESSION_HANDLE,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: ::std::os::raw::c_ulong,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_VerifyUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2786,13 +2852,16 @@ pub type CK_C_VerifyUpdate =
                              part_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_VerifyUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_VerifyUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_VerifyFinal =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2800,13 +2869,16 @@ pub type CK_C_VerifyFinal =
                              signature_len: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_VerifyFinal(
-        session: CK_SESSION_HANDLE,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_VerifyFinal(
+    _session: CK_SESSION_HANDLE,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_VerifyRecoverInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2814,13 +2886,16 @@ pub type CK_C_VerifyRecoverInit =
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_VerifyRecoverInit(
-        session: CK_SESSION_HANDLE,
-        mechanism: *mut _CK_MECHANISM,
-        key: CK_OBJECT_HANDLE,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_VerifyRecoverInit(
+    _session: CK_SESSION_HANDLE,
+    _mechanism: *mut _CK_MECHANISM,
+    _key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_VerifyRecover =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2830,15 +2905,18 @@ pub type CK_C_VerifyRecover =
                              data_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_VerifyRecover(
-        session: CK_SESSION_HANDLE,
-        signature: *mut ::std::os::raw::c_uchar,
-        signature_len: ::std::os::raw::c_ulong,
-        data: *mut ::std::os::raw::c_uchar,
-        data_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_VerifyRecover(
+    _session: CK_SESSION_HANDLE,
+    _signature: *mut ::std::os::raw::c_uchar,
+    _signature_len: ::std::os::raw::c_ulong,
+    _data: *mut ::std::os::raw::c_uchar,
+    _data_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DigestEncryptUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2848,15 +2926,18 @@ pub type CK_C_DigestEncryptUpdate =
                              encrypted_part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DigestEncryptUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DigestEncryptUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DecryptDigestUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2866,15 +2947,18 @@ pub type CK_C_DecryptDigestUpdate =
                              part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DecryptDigestUpdate(
-        session: CK_SESSION_HANDLE,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: ::std::os::raw::c_ulong,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DecryptDigestUpdate(
+    _session: CK_SESSION_HANDLE,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: ::std::os::raw::c_ulong,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_SignEncryptUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2884,15 +2968,18 @@ pub type CK_C_SignEncryptUpdate =
                              encrypted_part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_SignEncryptUpdate(
-        session: CK_SESSION_HANDLE,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: ::std::os::raw::c_ulong,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_SignEncryptUpdate(
+    _session: CK_SESSION_HANDLE,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: ::std::os::raw::c_ulong,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_DecryptVerifyUpdate =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
@@ -2902,15 +2989,18 @@ pub type CK_C_DecryptVerifyUpdate =
                              part_len: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-extern "C" {
-    pub fn C_DecryptVerifyUpdate(
-        session: CK_SESSION_HANDLE,
-        encrypted_part: *mut ::std::os::raw::c_uchar,
-        encrypted_part_len: ::std::os::raw::c_ulong,
-        part: *mut ::std::os::raw::c_uchar,
-        part_len: *mut ::std::os::raw::c_ulong,
-    ) -> CK_RV;
+
+#[no_mangle]
+pub extern "C" fn C_DecryptVerifyUpdate(
+    _session: CK_SESSION_HANDLE,
+    _encrypted_part: *mut ::std::os::raw::c_uchar,
+    _encrypted_part_len: ::std::os::raw::c_ulong,
+    _part: *mut ::std::os::raw::c_uchar,
+    _part_len: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
 pub type CK_C_GenerateKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
