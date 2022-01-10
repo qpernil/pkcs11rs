@@ -1513,30 +1513,107 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 };
 
-#[derive(Debug, Clone)]
-struct Slot {
+struct Slot<'a> {
     flags: CK_FLAGS,
     name: String,
-    manufacturer : String,
-    product: String,
-    serial: String 
+    serial: String,
+    handle: Option<libusb::DeviceHandle<'a>>
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for Slot<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write_fmt(format_args!("Slot(flags: {} name: {} serial: {})", self.flags, self.name, self.serial))
+    }
+}
+
+#[derive(Debug)]
 struct Session {
     slotID: CK_SLOT_ID,
-    flags: CK_FLAGS
+    flags: CK_FLAGS,
+}
+struct Context<'a> {
+    slots: HashMap<CK_SLOT_ID, Slot<'a>>,
+    sessions: HashMap<CK_SESSION_HANDLE, Session>,
+    libusb: Result<libusb::Context, libusb::Error>,
+    pcsc: Result<pcsc::Context, pcsc::Error>
 }
 
-static mut G_SLOTS: Option<HashMap<CK_SLOT_ID, Slot>> = None;
-static mut G_SESSIONS: Option<HashMap<CK_SESSION_HANDLE, Session>> = None;
+fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
+    match map.keys().max() {
+        Some(k) => k + 1,
+        None => 0
+    }
+}
+
+impl<'a> Context<'a> {
+
+    fn new() -> Context<'a> {
+        Context {
+            libusb: libusb::Context::new(),
+            pcsc: pcsc::Context::establish(pcsc::Scope::System),
+            slots: HashMap::new(),
+            sessions: HashMap::new(),
+        }
+    }
+
+    fn init(&'a mut self) {
+        if let Ok(ctx) = self.libusb.as_ref() {
+            if let Ok(res) = ctx.devices() {
+                for device in res.iter() {
+                    if let Ok(desc) = device.device_descriptor() {
+                        eprintln!("libusb desc {:?}", (desc.vendor_id(), desc.product_id()));
+                        if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
+                            if let Ok(mut handle) = device.open() {
+                                let timeout = Duration::from_millis(100);
+                                if let Ok(langs) = handle.read_languages(timeout) {
+                                    let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
+                                    let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
+                                    let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
+                                    let name = format!("{} {}", manufacturer, product);
+                                    eprintln!("libusb {:?} {:?}", name, serial);
+                                    if handle.claim_interface(0).is_ok() {
+                                        let k = next_key(&self.slots);
+                                        self.slots.insert(k, Slot {handle: Some(handle), name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } 
+        }
+        if let Ok(ctx) = self.pcsc.as_ref() {
+            if let Ok(readers) = ctx.list_readers_owned() {
+                for reader in readers {
+                    if let Ok(name) = reader.into_string() {
+                        let serial = String::new();
+                        eprintln!("pcsc {:?}", name);
+                        let k = next_key(&self.slots);
+                        self.slots.insert(k, Slot {handle: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                    }
+                }
+            }
+        }
+        eprintln!("{:?}", self);
+    }
+}
+
+impl std::fmt::Debug for Context<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write_fmt(format_args!("Context(slots: {:?}, sessions: {:?})", self.slots, self.sessions))
+    }
+}
+
+static mut G_CONTEXT: Option<Context> = None;
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Initialize called");
-    unsafe {
-        G_SLOTS = Some(HashMap::new());
-        G_SESSIONS = Some(HashMap::new());
+    unsafe {       
+        G_CONTEXT = Some(Context::new());
+        if let Some(context) = G_CONTEXT.as_mut() {
+            context.init();
+        }
         CKR_OK
     }.into()
 }
@@ -1548,8 +1625,7 @@ pub type CK_C_Finalize =
 pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called");
     unsafe {
-        G_SLOTS = None;
-        G_SESSIONS = None;
+        G_CONTEXT = None;
         CKR_OK
     }.into()
 }
@@ -1600,66 +1676,7 @@ pub type CK_C_GetSlotList =
                              -> CK_RV,
     >;
 
-fn NextKey(slots: &HashMap<u64, Slot>) -> u64 {
-    match slots.keys().max() {
-        Some(k) => k + 1,
-        None => 0
-    }
-}
-
-fn InitSlots(slots: &mut HashMap<u64, Slot>) {
-
-    if let Ok(ctx) = libusb::Context::new() {
-        if let Ok(res) = ctx.devices() {
-            const TIMEOUT: Duration = Duration::from_millis(100);
-            for device in res.iter() {
-                if let Ok(desc) = device.device_descriptor() {
-                    //eprintln!("C_GetSlotList usb desc {:?}", desc);
-                    if let Ok(mut handle) = device.open() {
-                        if let Ok(langs) = handle.read_languages(TIMEOUT) {
-                            eprintln!("InitSlots libusb {:?}", langs);
-                            let manufacturer = handle.read_manufacturer_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            let product = handle.read_product_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            let serial = handle.read_serial_number_string(langs[0], &desc, TIMEOUT).unwrap_or_default();
-                            let name = format!("{} {}", manufacturer, product);
-                            eprintln!("InitSlots libusb {:?}", name);
-                            if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
-                                if handle.claim_interface(0).is_ok() {
-                                    let ibuf = [6u8, 0u8, 0u8];
-                                    let wr = handle.write_bulk(1, &ibuf, TIMEOUT);
-                                    eprintln!("InitSlots wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
-                                    let mut buf = [0u8; 2064];
-                                    let rr = handle.read_bulk(0x81, &mut buf, TIMEOUT);
-                                    let ret = &buf[..rr.unwrap_or_default()];
-                                    eprintln!("InitSlots read {:?}", (ret.len(), ret));
-                                    let ir = handle.release_interface(0);
-                                    eprintln!("InitSlots released {:?}", ir);
-                                    let k = NextKey(slots);
-                                    slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } 
-    }
-
-    if let Ok(ctx) = pcsc::Context::establish(pcsc::Scope::System) {
-        if let Ok(readers) = ctx.list_readers_owned() {
-            for reader in readers {
-                if let Ok(name) = reader.into_string() {
-                    let manufacturer = String::from("Yubico");
-                    let product = String::from("YubiKey");
-                    let serial = String::new();
-                    eprintln!("InitSlots pcsc {:?}", name);
-                    let k = NextKey(slots);
-                    slots.insert(k, Slot {name, manufacturer, product, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
-                }
-            }
-        }
-    }
-
+/*
     let cipher = openssl::symm::Cipher::aes_128_cbc();
     let data = b"Some Crypto Text";
     let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
@@ -1669,9 +1686,7 @@ fn InitSlots(slots: &mut HashMap<u64, Slot>) {
         key,
         Some(iv),
         data).unwrap();
-
-    eprintln!("InitSlots initialized {:?}", slots);
-}
+*/
 
 #[no_mangle]
 pub extern "C" fn C_GetSlotList(
@@ -1681,15 +1696,24 @@ pub extern "C" fn C_GetSlotList(
 ) -> CK_RV {
     unsafe {
         eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, *count));
-        match G_SLOTS.as_mut() {
-            Some(slots) => {
-                if slots.is_empty() {
-                    InitSlots(slots);
+        match G_CONTEXT.as_mut() {
+            Some(ctx) => {
+                let timeout = Duration::from_millis(100);
+                for slot in ctx.slots.values() {
+                    if let Some(handle) = slot.handle.as_ref() {
+                        let ibuf = [6u8, 0u8, 0u8];
+                        let wr = handle.write_bulk(1, &ibuf, timeout);
+                        eprintln!("wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
+                        let mut buf = [0u8; 2064];
+                        let rr = handle.read_bulk(0x81, &mut buf, timeout);
+                        let ret = &buf[..rr.unwrap_or_default()];
+                        eprintln!("read {:?}", (ret.len(), ret));
+                    } 
                 }
                 let keys = if token_present == 0 {
-                    Vec::from_iter(slots.keys().map(|x| *x))
+                    Vec::from_iter(ctx.slots.keys().map(|x| *x))
                 } else {
-                    Vec::from_iter(slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0))
+                    Vec::from_iter(ctx.slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0))
                 };
                 match slot_list.as_mut() {
                     Some(_) => {
@@ -1727,9 +1751,9 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
     eprintln!("C_GetSlotInfo {} called", slotID);
 
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.slots.get(&slotID) {
                     Some(slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
@@ -1765,9 +1789,9 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
     eprintln!("C_GetTokenInfo {} called", slotID);
 
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.slots.get(&slotID) {
                     Some(_slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
@@ -1838,9 +1862,9 @@ pub extern "C" fn C_GetMechanismList(
 ) -> CK_RV {
     unsafe {
         eprintln!("C_GetMechanismList called with {:?}", (slotID, mechanism_list, *count));
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.slots.get(&slotID) {
                     Some(_slot) => {
                         match mechanism_list.as_mut() {
                             Some(_) => {
@@ -1882,9 +1906,9 @@ pub extern "C" fn C_GetMechanismInfo(
 ) -> CK_RV {
     eprintln!("C_GetMechanismInfo called with {:?}", (slotID, type_, info_ptr));
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.slots.get(&slotID) {
                     Some(_slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
@@ -1982,25 +2006,17 @@ pub extern "C" fn C_OpenSession(
 ) -> CK_RV {
     eprintln!("C_OpenSession called with {:?}", (slotID, flags));
     unsafe {
-        match G_SLOTS.as_ref() {
-            Some(slots) => {
-                match slots.get(&slotID) {
+        match G_CONTEXT.as_mut() {
+            Some(ctx) => {
+                match ctx.slots.get(&slotID) {
                     Some(_slot) => {
-                        match G_SESSIONS.as_mut() {
-                            Some(sessions) => {
-                                let k = match sessions.keys().max() {
-                                    Some(v) => v + 1,
-                                    None => 1
-                                };
-                                eprintln!("C_OpenSession sessions before {:?}", sessions);
-                                sessions.insert(k, Session {slotID, flags});
-                                eprintln!("C_OpenSession sessions after {:?}", sessions);
-                                eprintln!("C_OpenSession returning {:?}", k);
-                                *session = k;
-                                CKR_OK
-                            },
-                            None => CKR_HOST_MEMORY
-                        }
+                        let k = next_key(&ctx.sessions);
+                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                        ctx.sessions.insert(k, Session {slotID, flags});
+                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
+                        eprintln!("C_OpenSession returning {:?}", k);
+                        *session = k;
+                        CKR_OK
                     }
                     None => CKR_SLOT_ID_INVALID
                 }
@@ -2017,13 +2033,13 @@ pub type CK_C_CloseSession =
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_CloseSession called with {:?}", session_handle);
     unsafe {
-        match G_SESSIONS.as_mut() {
-            Some(sessions) => {
-                eprintln!("C_CloseSession sessions before {:?}", sessions);
-                match sessions.remove(&session_handle) {
+        match G_CONTEXT.as_mut() {
+            Some(ctx) => {
+                eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
+                match ctx.sessions.remove(&session_handle) {
                     Some(session) => {
                         eprintln!("C_CloseSession removed {:?}", (session_handle, session));
-                        eprintln!("C_CloseSession sessions after {:?}", sessions);
+                        eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                         CKR_OK
                     }
                     None => CKR_SESSION_HANDLE_INVALID
@@ -2043,11 +2059,11 @@ pub type CK_C_CloseAllSessions = ::std::option::Option<
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     eprintln!("C_CloseAllSessions called with {:?}", slotID);
     unsafe {
-        match G_SESSIONS.as_mut() {
-            Some(sessions) => {
-                eprintln!("C_CloseAllSessions sessions before {:?}", sessions);
-                sessions.retain(|_k, v| v.slotID != slotID);
-                eprintln!("C_CloseAllSessions sessions after {:?}", sessions);
+        match G_CONTEXT.as_mut() {
+            Some(ctx) => {
+                eprintln!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
+                ctx.sessions.retain(|_k, v| v.slotID != slotID);
+                eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
                 CKR_OK
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED
@@ -2066,9 +2082,9 @@ pub type CK_C_GetSessionInfo =
 pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut _CK_SESSION_INFO) -> CK_RV {
     eprintln!("C_GetSessionInfo called with {:?}", session_handle);
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(session) => {
                         match info_ptr.as_mut() {
                             Some(info) => { 
@@ -2146,9 +2162,9 @@ pub extern "C" fn C_Login(
 ) -> CK_RV {
     eprintln!("C_Login called with {:?}", (session_handle, user_type, pin, pin_len));
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(_session) => {
                         match pin.as_ref() {
                             Some(_pin) => { 
@@ -2174,9 +2190,9 @@ pub type CK_C_Logout = ::std::option::Option<
 pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_Logout called with {:?}", session_handle);
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(_session) => {
                         CKR_OK
                     }
@@ -2311,9 +2327,9 @@ pub extern "C" fn C_FindObjectsInit(
 ) -> CK_RV {
     eprintln!("C_FindObjectsInit called with {:?}", (session_handle, templ, count));
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(_session) => {
                         match templ.as_ref() {
                             Some(_info) => { 
@@ -2350,9 +2366,9 @@ pub extern "C" fn C_FindObjects(
 ) -> CK_RV {
     eprintln!("C_FindObjects called with {:?}", (session_handle, object, max_object_count, object_count));
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(_session) => {
                         match object.as_mut() {
                             Some(_info) => {
@@ -2378,9 +2394,9 @@ pub type CK_C_FindObjectsFinal =
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
     unsafe {
-        match G_SESSIONS.as_ref() {
-            Some(sessions) => {
-                match sessions.get(&session_handle) {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
                     Some(_session) => {
                         CKR_OK
                     }
