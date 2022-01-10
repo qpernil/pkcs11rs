@@ -1532,6 +1532,7 @@ struct Session {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
 }
+
 struct Context<'a> {
     slots: HashMap<CK_SLOT_ID, Slot<'a>>,
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
@@ -1551,9 +1552,6 @@ impl<'a> Context<'a> {
     fn new() -> Context<'a> {
         let libusb = match libusb::Context::new() {
             Ok(ctx) => {
-                eprintln!("libusb.has_hotplug: {:?}", ctx.has_hotplug());
-                eprintln!("libusb.has_capability: {:?}", ctx.has_capability());
-                eprintln!("libusb.has_hid_access: {:?}", ctx.has_hid_access());
                 Some(ctx)
             }
             Err(e) => {
@@ -1563,7 +1561,6 @@ impl<'a> Context<'a> {
         };
         let pcsc = match pcsc::Context::establish(pcsc::Scope::System) {
             Ok(ctx) => {
-                eprintln!("pcsc.is_valid: {:?}", ctx.is_valid());
                 Some(ctx)
             }
             Err(e) => {
@@ -1580,24 +1577,41 @@ impl<'a> Context<'a> {
     }
 
     fn init(&'a mut self) {
+        self.slots.clear();
         if let Some(ctx) = self.libusb.as_ref() {
-            if let Ok(res) = ctx.devices() {
-                for device in res.iter() {
+            if let Ok(devices) = ctx.devices() {
+                for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
-                        eprintln!("libusb desc {:?}", (desc.vendor_id(), desc.product_id()));
+                        //eprintln!("libusb {:?}", desc);
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
-                            if let Ok(mut handle) = device.open() {
-                                let timeout = Duration::from_millis(100);
-                                if let Ok(langs) = handle.read_languages(timeout) {
-                                    let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
-                                    let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
-                                    let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                    let name = format!("{} {}", manufacturer, product);
-                                    eprintln!("libusb {:?} {:?}", name, serial);
-                                    if handle.claim_interface(0).is_ok() {
-                                        let k = next_key(&self.slots);
-                                        self.slots.insert(k, Slot {handle: Some(handle), card: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
+                            match device.open() {
+                                Ok(mut handle) => {
+                                    let timeout = Duration::from_millis(100);
+                                    match handle.read_languages(timeout) {
+                                        Ok(langs) => {
+                                            let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
+                                            let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
+                                            let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
+                                            let name = format!("{} {}", manufacturer, product);
+                                            eprintln!("libusb {:?} {:?}", name, serial);
+                                            match handle.claim_interface(0) {
+                                                Ok(_) => {
+                                                    let k = next_key(&self.slots);
+                                                    let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
+                                                    self.slots.insert(k, Slot {handle: Some(handle), card: None, name, serial, flags});
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("libusb.claim_interface: {:?}", e);
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            eprintln!("libusb.read_languages: {:?}", e);
+                                        }
                                     }
+                                },
+                                Err(e) => {
+                                    eprintln!("libusb.open: {:?}", e);
                                 }
                             }
                         }
@@ -1614,16 +1628,17 @@ impl<'a> Context<'a> {
                             let name = reader.to_str().unwrap_or_default().to_owned();
                             let serial = String::new();
                             let k = next_key(&self.slots);
-                            self.slots.insert(k, Slot {card: Some(card), handle: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                            let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
+                            self.slots.insert(k, Slot {card: Some(card), handle: None, name, serial, flags});
                         }
                         Err(e) => {
-                            eprintln!("pcsc: {:?}", e);
+                            eprintln!("{:?}: {:?}", reader, e);
                         }
                     }
                 }
             }
         }
-        eprintln!("{:?}", self);
+        eprintln!("Context.init {:?}", self);
     }
 }
 
@@ -1639,11 +1654,13 @@ static mut G_CONTEXT: Option<Context> = None;
 pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Initialize called");
     unsafe {       
-        G_CONTEXT = Some(Context::new());
-        if let Some(context) = G_CONTEXT.as_mut() {
-            context.init();
+        match G_CONTEXT.as_mut() {
+            Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED,
+            None => {
+                G_CONTEXT = Some(Context::new());
+                CKR_OK
+            }
         }
-        CKR_OK
     }.into()
 }
 
@@ -1654,8 +1671,13 @@ pub type CK_C_Finalize =
 pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called");
     unsafe {
-        G_CONTEXT = None;
-        CKR_OK
+        match G_CONTEXT.as_mut() {
+            Some(_) => {
+                G_CONTEXT = None;
+                CKR_OK
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
     }.into()
 }
 
@@ -1665,19 +1687,24 @@ pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut _C
 pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
     eprintln!("C_GetInfo called");
     unsafe {
-        match info_ptr.as_mut() {
-            Some(info) => {
-                info.cryptokiVersion.major = 2;
-                info.cryptokiVersion.minor = 40;
-                info.libraryVersion.major = 1;
-                info.libraryVersion.minor = 0;
-                info.flags = 0;
-                info.libraryDescription.fill(65u8);
-                info.manufacturerID.fill(66u8);
-                eprintln!("C_GetInfo returning {:?}", info);
-                CKR_OK
+        match G_CONTEXT.as_ref() {
+            Some(_ctx) => {
+                match info_ptr.as_mut() {
+                    Some(info) => {
+                        info.cryptokiVersion.major = 2;
+                        info.cryptokiVersion.minor = 40;
+                        info.libraryVersion.major = 1;
+                        info.libraryVersion.minor = 0;
+                        info.flags = 0;
+                        info.libraryDescription.fill(65u8);
+                        info.manufacturerID.fill(66u8);
+                        eprintln!("C_GetInfo returning {:?}", info);
+                        CKR_OK
+                    },
+                    None => CKR_ARGUMENTS_BAD
+                }
             },
-            None => CKR_ARGUMENTS_BAD
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
         }
     }.into()
 }
@@ -1725,28 +1752,15 @@ pub extern "C" fn C_GetSlotList(
 ) -> CK_RV {
     unsafe {
         eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, *count));
-        match G_CONTEXT.as_mut() {
+        if let Some(context) = G_CONTEXT.as_mut() {
+            context.init();
+        }
+        match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                let timeout = Duration::from_millis(100);
-                for slot in ctx.slots.values() {
-                    if let Some(handle) = slot.handle.as_ref() {
-                        eprintln!("libusb.active_configuration: {:?}", handle.active_configuration());
-                        let ibuf = [6u8, 0u8, 0u8];
-                        let wr = handle.write_bulk(1, &ibuf, timeout);
-                        eprintln!("wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
-                        let mut buf = [0u8; 2064];
-                        let rr = handle.read_bulk(0x81, &mut buf, timeout);
-                        let ret = &buf[..rr.unwrap_or_default()];
-                        eprintln!("read {:?}", (ret.len(), ret));
-                    }
-                    if let Some(card) = slot.card.as_ref() {
-                        eprintln!("pcsc: {:?}", card.status2_owned());
-                    }
-                }
-                let keys = if token_present == 0 {
-                    Vec::from_iter(ctx.slots.keys().map(|x| *x))
+                let keys: Vec<CK_SLOT_ID> = if token_present == 0 {
+                    ctx.slots.keys().cloned().collect()
                 } else {
-                    Vec::from_iter(ctx.slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0))
+                    ctx.slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0).collect()
                 };
                 match slot_list.as_mut() {
                     Some(_) => {
@@ -1790,10 +1804,10 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                     Some(slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                info.hardwareVersion.major = 1;
-                                info.hardwareVersion.minor = 0;
                                 info.firmwareVersion.major = 5;
                                 info.firmwareVersion.minor = 43;
+                                info.hardwareVersion.major = 1;
+                                info.hardwareVersion.minor = 0;
                                 info.slotDescription.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.flags = slot.flags;
@@ -1825,9 +1839,22 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
-                    Some(_slot) => {
+                    Some(slot) => {
                         match info_ptr.as_mut() {
                             Some(info) => {
+                                if let Some(handle) = slot.handle.as_ref() {
+                                    let timeout = Duration::from_millis(100);
+                                    let ibuf = [6u8, 0u8, 0u8];
+                                    let wr = handle.write_bulk(1, &ibuf, timeout);
+                                    eprintln!("libusb wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
+                                    let mut buf = [0u8; 2064];
+                                    let rr = handle.read_bulk(0x81, &mut buf, timeout);
+                                    let ret = &buf[..rr.unwrap_or_default()];
+                                    eprintln!("libusb read {:?}", (ret.len(), ret));
+                                }
+                                if let Some(card) = slot.card.as_ref() {
+                                    eprintln!("pcsc: {:?}", card.status2_owned());
+                                }
                                 info.label.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.model.fill(67u8);
