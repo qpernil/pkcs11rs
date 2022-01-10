@@ -1517,7 +1517,8 @@ struct Slot<'a> {
     flags: CK_FLAGS,
     name: String,
     serial: String,
-    handle: Option<libusb::DeviceHandle<'a>>
+    handle: Option<libusb::DeviceHandle<'a>>,
+    card: Option<pcsc::Card>
 }
 
 impl std::fmt::Debug for Slot<'_> {
@@ -1534,8 +1535,8 @@ struct Session {
 struct Context<'a> {
     slots: HashMap<CK_SLOT_ID, Slot<'a>>,
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
-    libusb: Result<libusb::Context, libusb::Error>,
-    pcsc: Result<pcsc::Context, pcsc::Error>
+    libusb: Option<libusb::Context>,
+    pcsc: Option<pcsc::Context>
 }
 
 fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
@@ -1548,16 +1549,38 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
 impl<'a> Context<'a> {
 
     fn new() -> Context<'a> {
+        let libusb = match libusb::Context::new() {
+            Ok(ctx) => {
+                eprintln!("libusb.has_hotplug: {:?}", ctx.has_hotplug());
+                eprintln!("libusb.has_capability: {:?}", ctx.has_capability());
+                eprintln!("libusb.has_hid_access: {:?}", ctx.has_hid_access());
+                Some(ctx)
+            }
+            Err(e) => {
+                eprintln!("libusb: {:?}", e);
+                None
+            }
+        };
+        let pcsc = match pcsc::Context::establish(pcsc::Scope::System) {
+            Ok(ctx) => {
+                eprintln!("pcsc.is_valid: {:?}", ctx.is_valid());
+                Some(ctx)
+            }
+            Err(e) => {
+                eprintln!("pcsc: {:?}", e);
+                None
+            }
+        };
         Context {
-            libusb: libusb::Context::new(),
-            pcsc: pcsc::Context::establish(pcsc::Scope::System),
+            libusb,
+            pcsc,
             slots: HashMap::new(),
             sessions: HashMap::new(),
         }
     }
 
     fn init(&'a mut self) {
-        if let Ok(ctx) = self.libusb.as_ref() {
+        if let Some(ctx) = self.libusb.as_ref() {
             if let Ok(res) = ctx.devices() {
                 for device in res.iter() {
                     if let Ok(desc) = device.device_descriptor() {
@@ -1573,7 +1596,7 @@ impl<'a> Context<'a> {
                                     eprintln!("libusb {:?} {:?}", name, serial);
                                     if handle.claim_interface(0).is_ok() {
                                         let k = next_key(&self.slots);
-                                        self.slots.insert(k, Slot {handle: Some(handle), name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
+                                        self.slots.insert(k, Slot {handle: Some(handle), card: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS} );
                                     }
                                 }
                             }
@@ -1582,14 +1605,20 @@ impl<'a> Context<'a> {
                 }
             } 
         }
-        if let Ok(ctx) = self.pcsc.as_ref() {
+        if let Some(ctx) = self.pcsc.as_ref() {
             if let Ok(readers) = ctx.list_readers_owned() {
                 for reader in readers {
-                    if let Ok(name) = reader.into_string() {
-                        let serial = String::new();
-                        eprintln!("pcsc {:?}", name);
-                        let k = next_key(&self.slots);
-                        self.slots.insert(k, Slot {handle: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                    eprintln!("pcsc {:?}", reader);
+                    match ctx.connect(&reader, pcsc::ShareMode::Shared, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
+                        Ok(card) => {
+                            let name = reader.to_str().unwrap_or_default().to_owned();
+                            let serial = String::new();
+                            let k = next_key(&self.slots);
+                            self.slots.insert(k, Slot {card: Some(card), handle: None, name, serial, flags: (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS});
+                        }
+                        Err(e) => {
+                            eprintln!("pcsc: {:?}", e);
+                        }
                     }
                 }
             }
@@ -1701,6 +1730,7 @@ pub extern "C" fn C_GetSlotList(
                 let timeout = Duration::from_millis(100);
                 for slot in ctx.slots.values() {
                     if let Some(handle) = slot.handle.as_ref() {
+                        eprintln!("libusb.active_configuration: {:?}", handle.active_configuration());
                         let ibuf = [6u8, 0u8, 0u8];
                         let wr = handle.write_bulk(1, &ibuf, timeout);
                         eprintln!("wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
@@ -1708,7 +1738,10 @@ pub extern "C" fn C_GetSlotList(
                         let rr = handle.read_bulk(0x81, &mut buf, timeout);
                         let ret = &buf[..rr.unwrap_or_default()];
                         eprintln!("read {:?}", (ret.len(), ret));
-                    } 
+                    }
+                    if let Some(card) = slot.card.as_ref() {
+                        eprintln!("pcsc: {:?}", card.status2_owned());
+                    }
                 }
                 let keys = if token_present == 0 {
                     Vec::from_iter(ctx.slots.keys().map(|x| *x))
