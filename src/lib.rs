@@ -1513,6 +1513,13 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 };
 
+fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
+    match map.keys().max() {
+        Some(k) => k + 1,
+        None => 0
+    }
+}
+
 struct Slot<'a> {
     flags: CK_FLAGS,
     name: String,
@@ -1523,7 +1530,7 @@ struct Slot<'a> {
 
 impl std::fmt::Debug for Slot<'_> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Slot(flags: {} name: {} serial: {})", self.flags, self.name, self.serial))
+        fmt.write_fmt(format_args!("Slot(flags: {:?} name: {:?} serial: {:?} handle: {:?} card: {:?})", self.flags, self.name, self.serial, some(&self.handle), some(&self.card)))
     }
 }
 
@@ -1534,43 +1541,38 @@ struct Session {
 }
 
 struct Context<'a> {
+    libusb: Result<libusb::Context, libusb::Error>,
+    pcsc: Result<pcsc::Context, pcsc::Error>,
     slots: HashMap<CK_SLOT_ID, Slot<'a>>,
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
-    libusb: Option<libusb::Context>,
-    pcsc: Option<pcsc::Context>
 }
 
-fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
-    match map.keys().max() {
-        Some(k) => k + 1,
-        None => 0
+impl std::fmt::Debug for Context<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", ok(&self.libusb), ok(&self.pcsc), self.slots, self.sessions))
+    }
+}
+
+fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
+    match r {
+        Ok(_) => &"Ok",
+        Err(e) => e
+    }
+}
+
+fn some<T>(o: &Option<T>) -> &dyn std::fmt::Debug {
+    match o {
+        Some(_) => &"Some",
+        None => &"None"
     }
 }
 
 impl<'a> Context<'a> {
 
     fn new() -> Context<'a> {
-        let libusb = match libusb::Context::new() {
-            Ok(ctx) => {
-                Some(ctx)
-            }
-            Err(e) => {
-                eprintln!("libusb: {:?}", e);
-                None
-            }
-        };
-        let pcsc = match pcsc::Context::establish(pcsc::Scope::System) {
-            Ok(ctx) => {
-                Some(ctx)
-            }
-            Err(e) => {
-                eprintln!("pcsc: {:?}", e);
-                None
-            }
-        };
         Context {
-            libusb,
-            pcsc,
+            libusb: libusb::Context::new(),
+            pcsc: pcsc::Context::establish(pcsc::Scope::System),
             slots: HashMap::new(),
             sessions: HashMap::new(),
         }
@@ -1578,7 +1580,7 @@ impl<'a> Context<'a> {
 
     fn init(&'a mut self) {
         self.slots.clear();
-        if let Some(ctx) = self.libusb.as_ref() {
+        if let Ok(ctx) = self.libusb.as_ref() {
             if let Ok(devices) = ctx.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
@@ -1619,7 +1621,7 @@ impl<'a> Context<'a> {
                 }
             } 
         }
-        if let Some(ctx) = self.pcsc.as_ref() {
+        if let Ok(ctx) = self.pcsc.as_ref() {
             if let Ok(readers) = ctx.list_readers_owned() {
                 for reader in readers {
                     eprintln!("pcsc {:?}", reader);
@@ -1639,12 +1641,6 @@ impl<'a> Context<'a> {
             }
         }
         eprintln!("Context.init {:?}", self);
-    }
-}
-
-impl std::fmt::Debug for Context<'_> {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Context(slots: {:?}, sessions: {:?})", self.slots, self.sessions))
     }
 }
 
@@ -1672,7 +1668,9 @@ pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called");
     unsafe {
         match G_CONTEXT.as_mut() {
-            Some(_) => {
+            Some(ctx) => {
+                ctx.sessions.clear();
+                ctx.slots.clear();
                 G_CONTEXT = None;
                 CKR_OK
             },
@@ -1752,8 +1750,8 @@ pub extern "C" fn C_GetSlotList(
 ) -> CK_RV {
     unsafe {
         eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, *count));
-        if let Some(context) = G_CONTEXT.as_mut() {
-            context.init();
+        if let Some(ctx) = G_CONTEXT.as_mut() {
+            ctx.init();
         }
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
@@ -1802,6 +1800,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
                     Some(slot) => {
+                        eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
                                 info.firmwareVersion.major = 5;
@@ -1840,6 +1839,7 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
                     Some(slot) => {
+                        eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
                                 if let Some(handle) = slot.handle.as_ref() {
@@ -1925,7 +1925,8 @@ pub extern "C" fn C_GetMechanismList(
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
-                    Some(_slot) => {
+                    Some(slot) => {
+                        eprintln!("{:?}", slot);
                         match mechanism_list.as_mut() {
                             Some(_) => {
                                 let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
@@ -1969,7 +1970,8 @@ pub extern "C" fn C_GetMechanismInfo(
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
-                    Some(_slot) => {
+                    Some(slot) => {
+                        eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
                                 info.ulMinKeySize = 128;
@@ -2069,7 +2071,8 @@ pub extern "C" fn C_OpenSession(
         match G_CONTEXT.as_mut() {
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
-                    Some(_slot) => {
+                    Some(slot) => {
+                        eprintln!("{:?}", slot);
                         let k = next_key(&ctx.sessions);
                         eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
                         ctx.sessions.insert(k, Session {slotID, flags});
