@@ -1520,10 +1520,17 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
+fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
+    match r {
+        Ok(_) => &"Ok",
+        Err(e) => e
+    }
+}
+
 trait Connector {
     fn name(&self) -> String;
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String>;
-    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, String> ;
+    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String>;
+    fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, String> ;
 }
 
 struct UsbConnector<'a> {
@@ -1537,14 +1544,14 @@ impl Connector for UsbConnector<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
-        match self.handle.read_bulk(endpoint, buf, timeout) {
+    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
+        match self.handle.read_bulk(0x81, buf, timeout) {
             Ok(r) => Ok(r),
             Err(e) => Err(e.to_string())
         }
     }
-    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, String> {
-        match self.handle.write_bulk(endpoint, buf, timeout) {
+    fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, String> {
+        match self.handle.write_bulk(0x01, buf, timeout) {
             Ok(r) => Ok(r),
             Err(e) => Err(e.to_string())
         }
@@ -1560,12 +1567,12 @@ impl Connector for PcscConnector {
     fn name(&self) -> String {
         self.reader.clone()
     }
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
+    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
         let len = timeout.as_millis() as usize;
-        buf[..len].fill(endpoint);
+        buf[..len].fill(len as u8);
         Ok(len)
     }
-    fn write(&self, _endpoint: u8, buf: &[u8], _timeout: Duration) -> Result<usize, String> {
+    fn write(&self, buf: &[u8], _timeout: Duration) -> Result<usize, String> {
         Ok(buf.len())
     }
 }
@@ -1597,13 +1604,6 @@ struct Context {
 impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", ok(&self.libusb), ok(&self.pcsc), self.slots, self.sessions))
-    }
-}
-
-fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
-    match r {
-        Ok(_) => &"Ok",
-        Err(e) => e
     }
 }
 
@@ -1883,10 +1883,10 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                             Some(info) => {
                                 let timeout = Duration::from_millis(100);
                                 let ibuf = [6u8, 0u8, 0u8];
-                                let wr = slot.connector.write(0x01, &ibuf, timeout);
+                                let wr = slot.connector.write(&ibuf, timeout);
                                 eprintln!("connector wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
                                 let mut buf = [0u8; 2064];
-                                let rr = slot.connector.read(0x81, &mut buf, timeout);
+                                let rr = slot.connector.read(&mut buf, timeout);
                                 let ret = &buf[..rr.unwrap_or_default()];
                                 eprintln!("connector read {:?}", (ret.len(), ret));
                                 info.label.fill(65u8);
