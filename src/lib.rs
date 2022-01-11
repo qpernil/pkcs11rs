@@ -1520,17 +1520,69 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
-struct Slot<'a> {
-    flags: CK_FLAGS,
-    name: String,
-    serial: String,
-    handle: Option<libusb::DeviceHandle<'a>>,
-    card: Option<pcsc::Card>
+enum ConnectorError {
+    Some,
+    None
 }
 
-impl std::fmt::Debug for Slot<'_> {
+trait Connector {
+    fn name(&self) -> String;
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError>;
+    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, ConnectorError> ;
+}
+
+struct UsbConnector<'a> {
+    handle: libusb::DeviceHandle<'a>,
+    manufacturer: String,
+    product: String,
+    serial : String
+}
+
+impl Connector for UsbConnector<'_> {
+    fn name(&self) -> String {
+        format!("{} {} {}", self.manufacturer, self.product, self.serial)
+    }
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError> {
+        match self.handle.read_bulk(endpoint, buf, timeout) {
+            Ok(r) => Ok(r),
+            Err(_e) => Err(ConnectorError::Some)
+        }
+    }
+    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, ConnectorError> {
+        match self.handle.write_bulk(endpoint, buf, timeout) {
+            Ok(r) => Ok(r),
+            Err(_e) => Err(ConnectorError::Some)
+        }
+    }
+}
+
+struct PcscConnector {
+    card: pcsc::Card,
+    reader: String
+}
+
+impl Connector for PcscConnector {
+    fn name(&self) -> String {
+        self.reader.clone()
+    }
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError> {
+        let len = timeout.as_millis() as usize;
+        buf[..len].fill(endpoint);
+        Ok(len)
+    }
+    fn write(&self, _endpoint: u8, buf: &[u8], _timeout: Duration) -> Result<usize, ConnectorError> {
+        Ok(buf.len())
+    }
+}
+
+struct Slot {
+    connector: Box<dyn Connector>,
+    flags: CK_FLAGS
+}
+
+impl std::fmt::Debug for Slot {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Slot(flags: {:?} name: {:?} serial: {:?} handle: {:?} card: {:?})", self.flags, self.name, self.serial, some(&self.handle), some(&self.card)))
+        fmt.write_fmt(format_args!("Slot (flags: {:?} connector: {:?})", self.flags, self.connector.name()))
     }
 }
 
@@ -1540,14 +1592,14 @@ struct Session {
     flags: CK_FLAGS,
 }
 
-struct Context<'a> {
+struct Context {
     libusb: Result<libusb::Context, libusb::Error>,
     pcsc: Result<pcsc::Context, pcsc::Error>,
-    slots: HashMap<CK_SLOT_ID, Slot<'a>>,
+    slots: HashMap<CK_SLOT_ID, Slot>,
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
 }
 
-impl std::fmt::Debug for Context<'_> {
+impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", ok(&self.libusb), ok(&self.pcsc), self.slots, self.sessions))
     }
@@ -1560,16 +1612,9 @@ fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
     }
 }
 
-fn some<T>(o: &Option<T>) -> &dyn std::fmt::Debug {
-    match o {
-        Some(_) => &"Some",
-        None => &"None"
-    }
-}
+impl Context {
 
-impl<'a> Context<'a> {
-
-    fn new() -> Context<'a> {
+    fn new() -> Context {
         Context {
             libusb: libusb::Context::new(),
             pcsc: pcsc::Context::establish(pcsc::Scope::System),
@@ -1578,7 +1623,7 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn init(&'a mut self) {
+    fn init(&'static mut self) {
         if let Ok(ctx) = self.libusb.as_ref() {
             let timeout = Duration::from_millis(100);
             if let Ok(devices) = ctx.devices() {
@@ -1593,13 +1638,12 @@ impl<'a> Context<'a> {
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let name = format!("{} {}", manufacturer, product);
-                                            eprintln!("libusb {:?} {:?}", name, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
                                                     let k = next_key(&self.slots);
                                                     let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
-                                                    self.slots.insert(k, Slot {handle: Some(handle), card: None, name, serial, flags});
+                                                    let connector = Box::new(UsbConnector {handle, manufacturer, product, serial});
+                                                    self.slots.insert(k, Slot {connector, flags});
                                                 }
                                                 Err(e) => {
                                                     eprintln!("libusb.claim_interface: {:?}", e);
@@ -1626,11 +1670,11 @@ impl<'a> Context<'a> {
                     eprintln!("pcsc {:?}", reader);
                     match ctx.connect(&reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
                         Ok(card) => {
-                            let name = reader.to_str().unwrap_or_default().to_owned();
-                            let serial = String::new();
                             let k = next_key(&self.slots);
+                            let reader = reader.to_str().unwrap_or_default().to_owned();
                             let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
-                            self.slots.insert(k, Slot {card: Some(card), handle: None, name, serial, flags});
+                            let connector = Box::new(PcscConnector {card, reader});
+                            self.slots.insert(k, Slot {connector, flags});
                         }
                         Err(e) => {
                             eprintln!("{:?}: {:?}", reader, e);
@@ -1841,19 +1885,14 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                if let Some(handle) = slot.handle.as_ref() {
-                                    let timeout = Duration::from_millis(100);
-                                    let ibuf = [6u8, 0u8, 0u8];
-                                    let wr = handle.write_bulk(1, &ibuf, timeout);
-                                    eprintln!("libusb wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
-                                    let mut buf = [0u8; 2064];
-                                    let rr = handle.read_bulk(0x81, &mut buf, timeout);
-                                    let ret = &buf[..rr.unwrap_or_default()];
-                                    eprintln!("libusb read {:?}", (ret.len(), ret));
-                                }
-                                if let Some(card) = slot.card.as_ref() {
-                                    eprintln!("pcsc: {:?}", card.status2_owned());
-                                }
+                                let timeout = Duration::from_millis(100);
+                                let ibuf = [6u8, 0u8, 0u8];
+                                let wr = slot.connector.write(0x01, &ibuf, timeout);
+                                eprintln!("connector wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
+                                let mut buf = [0u8; 2064];
+                                let rr = slot.connector.read(0x81, &mut buf, timeout);
+                                let ret = &buf[..rr.unwrap_or_default()];
+                                eprintln!("connector read {:?}", (ret.len(), ret));
                                 info.label.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.model.fill(67u8);
@@ -2397,7 +2436,7 @@ pub extern "C" fn C_FindObjectsInit(
                 match ctx.sessions.get(&session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjectsInit {:?}", session);
-                       match templ.as_ref() {
+                        match templ.as_ref() {
                             Some(_info) => { 
                                 CKR_OK
                             },
@@ -3019,13 +3058,45 @@ pub type CK_C_GenerateKey =
 
 #[no_mangle]
 pub extern "C" fn C_GenerateKey(
-    _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
-    _templ: *mut _CK_ATTRIBUTE,
-    _count: ::std::os::raw::c_ulong,
-    _key: *mut CK_OBJECT_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: *mut _CK_MECHANISM,
+    templ: *mut _CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
+    key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    eprintln!("C_GenerateKey called with {:?}", (session_handle, mechanism, templ, count, key));
+    unsafe {
+        match G_CONTEXT.as_ref() {
+            Some(ctx) => {
+                match ctx.sessions.get(&session_handle) {
+                    Some(session) => {
+                        eprintln!("C_GenerateKey {:?}", session);
+                        match ctx.slots.get(&session.slotID) {
+                            Some(slot) => {
+                                eprintln!("C_GenerateKey {:?}", slot);
+                                if let Some(mechanism) = mechanism.as_ref() {
+                                    eprintln!("C_GenerateKey {:?}", mechanism);
+                                    if let Some(_) = templ.as_ref() {
+                                        let templ = slice::from_raw_parts(templ, count as usize);
+                                        eprintln!("C_GenerateKey {:?}", templ);
+                                        *key = slot.flags;
+                                        CKR_OK
+                                    } else {
+                                        CKR_ARGUMENTS_BAD
+                                    }
+                                } else {
+                                    CKR_ARGUMENTS_BAD
+                                }
+                            },
+                            None => CKR_SLOT_ID_INVALID
+                        }
+                    }
+                    None => CKR_SESSION_HANDLE_INVALID
+                }
+            },
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }
+    }.into()
 }
 
 pub type CK_C_GenerateKeyPair = :: std :: option :: Option < unsafe extern "C" fn (session : CK_SESSION_HANDLE , mechanism : * mut _CK_MECHANISM , public_key_template : * mut _CK_ATTRIBUTE , public_key_attribute_count : :: std :: os :: raw :: c_ulong , private_key_template : * mut _CK_ATTRIBUTE , private_key_attribute_count : :: std :: os :: raw :: c_ulong , public_key : * mut CK_OBJECT_HANDLE , private_key : * mut CK_OBJECT_HANDLE) -> CK_RV > ;
