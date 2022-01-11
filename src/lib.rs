@@ -1419,7 +1419,7 @@ pub type CK_NOTIFY =
                              -> CK_RV,
     >;
 pub type CK_C_Initialize =
-    ::std::option::Option<extern "C" fn(init_args: *mut ::std::os::raw::c_void) -> CK_RV>;
+    ::std::option::Option<extern "C" fn(init_args: *mut _CK_C_INITIALIZE_ARGS) -> CK_RV>;
 
 static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     version : CK_VERSION {major: 2, minor: 40},
@@ -1646,8 +1646,8 @@ impl<'a> Context<'a> {
 static mut G_CONTEXT: Option<Context> = None;
 
 #[no_mangle]
-pub extern "C" fn C_Initialize(_init_args: *mut ::std::os::raw::c_void) -> CK_RV {
-    eprintln!("C_Initialize called");
+pub extern "C" fn C_Initialize(init_args: *mut _CK_C_INITIALIZE_ARGS) -> CK_RV {
+    eprintln!("C_Initialize called with {:?}", init_args);
     unsafe {       
         match G_CONTEXT.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED,
@@ -1663,8 +1663,8 @@ pub type CK_C_Finalize =
     ::std::option::Option<extern "C" fn(pReserved: *mut ::std::os::raw::c_void) -> CK_RV>;
 
 #[no_mangle]
-pub extern "C" fn C_Finalize(_pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
-    eprintln!("C_Finalize called");
+pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
+    eprintln!("C_Finalize called with {:?}", pReserved);
     unsafe {
         match G_CONTEXT.as_mut() {
             Some(ctx) => {
@@ -2148,6 +2148,7 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
                     Some(session) => {
+                        eprintln!("C_GetSessionInfo {:?}", session);
                         match info_ptr.as_mut() {
                             Some(info) => { 
                                 info.slotID = session.slotID;
@@ -2227,7 +2228,8 @@ pub extern "C" fn C_Login(
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
-                    Some(_session) => {
+                    Some(session) => {
+                        eprintln!("C_Login {:?}", session);
                         match pin.as_ref() {
                             Some(_pin) => { 
                                 CKR_OK
@@ -2255,7 +2257,8 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
-                    Some(_session) => {
+                    Some(session) => {
+                        eprintln!("C_Logout {:?}", session);
                         CKR_OK
                     }
                     None => CKR_SESSION_HANDLE_INVALID
@@ -2392,8 +2395,9 @@ pub extern "C" fn C_FindObjectsInit(
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
-                    Some(_session) => {
-                        match templ.as_ref() {
+                    Some(session) => {
+                        eprintln!("C_FindObjectsInit {:?}", session);
+                       match templ.as_ref() {
                             Some(_info) => { 
                                 CKR_OK
                             },
@@ -2431,7 +2435,8 @@ pub extern "C" fn C_FindObjects(
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
-                    Some(_session) => {
+                    Some(session) => {
+                        eprintln!("C_FindObjects {:?}", session);
                         match object.as_mut() {
                             Some(_info) => {
                                 eprintln!("C_FindObjects returning {:?}", 0);
@@ -2459,7 +2464,8 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.sessions.get(&session_handle) {
-                    Some(_session) => {
+                    Some(session) => {
+                        eprintln!("C_FindObjectsFinal {:?}", session);
                         CKR_OK
                     }
                     None => CKR_SESSION_HANDLE_INVALID
