@@ -1520,15 +1520,10 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
-enum ConnectorError {
-    Some,
-    None
-}
-
 trait Connector {
     fn name(&self) -> String;
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError>;
-    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, ConnectorError> ;
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String>;
+    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, String> ;
 }
 
 struct UsbConnector<'a> {
@@ -1542,16 +1537,16 @@ impl Connector for UsbConnector<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError> {
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
         match self.handle.read_bulk(endpoint, buf, timeout) {
             Ok(r) => Ok(r),
-            Err(_e) => Err(ConnectorError::Some)
+            Err(e) => Err(e.to_string())
         }
     }
-    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, ConnectorError> {
+    fn write(&self, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, String> {
         match self.handle.write_bulk(endpoint, buf, timeout) {
             Ok(r) => Ok(r),
-            Err(_e) => Err(ConnectorError::Some)
+            Err(e) => Err(e.to_string())
         }
     }
 }
@@ -1565,12 +1560,12 @@ impl Connector for PcscConnector {
     fn name(&self) -> String {
         self.reader.clone()
     }
-    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, ConnectorError> {
+    fn read(&self, endpoint: u8, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
         let len = timeout.as_millis() as usize;
         buf[..len].fill(endpoint);
         Ok(len)
     }
-    fn write(&self, _endpoint: u8, buf: &[u8], _timeout: Duration) -> Result<usize, ConnectorError> {
+    fn write(&self, _endpoint: u8, buf: &[u8], _timeout: Duration) -> Result<usize, String> {
         Ok(buf.len())
     }
 }
@@ -1638,6 +1633,7 @@ impl Context {
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
+                                            eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
                                                     let k = next_key(&self.slots);
