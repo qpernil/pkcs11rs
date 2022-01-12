@@ -1529,8 +1529,7 @@ fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
 
 trait Connector {
     fn name(&self) -> String;
-    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String>;
-    fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, String> ;
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], timeout: Duration) -> Result<&'buf [u8], String>;
 }
 
 struct UsbConnector<'a> {
@@ -1544,36 +1543,71 @@ impl Connector for UsbConnector<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
-    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
-        match self.handle.read_bulk(0x81, buf, timeout) {
-            Ok(r) => Ok(r),
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], timeout: Duration) -> Result<&'buf [u8], String> {
+        match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
+            Ok(_) => {
+                match self.handle.read_bulk(0x81, receive_buffer, timeout) {
+                    Ok(len) => {
+                        eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
+                        Ok(&receive_buffer[..len])
+                    },
+                    Err(e) => {
+                        eprintln!("libusb.read_bulk() -> {}", e);
+                        Err(e.to_string())
+                    }
+                }
+            }
             Err(e) => Err(e.to_string())
         }
     }
-    fn write(&self, buf: &[u8], timeout: Duration) -> Result<usize, String> {
-        match self.handle.write_bulk(0x01, buf, timeout) {
-            Ok(r) => Ok(r),
-            Err(e) => Err(e.to_string())
+}
+
+fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, libusb::Error> {
+    match handle.write_bulk(endpoint, buf, timeout) {
+        Ok(len) => {
+            eprintln!("libusb.write_bulk({:?}) -> {}", buf, len);
+            if len % 64 == 0 { // Write a ZLP if last packet is full
+                match handle.write_bulk(endpoint, &[], timeout) {
+                    Ok(zlp) => {
+                        eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
+                        Ok(len)
+                    },
+                    Err(e) => {
+                        eprintln!("libusb.write_bulk'zlp() -> {}", e);
+                        Err(e)
+                    }
+                }
+            } else {
+                Ok(len)
+            }
+        }
+        Err(e) => {
+            eprintln!("libusb.write_bulk({:?}) -> {}", buf, e);
+            Err(e)
         }
     }
 }
 
 struct PcscConnector {
     card: pcsc::Card,
-    reader: String
+    status: pcsc::CardStatusOwned,
 }
 
 impl Connector for PcscConnector {
     fn name(&self) -> String {
-        self.reader.clone()
+        self.status.reader_names()[0].to_string_lossy().to_string()
     }
-    fn read(&self, buf: &mut [u8], timeout: Duration) -> Result<usize, String> {
-        let len = timeout.as_millis() as usize;
-        buf[..len].fill(len as u8);
-        Ok(len)
-    }
-    fn write(&self, buf: &[u8], _timeout: Duration) -> Result<usize, String> {
-        Ok(buf.len())
+    fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], _timeout: Duration) -> Result<&'buf [u8], String> {
+        match self.card.transmit(send_buffer, receive_buffer) {
+            Ok(receive_buffer) => {
+                eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, receive_buffer);
+                Ok(receive_buffer)
+            },
+            Err(e) => {
+                eprintln!("pcsc.transmit({:?}) -> {}", send_buffer, e);
+                Err(e.to_string())
+            }
+        }
     }
 }
 
@@ -1615,6 +1649,18 @@ impl Context {
             pcsc: pcsc::Context::establish(pcsc::Scope::System),
             slots: HashMap::new(),
             sessions: HashMap::new(),
+        }
+    }
+
+    fn get_session<'a>(&'a self, session_handle: CK_SESSION_HANDLE) -> Option<(&'a Slot, &'a Session)> {
+        match self.sessions.get(&session_handle) {
+            Some(session) => {
+                match self.slots.get(&session.slotID) {
+                    Some(slot) => Some((slot, session)),
+                    None => None
+                }
+            },
+            None => None
         }
     }
 
@@ -1666,11 +1712,17 @@ impl Context {
                     eprintln!("pcsc {:?}", reader);
                     match ctx.connect(&reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
                         Ok(card) => {
-                            let k = next_key(&self.slots);
-                            let reader = reader.to_str().unwrap_or_default().to_owned();
-                            let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
-                            let connector = Box::new(PcscConnector {card, reader});
-                            self.slots.insert(k, Slot {connector, flags});
+                            match card.status2_owned() {
+                                Ok(status) => {
+                                    let k = next_key(&self.slots);
+                                    let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
+                                    let connector = Box::new(PcscConnector {card, status});
+                                    self.slots.insert(k, Slot {connector, flags});
+                                },
+                                Err(e) => {
+                                    eprintln!("{:?}: {:?}", reader, e);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("{:?}: {:?}", reader, e);
@@ -1794,7 +1846,7 @@ pub extern "C" fn C_GetSlotList(
         }
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                let keys: Vec<CK_SLOT_ID> = if token_present == 0 {
+                let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                     ctx.slots.keys().cloned().collect()
                 } else {
                     ctx.slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0).collect()
@@ -1802,6 +1854,7 @@ pub extern "C" fn C_GetSlotList(
                 match slot_list.as_mut() {
                     Some(_) => {
                         if *count >= keys.len() as u64 {
+                            keys.sort();
                             ptr::copy(keys.as_ptr(), slot_list, keys.len());
                             *count = keys.len() as u64;
                             eprintln!("C_GetSlotList returning {:?}", (keys, *count));
@@ -1883,12 +1936,8 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                             Some(info) => {
                                 let timeout = Duration::from_millis(100);
                                 let ibuf = [6u8, 0u8, 0u8];
-                                let wr = slot.connector.write(&ibuf, timeout);
-                                eprintln!("connector wrote {:?}", &ibuf[..wr.unwrap_or_default()]);
                                 let mut buf = [0u8; 2064];
-                                let rr = slot.connector.read(&mut buf, timeout);
-                                let ret = &buf[..rr.unwrap_or_default()];
-                                eprintln!("connector read {:?}", (ret.len(), ret));
+                                let _rr = slot.connector.transmit(&ibuf, &mut buf, timeout);
                                 info.label.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.model.fill(67u8);
@@ -2008,8 +2057,8 @@ pub extern "C" fn C_GetMechanismInfo(
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                info.ulMinKeySize = 128;
-                                info.ulMaxKeySize = 256;
+                                info.ulMinKeySize = 1024;
+                                info.ulMaxKeySize = 4096;
                                 info.flags = 0;
                                 eprintln!("C_GetMechanismInfo returning {:?}", info);
                                 CKR_OK
@@ -2181,8 +2230,8 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
-                    Some(session) => {
+                match ctx.get_session(session_handle) {
+                    Some((_slot, session)) => {
                         eprintln!("C_GetSessionInfo {:?}", session);
                         match info_ptr.as_mut() {
                             Some(info) => { 
@@ -2262,7 +2311,7 @@ pub extern "C" fn C_Login(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_Login {:?}", session);
                         match pin.as_ref() {
@@ -2291,7 +2340,7 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_Logout {:?}", session);
                         CKR_OK
@@ -2429,7 +2478,7 @@ pub extern "C" fn C_FindObjectsInit(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjectsInit {:?}", session);
                         match templ.as_ref() {
@@ -2469,7 +2518,7 @@ pub extern "C" fn C_FindObjects(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjects {:?}", session);
                         match object.as_mut() {
@@ -2498,7 +2547,7 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjectsFinal {:?}", session);
                         CKR_OK
@@ -3064,29 +3113,27 @@ pub extern "C" fn C_GenerateKey(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.sessions.get(&session_handle) {
+                match ctx.get_session(session_handle) {
                     Some(session) => {
                         eprintln!("C_GenerateKey {:?}", session);
-                        match ctx.slots.get(&session.slotID) {
-                            Some(slot) => {
-                                eprintln!("C_GenerateKey {:?}", slot);
-                                if let Some(mechanism) = mechanism.as_ref() {
-                                    eprintln!("C_GenerateKey {:?}", mechanism);
-                                    if let Some(_) = templ.as_ref() {
-                                        let templ = slice::from_raw_parts(templ, count as usize);
-                                        eprintln!("C_GenerateKey {:?}", templ);
-                                        *key = slot.flags;
-                                        CKR_OK
-                                    } else {
-                                        CKR_ARGUMENTS_BAD
-                                    }
-                                } else {
-                                    CKR_ARGUMENTS_BAD
-                                }
-                            },
-                            None => CKR_SLOT_ID_INVALID
+                        if let Some(mechanism) = mechanism.as_ref() {
+                            eprintln!("C_GenerateKey {:?}", mechanism);
+                            if let Some(_) = templ.as_ref() {
+                                let templ = slice::from_raw_parts(templ, count as usize);
+                                eprintln!("C_GenerateKey {:?}", templ);
+                                let timeout = Duration::from_millis(100);
+                                let ibuf = [1u8, 0u8, 61u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                                let mut buf = [0u8; 2064];
+                                let _wr = session.0.connector.transmit(&ibuf, &mut buf, timeout);
+                                *key = session.0.flags;
+                                CKR_OK
+                            } else {
+                                CKR_ARGUMENTS_BAD
+                            }
+                        } else {
+                            CKR_ARGUMENTS_BAD
                         }
-                    }
+                    },
                     None => CKR_SESSION_HANDLE_INVALID
                 }
             },
