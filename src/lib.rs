@@ -2166,13 +2166,17 @@ pub extern "C" fn C_OpenSession(
                 match ctx.slots.get(&slotID) {
                     Some(slot) => {
                         eprintln!("{:?}", slot);
-                        let k = next_key(&ctx.sessions);
-                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
-                        ctx.sessions.insert(k, Session {slotID, flags});
-                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
-                        eprintln!("C_OpenSession returning {:?}", k);
-                        *session = k;
-                        CKR_OK
+                        if slot.connector.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                            let k = next_key(&ctx.sessions);
+                            eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                            ctx.sessions.insert(k, Session {slotID, flags});
+                            eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
+                            eprintln!("C_OpenSession returning {:?}", k);
+                            *session = k;
+                            CKR_OK
+                        } else {
+                            CKR_TOKEN_NOT_PRESENT
+                        }
                     }
                     None => CKR_SLOT_ID_INVALID
                 }
