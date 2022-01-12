@@ -1529,6 +1529,7 @@ fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
 
 trait Connector {
     fn name(&self) -> String;
+    fn flags(&self) -> CK_FLAGS;
     fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], timeout: Duration) -> Result<&'buf [u8], String>;
 }
 
@@ -1542,6 +1543,9 @@ struct UsbConnector<'a> {
 impl Connector for UsbConnector<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
+    }
+    fn flags(&self) -> CK_FLAGS {
+        (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS
     }
     fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], timeout: Duration) -> Result<&'buf [u8], String> {
         match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
@@ -1589,36 +1593,46 @@ fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: D
 }
 
 struct PcscConnector {
-    card: pcsc::Card,
-    status: pcsc::CardStatusOwned,
+    reader: String,
+    card: Option<pcsc::Card>
 }
 
 impl Connector for PcscConnector {
     fn name(&self) -> String {
-        self.status.reader_names()[0].to_string_lossy().to_string()
+        self.reader.clone()
+    }
+    fn flags(&self) -> CK_FLAGS {
+        match self.card {
+            Some(_) => CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT,
+            None => CKF_HW_SLOT | CKF_REMOVABLE_DEVICE
+        }.into()
     }
     fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], _timeout: Duration) -> Result<&'buf [u8], String> {
-        match self.card.transmit(send_buffer, receive_buffer) {
-            Ok(receive_buffer) => {
-                eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, receive_buffer);
-                Ok(receive_buffer)
-            },
-            Err(e) => {
-                eprintln!("pcsc.transmit({:?}) -> {}", send_buffer, e);
-                Err(e.to_string())
+        match self.card.as_ref() {
+            Some(card) => {
+                match card.transmit(send_buffer, receive_buffer) {
+                    Ok(receive_buffer) => {
+                        eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, receive_buffer);
+                        Ok(receive_buffer)
+                    },
+                    Err(e) => {
+                        eprintln!("pcsc.transmit({:?}) -> {}", send_buffer, e);
+                        Err(e.to_string())
+                    }
+                }
             }
+            None => Err("No card".to_string())
         }
     }
 }
 
 struct Slot {
     connector: Box<dyn Connector>,
-    flags: CK_FLAGS
 }
 
 impl std::fmt::Debug for Slot {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Slot (flags: {:?} connector: {:?})", self.flags, self.connector.name()))
+        fmt.write_fmt(format_args!("Slot (flags: {:?} connector: {:?})", self.connector.flags(), self.connector.name()))
     }
 }
 
@@ -1683,9 +1697,8 @@ impl Context {
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
                                                     let k = next_key(&self.slots);
-                                                    let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
                                                     let connector = Box::new(UsbConnector {handle, manufacturer, product, serial});
-                                                    self.slots.insert(k, Slot {connector, flags});
+                                                    self.slots.insert(k, Slot {connector});
                                                 }
                                                 Err(e) => {
                                                     eprintln!("libusb.claim_interface: {:?}", e);
@@ -1708,24 +1721,21 @@ impl Context {
         }
         if let Ok(ctx) = self.pcsc.as_ref() {
             if let Ok(readers) = ctx.list_readers_owned() {
-                for reader in readers {
-                    eprintln!("pcsc {:?}", reader);
-                    match ctx.connect(&reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
+                for creader in readers {
+                    eprintln!("pcsc {:?}", creader);
+                    let k = next_key(&self.slots);
+                    let reader = creader.to_string_lossy().to_string();
+                    match ctx.connect(&creader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
                         Ok(card) => {
-                            match card.status2_owned() {
-                                Ok(status) => {
-                                    let k = next_key(&self.slots);
-                                    let flags = (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS;
-                                    let connector = Box::new(PcscConnector {card, status});
-                                    self.slots.insert(k, Slot {connector, flags});
-                                },
-                                Err(e) => {
-                                    eprintln!("{:?}: {:?}", reader, e);
-                                }
-                            }
+                            let connector = Box::new(PcscConnector {reader, card: Some(card)});
+                            self.slots.insert(k, Slot {connector});
                         }
                         Err(e) => {
-                            eprintln!("{:?}: {:?}", reader, e);
+                            if !self.slots.values().any(|s| s.connector.name() == reader) {
+                                eprintln!("{:?}: {:?}", reader, e);
+                                let connector = Box::new(PcscConnector {reader, card: None});
+                                self.slots.insert(k, Slot {connector});
+                            }
                         }
                     }
                 }
@@ -1849,7 +1859,7 @@ pub extern "C" fn C_GetSlotList(
                 let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                     ctx.slots.keys().cloned().collect()
                 } else {
-                    ctx.slots.iter().filter(|x| x.1.flags & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0).collect()
+                    ctx.slots.iter().filter(|x| x.1.connector.flags() & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0).collect()
                 };
                 match slot_list.as_mut() {
                     Some(_) => {
@@ -1901,7 +1911,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.hardwareVersion.minor = 0;
                                 info.slotDescription.fill(65u8);
                                 info.manufacturerID.fill(66u8);
-                                info.flags = slot.flags;
+                                info.flags = slot.connector.flags();
                                 eprintln!("C_GetSlotInfo returning {:?}", info);
                                 CKR_OK
                             },
@@ -3125,7 +3135,7 @@ pub extern "C" fn C_GenerateKey(
                                 let ibuf = [1u8, 0u8, 61u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                                 let mut buf = [0u8; 2064];
                                 let _wr = session.0.connector.transmit(&ibuf, &mut buf, timeout);
-                                *key = session.0.flags;
+                                *key = 99;
                                 CKR_OK
                             } else {
                                 CKR_ARGUMENTS_BAD
