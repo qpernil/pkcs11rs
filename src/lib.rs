@@ -1527,20 +1527,26 @@ fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
     }
 }
 
-trait Connector {
+trait Slot {
     fn name(&self) -> String;
     fn flags(&self) -> CK_FLAGS;
     fn transmit<'buf>(&self, send_buffer: &[u8], receive_buffer: &'buf mut [u8], timeout: Duration) -> Result<&'buf [u8], String>;
 }
 
-struct UsbConnector<'a> {
+impl std::fmt::Debug for dyn Slot {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.write_fmt(format_args!("Slot (name: {} flags: {})", self.name(), self.flags()))
+    }
+}
+
+struct UsbSlot<'a> {
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
     serial : String
 }
 
-impl Connector for UsbConnector<'_> {
+impl Slot for UsbSlot<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
@@ -1592,12 +1598,12 @@ fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: D
     }
 }
 
-struct PcscConnector {
+struct PcscSlot {
     reader: String,
     card: Option<pcsc::Card>
 }
 
-impl Connector for PcscConnector {
+impl Slot for PcscSlot {
     fn name(&self) -> String {
         self.reader.clone()
     }
@@ -1621,18 +1627,11 @@ impl Connector for PcscConnector {
                     }
                 }
             }
-            None => Err("No card".to_string())
+            None => {
+                eprintln!("pcsc.transmit({:?}) -> No Card", send_buffer);
+                Err("No card".to_string())
+            }
         }
-    }
-}
-
-struct Slot {
-    connector: Box<dyn Connector>,
-}
-
-impl std::fmt::Debug for Slot {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Slot (flags: {:?} connector: {:?})", self.connector.flags(), self.connector.name()))
     }
 }
 
@@ -1645,7 +1644,7 @@ struct Session {
 struct Context {
     libusb: Result<libusb::Context, libusb::Error>,
     pcsc: Result<pcsc::Context, pcsc::Error>,
-    slots: HashMap<CK_SLOT_ID, Slot>,
+    slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
 }
 
@@ -1656,7 +1655,6 @@ impl std::fmt::Debug for Context {
 }
 
 impl Context {
-
     fn new() -> Context {
         Context {
             libusb: libusb::Context::new(),
@@ -1665,8 +1663,7 @@ impl Context {
             sessions: HashMap::new(),
         }
     }
-
-    fn get_session<'a>(&'a self, session_handle: CK_SESSION_HANDLE) -> Option<(&'a Slot, &'a Session)> {
+    fn get_session<'a>(&'a self, session_handle: CK_SESSION_HANDLE) -> Option<(&'a Box<dyn Slot>, &'a Session)> {
         match self.sessions.get(&session_handle) {
             Some(session) => {
                 match self.slots.get(&session.slotID) {
@@ -1677,14 +1674,13 @@ impl Context {
             None => None
         }
     }
-
     fn init(&'static mut self) {
         if let Ok(ctx) = self.libusb.as_ref() {
             let timeout = Duration::from_millis(100);
             if let Ok(devices) = ctx.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
-                        eprintln!("libusb vendor {:?} product {:?} usb {:?} device {:?}", desc.vendor_id(), desc.product_id(), desc.usb_version(), desc.device_version());
+                        eprintln!("libusb vendor {} product {:?} usb {:?} device {:?}", desc.vendor_id(), desc.product_id(), desc.usb_version(), desc.device_version());
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
                             match device.open() {
                                 Ok(mut handle) => {
@@ -1697,8 +1693,8 @@ impl Context {
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
                                                     let k = next_key(&self.slots);
-                                                    let connector = Box::new(UsbConnector {handle, manufacturer, product, serial});
-                                                    self.slots.insert(k, Slot {connector});
+                                                    let v = Box::new(UsbSlot {handle, manufacturer, product, serial});
+                                                    self.slots.insert(k, v);
                                                 }
                                                 Err(e) => {
                                                     eprintln!("libusb.claim_interface: {:?}", e);
@@ -1722,19 +1718,19 @@ impl Context {
         if let Ok(ctx) = self.pcsc.as_ref() {
             if let Ok(readers) = ctx.list_readers_owned() {
                 for creader in readers {
-                    eprintln!("pcsc {:?}", creader);
-                    let k = next_key(&self.slots);
                     let reader = creader.to_string_lossy().to_string();
-                    match ctx.connect(&creader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
-                        Ok(card) => {
-                            let connector = Box::new(PcscConnector {reader, card: Some(card)});
-                            self.slots.insert(k, Slot {connector});
-                        }
-                        Err(e) => {
-                            if !self.slots.values().any(|s| s.connector.name() == reader) {
-                                eprintln!("{:?}: {:?}", reader, e);
-                                let connector = Box::new(PcscConnector {reader, card: None});
-                                self.slots.insert(k, Slot {connector});
+                    eprintln!("pcsc {}", reader);
+                    if !self.slots.values().any(|s| s.name() == reader) {
+                        let k = next_key(&self.slots);
+                        match ctx.connect(&creader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
+                            Ok(card) => {
+                                let v = Box::new(PcscSlot {reader, card: Some(card)});
+                                self.slots.insert(k, v);
+                            }
+                            Err(e) => {
+                                eprintln!("{}: {}", reader, e);
+                                let v = Box::new(PcscSlot {reader, card: None});
+                                self.slots.insert(k, v);
                             }
                         }
                     }
@@ -1859,7 +1855,7 @@ pub extern "C" fn C_GetSlotList(
                 let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                     ctx.slots.keys().cloned().collect()
                 } else {
-                    ctx.slots.iter().filter(|x| x.1.connector.flags() & (CKF_TOKEN_PRESENT as u64) != 0).map(|x| *x.0).collect()
+                    ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as u64) != 0).map(|s| *s.0).collect()
                 };
                 match slot_list.as_mut() {
                     Some(_) => {
@@ -1911,7 +1907,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.hardwareVersion.minor = 0;
                                 info.slotDescription.fill(65u8);
                                 info.manufacturerID.fill(66u8);
-                                info.flags = slot.connector.flags();
+                                info.flags = slot.flags();
                                 eprintln!("C_GetSlotInfo returning {:?}", info);
                                 CKR_OK
                             },
@@ -1947,7 +1943,7 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                                 let timeout = Duration::from_millis(100);
                                 let ibuf = [6u8, 0u8, 0u8];
                                 let mut buf = [0u8; 2064];
-                                let _rr = slot.connector.transmit(&ibuf, &mut buf, timeout);
+                                let _rr = slot.transmit(&ibuf, &mut buf, timeout);
                                 info.label.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.model.fill(67u8);
@@ -2166,7 +2162,7 @@ pub extern "C" fn C_OpenSession(
                 match ctx.slots.get(&slotID) {
                     Some(slot) => {
                         eprintln!("{:?}", slot);
-                        if slot.connector.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                        if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
                             let k = next_key(&ctx.sessions);
                             eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
                             ctx.sessions.insert(k, Session {slotID, flags});
@@ -3138,7 +3134,7 @@ pub extern "C" fn C_GenerateKey(
                                 let timeout = Duration::from_millis(100);
                                 let ibuf = [1u8, 0u8, 61u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                                 let mut buf = [0u8; 2064];
-                                let _wr = session.0.connector.transmit(&ibuf, &mut buf, timeout);
+                                let _wr = session.0.transmit(&ibuf, &mut buf, timeout);
                                 *key = 99;
                                 CKR_OK
                             } else {
