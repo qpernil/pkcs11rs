@@ -1903,7 +1903,7 @@ struct Context {
 
 impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", some(&self.libusb), some(&self.pcsc), self.slots, self.sessions))
+        fmt.write_fmt(format_args!("Context(libusb: {}, pcsc {}, slots: {:?}, sessions: {:?})", some(&self.libusb), some(&self.pcsc), self.slots, self.sessions))
     }
 }
 
@@ -2513,13 +2513,13 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.get_session(session_handle) {
-                    Some((slot, session)) => {
+                    Some(session) => {
                         eprintln!("C_GetSessionInfo {:?}", session);
                         match info_ptr.as_mut() {
-                            Some(info) => { 
-                                info.slotID = session.slotID();
+                            Some(info) => {
+                                info.slotID = session.1.slotID();
                                 info.state = CKS_RW_PUBLIC_SESSION as u64;
-                                info.flags = slot.flags();
+                                info.flags = session.1.flags();
                                 info.ulDeviceError = 0;
                                 eprintln!("C_GetSessionInfo returning {:?}", info);
                                 CKR_OK
@@ -2626,6 +2626,7 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
                 match ctx.get_session_mut(session_handle) {
                     Some(session) => {
                         eprintln!("C_Logout {:?}", session);
+                        session.1.logout();
                         CKR_OK
                     }
                     None => CKR_SESSION_HANDLE_INVALID
