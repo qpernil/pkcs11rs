@@ -1520,10 +1520,10 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
-fn ok<T, E: std::fmt::Debug>(r: &Result<T, E>) -> &dyn std::fmt::Debug {
-    match r {
-        Ok(_) => &"Ok",
-        Err(e) => e
+fn some<T>(o: &Option<T>) -> &dyn std::fmt::Debug {
+    match o {
+        Some(_) => &"Some",
+        None => &"None"
     }
 }
 
@@ -1716,6 +1716,7 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
+    _context: Rc<libusb::Context>,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -1774,13 +1775,13 @@ fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: D
     }
 }
 
-struct PcscConnector<'a> {
+struct PcscConnector {
     reader: std::ffi::CString,
-    pcsc: &'a pcsc::Context,
+    context: Rc<pcsc::Context>,
     card: Option<pcsc::Card>
 }
 
-impl Connector for PcscConnector<'_> {
+impl Connector for PcscConnector {
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
     }
@@ -1809,9 +1810,9 @@ impl Connector for PcscConnector<'_> {
     }
 }
 
-impl PcscConnector<'_> {
+impl PcscConnector {
     fn connect(&mut self) -> Result<(), String> {
-        match self.pcsc.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
+        match self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
             Ok(card) => {
                 self.card = Some(card);
                 Ok(())
@@ -1894,28 +1895,44 @@ impl Scp03Connector {
 }
 
 struct Context {
-    libusb: Result<libusb::Context, libusb::Error>,
-    pcsc: Result<pcsc::Context, pcsc::Error>,
+    libusb: Option<Rc<libusb::Context>>,
+    pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
 }
 
 impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", ok(&self.libusb), ok(&self.pcsc), self.slots, self.sessions))
+        fmt.write_fmt(format_args!("Context(libusb: {:?}, pcsc {:?}, slots: {:?}, sessions: {:?})", some(&self.libusb), some(&self.pcsc), self.slots, self.sessions))
     }
 }
 
 impl Context {
     fn new() -> Context {
         Context {
-            libusb: libusb::Context::new(),
-            pcsc: pcsc::Context::establish(pcsc::Scope::System),
+            libusb: match libusb::Context::new() {
+                Ok(x) => {
+                    Some(Rc::new(x))
+                },
+                Err(e) => {
+                    eprintln!("libusb::Context::new: {}", e);
+                    None
+                }
+            },
+            pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
+                Ok(x) => {
+                    Some(Rc::new(x))
+                },
+                Err(e) => {
+                    eprintln!("pcsc::Context::establish: {}", e);
+                    None
+                }
+            },
             slots: HashMap::new(),
             sessions: HashMap::new(),
         }
     }
-    fn get_session<'a>(&'a self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
+    fn get_session(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
         match self.sessions.get(&session_handle) {
             Some(session) => {
                 match self.slots.get(&session.slotID()) {
@@ -1926,7 +1943,7 @@ impl Context {
             None => None
         }
     }
-    fn get_session_mut<'a>(&'a mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
+    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
         match self.sessions.get_mut(&session_handle) {
             Some(session) => {
                 match self.slots.get(&session.slotID()) {
@@ -1938,9 +1955,9 @@ impl Context {
         }
     }
     fn init(&'static mut self) {
-        if let Ok(ctx) = self.libusb.as_ref() {
+        if let Some(context) = self.libusb.as_ref() {
             let timeout = Duration::from_millis(100);
-            if let Ok(devices) = ctx.devices() {
+            if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
                         eprintln!("libusb vendor {} product {:?} usb {:?} device {:?}", desc.vendor_id(), desc.product_id(), desc.usb_version(), desc.device_version());
@@ -1955,8 +1972,8 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
+                                                    let connector = Rc::new(UsbConnector {_context: context.clone(), handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
-                                                    let connector = Rc::new(UsbConnector {handle, manufacturer, product, serial});
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
                                                 }
@@ -1979,10 +1996,10 @@ impl Context {
                 }
             } 
         }
-        if let Ok(pcsc) = self.pcsc.as_ref() {
-            if let Ok(readers) = pcsc.list_readers_owned() {
+        if let Some(context) = self.pcsc.as_ref() {
+            if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
-                    let mut connector = PcscConnector {reader, pcsc, card: None};
+                    let mut connector = PcscConnector {reader, context: context.clone(), card: None};
                     let name = connector.name();
                     eprintln!("pcsc {:?}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
