@@ -1520,7 +1520,7 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
-fn some<T>(o: &Option<T>) -> &dyn std::fmt::Debug {
+fn some<T>(o: &Option<T>) -> &str {
     match o {
         Some(_) => &"Some",
         None => &"None"
@@ -1911,8 +1911,8 @@ impl Context {
     fn new() -> Context {
         Context {
             libusb: match libusb::Context::new() {
-                Ok(x) => {
-                    Some(Rc::new(x))
+                Ok(context) => {
+                    Some(Rc::new(context))
                 },
                 Err(e) => {
                     eprintln!("libusb::Context::new: {}", e);
@@ -1920,8 +1920,8 @@ impl Context {
                 }
             },
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
-                Ok(x) => {
-                    Some(Rc::new(x))
+                Ok(context) => {
+                    Some(Rc::new(context))
                 },
                 Err(e) => {
                     eprintln!("pcsc::Context::establish: {}", e);
