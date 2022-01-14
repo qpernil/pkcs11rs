@@ -1528,6 +1528,7 @@ fn some<T>(o: &Option<T>) -> &str {
 }
 
 trait Slot {
+    fn to_string(&self) -> String;
     fn name(&self) -> String;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
@@ -1545,7 +1546,7 @@ trait Slot {
 
 impl std::fmt::Debug for dyn Slot {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Slot (name: {} flags: {})", self.name(), self.flags()))
+        fmt.write_fmt(format_args!("{}", self.to_string()))
     }
 }
 
@@ -1555,8 +1556,11 @@ struct YubiHsmSlot {
 }
 
 impl Slot for YubiHsmSlot {
+    fn to_string(&self) -> String {
+        format!("{:?}", self)
+    }
     fn name(&self) -> String {
-        format!("{}", self.connector.name())
+        self.connector.name()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -1584,8 +1588,11 @@ struct YubiKeySlot {
 }
 
 impl Slot for YubiKeySlot {
+    fn to_string(&self) -> String {
+        format!("{:?}", self)
+    }
     fn name(&self) -> String {
-        format!("{}", self.connector.name())
+        self.connector.name()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -1608,9 +1615,10 @@ impl Slot for YubiKeySlot {
 }
 
 trait Session {
-    fn name(&self) -> String;
+    fn to_string(&self) -> String;
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
+    fn state(&self) -> CK_STATE;
     fn login(&mut self) -> bool;
     fn logout(&mut self) -> bool;
     fn get_session_info(&self) -> bool;
@@ -1619,7 +1627,7 @@ trait Session {
 
 impl std::fmt::Debug for dyn Session {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("{}", self.name()))
+        fmt.write_fmt(format_args!("{}", self.to_string()))
     }
 }
 
@@ -1631,7 +1639,7 @@ struct YubiHsmSession {
 }
 
 impl Session for YubiHsmSession {
-    fn name(&self) -> String {
+    fn to_string(&self) -> String {
         format!("{:?}", self)
     }
     fn slotID(&self) -> CK_SLOT_ID {
@@ -1639,6 +1647,9 @@ impl Session for YubiHsmSession {
     }
     fn flags(&self) -> CK_FLAGS {
         self.flags
+    }
+    fn state(&self) -> CK_STATE {
+        self.connector.state()
     }
     fn login(&mut self) -> bool {
         self.connector.authenticate()
@@ -1668,7 +1679,7 @@ struct YubiKeySession {
 }
 
 impl Session for YubiKeySession {
-    fn name(&self) -> String {
+    fn to_string(&self) -> String {
         format!("{:?}", self)
     }
     fn slotID(&self) -> CK_SLOT_ID {
@@ -1676,6 +1687,9 @@ impl Session for YubiKeySession {
     }
     fn flags(&self) -> CK_FLAGS {
         self.flags
+    }
+    fn state(&self) -> CK_STATE {
+        self.connector.state()
     }
     fn login(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
@@ -1704,14 +1718,16 @@ impl Session for YubiKeySession {
 }
 
 trait Connector {
+    fn to_string(&self) -> String;
     fn name(&self) -> String;
     fn is_present(&self) -> bool;
+    fn state(&self) -> CK_STATE;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String>;
 }
 
 impl std::fmt::Debug for dyn Connector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Connector (name: {} is_present: {})", self.name(), self.is_present()))
+        fmt.write_fmt(format_args!("{}", self.to_string()))
     }
 }
 
@@ -1724,11 +1740,17 @@ struct UsbConnector<'a> {
 }
 
 impl Connector for UsbConnector<'_> {
+    fn to_string(&self) -> String {
+        format!("UsbConnector ({})", self.name())
+    }
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
     fn is_present(&self) -> bool {
         true
+    }
+    fn state(&self) -> CK_STATE {
+        CKS_RW_PUBLIC_SESSION as CK_STATE
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
         match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
@@ -1782,11 +1804,17 @@ struct PcscConnector {
 }
 
 impl Connector for PcscConnector {
+    fn to_string(&self) -> String {
+        format!("PcscConnector ({})", self.name())
+    }
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
     }
     fn is_present(&self) -> bool {
         self.card.is_some()
+    }
+    fn state(&self) -> CK_STATE {
+        CKS_RW_PUBLIC_SESSION as CK_STATE
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], String> {
         match self.card.as_ref() {
@@ -1853,16 +1881,22 @@ struct Scp03Connector {
     session: Option<Scp03Session>
 }
 
-#[derive(Debug)]
-struct Scp03Session {
-}
-
 impl Connector for Scp03Connector {
+    fn to_string(&self) -> String {
+        format!("{:?}", self)
+    }
     fn name(&self) -> String {
-        format!("{}", self.connector.name())
+        self.connector.name()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
+    }
+    fn state(&self) -> CK_STATE {
+        if self.session.is_some() {
+            CKS_RW_USER_FUNCTIONS
+        } else {
+            CKS_RW_PUBLIC_SESSION
+        }.into()
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
         if self.session.is_some() {
@@ -1892,6 +1926,10 @@ impl Scp03Connector {
         }
         self.session.is_none()
     }
+}
+
+#[derive(Debug)]
+struct Scp03Session {
 }
 
 struct Context {
@@ -2518,7 +2556,7 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
                         match info_ptr.as_mut() {
                             Some(info) => {
                                 info.slotID = session.1.slotID();
-                                info.state = CKS_RW_PUBLIC_SESSION as u64;
+                                info.state = session.1.state();
                                 info.flags = session.1.flags();
                                 info.ulDeviceError = 0;
                                 eprintln!("C_GetSessionInfo returning {:?}", info);
