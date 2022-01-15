@@ -1649,7 +1649,11 @@ impl Session for YubiHsmSession {
         self.flags
     }
     fn state(&self) -> CK_STATE {
-        self.connector.state()
+        if self.connector.is_authenticated() {
+            CKS_RW_USER_FUNCTIONS
+        } else {
+            CKS_RW_PUBLIC_SESSION
+        }.into()
     }
     fn login(&mut self) -> bool {
         self.connector.authenticate()
@@ -1689,29 +1693,36 @@ impl Session for YubiKeySession {
         self.flags
     }
     fn state(&self) -> CK_STATE {
-        self.connector.state()
-    }
-    fn login(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+            CKS_RW_USER_FUNCTIONS
+        } else {
+            CKS_RW_PUBLIC_SESSION
+        }.into()
     }
-    fn logout(&mut self) -> bool {
+    fn login(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
         self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
     }
-    fn get_session_info(&self) -> bool {
+    fn logout(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
         self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
     }
-    fn generate(&self) ->bool {
+    fn get_session_info(&self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut receive_buffer = [0u8; 2064];
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+    }
+    fn generate(&self) ->bool {
+        let timeout = Duration::from_millis(100);
+        let send_buffer = [1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
         self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
     }
@@ -1721,7 +1732,6 @@ trait Connector {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
     fn is_present(&self) -> bool;
-    fn state(&self) -> CK_STATE;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String>;
 }
 
@@ -1732,7 +1742,6 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
-    _context: Rc<libusb::Context>,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -1741,16 +1750,13 @@ struct UsbConnector<'a> {
 
 impl Connector for UsbConnector<'_> {
     fn to_string(&self) -> String {
-        format!("UsbConnector ({})", self.name())
+        format!("UsbConnector  {{ name: {} is_present: {}}}", self.name(), self.is_present())
     }
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
     fn is_present(&self) -> bool {
         true
-    }
-    fn state(&self) -> CK_STATE {
-        CKS_RW_PUBLIC_SESSION as CK_STATE
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
         match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
@@ -1797,24 +1803,21 @@ fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: D
     }
 }
 
-struct PcscConnector {
+struct PcscConnector<'a> {
     reader: std::ffi::CString,
-    context: Rc<pcsc::Context>,
-    card: Option<pcsc::Card>
+    context: &'a pcsc::Context,
+    card: Option<pcsc::Card>,
 }
 
-impl Connector for PcscConnector {
+impl Connector for PcscConnector<'_> {
     fn to_string(&self) -> String {
-        format!("PcscConnector ({})", self.name())
+        format!("PcscConnector  {{ name: {} is_present: {} }}", self.name(), self.is_present())
     }
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
     }
     fn is_present(&self) -> bool {
         self.card.is_some()
-    }
-    fn state(&self) -> CK_STATE {
-        CKS_RW_PUBLIC_SESSION as CK_STATE
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], String> {
         match self.card.as_ref() {
@@ -1838,7 +1841,7 @@ impl Connector for PcscConnector {
     }
 }
 
-impl PcscConnector {
+impl PcscConnector<'_> {
     fn connect(&mut self) -> Result<(), String> {
         match self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
             Ok(card) => {
@@ -1891,13 +1894,6 @@ impl Connector for Scp03Connector {
     fn is_present(&self) -> bool {
         self.connector.is_present()
     }
-    fn state(&self) -> CK_STATE {
-        if self.session.is_some() {
-            CKS_RW_USER_FUNCTIONS
-        } else {
-            CKS_RW_PUBLIC_SESSION
-        }.into()
-    }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
         if self.session.is_some() {
             self.connector.transmit(send_buffer, receive_buffer, timeout)
@@ -1908,6 +1904,9 @@ impl Connector for Scp03Connector {
 }
 
 impl Scp03Connector {
+    fn is_authenticated(&self) -> bool {
+        self.session.is_some()
+    }
     fn authenticate(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
@@ -1933,8 +1932,8 @@ struct Scp03Session {
 }
 
 struct Context {
-    libusb: Option<Rc<libusb::Context>>,
-    pcsc: Option<Rc<pcsc::Context>>,
+    libusb: Option<libusb::Context>,
+    pcsc: Option<pcsc::Context>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
 }
@@ -1950,7 +1949,7 @@ impl Context {
         Context {
             libusb: match libusb::Context::new() {
                 Ok(context) => {
-                    Some(Rc::new(context))
+                    Some(context)
                 },
                 Err(e) => {
                     eprintln!("libusb::Context::new: {}", e);
@@ -1959,7 +1958,7 @@ impl Context {
             },
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
                 Ok(context) => {
-                    Some(Rc::new(context))
+                    Some(context)
                 },
                 Err(e) => {
                     eprintln!("pcsc::Context::establish: {}", e);
@@ -2010,7 +2009,7 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {_context: context.clone(), handle, manufacturer, product, serial});
+                                                    let connector = Rc::new(UsbConnector {handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
@@ -2037,7 +2036,7 @@ impl Context {
         if let Some(context) = self.pcsc.as_ref() {
             if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
-                    let mut connector = PcscConnector {reader, context: context.clone(), card: None};
+                    let mut connector = PcscConnector {reader, context, card: None};
                     let name = connector.name();
                     eprintln!("pcsc {:?}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
