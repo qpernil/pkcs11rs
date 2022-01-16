@@ -1742,6 +1742,7 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
+    context: &'a libusb::Context,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -1895,7 +1896,23 @@ impl Connector for Scp03Connector {
         self.connector.is_present()
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
-        if self.session.is_some() {
+        if let Some(session) = self.session.as_ref() {
+            match session.encrypt(send_buffer) {
+                Ok(enc) => {
+                    eprintln!("encrypted {}: {:?}", send_buffer.len(), enc);
+                    match session.decrypt(&enc) {
+                        Ok(dec) => {
+                            eprintln!("decrypted {}: {:?}", enc.len(), dec);
+                        },
+                        Err(e) => {
+                            eprintln!("{:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{:?}", e);
+                }
+            }
             self.connector.transmit(send_buffer, receive_buffer, timeout)
         } else {
             Err("Not authenticated".to_string())
@@ -1929,6 +1946,21 @@ impl Scp03Connector {
 
 #[derive(Debug)]
 struct Scp03Session {
+}
+
+impl Scp03Session {
+    fn encrypt(&self, data : &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+        let cipher = openssl::symm::Cipher::aes_128_cbc();
+        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
+        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
+        openssl::symm::encrypt(cipher, key, Some(iv), data)
+    }
+    fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+        let cipher = openssl::symm::Cipher::aes_128_cbc();
+        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
+        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
+        openssl::symm::decrypt(cipher, key, Some(iv), data)
+    }
 }
 
 struct Context {
@@ -2009,7 +2041,7 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {handle, manufacturer, product, serial});
+                                                    let connector = Rc::new(UsbConnector {context, handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
@@ -2137,18 +2169,6 @@ pub type CK_C_GetSlotList =
                              count: *mut ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
-
-/*
-    let cipher = openssl::symm::Cipher::aes_128_cbc();
-    let data = b"Some Crypto Text";
-    let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
-    let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
-    let _ciphertext = openssl::symm::encrypt(
-        cipher,
-        key,
-        Some(iv),
-        data).unwrap();
-*/
 
 #[no_mangle]
 pub extern "C" fn C_GetSlotList(
