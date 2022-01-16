@@ -1953,13 +1953,31 @@ impl Scp03Session {
         let cipher = openssl::symm::Cipher::aes_128_cbc();
         let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
         let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
-        openssl::symm::encrypt(cipher, key, Some(iv), data)
+        let mut c = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Encrypt, key, Some(iv))?;
+        c.pad(false);
+        let mut out = vec![0; data.len() + cipher.block_size()];
+        let count = c.update(data, &mut out)?;
+        let rest = c.finalize(&mut out[count..])?;
+        out.truncate(count + rest);
+        Ok(out)
     }
     fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+        let input = r#"
+      {
+        "a boolean": true,
+        "an array": [3, 2, 1]
+      }
+    "#;
         let cipher = openssl::symm::Cipher::aes_128_cbc();
         let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
         let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
-        openssl::symm::decrypt(cipher, key, Some(iv), data)
+        let mut c = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Decrypt, key, Some(iv))?;
+        c.pad(false);
+        let mut out = vec![0; data.len() + cipher.block_size()];
+        let count = c.update(data, &mut out)?;
+        let rest = c.finalize(&mut out[count..])?;
+        out.truncate(count + rest);
+        Ok(out)
     }
 }
 
