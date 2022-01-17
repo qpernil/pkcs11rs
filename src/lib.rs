@@ -1619,7 +1619,7 @@ trait Session {
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
     fn state(&self) -> CK_STATE;
-    fn login(&mut self) -> bool;
+    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV>;
     fn logout(&mut self) -> bool;
     fn get_session_info(&self) -> bool;
     fn generate(&self) ->bool;
@@ -1656,14 +1656,16 @@ impl Session for YubiHsmSession {
             CKS_RW_PUBLIC_SESSION
         }.into()
     }
-    fn login(&mut self) -> bool {
+    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
         if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
             self.session = Some(Scp03Session {});
+            Ok(())
+        } else {
+            Err(CKR_PIN_INCORRECT as CK_RV)
         }
-        self.session.is_some()
     }
     fn logout(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
@@ -1730,11 +1732,15 @@ impl Session for YubiKeySession {
             CKS_RW_PUBLIC_SESSION
         }.into()
     }
-    fn login(&mut self) -> bool {
+    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+            Ok(())
+        } else {
+            Err(CKR_PIN_INCORRECT as CK_RV)
+        }
     }
     fn logout(&mut self) -> bool {
         let timeout = Duration::from_millis(100);
@@ -1798,7 +1804,6 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
-    context: &'a libusb::Context,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -1964,15 +1969,27 @@ impl Context {
             sessions: HashMap::new(),
         }
     }
-    fn get_session(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
+    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
         let session = self.sessions.get(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot, session))
     }
-    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
+    fn get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &Box<dyn Session>), CK_RV> {
+        match self.get_session_(session_handle) {
+            Some(ctx) => Ok(ctx),
+            None => Err(CKR_SESSION_HANDLE_INVALID as CK_RV)
+        }
+    }
+    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
         let session = self.sessions.get_mut(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot, session))
+    }
+    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &mut Box<dyn Session>), CK_RV> {
+        match self.get_session_mut_(session_handle) {
+            Some(ctx) => Ok(ctx),
+            None => Err(CKR_SESSION_HANDLE_INVALID as CK_RV)
+        }
     }
     fn init(&'static mut self) {
         if let Some(context) = self.libusb.as_ref() {
@@ -1992,7 +2009,7 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {context, handle, manufacturer, product, serial});
+                                                    let connector = Rc::new(UsbConnector {handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
@@ -2518,7 +2535,7 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.get_session(session_handle) {
+                match ctx.get_session_(session_handle) {
                     Some(session) => {
                         eprintln!("C_GetSessionInfo {:?}", session);
                         match info_ptr.as_mut() {
@@ -2588,6 +2605,61 @@ pub type CK_C_Login =
                              -> CK_RV,
     >;
 
+fn get_ctx() -> Result<&'static Context, CK_RV> {
+    unsafe {
+        if let Some(context) = G_CONTEXT.as_ref() {
+            Ok(context)
+        } else {
+            Err(CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV)
+        }
+    }
+}
+
+fn get_ctx_mut() -> Result<&'static mut Context, CK_RV> {
+    unsafe {
+        if let Some(context) = G_CONTEXT.as_mut() {
+            Ok(context)
+        } else {
+            Err(CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV)
+        }
+    }
+}
+
+fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], CK_RV> {
+    if ptr.is_null() {
+        Err(CKR_ARGUMENTS_BAD as CK_RV)
+    } else {
+        Ok(unsafe { slice::from_raw_parts(ptr, len) })
+    }
+}
+
+fn from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], CK_RV> {
+    if ptr.is_null() {
+        Err(CKR_ARGUMENTS_BAD as CK_RV)
+    } else {
+        Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
+    }
+}
+
+fn map<T, E>(r: Result<T, E>) -> CK_RV where E: Into<CK_RV> {
+    match r {
+        Ok(_) => CKR_OK as CK_RV,
+        Err(e) => e.into()
+    }
+}
+
+fn login(
+    session_handle: CK_SESSION_HANDLE,
+    _user_type: CK_USER_TYPE,
+    pin: *const ::std::os::raw::c_uchar,
+    pin_len: ::std::os::raw::c_ulong,
+) -> Result<(), CK_RV> {
+    let session = get_ctx_mut()?.get_session_mut(session_handle)?;
+    let pin = from_raw_parts(pin, pin_len as usize)?;
+    eprintln!("login {:?} {:?}", session, pin);
+    session.1.login(pin)
+}
+
 #[no_mangle]
 pub extern "C" fn C_Login(
     session_handle: CK_SESSION_HANDLE,
@@ -2596,26 +2668,7 @@ pub extern "C" fn C_Login(
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_Login called with {:?}", (session_handle, user_type, pin, pin_len));
-    unsafe {
-        match G_CONTEXT.as_mut() {
-            Some(ctx) => {
-                match ctx.get_session_mut(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_Login {:?}", session);
-                        match pin.as_ref() {
-                            Some(_pin) => {
-                                session.1.login();
-                                CKR_OK
-                            },
-                            None => CKR_ARGUMENTS_BAD
-                        }
-                    }
-                    None => CKR_SESSION_HANDLE_INVALID
-                }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }
-    }.into()
+    map(login(session_handle, user_type, pin, pin_len))
 }
 
 pub type CK_C_Logout = ::std::option::Option<
@@ -2629,7 +2682,7 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     unsafe {
         match G_CONTEXT.as_mut() {
             Some(ctx) => {
-                match ctx.get_session_mut(session_handle) {
+                match ctx.get_session_mut_(session_handle) {
                     Some(session) => {
                         eprintln!("C_Logout {:?}", session);
                         session.1.logout();
@@ -2768,7 +2821,7 @@ pub extern "C" fn C_FindObjectsInit(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.get_session(session_handle) {
+                match ctx.get_session_(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjectsInit {:?}", session);
                         match templ.as_ref() {
@@ -2808,7 +2861,7 @@ pub extern "C" fn C_FindObjects(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.get_session(session_handle) {
+                match ctx.get_session_(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjects {:?}", session);
                         match object.as_mut() {
@@ -2837,7 +2890,7 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.get_session(session_handle) {
+                match ctx.get_session_(session_handle) {
                     Some(session) => {
                         eprintln!("C_FindObjectsFinal {:?}", session);
                         CKR_OK
@@ -3403,7 +3456,7 @@ pub extern "C" fn C_GenerateKey(
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
-                match ctx.get_session(session_handle) {
+                match ctx.get_session_(session_handle) {
                     Some(session) => {
                         eprintln!("C_GenerateKey {:?}", session);
                         if let Some(mechanism) = mechanism.as_ref() {
