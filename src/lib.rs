@@ -1691,23 +1691,12 @@ impl Session for YubiHsmSession {
 impl YubiHsmSession {
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         if let Some(session) = self.session.as_ref() {
-            match session.encrypt(send_buffer) {
-                Ok(enc) => {
-                    eprintln!("encrypted {}: {:?}", send_buffer.len(), enc);
-                    match session.decrypt(&enc) {
-                        Ok(dec) => {
-                            eprintln!("decrypted {}: {:?}", enc.len(), dec);
-                        },
-                        Err(e) => {
-                            eprintln!("{:?}", e);
-                        }
-                    }
-                },
-                Err(e) => {
-                    eprintln!("{:?}", e);
-                }
-            }
-            self.connector.transmit(send_buffer, receive_buffer, timeout)
+            let enc = session.encrypt(send_buffer)?;
+            eprintln!("encrypted {:?} -> {:?}", send_buffer, enc);
+            let resp = self.connector.transmit(send_buffer, receive_buffer, timeout)?;
+            let dec = session.decrypt(resp)?;
+            eprintln!("decrypted {:?} -> {:?}", receive_buffer, dec);
+            Ok(receive_buffer)
         } else {
             Err(Error::NotAuthenticated)
         }
@@ -1776,18 +1765,21 @@ enum Error {
 
 impl From<pcsc::Error> for Error {
     fn from(e: pcsc::Error) -> Self {
+        eprintln!("LibUsbError({:?})", e);
         Error::PcscError(e.to_string())
     }
 }
 
 impl From<libusb::Error> for Error {
     fn from(e: libusb::Error) -> Self {
+        eprintln!("PcscError({:?})", e);
         Error::LibUsbError(e.to_string())
     }
 }
 
 impl From<openssl::error::ErrorStack> for Error {
     fn from(e: openssl::error::ErrorStack) -> Self {
+        eprintln!("OpenSslError({:?})", e);
         Error::OpenSslError(e.to_string())
     }
 }
@@ -1815,7 +1807,7 @@ struct UsbConnector<'a> {
 
 impl Connector for UsbConnector<'_> {
     fn to_string(&self) -> String {
-        format!("UsbConnector  {{ name: {} is_present: {}}}", self.name(), self.is_present())
+        format!("UsbConnector {{ name: {} is_present: {}}}", self.name(), self.is_present())
     }
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
@@ -1824,50 +1816,15 @@ impl Connector for UsbConnector<'_> {
         true
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
-        match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
-            Ok(_) => {
-                match self.handle.read_bulk(0x81, receive_buffer, timeout) {
-                    Ok(len) => {
-                        eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
-                        Ok(&receive_buffer[..len])
-                    },
-                    Err(e) => {
-                        eprintln!("libusb.read_bulk() -> {}", e);
-                        Err(Error::from(e))
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("libusb.write_bulk() -> {}", e);
-                Err(Error::from(e))
-            }
+        let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
+        eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
+        if len % 64 == 0 { // Write a ZLP if last packet is full
+            let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
+            eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
         }
-    }
-}
-
-fn write_zlp(handle: &libusb::DeviceHandle, endpoint: u8, buf: &[u8], timeout: Duration) -> Result<usize, libusb::Error> {
-    match handle.write_bulk(endpoint, buf, timeout) {
-        Ok(len) => {
-            eprintln!("libusb.write_bulk({:?}) -> {}", buf, len);
-            if len % 64 == 0 { // Write a ZLP if last packet is full
-                match handle.write_bulk(endpoint, &[], timeout) {
-                    Ok(zlp) => {
-                        eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
-                        Ok(len)
-                    },
-                    Err(e) => {
-                        eprintln!("libusb.write_bulk'zlp() -> {}", e);
-                        Err(e)
-                    }
-                }
-            } else {
-                Ok(len)
-            }
-        }
-        Err(e) => {
-            eprintln!("libusb.write_bulk({:?}) -> {}", buf, e);
-            Err(e)
-        }
+        let len = self.handle.read_bulk(0x81, receive_buffer, timeout)?;
+        eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
+        Ok(&receive_buffer[..len])
     }
 }
 
@@ -1879,7 +1836,7 @@ struct PcscConnector<'a> {
 
 impl Connector for PcscConnector<'_> {
     fn to_string(&self) -> String {
-        format!("PcscConnector  {{ name: {} is_present: {} }}", self.name(), self.is_present())
+        format!("PcscConnector {{ name: {} is_present: {} }}", self.name(), self.is_present())
     }
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
@@ -1890,19 +1847,11 @@ impl Connector for PcscConnector<'_> {
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
             Some(card) => {
-                match card.transmit(send_buffer, receive_buffer) {
-                    Ok(receive_buffer) => {
-                        eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, receive_buffer);
-                        Ok(receive_buffer)
-                    },
-                    Err(e) => {
-                        eprintln!("pcsc.transmit({:?}) -> {}", send_buffer, e);
-                        Err(Error::from(e))
-                    }
-                }
+                let received = card.transmit(send_buffer, receive_buffer)?;
+                eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, received);
+                Ok(received)
             }
             None => {
-                eprintln!("pcsc.transmit({:?}) -> No Card", send_buffer);
                 Err(Error::from(pcsc::Error::NoSmartcard))
             }
         }
@@ -1937,7 +1886,7 @@ impl PcscConnector<'_> {
             },
             None => {
                 eprintln!("pcsc.reconnect() -> Not connected");
-                Err(Error::from(libusb::Error::NoDevice))
+                Err(Error::from(pcsc::Error::NoSmartcard))
             }
         }
     }
