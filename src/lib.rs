@@ -1566,7 +1566,7 @@ impl Slot for YubiHsmSlot {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiHsmSession {slotID, flags, connector: Scp03Connector { connector: self.connector.clone(), session: None}})
+        Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
     }
     fn get_slot_info(&self) -> bool {
         let timeout = Duration::from_millis(100);
@@ -1635,7 +1635,8 @@ impl std::fmt::Debug for dyn Session {
 struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
-    connector: Scp03Connector
+    connector: Rc<dyn Connector>,
+    session: Option<Scp03Session>
 }
 
 impl Session for YubiHsmSession {
@@ -1649,29 +1650,67 @@ impl Session for YubiHsmSession {
         self.flags
     }
     fn state(&self) -> CK_STATE {
-        if self.connector.is_authenticated() {
+        if self.session.is_some() {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
         }.into()
     }
     fn login(&mut self) -> bool {
-        self.connector.authenticate()
+        let timeout = Duration::from_millis(100);
+        let send_buffer = [6u8, 0u8, 0u8];
+        let mut receive_buffer = [0u8; 2064];
+        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+            self.session = Some(Scp03Session {});
+        }
+        self.session.is_some()
     }
     fn logout(&mut self) -> bool {
-        self.connector.deauthenticate()
+        let timeout = Duration::from_millis(100);
+        let send_buffer = [6u8, 0u8, 0u8];
+        let mut receive_buffer = [0u8; 2064];
+        if self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+            self.session = None;
+        }
+        self.session.is_none()
     }
     fn get_session_info(&self) -> bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
     }
     fn generate(&self) ->bool {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+    }
+}
+
+impl YubiHsmSession {
+    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
+        if let Some(session) = self.session.as_ref() {
+            match session.encrypt(send_buffer) {
+                Ok(enc) => {
+                    eprintln!("encrypted {}: {:?}", send_buffer.len(), enc);
+                    match session.decrypt(&enc) {
+                        Ok(dec) => {
+                            eprintln!("decrypted {}: {:?}", enc.len(), dec);
+                        },
+                        Err(e) => {
+                            eprintln!("{:?}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    eprintln!("{:?}", e);
+                }
+            }
+            self.connector.transmit(send_buffer, receive_buffer, timeout)
+        } else {
+            Err(Error::NotAuthenticated)
+        }
     }
 }
 
@@ -1728,11 +1767,36 @@ impl Session for YubiKeySession {
     }
 }
 
+enum Error {
+    LibUsbError(String),
+    PcscError(String),
+    OpenSslError(String),
+    NotAuthenticated
+}
+
+impl From<pcsc::Error> for Error {
+    fn from(e: pcsc::Error) -> Self {
+        Error::PcscError(e.to_string())
+    }
+}
+
+impl From<libusb::Error> for Error {
+    fn from(e: libusb::Error) -> Self {
+        Error::LibUsbError(e.to_string())
+    }
+}
+
+impl From<openssl::error::ErrorStack> for Error {
+    fn from(e: openssl::error::ErrorStack) -> Self {
+        Error::OpenSslError(e.to_string())
+    }
+}
+
 trait Connector {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
     fn is_present(&self) -> bool;
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String>;
+    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
 }
 
 impl std::fmt::Debug for dyn Connector {
@@ -1759,7 +1823,7 @@ impl Connector for UsbConnector<'_> {
     fn is_present(&self) -> bool {
         true
     }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
+    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         match write_zlp(&self.handle, 0x01, send_buffer, timeout) {
             Ok(_) => {
                 match self.handle.read_bulk(0x81, receive_buffer, timeout) {
@@ -1769,11 +1833,14 @@ impl Connector for UsbConnector<'_> {
                     },
                     Err(e) => {
                         eprintln!("libusb.read_bulk() -> {}", e);
-                        Err(e.to_string())
+                        Err(Error::from(e))
                     }
                 }
             }
-            Err(e) => Err(e.to_string())
+            Err(e) => {
+                eprintln!("libusb.write_bulk() -> {}", e);
+                Err(Error::from(e))
+            }
         }
     }
 }
@@ -1820,7 +1887,7 @@ impl Connector for PcscConnector<'_> {
     fn is_present(&self) -> bool {
         self.card.is_some()
     }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], String> {
+    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
             Some(card) => {
                 match card.transmit(send_buffer, receive_buffer) {
@@ -1830,20 +1897,20 @@ impl Connector for PcscConnector<'_> {
                     },
                     Err(e) => {
                         eprintln!("pcsc.transmit({:?}) -> {}", send_buffer, e);
-                        Err(e.to_string())
+                        Err(Error::from(e))
                     }
                 }
             }
             None => {
                 eprintln!("pcsc.transmit({:?}) -> No Card", send_buffer);
-                Err("No card".to_string())
+                Err(Error::from(pcsc::Error::NoSmartcard))
             }
         }
     }
 }
 
 impl PcscConnector<'_> {
-    fn connect(&mut self) -> Result<(), String> {
+    fn connect(&mut self) -> Result<(), Error> {
         match self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
             Ok(card) => {
                 self.card = Some(card);
@@ -1851,11 +1918,11 @@ impl PcscConnector<'_> {
             }
             Err(e) => {
                 eprintln!("pcsc.connect() -> {}", e);
-                Err(e.to_string())
+                Err(Error::from(e))
             }
         }
     }
-    fn _reconnect(&mut self) -> Result<(), String> {
+    fn _reconnect(&mut self) -> Result<(), Error> {
         match self.card.as_mut() {
             Some(card) => {
                 match card.reconnect(pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1, pcsc::Disposition::ResetCard) {
@@ -1864,83 +1931,18 @@ impl PcscConnector<'_> {
                     },
                     Err(e) => {
                         eprintln!("pcsc.reconnect() -> {}", e);
-                        Err(e.to_string())
+                        Err(Error::from(e))
                     }
                 }
             },
             None => {
                 eprintln!("pcsc.reconnect() -> Not connected");
-                Err("Not connected".to_string())
+                Err(Error::from(libusb::Error::NoDevice))
             }
         }
     }
     fn _disconnect(&mut self) {
         self.card = None;
-    }
-}
-
-#[derive(Debug)]
-struct Scp03Connector {
-    connector: Rc<dyn Connector>,
-    session: Option<Scp03Session>
-}
-
-impl Connector for Scp03Connector {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
-    }
-    fn name(&self) -> String {
-        self.connector.name()
-    }
-    fn is_present(&self) -> bool {
-        self.connector.is_present()
-    }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], String> {
-        if let Some(session) = self.session.as_ref() {
-            match session.encrypt(send_buffer) {
-                Ok(enc) => {
-                    eprintln!("encrypted {}: {:?}", send_buffer.len(), enc);
-                    match session.decrypt(&enc) {
-                        Ok(dec) => {
-                            eprintln!("decrypted {}: {:?}", enc.len(), dec);
-                        },
-                        Err(e) => {
-                            eprintln!("{:?}", e);
-                        }
-                    }
-                },
-                Err(e) => {
-                    eprintln!("{:?}", e);
-                }
-            }
-            self.connector.transmit(send_buffer, receive_buffer, timeout)
-        } else {
-            Err("Not authenticated".to_string())
-        }
-    }
-}
-
-impl Scp03Connector {
-    fn is_authenticated(&self) -> bool {
-        self.session.is_some()
-    }
-    fn authenticate(&mut self) -> bool {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
-            self.session = Some(Scp03Session {});
-        }
-        self.session.is_some()
-    }
-    fn deauthenticate(&mut self) -> bool {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
-            self.session = None;
-        }
-        self.session.is_none()
     }
 }
 
