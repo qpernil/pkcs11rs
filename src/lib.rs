@@ -1965,26 +1965,14 @@ impl Context {
         }
     }
     fn get_session(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
-        match self.sessions.get(&session_handle) {
-            Some(session) => {
-                match self.slots.get(&session.slotID()) {
-                    Some(slot) => Some((slot, session)),
-                    None => None
-                }
-            },
-            None => None
-        }
+        let session = self.sessions.get(&session_handle)?;
+        let slot = self.slots.get(&session.slotID())?;
+        Some((slot, session))
     }
     fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
-        match self.sessions.get_mut(&session_handle) {
-            Some(session) => {
-                match self.slots.get(&session.slotID()) {
-                    Some(slot) => Some((slot, session)),
-                    None => None
-                }
-            },
-            None => None
-        }
+        let session = self.sessions.get_mut(&session_handle)?;
+        let slot = self.slots.get(&session.slotID())?;
+        Some((slot, session))
     }
     fn init(&'static mut self) {
         if let Some(context) = self.libusb.as_ref() {
@@ -2186,7 +2174,6 @@ pub type CK_C_GetSlotInfo = ::std::option::Option<
 #[no_mangle]
 pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO) -> CK_RV {
     eprintln!("C_GetSlotInfo {} called", slotID);
-
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
@@ -2226,7 +2213,6 @@ pub type CK_C_GetTokenInfo = ::std::option::Option<
 #[no_mangle]
 pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_INFO) -> CK_RV {
     eprintln!("C_GetTokenInfo {} called", slotID);
-
     unsafe {
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
