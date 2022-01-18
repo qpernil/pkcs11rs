@@ -1804,6 +1804,7 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
+    context: &'a libusb::Context,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -2009,7 +2010,7 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {handle, manufacturer, product, serial});
+                                                    let connector = Rc::new(UsbConnector {context, handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
