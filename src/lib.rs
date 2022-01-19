@@ -1628,6 +1628,8 @@ trait Slot {
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
     fn serial(&self) -> &str;
+    fn major(&self) -> u8;
+    fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn get_token_info(&self) -> Result<(), Error>;
@@ -1672,6 +1674,12 @@ impl Slot for YubiHsmSlot {
     fn serial(&self) -> &str {
         self.connector.serial()
     }
+    fn major(&self) -> u8 {
+        self.connector.major()
+    }
+    fn minor(&self) -> u8 {
+        self.connector.minor()
+    }
     fn is_present(&self) -> bool {
         self.connector.is_present()
     }
@@ -1705,7 +1713,13 @@ impl Slot for YubiKeySlot {
         self.connector.product()
     }
     fn serial(&self) -> &str {
-        self.connector.serial()
+        "12345678"
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        43
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -1875,6 +1889,8 @@ trait Connector {
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
     fn serial(&self) -> &str;
+    fn major(&self) -> u8;
+    fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
 }
@@ -1887,9 +1903,10 @@ impl std::fmt::Debug for dyn Connector {
 
 struct UsbConnector<'a> {
     handle: libusb::DeviceHandle<'a>,
+    version: libusb::Version,
     manufacturer: String,
     product: String,
-    serial : String,
+    serial: String,
     present: bool
 }
 
@@ -1908,6 +1925,12 @@ impl Connector for UsbConnector<'_> {
     }
     fn serial(&self) -> &str {
         &self.serial
+    }
+    fn major(&self) -> u8 {
+        self.version.major()
+    }
+    fn minor(&self) -> u8 {
+        self.version.minor()
     }
     fn is_present(&self) -> bool {
         self.present
@@ -1953,7 +1976,13 @@ impl Connector for PcscConnector<'_> {
         "YubiKey"
     }
     fn serial(&self) -> &str {
-        "0000000000"
+        "0"
+    }
+    fn major(&self) -> u8 {
+        0
+    }
+    fn minor(&self) -> u8 {
+        0
     }
     fn is_present(&self) -> bool {
         self.card.is_some()
@@ -2095,10 +2124,11 @@ impl Context {
                                 Ok(handle) => {
                                     match handle.read_languages(timeout) {
                                         Ok(langs) => {
+                                            let version = desc.device_version();
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let mut connector = UsbConnector {handle, manufacturer, product, serial, present: false};
+                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, present: false};
                                             let name = connector.name();
                                             eprintln!("{}", name);
                                             if !self.slots.values().any(|s| s.name() == name) {
@@ -2288,8 +2318,8 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                info.firmwareVersion.major = 5;
-                                info.firmwareVersion.minor = 43;
+                                info.firmwareVersion.major = 1;
+                                info.firmwareVersion.minor = 0;
                                 info.hardwareVersion.major = 1;
                                 info.hardwareVersion.minor = 0;
                                 str_pad(&slot.name(), &mut info.slotDescription);
@@ -2341,10 +2371,10 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                                 info.ulFreePublicMemory = 0;
                                 info.ulTotalPrivateMemory = 0;
                                 info.ulFreePrivateMemory = 0;
-                                info.hardwareVersion.major = 5;
-                                info.hardwareVersion.minor = 43;
-                                info.firmwareVersion.major = 5;
-                                info.firmwareVersion.minor = 43;
+                                info.hardwareVersion.major = slot.major();
+                                info.hardwareVersion.minor = slot.minor();
+                                info.firmwareVersion.major = slot.major();
+                                info.firmwareVersion.minor = slot.minor();
                                 info.utcTime.fill(0);
                                 eprintln!("C_GetTokenInfo returning {:?}", info);
                                 map(slot.get_token_info())
