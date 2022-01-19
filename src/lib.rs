@@ -1527,13 +1527,96 @@ fn some<T>(o: &Option<T>) -> &str {
     }
 }
 
+fn _get_ctx() -> Result<&'static Context, Error> {
+    unsafe {
+        if let Some(context) = G_CONTEXT.as_ref() {
+            Ok(context)
+        } else {
+            Err(CKR_CRYPTOKI_NOT_INITIALIZED.into())
+        }
+    }
+}
+
+fn get_ctx_mut() -> Result<&'static mut Context, Error> {
+    unsafe {
+        if let Some(context) = G_CONTEXT.as_mut() {
+            Ok(context)
+        } else {
+            Err(CKR_CRYPTOKI_NOT_INITIALIZED.into())
+        }
+    }
+}
+
+fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
+    if ptr.is_null() {
+        Err(CKR_ARGUMENTS_BAD.into())
+    } else {
+        Ok(unsafe { slice::from_raw_parts(ptr, len) })
+    }
+}
+
+fn _from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], Error> {
+    if ptr.is_null() {
+        Err(CKR_ARGUMENTS_BAD.into())
+    } else {
+        Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
+    }
+}
+
+#[derive(Debug)]
+enum Error {
+    Generic(CK_RV),
+    Usb(libusb::Error),
+    Pcsc(pcsc::Error),
+    OpenSsl(openssl::error::ErrorStack),
+}
+
+impl From<libusb::Error> for Error {
+    fn from(e: libusb::Error) -> Self { Self::Usb(e) }
+}
+
+impl From<pcsc::Error> for Error {
+    fn from(e: pcsc::Error) -> Self { Self::Pcsc(e) }
+}
+
+impl From<openssl::error::ErrorStack> for Error {
+    fn from(e: openssl::error::ErrorStack) -> Self { Self::OpenSsl(e) }
+}
+
+impl From<CK_RV> for Error {
+    fn from(e: CK_RV) -> Self { Self::Generic(e) }
+}
+
+impl From<u32> for Error {
+    fn from(e: u32) -> Self { Self::Generic(e as CK_RV) }
+}
+
+impl Into<CK_RV> for Error {
+    fn into(self) -> CK_RV {
+        match self {
+            Self::Generic(rv) => rv,
+            Self::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
+            Self::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
+            Self::OpenSsl(_) => CKR_FUNCTION_FAILED as CK_RV
+        }
+    }
+}
+
+fn map<T, E>(r: Result<T, E>) -> CK_RV where T: std::fmt::Debug, E: Into<CK_RV> + std::fmt::Debug {
+    eprintln!("map({:?})", r);
+    match r {
+        Ok(_) => CKR_OK as CK_RV,
+        Err(e) => e.into()
+    }
+}
+
 trait Slot {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
-    fn get_slot_info(&self) -> bool;
-    fn get_token_info(&self) -> bool;
+    fn get_slot_info(&self) -> Result<(), Error>;
+    fn get_token_info(&self) -> Result<(), Error>;
 
     fn flags(&self) -> CK_FLAGS {
         if self.is_present() {
@@ -1568,17 +1651,17 @@ impl Slot for YubiHsmSlot {
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
     }
-    fn get_slot_info(&self) -> bool {
+    fn get_slot_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
-    fn get_token_info(&self) -> bool {
+    fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
 }
 
@@ -1600,17 +1683,17 @@ impl Slot for YubiKeySlot {
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone()})
     }
-    fn get_slot_info(&self) -> bool {
+    fn get_slot_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
-    fn get_token_info(&self) -> bool {
+    fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
 }
 
@@ -1619,10 +1702,10 @@ trait Session {
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
     fn state(&self) -> CK_STATE;
-    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV>;
-    fn logout(&mut self) -> bool;
-    fn get_session_info(&self) -> bool;
-    fn generate(&self) ->bool;
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
+    fn logout(&mut self) -> Result<(), Error>;
+    fn get_session_info(&self) -> Result<(), Error>;
+    fn generate(&self) -> Result<(), Error>;
 }
 
 impl std::fmt::Debug for dyn Session {
@@ -1656,7 +1739,7 @@ impl Session for YubiHsmSession {
             CKS_RW_PUBLIC_SESSION
         }.into()
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV> {
+    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
@@ -1664,29 +1747,29 @@ impl Session for YubiHsmSession {
             self.session = Some(Scp03Session {});
             Ok(())
         } else {
-            Err(CKR_PIN_INCORRECT as CK_RV)
+            Err(CKR_PIN_INCORRECT.into())
         }
     }
-    fn logout(&mut self) -> bool {
+    fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
         if self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
             self.session = None;
         }
-        self.session.is_none()
+        Ok(())
     }
-    fn get_session_info(&self) -> bool {
+    fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
-    fn generate(&self) ->bool {
+    fn generate(&self) ->Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
-        self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
 }
 
@@ -1700,7 +1783,7 @@ impl YubiHsmSession {
             eprintln!("decrypted {:?} -> {:?}", receive_buffer, dec);
             Ok(receive_buffer)
         } else {
-            Err(Error::NotAuthenticated)
+            Err(CKR_PIN_INCORRECT.into())
         }
     }
 }
@@ -1732,61 +1815,33 @@ impl Session for YubiKeySession {
             CKS_RW_PUBLIC_SESSION
         }.into()
     }
-    fn login(&mut self, pin: &[u8]) -> Result<(), CK_RV> {
+    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
         if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
             Ok(())
         } else {
-            Err(CKR_PIN_INCORRECT as CK_RV)
+            Err(CKR_PIN_INCORRECT.into())
         }
     }
-    fn logout(&mut self) -> bool {
+    fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
-    fn get_session_info(&self) -> bool {
+    fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
-    fn generate(&self) ->bool {
+    fn generate(&self) ->Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok()
-    }
-}
-
-enum Error {
-    LibUsbError(String),
-    PcscError(String),
-    OpenSslError(String),
-    NotAuthenticated
-}
-
-impl From<pcsc::Error> for Error {
-    fn from(e: pcsc::Error) -> Self {
-        eprintln!("LibUsbError({:?})", e);
-        Error::PcscError(e.to_string())
-    }
-}
-
-impl From<libusb::Error> for Error {
-    fn from(e: libusb::Error) -> Self {
-        eprintln!("PcscError({:?})", e);
-        Error::LibUsbError(e.to_string())
-    }
-}
-
-impl From<openssl::error::ErrorStack> for Error {
-    fn from(e: openssl::error::ErrorStack) -> Self {
-        eprintln!("OpenSslError({:?})", e);
-        Error::OpenSslError(e.to_string())
+        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
 }
 
@@ -1804,7 +1859,7 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
-    context: &'a libusb::Context,
+    _context: &'a libusb::Context,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
@@ -1858,7 +1913,7 @@ impl Connector for PcscConnector<'_> {
                 Ok(received)
             }
             None => {
-                Err(Error::from(pcsc::Error::NoSmartcard))
+                Err(pcsc::Error::NoSmartcard.into())
             }
         }
     }
@@ -1873,7 +1928,7 @@ impl PcscConnector<'_> {
             }
             Err(e) => {
                 eprintln!("pcsc.connect() -> {}", e);
-                Err(Error::from(e))
+                Err(e.into())
             }
         }
     }
@@ -1886,7 +1941,7 @@ impl PcscConnector<'_> {
                     },
                     Err(e) => {
                         eprintln!("pcsc.reconnect() -> {}", e);
-                        Err(Error::from(e))
+                        Err(e.into())
                     }
                 }
             },
@@ -1906,7 +1961,7 @@ struct Scp03Session {
 }
 
 impl Scp03Session {
-    fn encrypt(&self, data : &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    fn encrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
         let cipher = openssl::symm::Cipher::aes_128_cbc();
         let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
         let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
@@ -1918,7 +1973,7 @@ impl Scp03Session {
         out.truncate(count + rest);
         Ok(out)
     }
-    fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
         let cipher = openssl::symm::Cipher::aes_128_cbc();
         let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
         let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
@@ -1975,10 +2030,10 @@ impl Context {
         let slot = self.slots.get(&session.slotID())?;
         Some((slot, session))
     }
-    fn get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &Box<dyn Session>), CK_RV> {
+    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &Box<dyn Session>), Error> {
         match self.get_session_(session_handle) {
             Some(ctx) => Ok(ctx),
-            None => Err(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            None => Err(CKR_SESSION_HANDLE_INVALID.into())
         }
     }
     fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
@@ -1986,10 +2041,10 @@ impl Context {
         let slot = self.slots.get(&session.slotID())?;
         Some((slot, session))
     }
-    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &mut Box<dyn Session>), CK_RV> {
+    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &mut Box<dyn Session>), Error> {
         match self.get_session_mut_(session_handle) {
             Some(ctx) => Ok(ctx),
-            None => Err(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            None => Err(CKR_SESSION_HANDLE_INVALID.into())
         }
     }
     fn init(&'static mut self) {
@@ -2010,7 +2065,7 @@ impl Context {
                                             eprintln!("libusb {} {} {}", manufacturer, product, serial);
                                             match handle.claim_interface(0) {
                                                 Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {context, handle, manufacturer, product, serial});
+                                                    let connector = Rc::new(UsbConnector {_context: context, handle, manufacturer, product, serial});
                                                     let k = next_key(&self.slots);
                                                     let v = Box::new(YubiHsmSlot {connector});
                                                     self.slots.insert(k, v);
@@ -2200,7 +2255,6 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                slot.get_slot_info();
                                 info.firmwareVersion.major = 5;
                                 info.firmwareVersion.minor = 43;
                                 info.hardwareVersion.major = 1;
@@ -2209,17 +2263,17 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.manufacturerID.fill(66u8);
                                 info.flags = slot.flags();
                                 eprintln!("C_GetSlotInfo returning {:?}", info);
-                                CKR_OK
+                                map(slot.get_slot_info())
                             },
-                            None => CKR_ARGUMENTS_BAD
+                            None => CKR_ARGUMENTS_BAD as CK_RV
                         }
                     }
-                    None => CKR_SLOT_ID_INVALID
+                    None => CKR_SLOT_ID_INVALID as CK_RV
                 }
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
         }
-    }.into()
+    }
 }
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
@@ -2239,7 +2293,6 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                slot.get_token_info();
                                 info.label.fill(65u8);
                                 info.manufacturerID.fill(66u8);
                                 info.model.fill(67u8);
@@ -2261,17 +2314,17 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                                 info.firmwareVersion.minor = 43;
                                 info.utcTime.fill(0u8);
                                 eprintln!("C_GetTokenInfo returning {:?}", info);
-                                CKR_OK
+                                map(slot.get_token_info())
                             },
-                            None => CKR_ARGUMENTS_BAD
+                            None => CKR_ARGUMENTS_BAD as CK_RV
                         }
                     }
-                    None => CKR_SLOT_ID_INVALID
+                    None => CKR_SLOT_ID_INVALID as CK_RV
                 }
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
         }
-    }.into()
+    }
 }
 
 pub type CK_C_WaitForSlotEvent =
@@ -2606,55 +2659,12 @@ pub type CK_C_Login =
                              -> CK_RV,
     >;
 
-fn get_ctx() -> Result<&'static Context, CK_RV> {
-    unsafe {
-        if let Some(context) = G_CONTEXT.as_ref() {
-            Ok(context)
-        } else {
-            Err(CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV)
-        }
-    }
-}
-
-fn get_ctx_mut() -> Result<&'static mut Context, CK_RV> {
-    unsafe {
-        if let Some(context) = G_CONTEXT.as_mut() {
-            Ok(context)
-        } else {
-            Err(CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV)
-        }
-    }
-}
-
-fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], CK_RV> {
-    if ptr.is_null() {
-        Err(CKR_ARGUMENTS_BAD as CK_RV)
-    } else {
-        Ok(unsafe { slice::from_raw_parts(ptr, len) })
-    }
-}
-
-fn from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], CK_RV> {
-    if ptr.is_null() {
-        Err(CKR_ARGUMENTS_BAD as CK_RV)
-    } else {
-        Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
-    }
-}
-
-fn map<T, E>(r: Result<T, E>) -> CK_RV where E: Into<CK_RV> {
-    match r {
-        Ok(_) => CKR_OK as CK_RV,
-        Err(e) => e.into()
-    }
-}
-
 fn login(
     session_handle: CK_SESSION_HANDLE,
     _user_type: CK_USER_TYPE,
     pin: *const ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
-) -> Result<(), CK_RV> {
+) -> Result<(), Error> {
     let session = get_ctx_mut()?.get_session_mut(session_handle)?;
     let pin = from_raw_parts(pin, pin_len as usize)?;
     eprintln!("login {:?} {:?}", session, pin);
@@ -2686,15 +2696,14 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
                 match ctx.get_session_mut_(session_handle) {
                     Some(session) => {
                         eprintln!("C_Logout {:?}", session);
-                        session.1.logout();
-                        CKR_OK
+                        map(session.1.logout())
                     }
-                    None => CKR_SESSION_HANDLE_INVALID
+                    None => CKR_SESSION_HANDLE_INVALID as CK_RV
                 }
             },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
         }
-    }.into()
+    }
 }
 
 pub type CK_C_CreateObject =
@@ -3465,22 +3474,21 @@ pub extern "C" fn C_GenerateKey(
                             if let Some(_) = templ.as_ref() {
                                 let templ = slice::from_raw_parts(templ, count as usize);
                                 eprintln!("C_GenerateKey {:?}", templ);
-                                session.1.generate();
                                 *key = 99;
-                                CKR_OK
+                                map(session.1.generate())
                             } else {
-                                CKR_ARGUMENTS_BAD
+                                CKR_ARGUMENTS_BAD as CK_RV
                             }
                         } else {
-                            CKR_ARGUMENTS_BAD
+                            CKR_ARGUMENTS_BAD as CK_RV
                         }
                     },
-                    None => CKR_SESSION_HANDLE_INVALID
+                    None => CKR_SESSION_HANDLE_INVALID as CK_RV
                 }
             },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
         }
-    }.into()
+    }
 }
 
 pub type CK_C_GenerateKeyPair = :: std :: option :: Option < unsafe extern "C" fn (session : CK_SESSION_HANDLE , mechanism : * mut _CK_MECHANISM , public_key_template : * mut _CK_ATTRIBUTE , public_key_attribute_count : :: std :: os :: raw :: c_ulong , private_key_template : * mut _CK_ATTRIBUTE , private_key_attribute_count : :: std :: os :: raw :: c_ulong , public_key : * mut CK_OBJECT_HANDLE , private_key : * mut CK_OBJECT_HANDLE) -> CK_RV > ;
