@@ -1513,6 +1513,18 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 };
 
+fn str_pad(src: &str, dst: &mut [u8]) {
+    let src = src.as_bytes();
+    let src_len = src.len();
+    let dst_len = dst.len();
+    if src_len < dst_len {
+        dst[..src_len].copy_from_slice(src);
+        dst[src_len..].fill(32);
+    } else {
+        dst.copy_from_slice(&src[..dst_len]);
+    }
+}
+
 fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     match map.keys().max() {
         Some(k) => k + 1,
@@ -1613,9 +1625,9 @@ fn map<T, E>(r: Result<T, E>) -> CK_RV where T: std::fmt::Debug, E: Into<CK_RV> 
 trait Slot {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
+    fn token_type(&self) -> &str;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
-    fn get_slot_info(&self) -> Result<(), Error>;
     fn get_token_info(&self) -> Result<(), Error>;
 
     fn flags(&self) -> CK_FLAGS {
@@ -1645,17 +1657,14 @@ impl Slot for YubiHsmSlot {
     fn name(&self) -> String {
         self.connector.name()
     }
+    fn token_type(&self) -> &str {
+        "YubiHSM"
+    }
     fn is_present(&self) -> bool {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
-    }
-    fn get_slot_info(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -1677,17 +1686,14 @@ impl Slot for YubiKeySlot {
     fn name(&self) -> String {
         self.connector.name()
     }
+    fn token_type(&self) -> &str {
+        "YubiKey"
+    }
     fn is_present(&self) -> bool {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone()})
-    }
-    fn get_slot_info(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
     }
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -2158,8 +2164,8 @@ pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
                         info.libraryVersion.major = 1;
                         info.libraryVersion.minor = 0;
                         info.flags = 0;
-                        info.libraryDescription.fill(65u8);
-                        info.manufacturerID.fill(66u8);
+                        str_pad("Yubico YubiHSM and YubiKey PKCS#11 module", &mut info.libraryDescription);
+                        str_pad("Yubico", &mut info.manufacturerID);
                         eprintln!("C_GetInfo returning {:?}", info);
                         CKR_OK
                     },
@@ -2210,24 +2216,24 @@ pub extern "C" fn C_GetSlotList(
                 let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                     ctx.slots.keys().cloned().collect()
                 } else {
-                    ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as u64) != 0).map(|s| *s.0).collect()
+                    ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0).map(|s| *s.0).collect()
                 };
                 match slot_list.as_mut() {
                     Some(_) => {
-                        if *count >= keys.len() as u64 {
+                        if *count >= keys.len() as ::std::os::raw::c_ulong {
                             keys.sort();
                             ptr::copy(keys.as_ptr(), slot_list, keys.len());
-                            *count = keys.len() as u64;
+                            *count = keys.len() as ::std::os::raw::c_ulong;
                             eprintln!("C_GetSlotList returning {:?}", (keys, *count));
                             CKR_OK
                         } else {
-                            *count = keys.len() as u64;
+                            *count = keys.len() as ::std::os::raw::c_ulong;
                             eprintln!("C_GetSlotList returning {:?}", *count);
                             CKR_BUFFER_TOO_SMALL
                         }
                     },
                     None => {
-                        *count = keys.len() as u64;
+                        *count = keys.len() as ::std::os::raw::c_ulong;
                         eprintln!("C_GetSlotList returning {:?}", *count);
                         CKR_OK
                     }
@@ -2259,21 +2265,21 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.firmwareVersion.minor = 43;
                                 info.hardwareVersion.major = 1;
                                 info.hardwareVersion.minor = 0;
-                                info.slotDescription.fill(65u8);
-                                info.manufacturerID.fill(66u8);
+                                str_pad(&slot.name(), &mut info.slotDescription);
+                                str_pad("Yubico", &mut info.manufacturerID);
                                 info.flags = slot.flags();
                                 eprintln!("C_GetSlotInfo returning {:?}", info);
-                                map(slot.get_slot_info())
+                                CKR_OK
                             },
-                            None => CKR_ARGUMENTS_BAD as CK_RV
+                            None => CKR_ARGUMENTS_BAD
                         }
                     }
-                    None => CKR_SLOT_ID_INVALID as CK_RV
+                    None => CKR_SLOT_ID_INVALID
                 }
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+            None => CKR_CRYPTOKI_NOT_INITIALIZED
         }
-    }
+    }.into()
 }
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
@@ -2293,11 +2299,11 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                info.label.fill(65u8);
-                                info.manufacturerID.fill(66u8);
-                                info.model.fill(67u8);
-                                info.serialNumber.fill(0x30u8);
-                                info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as u64;
+                                str_pad(&slot.name(), &mut info.label);
+                                str_pad("Yubico", &mut info.manufacturerID);
+                                str_pad(&slot.token_type(), &mut info.model);
+                                str_pad("000000", &mut info.serialNumber);
+                                info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
                                 info.ulMaxSessionCount = 0;
                                 info.ulSessionCount = 0;
                                 info.ulMaxRwSessionCount = 0;
@@ -2312,7 +2318,7 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                                 info.hardwareVersion.minor = 43;
                                 info.firmwareVersion.major = 5;
                                 info.firmwareVersion.minor = 43;
-                                info.utcTime.fill(0u8);
+                                info.utcTime.fill(0);
                                 eprintln!("C_GetTokenInfo returning {:?}", info);
                                 map(slot.get_token_info())
                             },
