@@ -1605,6 +1605,7 @@ impl From<u32> for Error {
 
 impl Into<CK_RV> for Error {
     fn into(self) -> CK_RV {
+        eprintln!("{:?}", self);
         match self {
             Self::Generic(rv) => rv,
             Self::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
@@ -1614,8 +1615,7 @@ impl Into<CK_RV> for Error {
     }
 }
 
-fn map<T, E>(r: Result<T, E>) -> CK_RV where T: std::fmt::Debug, E: Into<CK_RV> + std::fmt::Debug {
-    eprintln!("map({:?})", r);
+fn map<T, E>(r: Result<T, E>) -> CK_RV where E: Into<CK_RV> {
     match r {
         Ok(_) => CKR_OK as CK_RV,
         Err(e) => e.into()
@@ -1625,7 +1625,9 @@ fn map<T, E>(r: Result<T, E>) -> CK_RV where T: std::fmt::Debug, E: Into<CK_RV> 
 trait Slot {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
-    fn token_type(&self) -> &str;
+    fn manufacturer(&self) -> &str;
+    fn product(&self) -> &str;
+    fn serial(&self) -> &str;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn get_token_info(&self) -> Result<(), Error>;
@@ -1636,6 +1638,10 @@ trait Slot {
         } else {
             (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE) as CK_FLAGS
         }
+    }
+
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
     }
 }
 
@@ -1657,8 +1663,14 @@ impl Slot for YubiHsmSlot {
     fn name(&self) -> String {
         self.connector.name()
     }
-    fn token_type(&self) -> &str {
-        "YubiHSM"
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+    fn product(&self) -> &str {
+        self.connector.product()
+    }
+    fn serial(&self) -> &str {
+        self.connector.serial()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -1686,8 +1698,14 @@ impl Slot for YubiKeySlot {
     fn name(&self) -> String {
         self.connector.name()
     }
-    fn token_type(&self) -> &str {
-        "YubiKey"
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+    fn product(&self) -> &str {
+        self.connector.product()
+    }
+    fn serial(&self) -> &str {
+        self.connector.serial()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -1854,6 +1872,9 @@ impl Session for YubiKeySession {
 trait Connector {
     fn to_string(&self) -> String;
     fn name(&self) -> String;
+    fn manufacturer(&self) -> &str;
+    fn product(&self) -> &str;
+    fn serial(&self) -> &str;
     fn is_present(&self) -> bool;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
 }
@@ -1865,11 +1886,11 @@ impl std::fmt::Debug for dyn Connector {
 }
 
 struct UsbConnector<'a> {
-    _context: &'a libusb::Context,
     handle: libusb::DeviceHandle<'a>,
     manufacturer: String,
     product: String,
-    serial : String
+    serial : String,
+    present: bool
 }
 
 impl Connector for UsbConnector<'_> {
@@ -1879,8 +1900,17 @@ impl Connector for UsbConnector<'_> {
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
+    fn manufacturer(&self) -> &str {
+        &self.manufacturer
+    }
+    fn product(&self) -> &str {
+        &self.product
+    }
+    fn serial(&self) -> &str {
+        &self.serial
+    }
     fn is_present(&self) -> bool {
-        true
+        self.present
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
@@ -1892,6 +1922,14 @@ impl Connector for UsbConnector<'_> {
         let len = self.handle.read_bulk(0x81, receive_buffer, timeout)?;
         eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
         Ok(&receive_buffer[..len])
+    }
+}
+
+impl UsbConnector<'_> {
+    fn connect(&mut self) -> Result<(), Error> {
+        self.handle.claim_interface(0)?;
+        self.present = true;
+        Ok(())
     }
 }
 
@@ -1908,6 +1946,15 @@ impl Connector for PcscConnector<'_> {
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
     }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiKey"
+    }
+    fn serial(&self) -> &str {
+        "0000000000"
+    }
     fn is_present(&self) -> bool {
         self.card.is_some()
     }
@@ -1919,7 +1966,7 @@ impl Connector for PcscConnector<'_> {
                 Ok(received)
             }
             None => {
-                Err(pcsc::Error::NoSmartcard.into())
+                Err(Error::from(pcsc::Error::NoSmartcard))
             }
         }
     }
@@ -1927,32 +1974,15 @@ impl Connector for PcscConnector<'_> {
 
 impl PcscConnector<'_> {
     fn connect(&mut self) -> Result<(), Error> {
-        match self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1) {
-            Ok(card) => {
-                self.card = Some(card);
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("pcsc.connect() -> {}", e);
-                Err(e.into())
-            }
-        }
+        self.card = Some(self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1)?);
+        Ok(())
     }
     fn _reconnect(&mut self) -> Result<(), Error> {
         match self.card.as_mut() {
             Some(card) => {
-                match card.reconnect(pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1, pcsc::Disposition::ResetCard) {
-                    Ok(_) => {
-                        Ok(())
-                    },
-                    Err(e) => {
-                        eprintln!("pcsc.reconnect() -> {}", e);
-                        Err(e.into())
-                    }
-                }
+                card.reconnect(pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1, pcsc::Disposition::ResetCard).map_err(|e| e .into())
             },
             None => {
-                eprintln!("pcsc.reconnect() -> Not connected");
                 Err(Error::from(pcsc::Error::NoSmartcard))
             }
         }
@@ -2059,26 +2089,23 @@ impl Context {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
-                        eprintln!("libusb vendor {} product {:?} usb {:?} device {:?}", desc.vendor_id(), desc.product_id(), desc.usb_version(), desc.device_version());
+                        //eprintln!("USB Bus {} Device {}: ID {}:{}", device.bus_number(), device.address(), desc.vendor_id(), desc.product_id());
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
                             match device.open() {
-                                Ok(mut handle) => {
+                                Ok(handle) => {
                                     match handle.read_languages(timeout) {
                                         Ok(langs) => {
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            eprintln!("libusb {} {} {}", manufacturer, product, serial);
-                                            match handle.claim_interface(0) {
-                                                Ok(_) => {
-                                                    let connector = Rc::new(UsbConnector {_context: context, handle, manufacturer, product, serial});
-                                                    let k = next_key(&self.slots);
-                                                    let v = Box::new(YubiHsmSlot {connector});
-                                                    self.slots.insert(k, v);
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("libusb.claim_interface: {}", e);
-                                                }
+                                            let mut connector = UsbConnector {handle, manufacturer, product, serial, present: false};
+                                            let name = connector.name();
+                                            eprintln!("{}", name);
+                                            if !self.slots.values().any(|s| s.name() == name) {
+                                                map(connector.connect());
+                                                let k = next_key(&self.slots);
+                                                let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
+                                                self.slots.insert(k, v);
                                             }
                                         },
                                         Err(e) => {
@@ -2100,9 +2127,9 @@ impl Context {
                 for reader in readers {
                     let mut connector = PcscConnector {reader, context, card: None};
                     let name = connector.name();
-                    eprintln!("pcsc {:?}", name);
+                    eprintln!("{}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
-                        let _ = connector.connect();
+                        map(connector.connect());
                         let k = next_key(&self.slots);
                         let v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
                         self.slots.insert(k, v);
@@ -2266,7 +2293,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO
                                 info.hardwareVersion.major = 1;
                                 info.hardwareVersion.minor = 0;
                                 str_pad(&slot.name(), &mut info.slotDescription);
-                                str_pad("Yubico", &mut info.manufacturerID);
+                                str_pad(slot.manufacturer(), &mut info.manufacturerID);
                                 info.flags = slot.flags();
                                 eprintln!("C_GetSlotInfo returning {:?}", info);
                                 CKR_OK
@@ -2299,10 +2326,10 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_IN
                         eprintln!("{:?}", slot);
                         match info_ptr.as_mut() {
                             Some(info) => {
-                                str_pad(&slot.name(), &mut info.label);
-                                str_pad("Yubico", &mut info.manufacturerID);
-                                str_pad(&slot.token_type(), &mut info.model);
-                                str_pad("000000", &mut info.serialNumber);
+                                str_pad(&slot.label(), &mut info.label);
+                                str_pad(slot.manufacturer(), &mut info.manufacturerID);
+                                str_pad(slot.product(), &mut info.model);
+                                str_pad(slot.serial(), &mut info.serialNumber);
                                 info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
                                 info.ulMaxSessionCount = 0;
                                 info.ulSessionCount = 0;
