@@ -1525,10 +1525,10 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
+fn next_key<T>(map: &HashMap<u64, T>, min: u64) -> u64 {
     match map.keys().max() {
         Some(k) => k + 1,
-        None => 0
+        None => min
     }
 }
 
@@ -2176,7 +2176,7 @@ impl Context {
                                             eprintln!("{}", name);
                                             if !self.slots.values().any(|s| s.name() == name) {
                                                 map(connector.connect());
-                                                let k = next_key(&self.slots);
+                                                let k = next_key(&self.slots, 0);
                                                 let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
                                                 self.slots.insert(k, v);
                                             }
@@ -2203,7 +2203,7 @@ impl Context {
                     eprintln!("{}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
                         map(connector.connect());
-                        let k = next_key(&self.slots);
+                        let k = next_key(&self.slots, 0);
                         let v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
                         self.slots.insert(k, v);
                     }
@@ -2618,7 +2618,7 @@ pub extern "C" fn C_OpenSession(
                     Some(slot) => {
                         eprintln!("{:?}", slot);
                         if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                            let k = next_key(&ctx.sessions);
+                            let k = next_key(&ctx.sessions, 1);
                             eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
                             ctx.sessions.insert(k, slot.open_session(slotID, flags));
                             eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
