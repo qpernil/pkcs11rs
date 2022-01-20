@@ -2052,7 +2052,7 @@ struct Scp03Session {
 impl std::fmt::Debug for Scp03Session {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("Scp03Session")
-            .field("cipher", &self.cipher.nid().short_name().unwrap_or("Unknown"))
+            .field("cipher", &self.cipher.nid().short_name()?)
             .field("key", &self.key)
             .field("iv", &self.iv)
             .finish()
