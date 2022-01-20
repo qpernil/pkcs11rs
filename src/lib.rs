@@ -1681,9 +1681,22 @@ impl Slot for YubiHsmSlot {
     }
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        let _vec = self.send_cmd(6, &[], timeout)?;
+        Ok(())
+    }
+}
+
+impl YubiHsmSlot {
+    fn compose_cmd(cmd: u8, data: &[u8]) -> Vec<u8> {
+        let len = data.len() as u16;
+        let mut vec = Vec::with_capacity(2048);
+        vec.extend([cmd]);
+        vec.extend(len.to_be_bytes());
+        vec.extend(data);
+        vec
+    }
+    fn send_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
     }
 }
 
@@ -1723,8 +1736,8 @@ impl Slot for YubiKeySlot {
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        self.connector.send(&send_buffer, timeout)?;
+        Ok(())
     }
 }
 
@@ -1772,52 +1785,36 @@ impl Session for YubiHsmSession {
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
-            let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-            let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-            self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
-            Ok(())
-        } else {
-            Err(CKR_PIN_INCORRECT.into())
-        }
+        let _vec = self.send_cmd(1, &[5; 100], timeout)?;
+        let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
+        Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        if self.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
-            self.session = None;
-        }
+        let _vec = self.send_secure_cmd(1, &[6; 32], timeout)?;
+        self.session = None;
         Ok(())
     }
     fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        self.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        let _vec = self.send_secure_cmd(1, &[7; 99], timeout)?;
+        Ok(())
     }
     fn generate(&self) ->Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [6u8, 0u8, 0u8];
-        let mut receive_buffer = [0u8; 2064];
-        self.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        let _vec = self.send_secure_cmd(1, &[8; 72], timeout)?;
+        Ok(())
     }
 }
 
 impl YubiHsmSession {
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
-        if let Some(session) = self.session.as_ref() {
-            let enc = session.encrypt(send_buffer)?;
-            eprintln!("encrypted {:?} -> {:?}", send_buffer, enc);
-            let resp = self.connector.transmit(send_buffer, receive_buffer, timeout)?;
-            let dec = session.decrypt(&enc)?;
-            eprintln!("decrypted {:?}", dec);
-            Ok(resp)
-        } else {
-            Err(CKR_PIN_INCORRECT.into())
-        }
+    fn send_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+    }
+    fn send_secure_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
     }
 }
 
@@ -1841,8 +1838,7 @@ impl Session for YubiKeySession {
     fn state(&self) -> CK_STATE {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+        if self.connector.send(&send_buffer, timeout).is_ok() {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
@@ -1851,8 +1847,7 @@ impl Session for YubiKeySession {
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
+        if self.connector.send(&send_buffer, timeout).is_ok() {
             Ok(())
         } else {
             Err(CKR_PIN_INCORRECT.into())
@@ -1861,20 +1856,17 @@ impl Session for YubiKeySession {
     fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        self.connector.send(&send_buffer, timeout).map(|_| ())
     }
     fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        self.connector.send(&send_buffer, timeout).map(|_| ())
     }
     fn generate(&self) ->Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let mut receive_buffer = [0u8; 2064];
-        self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).map(|_| ())
+        self.connector.send(&send_buffer, timeout).map(|_| ())
     }
 }
 
@@ -1887,7 +1879,16 @@ trait Connector {
     fn major(&self) -> u8;
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
+    fn buffer_size(&self) -> usize;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
+
+    fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let mut receive_buffer = vec![0u8; self.buffer_size()];
+        let slice = self.transmit(send_buffer, &mut receive_buffer, timeout)?;
+        let len = slice.len();
+        receive_buffer.truncate(len);
+        Ok(receive_buffer)
+    }
 }
 
 impl std::fmt::Debug for dyn Connector {
@@ -1941,6 +1942,9 @@ impl Connector for UsbConnector<'_> {
     }
     fn is_present(&self) -> bool {
         self.claimed
+    }
+    fn buffer_size(&self) -> usize {
+        2048 + 64
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
@@ -2008,6 +2012,9 @@ impl Connector for PcscConnector<'_> {
     fn is_present(&self) -> bool {
         self.card.is_some()
     }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
             Some(card) => {
@@ -2060,7 +2067,7 @@ impl std::fmt::Debug for Scp03Session {
 }
 
 impl Scp03Session {
-    fn encrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
+    fn _encrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
         let iv = self.iv.as_ref().map(|v| &v[..]);
         let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Encrypt, &self.key, iv)?;
         //c.pad(false);
@@ -2070,7 +2077,7 @@ impl Scp03Session {
         out.truncate(count + rest);
         Ok(out)
     }
-    fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
+    fn _decrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
         let iv = self.iv.as_ref().map(|v| &v[..]);
         let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Decrypt, &self.key, iv)?;
         //c.pad(false);
