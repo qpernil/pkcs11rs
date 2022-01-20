@@ -1532,13 +1532,6 @@ fn next_key<T>(map: &HashMap<u64, T>) -> u64 {
     }
 }
 
-fn some<T>(o: &Option<T>) -> &str {
-    match o {
-        Some(_) => &"Some",
-        None => &"None"
-    }
-}
-
 fn _get_ctx() -> Result<&'static Context, Error> {
     unsafe {
         if let Some(context) = G_CONTEXT.as_ref() {
@@ -1623,7 +1616,7 @@ fn map<T, E>(r: Result<T, E>) -> CK_RV where E: Into<CK_RV> {
 }
 
 trait Slot {
-    fn to_string(&self) -> String;
+    fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
@@ -1649,7 +1642,7 @@ trait Slot {
 
 impl std::fmt::Debug for dyn Slot {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("{}", self.to_string()))
+        self.as_debug().fmt(fmt)
     }
 }
 
@@ -1659,8 +1652,8 @@ struct YubiHsmSlot {
 }
 
 impl Slot for YubiHsmSlot {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn name(&self) -> String {
         self.connector.name()
@@ -1700,8 +1693,8 @@ struct YubiKeySlot {
 }
 
 impl Slot for YubiKeySlot {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn name(&self) -> String {
         self.connector.name()
@@ -1736,7 +1729,7 @@ impl Slot for YubiKeySlot {
 }
 
 trait Session {
-    fn to_string(&self) -> String;
+    fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
     fn state(&self) -> CK_STATE;
@@ -1748,7 +1741,7 @@ trait Session {
 
 impl std::fmt::Debug for dyn Session {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("{}", self.to_string()))
+        self.as_debug().fmt(fmt)
     }
 }
 
@@ -1761,8 +1754,8 @@ struct YubiHsmSession {
 }
 
 impl Session for YubiHsmSession {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn slotID(&self) -> CK_SLOT_ID {
         self.slotID
@@ -1782,7 +1775,9 @@ impl Session for YubiHsmSession {
         let send_buffer = [6u8, 0u8, 0u8];
         let mut receive_buffer = [0u8; 2064];
         if self.connector.transmit(&send_buffer, &mut receive_buffer, timeout).is_ok() {
-            self.session = Some(Scp03Session {});
+            let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+            self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
             Ok(())
         } else {
             Err(CKR_PIN_INCORRECT.into())
@@ -1817,9 +1812,9 @@ impl YubiHsmSession {
             let enc = session.encrypt(send_buffer)?;
             eprintln!("encrypted {:?} -> {:?}", send_buffer, enc);
             let resp = self.connector.transmit(send_buffer, receive_buffer, timeout)?;
-            let dec = session.decrypt(resp)?;
-            eprintln!("decrypted {:?} -> {:?}", receive_buffer, dec);
-            Ok(receive_buffer)
+            let dec = session.decrypt(&enc)?;
+            eprintln!("decrypted {:?}", dec);
+            Ok(resp)
         } else {
             Err(CKR_PIN_INCORRECT.into())
         }
@@ -1834,8 +1829,8 @@ struct YubiKeySession {
 }
 
 impl Session for YubiKeySession {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn slotID(&self) -> CK_SLOT_ID {
         self.slotID
@@ -1884,7 +1879,7 @@ impl Session for YubiKeySession {
 }
 
 trait Connector {
-    fn to_string(&self) -> String;
+    fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
@@ -1897,7 +1892,7 @@ trait Connector {
 
 impl std::fmt::Debug for dyn Connector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("{}", self.to_string()))
+        self.as_debug().fmt(fmt)
     }
 }
 
@@ -1907,12 +1902,24 @@ struct UsbConnector<'a> {
     manufacturer: String,
     product: String,
     serial: String,
-    present: bool
+    claimed: bool
+}
+
+impl std::fmt::Debug for UsbConnector<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("UsbConnector")
+            .field("manufacturer", &self.manufacturer)
+            .field("product", &self.product)
+            .field("serial", &self.serial)
+            .field("version", &self.version)
+            .field("claimed", &self.claimed)
+            .finish()
+    }
 }
 
 impl Connector for UsbConnector<'_> {
-    fn to_string(&self) -> String {
-        format!("UsbConnector {{ name: {} is_present: {}}}", self.name(), self.is_present())
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn name(&self) -> String {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
@@ -1933,7 +1940,7 @@ impl Connector for UsbConnector<'_> {
         self.version.minor()
     }
     fn is_present(&self) -> bool {
-        self.present
+        self.claimed
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
@@ -1951,12 +1958,12 @@ impl Connector for UsbConnector<'_> {
 impl UsbConnector<'_> {
     fn connect(&mut self) -> Result<(), Error> {
         self.handle.claim_interface(0)?;
-        self.present = true;
+        self.claimed = true;
         Ok(())
     }
     fn _disconnect(&mut self) -> Result<(), Error> {
         self.handle.release_interface(0)?;
-        self.present = false;
+        self.claimed = false;
         Ok(())
     }
 }
@@ -1967,9 +1974,18 @@ struct PcscConnector<'a> {
     card: Option<pcsc::Card>,
 }
 
+impl std::fmt::Debug for PcscConnector<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("PcscConnector")
+            .field("reader", &self.reader)
+            .field("card", &self.card.as_ref().map(|_| "Card"))
+            .finish()
+    }
+}
+
 impl Connector for PcscConnector<'_> {
-    fn to_string(&self) -> String {
-        format!("PcscConnector {{ name: {} is_present: {} }}", self.name(), self.is_present())
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
     }
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()
@@ -2027,30 +2043,38 @@ impl PcscConnector<'_> {
     }
 }
 
-#[derive(Debug)]
 struct Scp03Session {
+    cipher: openssl::symm::Cipher,
+    key: Vec<u8>,
+    iv: Option<Vec<u8>>
+}
+
+impl std::fmt::Debug for Scp03Session {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("Scp03Session")
+            .field("cipher", &self.cipher.nid().short_name().unwrap_or("Unknown"))
+            .field("key", &self.key)
+            .field("iv", &self.iv)
+            .finish()
+    }
 }
 
 impl Scp03Session {
     fn encrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
-        let cipher = openssl::symm::Cipher::aes_128_cbc();
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
-        let mut c = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Encrypt, key, Some(iv))?;
-        c.pad(false);
-        let mut out = vec![0; data.len() + cipher.block_size()];
+        let iv = self.iv.as_ref().map(|v| &v[..]);
+        let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Encrypt, &self.key, iv)?;
+        //c.pad(false);
+        let mut out = vec![0; data.len() + self.cipher.block_size()];
         let count = c.update(data, &mut out)?;
         let rest = c.finalize(&mut out[count..])?;
         out.truncate(count + rest);
         Ok(out)
     }
     fn decrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
-        let cipher = openssl::symm::Cipher::aes_128_cbc();
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07";
-        let mut c = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Decrypt, key, Some(iv))?;
-        c.pad(false);
-        let mut out = vec![0; data.len() + cipher.block_size()];
+        let iv = self.iv.as_ref().map(|v| &v[..]);
+        let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Decrypt, &self.key, iv)?;
+        //c.pad(false);
+        let mut out = vec![0; data.len() + self.cipher.block_size()];
         let count = c.update(data, &mut out)?;
         let rest = c.finalize(&mut out[count..])?;
         out.truncate(count + rest);
@@ -2067,7 +2091,12 @@ struct Context {
 
 impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.write_fmt(format_args!("Context(libusb: {}, pcsc {}, slots: {:?}, sessions: {:?})", some(&self.libusb), some(&self.pcsc), self.slots, self.sessions))
+        fmt.debug_struct("Context")
+            .field("libusb", &self.libusb.as_ref().map(|_| "Context"))
+            .field("pcsc", &self.pcsc.as_ref().map(|_| "Context"))
+            .field("slots", &self.slots)
+            .field("sessions", &self.sessions)
+            .finish()
     }
 }
 
@@ -2134,7 +2163,7 @@ impl Context {
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, present: false};
+                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, claimed: false};
                                             let name = connector.name();
                                             eprintln!("{}", name);
                                             if !self.slots.values().any(|s| s.name() == name) {
