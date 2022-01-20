@@ -1880,7 +1880,6 @@ trait Connector {
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
-    fn packet_size(&self) -> usize;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
 
     fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
@@ -1948,9 +1947,6 @@ impl Connector for UsbConnector<'_> {
     }
     fn buffer_size(&self) -> usize {
         2048 + self.packet_size
-    }
-    fn packet_size(&self) -> usize {
-        self.packet_size
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
@@ -2020,9 +2016,6 @@ impl Connector for PcscConnector<'_> {
     }
     fn buffer_size(&self) -> usize {
         4096
-    }
-    fn packet_size(&self) -> usize {
-        64
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
