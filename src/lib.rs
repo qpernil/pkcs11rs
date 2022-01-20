@@ -1880,6 +1880,7 @@ trait Connector {
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
+    fn packet_size(&self) -> usize;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
 
     fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
@@ -1903,6 +1904,7 @@ struct UsbConnector<'a> {
     manufacturer: String,
     product: String,
     serial: String,
+    packet_size: usize,
     claimed: bool
 }
 
@@ -1913,8 +1915,9 @@ impl std::fmt::Debug for UsbConnector<'_> {
             .field("product", &self.product)
             .field("serial", &self.serial)
             .field("version", &self.version)
+            .field("packet_size", &self.packet_size)
             .field("claimed", &self.claimed)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -1944,12 +1947,15 @@ impl Connector for UsbConnector<'_> {
         self.claimed
     }
     fn buffer_size(&self) -> usize {
-        2048 + 64
+        2048 + self.packet_size
+    }
+    fn packet_size(&self) -> usize {
+        self.packet_size
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
         eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
-        if len % 64 == 0 { // Write a ZLP if last packet is full
+        if len % self.packet_size == 0 { // Write a ZLP if last packet is full
             let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
             eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
         }
@@ -1983,7 +1989,7 @@ impl std::fmt::Debug for PcscConnector<'_> {
         fmt.debug_struct("PcscConnector")
             .field("reader", &self.reader)
             .field("card", &self.card.as_ref().map(|_| "Card"))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -2014,6 +2020,9 @@ impl Connector for PcscConnector<'_> {
     }
     fn buffer_size(&self) -> usize {
         4096
+    }
+    fn packet_size(&self) -> usize {
+        64
     }
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
@@ -2060,9 +2069,7 @@ impl std::fmt::Debug for Scp03Session {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("Scp03Session")
             .field("cipher", &self.cipher.nid().short_name()?)
-            .field("key", &self.key)
-            .field("iv", &self.iv)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -2167,10 +2174,11 @@ impl Context {
                                     match handle.read_languages(timeout) {
                                         Ok(langs) => {
                                             let version = desc.device_version();
+                                            let packet_size = desc.max_packet_size() as usize;
                                             let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
                                             let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, claimed: false};
+                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, packet_size, claimed: false};
                                             let name = connector.name();
                                             eprintln!("{}", name);
                                             if !self.slots.values().any(|s| s.name() == name) {
