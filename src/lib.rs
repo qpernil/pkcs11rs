@@ -1625,6 +1625,7 @@ trait Slot {
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
+    fn init_slot(&self) -> Result<(), Error>;
     fn get_token_info(&self) -> Result<(), Error>;
 
     fn flags(&self) -> CK_FLAGS {
@@ -1679,6 +1680,11 @@ impl Slot for YubiHsmSlot {
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
     }
+    fn init_slot(&self) -> Result<(), Error> {
+        let timeout = Duration::from_millis(100);
+        let _vec = self.send_cmd(6, &[], timeout)?;
+        Ok(())
+    }
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(6, &[], timeout)?;
@@ -1732,6 +1738,12 @@ impl Slot for YubiKeySlot {
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone()})
+    }
+    fn init_slot(&self) -> Result<(), Error> {
+        let timeout = Duration::from_millis(100);
+        let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        self.connector.send(&send_buffer, timeout)?;
+        Ok(())
     }
     fn get_token_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -2178,6 +2190,7 @@ impl Context {
                                                 map(connector.connect());
                                                 let k = next_key(&self.slots, 0);
                                                 let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
+                                                map(v.init_slot());
                                                 self.slots.insert(k, v);
                                             }
                                         },
@@ -2205,6 +2218,7 @@ impl Context {
                         map(connector.connect());
                         let k = next_key(&self.slots, 0);
                         let v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
+                        map(v.init_slot());
                         self.slots.insert(k, v);
                     }
                 }
