@@ -1954,6 +1954,11 @@ impl UsbConnector<'_> {
         self.present = true;
         Ok(())
     }
+    fn _disconnect(&mut self) -> Result<(), Error> {
+        self.handle.release_interface(0)?;
+        self.present = false;
+        Ok(())
+    }
 }
 
 struct PcscConnector<'a> {
@@ -2016,8 +2021,9 @@ impl PcscConnector<'_> {
             }
         }
     }
-    fn _disconnect(&mut self) {
+    fn _disconnect(&mut self) -> Result<(), Error> {
         self.card = None;
+        Ok(())
     }
 }
 
