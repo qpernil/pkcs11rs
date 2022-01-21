@@ -2159,7 +2159,6 @@ impl Context {
     }
     fn init(&'static mut self) {
         if let Some(context) = self.libusb.as_ref() {
-            let timeout = Duration::from_millis(100);
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
