@@ -2167,27 +2167,20 @@ impl Context {
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
                             match device.open() {
                                 Ok(handle) => {
-                                    match handle.read_languages(timeout) {
-                                        Ok(langs) => {
-                                            let version = desc.device_version();
-                                            let packet_size = desc.max_packet_size() as usize;
-                                            let manufacturer = handle.read_manufacturer_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let product = handle.read_product_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let serial = handle.read_serial_number_string(langs[0], &desc, timeout).unwrap_or_default();
-                                            let mut connector = UsbConnector {handle, version, manufacturer, product, serial, packet_size, claimed: false};
-                                            let name = connector.name();
-                                            eprintln!("{}", name);
-                                            if !self.slots.values().any(|s| s.name() == name) {
-                                                map(connector.connect());
-                                                let k = next_key(&self.slots, 0);
-                                                let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
-                                                map(v.init_slot());
-                                                self.slots.insert(k, v);
-                                            }
-                                        },
-                                        Err(e) => {
-                                            eprintln!("libusb.read_languages: {}", e);
-                                        }
+                                    let version = desc.device_version();
+                                    let packet_size = desc.max_packet_size() as usize;
+                                    let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
+                                    let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
+                                    let serial = handle.read_serial_number_string_ascii(&desc).unwrap_or_default();
+                                    let mut connector = UsbConnector {handle, version, manufacturer, product, serial, packet_size, claimed: false};
+                                    let name = connector.name();
+                                    eprintln!("{}", name);
+                                    if !self.slots.values().any(|s| s.name() == name) {
+                                        map(connector.connect());
+                                        let k = next_key(&self.slots, 0);
+                                        let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
+                                        map(v.init_slot());
+                                        self.slots.insert(k, v);
                                     }
                                 },
                                 Err(e) => {
