@@ -1533,7 +1533,7 @@ fn next_key<T>(map: &HashMap<u64, T>, min: u64) -> u64 {
     }
 }
 
-fn _get_ctx() -> Result<&'static Context, Error> {
+fn get_ctx() -> Result<&'static Context, Error> {
     unsafe {
         if let Some(context) = G_CONTEXT.as_ref() {
             Ok(context)
@@ -1549,6 +1549,26 @@ fn get_ctx_mut() -> Result<&'static mut Context, Error> {
             Ok(context)
         } else {
             Err(CKR_CRYPTOKI_NOT_INITIALIZED.into())
+        }
+    }
+}
+
+fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
+    unsafe {
+        if let Some(p) = ptr.as_ref() {
+            Ok(p)
+        } else {
+            Err(CKR_ARGUMENTS_BAD.into())
+        }
+    }
+}
+
+fn as_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, Error> {
+    unsafe {
+        if let Some(p) = ptr.as_mut() {
+            Ok(p)
+        } else {
+            Err(CKR_ARGUMENTS_BAD.into())
         }
     }
 }
@@ -1627,7 +1647,8 @@ trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn init_slot(&self) -> Result<(), Error>;
-    fn get_token_info(&self) -> Result<(), Error>;
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error>;
 
     fn flags(&self) -> CK_FLAGS {
         if self.is_present() {
@@ -1686,9 +1707,39 @@ impl Slot for YubiHsmSlot {
         let _vec = self.send_cmd(6, &[], timeout)?;
         Ok(())
     }
-    fn get_token_info(&self) -> Result<(), Error> {
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        info.firmwareVersion.major = 1;
+        info.firmwareVersion.minor = 0;
+        info.hardwareVersion.major = 1;
+        info.hardwareVersion.minor = 0;
+        str_pad(&self.name(), &mut info.slotDescription);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        info.flags = self.flags();
+        Ok(())
+    }
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(6, &[], timeout)?;
+        str_pad(&self.label(), &mut info.label);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        str_pad(self.product(), &mut info.model);
+        str_pad(self.serial(), &mut info.serialNumber);
+        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        info.ulMaxSessionCount = 0;
+        info.ulSessionCount = 0;
+        info.ulMaxRwSessionCount = 0;
+        info.ulRwSessionCount = 0;
+        info.ulMaxPinLen = 34;
+        info.ulMinPinLen = 4;
+        info.ulTotalPublicMemory = 0;
+        info.ulFreePublicMemory = 0;
+        info.ulTotalPrivateMemory = 0;
+        info.ulFreePrivateMemory = 0;
+        info.hardwareVersion.major = self.major();
+        info.hardwareVersion.minor = self.minor();
+        info.firmwareVersion.major = self.major();
+        info.firmwareVersion.minor = self.minor();
+        info.utcTime.fill(0);
         Ok(())
     }
 }
@@ -1746,10 +1797,40 @@ impl Slot for YubiKeySlot {
         self.connector.send(&send_buffer, timeout)?;
         Ok(())
     }
-    fn get_token_info(&self) -> Result<(), Error> {
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        info.firmwareVersion.major = 1;
+        info.firmwareVersion.minor = 0;
+        info.hardwareVersion.major = 1;
+        info.hardwareVersion.minor = 0;
+        str_pad(&self.name(), &mut info.slotDescription);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        info.flags = self.flags();
+        Ok(())
+    }
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         self.connector.send(&send_buffer, timeout)?;
+        str_pad(&self.label(), &mut info.label);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        str_pad(self.product(), &mut info.model);
+        str_pad(self.serial(), &mut info.serialNumber);
+        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        info.ulMaxSessionCount = 0;
+        info.ulSessionCount = 0;
+        info.ulMaxRwSessionCount = 0;
+        info.ulRwSessionCount = 0;
+        info.ulMaxPinLen = 34;
+        info.ulMinPinLen = 4;
+        info.ulTotalPublicMemory = 0;
+        info.ulFreePublicMemory = 0;
+        info.ulTotalPrivateMemory = 0;
+        info.ulFreePrivateMemory = 0;
+        info.hardwareVersion.major = self.major();
+        info.hardwareVersion.minor = self.minor();
+        info.firmwareVersion.major = self.major();
+        info.firmwareVersion.minor = self.minor();
+        info.utcTime.fill(0);
         Ok(())
     }
 }
@@ -2135,6 +2216,28 @@ impl Context {
         eprintln!("Context.new {:?}", context);
         context
     }
+    fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
+        info.cryptokiVersion.major = 2;
+        info.cryptokiVersion.minor = 40;
+        info.libraryVersion.major = 1;
+        info.libraryVersion.minor = 0;
+        info.flags = 0;
+        str_pad("YubiHSM & YubiKey PKCS#11 module", &mut info.libraryDescription);
+        str_pad("Yubico", &mut info.manufacturerID);
+        Ok(())
+    }
+    fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&Box<dyn Slot>, Error> {
+        match self.slots.get(&slot_id) {
+            Some(slot) => Ok(slot),
+            None => Err(CKR_SLOT_ID_INVALID.into())
+        }
+    }
+    fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut Box<dyn Slot>, Error> {
+        match self.slots.get_mut(&slot_id) {
+            Some(slot) => Ok(slot),
+            None => Err(CKR_SLOT_ID_INVALID.into())
+        }
+    }
     fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
         let session = self.sessions.get(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
@@ -2235,7 +2338,7 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called with {:?}", pReserved);
     unsafe {
         match G_CONTEXT.as_mut() {
-            Some(ctx) => {
+            Some(_ctx) => {
                 G_CONTEXT = None;
                 CKR_OK
             },
@@ -2246,30 +2349,16 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
 
 pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut _CK_INFO) -> CK_RV>;
 
+fn get_info(
+    info_ptr: CK_INFO_PTR
+) -> Result<(), Error> {
+    get_ctx()?.get_info(as_mut(info_ptr)?)
+}
+
 #[no_mangle]
 pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
-    eprintln!("C_GetInfo called");
-    unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(_ctx) => {
-                match info_ptr.as_mut() {
-                    Some(info) => {
-                        info.cryptokiVersion.major = 2;
-                        info.cryptokiVersion.minor = 40;
-                        info.libraryVersion.major = 1;
-                        info.libraryVersion.minor = 0;
-                        info.flags = 0;
-                        str_pad("Yubico YubiHSM and YubiKey PKCS#11 module", &mut info.libraryDescription);
-                        str_pad("Yubico", &mut info.manufacturerID);
-                        eprintln!("C_GetInfo returning {:?}", info);
-                        CKR_OK
-                    },
-                    None => CKR_ARGUMENTS_BAD
-                }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }
-    }.into()
+    eprintln!("C_GetInfo called with {:?}", info_ptr);
+    map(get_info(info_ptr))
 }
 
 pub type CK_C_GetFunctionList =
@@ -2345,36 +2434,17 @@ pub type CK_C_GetSlotInfo = ::std::option::Option<
                          -> CK_RV,
 >;
 
+fn get_slot_info(
+    slotID: CK_SLOT_ID,
+    info_ptr: CK_SLOT_INFO_PTR
+) -> Result<(), Error> {
+    get_ctx()?.get_slot(slotID)?.get_slot_info(as_mut(info_ptr)?)
+}
+
 #[no_mangle]
 pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO) -> CK_RV {
-    eprintln!("C_GetSlotInfo {} called", slotID);
-    unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.slots.get(&slotID) {
-                    Some(slot) => {
-                        eprintln!("{:?}", slot);
-                        match info_ptr.as_mut() {
-                            Some(info) => {
-                                info.firmwareVersion.major = 1;
-                                info.firmwareVersion.minor = 0;
-                                info.hardwareVersion.major = 1;
-                                info.hardwareVersion.minor = 0;
-                                str_pad(&slot.name(), &mut info.slotDescription);
-                                str_pad(slot.manufacturer(), &mut info.manufacturerID);
-                                info.flags = slot.flags();
-                                eprintln!("C_GetSlotInfo returning {:?}", info);
-                                CKR_OK
-                            },
-                            None => CKR_ARGUMENTS_BAD
-                        }
-                    }
-                    None => CKR_SLOT_ID_INVALID
-                }
-            }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }
-    }.into()
+    eprintln!("C_GetSlotInfo called with {:?}", (slotID, info_ptr));
+    map(get_slot_info(slotID, info_ptr))
 }
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
@@ -2383,49 +2453,17 @@ pub type CK_C_GetTokenInfo = ::std::option::Option<
                          -> CK_RV,
 >;
 
+fn get_token_info(
+    slotID: CK_SLOT_ID,
+    info_ptr: CK_TOKEN_INFO_PTR
+) -> Result<(), Error> {
+    get_ctx()?.get_slot(slotID)?.get_token_info(as_mut(info_ptr)?)
+}
+
 #[no_mangle]
 pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_INFO) -> CK_RV {
-    eprintln!("C_GetTokenInfo {} called", slotID);
-    unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.slots.get(&slotID) {
-                    Some(slot) => {
-                        eprintln!("{:?}", slot);
-                        match info_ptr.as_mut() {
-                            Some(info) => {
-                                str_pad(&slot.label(), &mut info.label);
-                                str_pad(slot.manufacturer(), &mut info.manufacturerID);
-                                str_pad(slot.product(), &mut info.model);
-                                str_pad(slot.serial(), &mut info.serialNumber);
-                                info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
-                                info.ulMaxSessionCount = 0;
-                                info.ulSessionCount = 0;
-                                info.ulMaxRwSessionCount = 0;
-                                info.ulRwSessionCount = 0;
-                                info.ulMaxPinLen = 34;
-                                info.ulMinPinLen = 4;
-                                info.ulTotalPublicMemory = 0;
-                                info.ulFreePublicMemory = 0;
-                                info.ulTotalPrivateMemory = 0;
-                                info.ulFreePrivateMemory = 0;
-                                info.hardwareVersion.major = slot.major();
-                                info.hardwareVersion.minor = slot.minor();
-                                info.firmwareVersion.major = slot.major();
-                                info.firmwareVersion.minor = slot.minor();
-                                info.utcTime.fill(0);
-                                eprintln!("C_GetTokenInfo returning {:?}", info);
-                                map(slot.get_token_info())
-                            },
-                            None => CKR_ARGUMENTS_BAD as CK_RV
-                        }
-                    }
-                    None => CKR_SLOT_ID_INVALID as CK_RV
-                }
-            }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
-        }
-    }
+    eprintln!("C_GetTokenInfo called with {:?}", (slotID, info_ptr));
+    map(get_token_info(slotID, info_ptr))
 }
 
 pub type CK_C_WaitForSlotEvent =
