@@ -10,6 +10,6 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libusb = "0.3.0"
+rusb = "0.9.0"
 pcsc = "2.6.0"
 openssl ="0.10.38"
