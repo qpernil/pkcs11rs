@@ -12,4 +12,5 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 [dependencies]
 rusb = "0.9.0"
 pcsc = "2.6.0"
-openssl ="0.10.38"
+curl = "0.4.42"
+openssl = "0.10.38"
