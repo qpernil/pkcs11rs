@@ -1657,7 +1657,7 @@ trait Slot {
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
-    fn init_slot(&self) -> Result<(), Error>;
+    fn init_slot(&mut self) -> Result<(), Error>;
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error>;
 
@@ -1713,7 +1713,7 @@ impl Slot for YubiHsmSlot {
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
     }
-    fn init_slot(&self) -> Result<(), Error> {
+    fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(6, &[], timeout)?;
         Ok(())
@@ -1802,7 +1802,7 @@ impl Slot for YubiKeySlot {
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone()})
     }
-    fn init_slot(&self) -> Result<(), Error> {
+    fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         self.connector.send(&send_buffer, timeout)?;
@@ -2147,8 +2147,9 @@ impl PcscConnector<'_> {
 
 #[derive(Debug)]
 struct CurlConnector {
-    name: String,
+    serial: String,
     url: String,
+    connected: bool,
     curl: RefCell<curl::easy::Easy>
 }
 
@@ -2158,7 +2159,7 @@ impl Connector for CurlConnector {
     }
 
     fn name(&self) -> String {
-        self.name.clone()
+        format!("{} {} {}", self.manufacturer(), self.product(), self.serial())
     }
 
     fn manufacturer(&self) -> &str {
@@ -2170,7 +2171,7 @@ impl Connector for CurlConnector {
     }
 
     fn serial(&self) -> &str {
-        "00000001"
+        &self.serial
     }
 
     fn major(&self) -> u8 {
@@ -2182,7 +2183,7 @@ impl Connector for CurlConnector {
     }
 
     fn is_present(&self) -> bool {
-        true
+        self.connected
     }
 
     fn buffer_size(&self) -> usize {
@@ -2231,6 +2232,7 @@ impl CurlConnector {
         eprintln!("curl.get() -> {:?}", String::from_utf8_lossy(&received).to_string());
         curl.url(&format!("{}/connector/api", self.url))?;
         curl.post(true)?;
+        self.connected = true;
         Ok(())
     }
 }
@@ -2376,13 +2378,13 @@ impl Context {
                                     let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
                                     let serial = handle.read_serial_number_string_ascii(&desc).unwrap_or_default();
                                     let mut connector = UsbConnector {handle, version, manufacturer, product, serial, packet_size, claimed: false};
+                                    //let mut connector = CurlConnector { serial, url: String::from("http://127.0.0.1:12345"), connected: false, curl: RefCell::new(curl::easy::Easy::new()) };
                                     let name = connector.name();
-                                    //let mut connector = CurlConnector { name: name.clone(), url: "http://127.0.0.1:12345".into(), curl: RefCell::new(curl::easy::Easy::new()) };
                                     eprintln!("{}", name);
                                     if !self.slots.values().any(|s| s.name() == name) {
                                         map(connector.connect());
                                         let k = next_key(&self.slots, 0);
-                                        let v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
+                                        let mut v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
                                         map(v.init_slot());
                                         self.slots.insert(k, v);
                                     }
@@ -2405,7 +2407,7 @@ impl Context {
                     if !self.slots.values().any(|s| s.name() == name) {
                         map(connector.connect());
                         let k = next_key(&self.slots, 0);
-                        let v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
+                        let mut v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
                         map(v.init_slot());
                         self.slots.insert(k, v);
                     }
