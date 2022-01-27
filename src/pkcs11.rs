@@ -531,19 +531,19 @@ pub type CK_FLAGS = ::std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_VERSION {
+pub struct CK_VERSION {
     pub major: ::std::os::raw::c_uchar,
     pub minor: ::std::os::raw::c_uchar,
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_INFO {
-    pub cryptokiVersion: _CK_VERSION,
+pub struct CK_INFO {
+    pub cryptokiVersion: CK_VERSION,
     pub manufacturerID: [::std::os::raw::c_uchar; 32usize],
     pub flags: CK_FLAGS,
     pub libraryDescription: [::std::os::raw::c_uchar; 32usize],
-    pub libraryVersion: _CK_VERSION,
+    pub libraryVersion: CK_VERSION,
 }
 
 pub type CK_NOTIFICATION = ::std::os::raw::c_ulong;
@@ -551,17 +551,17 @@ pub type CK_SLOT_ID = ::std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_SLOT_INFO {
+pub struct CK_SLOT_INFO {
     pub slotDescription: [::std::os::raw::c_uchar; 64usize],
     pub manufacturerID: [::std::os::raw::c_uchar; 32usize],
     pub flags: CK_FLAGS,
-    pub hardwareVersion: _CK_VERSION,
-    pub firmwareVersion: _CK_VERSION,
+    pub hardwareVersion: CK_VERSION,
+    pub firmwareVersion: CK_VERSION,
 }
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_TOKEN_INFO {
+pub struct CK_TOKEN_INFO {
     pub label: [::std::os::raw::c_uchar; 32usize],
     pub manufacturerID: [::std::os::raw::c_uchar; 32usize],
     pub model: [::std::os::raw::c_uchar; 16usize],
@@ -577,8 +577,8 @@ pub struct _CK_TOKEN_INFO {
     pub ulFreePublicMemory: ::std::os::raw::c_ulong,
     pub ulTotalPrivateMemory: ::std::os::raw::c_ulong,
     pub ulFreePrivateMemory: ::std::os::raw::c_ulong,
-    pub hardwareVersion: _CK_VERSION,
-    pub firmwareVersion: _CK_VERSION,
+    pub hardwareVersion: CK_VERSION,
+    pub firmwareVersion: CK_VERSION,
     pub utcTime: [::std::os::raw::c_uchar; 16usize],
 }
 
@@ -588,7 +588,7 @@ pub type CK_STATE = ::std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_SESSION_INFO {
+pub struct CK_SESSION_INFO {
     pub slotID: CK_SLOT_ID,
     pub state: CK_STATE,
     pub flags: CK_FLAGS,
@@ -604,7 +604,7 @@ pub type CK_ATTRIBUTE_TYPE = ::std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_ATTRIBUTE {
+pub struct CK_ATTRIBUTE {
     pub type_: CK_ATTRIBUTE_TYPE,
     pub pValue: *mut ::std::os::raw::c_void,
     pub ulValueLen: ::std::os::raw::c_ulong,
@@ -612,7 +612,7 @@ pub struct _CK_ATTRIBUTE {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_DATE {
+pub struct CK_DATE {
     pub year: [::std::os::raw::c_uchar; 4usize],
     pub month: [::std::os::raw::c_uchar; 2usize],
     pub day: [::std::os::raw::c_uchar; 2usize],
@@ -622,7 +622,7 @@ pub type CK_MECHANISM_TYPE = ::std::os::raw::c_ulong;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_MECHANISM {
+pub struct CK_MECHANISM {
     pub mechanism: CK_MECHANISM_TYPE,
     pub pParameter: *mut ::std::os::raw::c_void,
     pub ulParameterLen: ::std::os::raw::c_ulong,
@@ -630,7 +630,7 @@ pub struct _CK_MECHANISM {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_MECHANISM_INFO {
+pub struct CK_MECHANISM_INFO {
     pub ulMinKeySize: ::std::os::raw::c_ulong,
     pub ulMaxKeySize: ::std::os::raw::c_ulong,
     pub flags: CK_FLAGS,
@@ -677,17 +677,17 @@ pub type CK_NOTIFY =
                              -> CK_RV,
     >;
 
-    pub type CK_C_Initialize =
-    ::std::option::Option<extern "C" fn(init_args: *mut _CK_C_INITIALIZE_ARGS) -> CK_RV>;
+pub type CK_C_Initialize =
+    ::std::option::Option<extern "C" fn(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV>;
 
-    pub type CK_C_Finalize =
+pub type CK_C_Finalize =
     ::std::option::Option<extern "C" fn(pReserved: *mut ::std::os::raw::c_void) -> CK_RV>;
 
-pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut _CK_INFO) -> CK_RV>;
+pub type CK_C_GetInfo = ::std::option::Option<unsafe extern "C" fn(info: *mut CK_INFO) -> CK_RV>;
 
 pub type CK_C_GetFunctionList =
     ::std::option::Option<
-        unsafe extern "C" fn(function_list: *mut *mut _CK_FUNCTION_LIST) -> CK_RV,
+        unsafe extern "C" fn(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV,
     >;
 
 pub type CK_C_GetSlotList =
@@ -700,13 +700,13 @@ pub type CK_C_GetSlotList =
 
 pub type CK_C_GetSlotInfo = ::std::option::Option<
     unsafe extern "C" fn(slotID: CK_SLOT_ID,
-                         info: *mut _CK_SLOT_INFO)
+                         info: *mut CK_SLOT_INFO)
                          -> CK_RV,
 >;
 
 pub type CK_C_GetTokenInfo = ::std::option::Option<
     unsafe extern "C" fn(slotID: CK_SLOT_ID,
-                         info: *mut _CK_TOKEN_INFO)
+                         info: *mut CK_TOKEN_INFO)
                          -> CK_RV,
 >;
 
@@ -730,7 +730,7 @@ pub type CK_C_GetMechanismInfo =
     ::std::option::Option<
         unsafe extern "C" fn(slotID: CK_SLOT_ID,
                              type_: CK_MECHANISM_TYPE,
-                             info: *mut _CK_MECHANISM_INFO)
+                             info: *mut CK_MECHANISM_INFO)
                              -> CK_RV,
     >;
 
@@ -782,7 +782,7 @@ pub type CK_C_CloseAllSessions = ::std::option::Option<
 pub type CK_C_GetSessionInfo =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             info: *mut _CK_SESSION_INFO)
+                             info: *mut CK_SESSION_INFO)
                              -> CK_RV,
     >;
 
@@ -821,7 +821,7 @@ pub type CK_C_Logout = ::std::option::Option<
 pub type CK_C_CreateObject =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong,
                              object: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
@@ -831,7 +831,7 @@ pub type CK_C_CopyObject =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                              object: CK_OBJECT_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong,
                              new_object: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
@@ -856,7 +856,7 @@ pub type CK_C_GetAttributeValue =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                              object: CK_OBJECT_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
@@ -865,7 +865,7 @@ pub type CK_C_SetAttributeValue =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
                              object: CK_OBJECT_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
@@ -873,7 +873,7 @@ pub type CK_C_SetAttributeValue =
 pub type CK_C_FindObjectsInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong)
                              -> CK_RV,
     >;
@@ -894,7 +894,7 @@ pub type CK_C_FindObjectsFinal =
 pub type CK_C_EncryptInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
@@ -927,7 +927,7 @@ pub type CK_C_EncryptFinal =
 pub type CK_C_DecryptInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
@@ -963,7 +963,7 @@ pub type CK_C_DecryptFinal =
 pub type CK_C_DigestInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM)
+                             mechanism: *mut CK_MECHANISM)
                              -> CK_RV,
     >;
 
@@ -1001,7 +1001,7 @@ pub type CK_C_DigestFinal =
 
 pub type CK_C_SignInit = ::std::option::Option<
     unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                         mechanism: *mut _CK_MECHANISM,
+                         mechanism: *mut CK_MECHANISM,
                          key: CK_OBJECT_HANDLE)
                          -> CK_RV,
 >;
@@ -1035,7 +1035,7 @@ pub type CK_C_SignFinal =
 pub type CK_C_SignRecoverInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
@@ -1053,7 +1053,7 @@ pub type CK_C_SignRecover =
 pub type CK_C_VerifyInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
@@ -1087,7 +1087,7 @@ pub type CK_C_VerifyFinal =
 pub type CK_C_VerifyRecoverInit =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              key: CK_OBJECT_HANDLE)
                              -> CK_RV,
     >;
@@ -1145,8 +1145,8 @@ pub type CK_C_DecryptVerifyUpdate =
 pub type CK_C_GenerateKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
-                             templ: *mut _CK_ATTRIBUTE,
+                             mechanism: *mut CK_MECHANISM,
+                             templ: *mut CK_ATTRIBUTE,
                              count: ::std::os::raw::c_ulong,
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
@@ -1155,10 +1155,10 @@ pub type CK_C_GenerateKey =
 pub type CK_C_GenerateKeyPair =
     :: std :: option :: Option <
         unsafe extern "C" fn (session : CK_SESSION_HANDLE,
-            mechanism : * mut _CK_MECHANISM,
-            public_key_template : * mut _CK_ATTRIBUTE,
+            mechanism : * mut CK_MECHANISM,
+            public_key_template : * mut CK_ATTRIBUTE,
             public_key_attribute_count : :: std :: os :: raw :: c_ulong,
-            private_key_template : * mut _CK_ATTRIBUTE,
+            private_key_template : * mut CK_ATTRIBUTE,
             private_key_attribute_count : :: std :: os :: raw :: c_ulong,
             public_key : * mut CK_OBJECT_HANDLE,
             private_key : * mut CK_OBJECT_HANDLE) -> CK_RV > ;
@@ -1166,7 +1166,7 @@ pub type CK_C_GenerateKeyPair =
 pub type CK_C_WrapKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              wrapping_key: CK_OBJECT_HANDLE,
                              key: CK_OBJECT_HANDLE,
                              wrapped_key: *mut ::std::os::raw::c_uchar,
@@ -1177,11 +1177,11 @@ pub type CK_C_WrapKey =
 pub type CK_C_UnwrapKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              unwrapping_key: CK_OBJECT_HANDLE,
                              wrapped_key: *mut ::std::os::raw::c_uchar,
                              wrapped_key_len: ::std::os::raw::c_ulong,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              attribute_count: ::std::os::raw::c_ulong,
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
@@ -1190,9 +1190,9 @@ pub type CK_C_UnwrapKey =
 pub type CK_C_DeriveKey =
     ::std::option::Option<
         unsafe extern "C" fn(session: CK_SESSION_HANDLE,
-                             mechanism: *mut _CK_MECHANISM,
+                             mechanism: *mut CK_MECHANISM,
                              base_key: CK_OBJECT_HANDLE,
-                             templ: *mut _CK_ATTRIBUTE,
+                             templ: *mut CK_ATTRIBUTE,
                              attribute_count: ::std::os::raw::c_ulong,
                              key: *mut CK_OBJECT_HANDLE)
                              -> CK_RV,
@@ -1222,8 +1222,8 @@ pub type CK_C_CancelFunction =
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_FUNCTION_LIST {
-    pub version: _CK_VERSION,
+pub struct CK_FUNCTION_LIST {
+    pub version: CK_VERSION,
     pub C_Initialize: CK_C_Initialize,
     pub C_Finalize: CK_C_Finalize,
     pub C_GetInfo: CK_C_GetInfo,
@@ -1305,7 +1305,7 @@ pub type CK_UNLOCKMUTEX =
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CK_C_INITIALIZE_ARGS {
+pub struct CK_C_INITIALIZE_ARGS {
     pub pfnCreateMutex: CK_CREATEMUTEX,
     pub pfnDestroyMutex: CK_DESTROYMUTEX,
     pub pfnLockMutex: CK_LOCKMUTEX,
@@ -1326,34 +1326,23 @@ pub type CK_UTF8CHAR_PTR = *mut CK_UTF8CHAR;
 pub type CK_ULONG_PTR = *mut CK_ULONG;
 pub type CK_VOID_PTR = *mut ::std::os::raw::c_void;
 pub type CK_VOID_PTR_PTR = *mut *mut ::std::os::raw::c_void;
-pub type CK_VERSION = _CK_VERSION;
-pub type CK_VERSION_PTR = *mut _CK_VERSION;
-pub type CK_INFO = _CK_INFO;
-pub type CK_INFO_PTR = *mut _CK_INFO;
+pub type CK_VERSION_PTR = *mut CK_VERSION;
+pub type CK_INFO_PTR = *mut CK_INFO;
 pub type CK_SLOT_ID_PTR = *mut CK_SLOT_ID;
-pub type CK_SLOT_INFO = _CK_SLOT_INFO;
-pub type CK_SLOT_INFO_PTR = *mut _CK_SLOT_INFO;
-pub type CK_TOKEN_INFO = _CK_TOKEN_INFO;
-pub type CK_TOKEN_INFO_PTR = *mut _CK_TOKEN_INFO;
+pub type CK_SLOT_INFO_PTR = *mut CK_SLOT_INFO;
+pub type CK_TOKEN_INFO_PTR = *mut CK_TOKEN_INFO;
 pub type CK_SESSION_HANDLE_PTR = *mut CK_SESSION_HANDLE;
-pub type CK_SESSION_INFO = _CK_SESSION_INFO;
-pub type CK_SESSION_INFO_PTR = *mut _CK_SESSION_INFO;
+pub type CK_SESSION_INFO_PTR = *mut CK_SESSION_INFO;
 pub type CK_OBJECT_HANDLE_PTR = *mut CK_OBJECT_HANDLE;
 pub type CK_OBJECT_CLASS_PTR = *mut CK_OBJECT_CLASS;
-pub type CK_ATTRIBUTE = _CK_ATTRIBUTE;
-pub type CK_ATTRIBUTE_PTR = *mut _CK_ATTRIBUTE;
-pub type CK_DATE = _CK_DATE;
-pub type CK_DATE_PTR = *mut _CK_DATE;
+pub type CK_ATTRIBUTE_PTR = *mut CK_ATTRIBUTE;
+pub type CK_DATE_PTR = *mut CK_DATE;
 pub type CK_MECHANISM_TYPE_PTR = *mut CK_MECHANISM_TYPE;
-pub type CK_MECHANISM = _CK_MECHANISM;
-pub type CK_MECHANISM_PTR = *mut _CK_MECHANISM;
-pub type CK_MECHANISM_INFO = _CK_MECHANISM_INFO;
-pub type CK_MECHANISM_INFO_PTR = *mut _CK_MECHANISM_INFO;
-pub type CK_FUNCTION_LIST = _CK_FUNCTION_LIST;
-pub type CK_FUNCTION_LIST_PTR = *mut _CK_FUNCTION_LIST;
-pub type CK_FUNCTION_LIST_PTR_PTR = *mut *mut _CK_FUNCTION_LIST;
-pub type CK_C_INITIALIZE_ARGS = _CK_C_INITIALIZE_ARGS;
-pub type CK_C_INITIALIZE_ARGS_PTR = *mut _CK_C_INITIALIZE_ARGS;
+pub type CK_MECHANISM_PTR = *mut CK_MECHANISM;
+pub type CK_MECHANISM_INFO_PTR = *mut CK_MECHANISM_INFO;
+pub type CK_FUNCTION_LIST_PTR = *mut CK_FUNCTION_LIST;
+pub type CK_FUNCTION_LIST_PTR_PTR = *mut *mut CK_FUNCTION_LIST;
+pub type CK_C_INITIALIZE_ARGS_PTR = *mut CK_C_INITIALIZE_ARGS;
 
 
 

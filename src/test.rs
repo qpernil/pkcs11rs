@@ -459,41 +459,41 @@ fn bindgen_test_layout__CK_DATE() {
 #[test]
 fn bindgen_test_layout__CK_MECHANISM() {
     assert_eq!(
-        ::std::mem::size_of::<_CK_MECHANISM>(),
+        ::std::mem::size_of::<CK_MECHANISM>(),
         24usize,
-        concat!("Size of: ", stringify!(_CK_MECHANISM))
+        concat!("Size of: ", stringify!(CK_MECHANISM))
     );
     assert_eq!(
-        ::std::mem::align_of::<_CK_MECHANISM>(),
+        ::std::mem::align_of::<CK_MECHANISM>(),
         8usize,
-        concat!("Alignment of ", stringify!(_CK_MECHANISM))
+        concat!("Alignment of ", stringify!(CK_MECHANISM))
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM>())).mechanism as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM>())).mechanism as *const _ as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM),
+            stringify!(CK_MECHANISM),
             "::",
             stringify!(mechanism)
         )
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM>())).pParameter as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM>())).pParameter as *const _ as usize },
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM),
+            stringify!(CK_MECHANISM),
             "::",
             stringify!(pParameter)
         )
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM>())).ulParameterLen as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM>())).ulParameterLen as *const _ as usize },
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM),
+            stringify!(CK_MECHANISM),
             "::",
             stringify!(ulParameterLen)
         )
@@ -502,41 +502,41 @@ fn bindgen_test_layout__CK_MECHANISM() {
 #[test]
 fn bindgen_test_layout__CK_MECHANISM_INFO() {
     assert_eq!(
-        ::std::mem::size_of::<_CK_MECHANISM_INFO>(),
+        ::std::mem::size_of::<CK_MECHANISM_INFO>(),
         24usize,
-        concat!("Size of: ", stringify!(_CK_MECHANISM_INFO))
+        concat!("Size of: ", stringify!(CK_MECHANISM_INFO))
     );
     assert_eq!(
-        ::std::mem::align_of::<_CK_MECHANISM_INFO>(),
+        ::std::mem::align_of::<CK_MECHANISM_INFO>(),
         8usize,
-        concat!("Alignment of ", stringify!(_CK_MECHANISM_INFO))
+        concat!("Alignment of ", stringify!(CK_MECHANISM_INFO))
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM_INFO>())).ulMinKeySize as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM_INFO>())).ulMinKeySize as *const _ as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM_INFO),
+            stringify!(CK_MECHANISM_INFO),
             "::",
             stringify!(ulMinKeySize)
         )
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM_INFO>())).ulMaxKeySize as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM_INFO>())).ulMaxKeySize as *const _ as usize },
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM_INFO),
+            stringify!(CK_MECHANISM_INFO),
             "::",
             stringify!(ulMaxKeySize)
         )
     );
     assert_eq!(
-        unsafe { &(*(::std::ptr::null::<_CK_MECHANISM_INFO>())).flags as *const _ as usize },
+        unsafe { &(*(::std::ptr::null::<CK_MECHANISM_INFO>())).flags as *const _ as usize },
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(_CK_MECHANISM_INFO),
+            stringify!(CK_MECHANISM_INFO),
             "::",
             stringify!(flags)
         )
