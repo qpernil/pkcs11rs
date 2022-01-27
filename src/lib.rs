@@ -15,6 +15,8 @@ use error::*;
 pub mod pkcs11;
 use pkcs11::*;
 
+mod test;
+
 fn str_pad(src: &str, dst: &mut [u8]) {
     let src = src.as_bytes();
     let src_len = src.len();
