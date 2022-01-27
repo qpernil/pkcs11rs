@@ -774,35 +774,35 @@ impl Context {
         str_pad("Yubico", &mut info.manufacturerID);
         Ok(())
     }
-    fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&Box<dyn Slot>, Error> {
+    fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&dyn Slot, Error> {
         match self.slots.get(&slot_id) {
-            Some(slot) => Ok(slot),
+            Some(slot) => Ok(slot.as_ref()),
             None => Err(CKR_SLOT_ID_INVALID.into())
         }
     }
-    fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut Box<dyn Slot>, Error> {
+    fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut dyn Slot, Error> {
         match self.slots.get_mut(&slot_id) {
-            Some(slot) => Ok(slot),
+            Some(slot) => Ok(slot.as_mut()),
             None => Err(CKR_SLOT_ID_INVALID.into())
         }
     }
-    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &Box<dyn Session>)> {
+    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&dyn Slot, &dyn Session)> {
         let session = self.sessions.get(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
-        Some((slot, session))
+        Some((slot.as_ref(), session.as_ref()))
     }
-    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &Box<dyn Session>), Error> {
+    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&dyn Slot, &dyn Session), Error> {
         match self.get_session_(session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into())
         }
     }
-    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&Box<dyn Slot>, &mut Box<dyn Session>)> {
+    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&dyn Slot, &mut dyn Session)> {
         let session = self.sessions.get_mut(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
-        Some((slot, session))
+        Some((slot.as_ref(), session.as_mut()))
     }
-    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&Box<dyn Slot>, &mut Box<dyn Session>), Error> {
+    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&dyn Slot, &mut dyn Session), Error> {
         match self.get_session_mut_(session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into())
@@ -884,7 +884,7 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called with {:?}", pReserved);
     unsafe {
         match G_CONTEXT.as_mut() {
-            Some(_ctx) => {
+            Some(_) => {
                 G_CONTEXT = None;
                 CKR_OK
             },
