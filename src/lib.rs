@@ -7,7 +7,7 @@ extern crate curl;
 extern crate openssl;
 
 use std::{ptr, slice, collections::HashMap, time::Duration, rc::Rc, cell::{RefCell}, io::Write};
-use rusb::{UsbContext, DeviceHandle, Version};
+use rusb::UsbContext;
 
 pub mod error;
 use error::*;
@@ -449,8 +449,8 @@ impl std::fmt::Debug for dyn Connector {
 
 #[derive(Debug)]
 struct UsbConnector {
-    handle: DeviceHandle<rusb::Context>,
-    version: Version,
+    handle: rusb::DeviceHandle<rusb::Context>,
+    version: rusb::Version,
     manufacturer: String,
     product: String,
     serial: String,

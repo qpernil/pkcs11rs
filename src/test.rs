@@ -502,7 +502,7 @@ fn bindgen_test_layout_CK_MECHANISM() {
     );
 }
 #[test]
-fn bindgen_test_layout__CK_MECHANISM_INFO() {
+fn bindgen_test_layout_CK_MECHANISM_INFO() {
     assert_eq!(
         ::std::mem::size_of::<CK_MECHANISM_INFO>(),
         24usize,
@@ -720,7 +720,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_PSS_PARAMS() {
     );
 }
 #[test]
-fn bindgen_test_layout__CK_VERSION() {
+fn bindgen_test_layout_CK_VERSION() {
     assert_eq!(
         ::std::mem::size_of::<CK_VERSION>(),
         2usize,
@@ -753,7 +753,7 @@ fn bindgen_test_layout__CK_VERSION() {
     );
 }
 #[test]
-fn bindgen_test_layout__CK_C_INITIALIZE_ARGS() {
+fn bindgen_test_layout_CK_C_INITIALIZE_ARGS() {
     assert_eq!(
         ::std::mem::size_of::<CK_C_INITIALIZE_ARGS>(),
         48usize,
@@ -832,7 +832,7 @@ fn bindgen_test_layout__CK_C_INITIALIZE_ARGS() {
     );
 }
 #[test]
-fn bindgen_test_layout__CK_FUNCTION_LIST() {
+fn bindgen_test_layout_CK_FUNCTION_LIST() {
     assert_eq!(
         ::std::mem::size_of::<CK_FUNCTION_LIST>(),
         552usize,
