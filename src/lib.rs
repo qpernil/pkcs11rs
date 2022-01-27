@@ -864,7 +864,7 @@ impl Context {
 static mut G_CONTEXT: Option<Context> = None;
 
 #[no_mangle]
-pub extern "C" fn C_Initialize(init_args: *mut _CK_C_INITIALIZE_ARGS) -> CK_RV {
+pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
     unsafe {       
         match G_CONTEXT.as_mut() {
@@ -891,100 +891,8 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     }.into()
 }
 
-static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
-    version : CK_VERSION {major: 2, minor: 40},
-
-    C_Initialize: Some(C_Initialize),
-    C_Finalize: Some(C_Finalize),
-    C_GetInfo: Some(C_GetInfo),
-    C_GetFunctionList: Some(C_GetFunctionList),
-
-    C_GetSlotList: Some(C_GetSlotList),
-    C_GetSlotInfo: Some(C_GetSlotInfo),
-    C_GetTokenInfo: Some(C_GetTokenInfo),
-
-    C_GetMechanismList: Some(C_GetMechanismList),
-    C_GetMechanismInfo: Some(C_GetMechanismInfo),
-
-    C_InitToken: Some(C_InitToken),
-    C_InitPIN: Some(C_InitPIN),
-    C_SetPIN: Some(C_SetPIN),
-
-    C_OpenSession: Some(C_OpenSession),
-    C_CloseSession: Some(C_CloseSession),
-    C_CloseAllSessions: Some(C_CloseAllSessions),
-    C_GetSessionInfo: Some(C_GetSessionInfo),
-
-    C_GetOperationState: Some(C_GetOperationState),
-    C_SetOperationState: Some(C_SetOperationState),
-
-    C_Login: Some(C_Login),
-    C_Logout: Some(C_Logout),
-
-    C_CreateObject: Some(C_CreateObject),
-    C_CopyObject: Some(C_CopyObject),
-    C_DestroyObject: Some(C_DestroyObject),
-    C_GetObjectSize: Some(C_GetObjectSize),
-
-    C_GetAttributeValue: Some(C_GetAttributeValue),
-    C_SetAttributeValue: Some(C_SetAttributeValue),
-
-    C_FindObjectsInit: Some(C_FindObjectsInit),
-    C_FindObjects: Some(C_FindObjects),
-    C_FindObjectsFinal: Some(C_FindObjectsFinal),
-
-    C_EncryptInit: Some(C_EncryptInit),
-    C_Encrypt: Some(C_Encrypt),
-    C_EncryptUpdate: Some(C_EncryptUpdate),
-    C_EncryptFinal: Some(C_EncryptFinal),
-
-    C_DecryptInit: Some(C_DecryptInit),
-    C_Decrypt: Some(C_Decrypt),
-    C_DecryptUpdate: Some(C_DecryptUpdate),
-    C_DecryptFinal: Some(C_DecryptFinal),
-
-    C_DigestInit: Some(C_DigestInit),
-    C_Digest: Some(C_Digest),
-    C_DigestUpdate: Some(C_DigestUpdate),
-    C_DigestKey: Some(C_DigestKey),
-    C_DigestFinal: Some(C_DigestFinal),
-
-    C_SignInit: Some(C_SignInit),
-    C_Sign: Some(C_Sign),
-    C_SignUpdate: Some(C_SignUpdate),
-    C_SignFinal: Some(C_SignFinal),
-    C_SignRecoverInit: Some(C_SignRecoverInit),
-    C_SignRecover: Some(C_SignRecover),
-
-    C_VerifyInit: Some(C_VerifyInit),
-    C_Verify: Some(C_Verify),
-    C_VerifyUpdate: Some(C_VerifyUpdate),
-    C_VerifyFinal: Some(C_VerifyFinal),
-    C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
-    C_VerifyRecover: Some(C_VerifyRecover),
-
-    C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
-    C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
-    C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
-    C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
-
-    C_GenerateKey: Some(C_GenerateKey),
-    C_GenerateKeyPair: Some(C_GenerateKeyPair),
-
-    C_WrapKey: Some(C_WrapKey),
-    C_UnwrapKey: Some(C_UnwrapKey),
-    C_DeriveKey: Some(C_DeriveKey),
-
-    C_SeedRandom: Some(C_SeedRandom),
-    C_GenerateRandom: Some(C_GenerateRandom),
-
-    C_GetFunctionStatus: Some(C_GetFunctionStatus),
-    C_CancelFunction: Some(C_CancelFunction),
-    C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
-};
-
 #[no_mangle]
-pub extern "C" fn C_GetFunctionList(function_list: *mut *mut _CK_FUNCTION_LIST) -> CK_RV {
+pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     unsafe {
         eprintln!("C_GetFunctionList called with {:?}", (function_list, *function_list));
         *function_list = &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
@@ -1000,7 +908,7 @@ fn get_info(
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetInfo(info_ptr: *mut _CK_INFO) -> CK_RV {
+pub extern "C" fn C_GetInfo(info_ptr: *mut CK_INFO) -> CK_RV {
     eprintln!("C_GetInfo called with {:?}", info_ptr);
     map(get_info(info_ptr))
 }
@@ -1057,7 +965,7 @@ fn get_slot_info(
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_SLOT_INFO) -> CK_RV {
+pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO) -> CK_RV {
     eprintln!("C_GetSlotInfo called with {:?}", (slotID, info_ptr));
     map(get_slot_info(slotID, info_ptr))
 }
@@ -1070,7 +978,7 @@ fn get_token_info(
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut _CK_TOKEN_INFO) -> CK_RV {
+pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_TOKEN_INFO) -> CK_RV {
     eprintln!("C_GetTokenInfo called with {:?}", (slotID, info_ptr));
     map(get_token_info(slotID, info_ptr))
 }
@@ -1125,7 +1033,7 @@ pub extern "C" fn C_GetMechanismList(
 pub extern "C" fn C_GetMechanismInfo(
     slotID: CK_SLOT_ID,
     type_: CK_MECHANISM_TYPE,
-    info_ptr: *mut _CK_MECHANISM_INFO,
+    info_ptr: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
     eprintln!("C_GetMechanismInfo called with {:?}", (slotID, type_, info_ptr));
     unsafe {
@@ -1256,7 +1164,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut _CK_SESSION_INFO) -> CK_RV {
+pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut CK_SESSION_INFO) -> CK_RV {
     eprintln!("C_GetSessionInfo called with {:?}", session_handle);
     unsafe {
         match G_CONTEXT.as_ref() {
@@ -1349,7 +1257,7 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CreateObject(
     _session: CK_SESSION_HANDLE,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
     _object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
@@ -1360,7 +1268,7 @@ pub extern "C" fn C_CreateObject(
 pub extern "C" fn C_CopyObject(
     _session: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
     _new_object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
@@ -1385,7 +1293,7 @@ pub extern "C" fn C_GetObjectSize(
 pub extern "C" fn C_GetAttributeValue(
     _session: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1395,7 +1303,7 @@ pub extern "C" fn C_GetAttributeValue(
 pub extern "C" fn C_SetAttributeValue(
     _session: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1404,7 +1312,7 @@ pub extern "C" fn C_SetAttributeValue(
 #[no_mangle]
 pub extern "C" fn C_FindObjectsInit(
     session_handle: CK_SESSION_HANDLE,
-    templ: *mut _CK_ATTRIBUTE,
+    templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_FindObjectsInit called with {:?}", (session_handle, templ, count));
@@ -1484,7 +1392,7 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
 #[no_mangle]
 pub extern "C" fn C_EncryptInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1524,7 +1432,7 @@ pub extern "C" fn C_EncryptFinal(
 #[no_mangle]
 pub extern "C" fn C_DecryptInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1564,7 +1472,7 @@ pub extern "C" fn C_DecryptFinal(
 #[no_mangle]
 pub extern "C" fn C_DigestInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM) -> CK_RV {
+    _mechanism: *mut CK_MECHANISM) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
 
@@ -1607,7 +1515,7 @@ pub extern "C" fn C_DigestFinal(
 #[no_mangle]
 pub extern "C" fn C_SignInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1645,7 +1553,7 @@ pub extern "C" fn C_SignFinal(
 #[no_mangle]
 pub extern "C" fn C_SignRecoverInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1665,7 +1573,7 @@ pub extern "C" fn C_SignRecover(
 #[no_mangle]
 pub extern "C" fn C_VerifyInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1703,7 +1611,7 @@ pub extern "C" fn C_VerifyFinal(
 #[no_mangle]
 pub extern "C" fn C_VerifyRecoverInit(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
@@ -1767,8 +1675,8 @@ pub extern "C" fn C_DecryptVerifyUpdate(
 #[no_mangle]
 pub extern "C" fn C_GenerateKey(
     session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut _CK_MECHANISM,
-    templ: *mut _CK_ATTRIBUTE,
+    mechanism: *mut CK_MECHANISM,
+    templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
@@ -1804,10 +1712,10 @@ pub extern "C" fn C_GenerateKey(
 #[no_mangle]
 pub extern "C" fn C_GenerateKeyPair(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
-    _public_key_template: *mut _CK_ATTRIBUTE,
+    _mechanism: *mut CK_MECHANISM,
+    _public_key_template: *mut CK_ATTRIBUTE,
     _public_key_attribute_count: ::std::os::raw::c_ulong,
-    _private_key_template: *mut _CK_ATTRIBUTE,
+    _private_key_template: *mut CK_ATTRIBUTE,
     _private_key_attribute_count: ::std::os::raw::c_ulong,
     _public_key: *mut CK_OBJECT_HANDLE,
     _private_key: *mut CK_OBJECT_HANDLE,
@@ -1818,7 +1726,7 @@ pub extern "C" fn C_GenerateKeyPair(
 #[no_mangle]
 pub extern "C" fn C_WrapKey(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _wrapping_key: CK_OBJECT_HANDLE,
     _key: CK_OBJECT_HANDLE,
     _wrapped_key: *mut ::std::os::raw::c_uchar,
@@ -1830,11 +1738,11 @@ pub extern "C" fn C_WrapKey(
 #[no_mangle]
 pub extern "C" fn C_UnwrapKey(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _unwrapping_key: CK_OBJECT_HANDLE,
     _wrapped_key: *mut ::std::os::raw::c_uchar,
     _wrapped_key_len: ::std::os::raw::c_ulong,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _attribute_count: ::std::os::raw::c_ulong,
     _key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
@@ -1844,9 +1752,9 @@ pub extern "C" fn C_UnwrapKey(
 #[no_mangle]
 pub extern "C" fn C_DeriveKey(
     _session: CK_SESSION_HANDLE,
-    _mechanism: *mut _CK_MECHANISM,
+    _mechanism: *mut CK_MECHANISM,
     _base_key: CK_OBJECT_HANDLE,
-    _templ: *mut _CK_ATTRIBUTE,
+    _templ: *mut CK_ATTRIBUTE,
     _attribute_count: ::std::os::raw::c_ulong,
     _key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
@@ -1882,3 +1790,95 @@ pub extern "C" fn C_GetFunctionStatus(_session: CK_SESSION_HANDLE) -> CK_RV {
 pub extern "C" fn C_CancelFunction(_session: CK_SESSION_HANDLE) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
+
+static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
+    version : CK_VERSION {major: 2, minor: 40},
+
+    C_Initialize: Some(C_Initialize),
+    C_Finalize: Some(C_Finalize),
+    C_GetInfo: Some(C_GetInfo),
+    C_GetFunctionList: Some(C_GetFunctionList),
+
+    C_GetSlotList: Some(C_GetSlotList),
+    C_GetSlotInfo: Some(C_GetSlotInfo),
+    C_GetTokenInfo: Some(C_GetTokenInfo),
+
+    C_GetMechanismList: Some(C_GetMechanismList),
+    C_GetMechanismInfo: Some(C_GetMechanismInfo),
+
+    C_InitToken: Some(C_InitToken),
+    C_InitPIN: Some(C_InitPIN),
+    C_SetPIN: Some(C_SetPIN),
+
+    C_OpenSession: Some(C_OpenSession),
+    C_CloseSession: Some(C_CloseSession),
+    C_CloseAllSessions: Some(C_CloseAllSessions),
+    C_GetSessionInfo: Some(C_GetSessionInfo),
+
+    C_GetOperationState: Some(C_GetOperationState),
+    C_SetOperationState: Some(C_SetOperationState),
+
+    C_Login: Some(C_Login),
+    C_Logout: Some(C_Logout),
+
+    C_CreateObject: Some(C_CreateObject),
+    C_CopyObject: Some(C_CopyObject),
+    C_DestroyObject: Some(C_DestroyObject),
+    C_GetObjectSize: Some(C_GetObjectSize),
+
+    C_GetAttributeValue: Some(C_GetAttributeValue),
+    C_SetAttributeValue: Some(C_SetAttributeValue),
+
+    C_FindObjectsInit: Some(C_FindObjectsInit),
+    C_FindObjects: Some(C_FindObjects),
+    C_FindObjectsFinal: Some(C_FindObjectsFinal),
+
+    C_EncryptInit: Some(C_EncryptInit),
+    C_Encrypt: Some(C_Encrypt),
+    C_EncryptUpdate: Some(C_EncryptUpdate),
+    C_EncryptFinal: Some(C_EncryptFinal),
+
+    C_DecryptInit: Some(C_DecryptInit),
+    C_Decrypt: Some(C_Decrypt),
+    C_DecryptUpdate: Some(C_DecryptUpdate),
+    C_DecryptFinal: Some(C_DecryptFinal),
+
+    C_DigestInit: Some(C_DigestInit),
+    C_Digest: Some(C_Digest),
+    C_DigestUpdate: Some(C_DigestUpdate),
+    C_DigestKey: Some(C_DigestKey),
+    C_DigestFinal: Some(C_DigestFinal),
+
+    C_SignInit: Some(C_SignInit),
+    C_Sign: Some(C_Sign),
+    C_SignUpdate: Some(C_SignUpdate),
+    C_SignFinal: Some(C_SignFinal),
+    C_SignRecoverInit: Some(C_SignRecoverInit),
+    C_SignRecover: Some(C_SignRecover),
+
+    C_VerifyInit: Some(C_VerifyInit),
+    C_Verify: Some(C_Verify),
+    C_VerifyUpdate: Some(C_VerifyUpdate),
+    C_VerifyFinal: Some(C_VerifyFinal),
+    C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
+    C_VerifyRecover: Some(C_VerifyRecover),
+
+    C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
+    C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
+    C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
+    C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
+
+    C_GenerateKey: Some(C_GenerateKey),
+    C_GenerateKeyPair: Some(C_GenerateKeyPair),
+
+    C_WrapKey: Some(C_WrapKey),
+    C_UnwrapKey: Some(C_UnwrapKey),
+    C_DeriveKey: Some(C_DeriveKey),
+
+    C_SeedRandom: Some(C_SeedRandom),
+    C_GenerateRandom: Some(C_GenerateRandom),
+
+    C_GetFunctionStatus: Some(C_GetFunctionStatus),
+    C_CancelFunction: Some(C_CancelFunction),
+    C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
+};
