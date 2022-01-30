@@ -117,6 +117,39 @@ trait Slot {
     fn label(&self) -> String {
         format!("{} #{}", self.product(), self.serial())
     }
+
+    fn format_slot_info(&self, info: &mut CK_SLOT_INFO) {
+        info.firmwareVersion.major = 1;
+        info.firmwareVersion.minor = 0;
+        info.hardwareVersion.major = 1;
+        info.hardwareVersion.minor = 0;
+        str_pad(&self.name(), &mut info.slotDescription);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        info.flags = self.flags();
+    }
+
+    fn format_token_info(&self, info: &mut CK_TOKEN_INFO) {
+        str_pad(&self.label(), &mut info.label);
+        str_pad(self.manufacturer(), &mut info.manufacturerID);
+        str_pad(self.product(), &mut info.model);
+        str_pad(self.serial(), &mut info.serialNumber);
+        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        info.ulMaxSessionCount = 0;
+        info.ulSessionCount = 0;
+        info.ulMaxRwSessionCount = 0;
+        info.ulRwSessionCount = 0;
+        info.ulMaxPinLen = 34;
+        info.ulMinPinLen = 4;
+        info.ulTotalPublicMemory = 0;
+        info.ulFreePublicMemory = 0;
+        info.ulTotalPrivateMemory = 0;
+        info.ulFreePrivateMemory = 0;
+        info.hardwareVersion.major = self.major();
+        info.hardwareVersion.minor = self.minor();
+        info.firmwareVersion.major = self.major();
+        info.firmwareVersion.minor = self.minor();
+        info.utcTime.fill(0);
+    }
 }
 
 impl std::fmt::Debug for dyn Slot {
@@ -164,38 +197,13 @@ impl Slot for YubiHsmSlot {
         Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
-        info.firmwareVersion.major = 1;
-        info.firmwareVersion.minor = 0;
-        info.hardwareVersion.major = 1;
-        info.hardwareVersion.minor = 0;
-        str_pad(&self.name(), &mut info.slotDescription);
-        str_pad(self.manufacturer(), &mut info.manufacturerID);
-        info.flags = self.flags();
+        self.format_slot_info(info);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(6, &[], timeout)?;
-        str_pad(&self.label(), &mut info.label);
-        str_pad(self.manufacturer(), &mut info.manufacturerID);
-        str_pad(self.product(), &mut info.model);
-        str_pad(self.serial(), &mut info.serialNumber);
-        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
-        info.ulMaxSessionCount = 0;
-        info.ulSessionCount = 0;
-        info.ulMaxRwSessionCount = 0;
-        info.ulRwSessionCount = 0;
-        info.ulMaxPinLen = 34;
-        info.ulMinPinLen = 4;
-        info.ulTotalPublicMemory = 0;
-        info.ulFreePublicMemory = 0;
-        info.ulTotalPrivateMemory = 0;
-        info.ulFreePrivateMemory = 0;
-        info.hardwareVersion.major = self.major();
-        info.hardwareVersion.minor = self.minor();
-        info.firmwareVersion.major = self.major();
-        info.firmwareVersion.minor = self.minor();
-        info.utcTime.fill(0);
+        self.format_token_info(info);
         Ok(())
     }
 }
@@ -254,39 +262,14 @@ impl Slot for YubiKeySlot {
         Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
-        info.firmwareVersion.major = 1;
-        info.firmwareVersion.minor = 0;
-        info.hardwareVersion.major = 1;
-        info.hardwareVersion.minor = 0;
-        str_pad(&self.name(), &mut info.slotDescription);
-        str_pad(self.manufacturer(), &mut info.manufacturerID);
-        info.flags = self.flags();
+        self.format_slot_info(info);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         self.connector.send(&send_buffer, timeout)?;
-        str_pad(&self.label(), &mut info.label);
-        str_pad(self.manufacturer(), &mut info.manufacturerID);
-        str_pad(self.product(), &mut info.model);
-        str_pad(self.serial(), &mut info.serialNumber);
-        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
-        info.ulMaxSessionCount = 0;
-        info.ulSessionCount = 0;
-        info.ulMaxRwSessionCount = 0;
-        info.ulRwSessionCount = 0;
-        info.ulMaxPinLen = 34;
-        info.ulMinPinLen = 4;
-        info.ulTotalPublicMemory = 0;
-        info.ulFreePublicMemory = 0;
-        info.ulTotalPrivateMemory = 0;
-        info.ulFreePrivateMemory = 0;
-        info.hardwareVersion.major = self.major();
-        info.hardwareVersion.minor = self.minor();
-        info.firmwareVersion.major = self.major();
-        info.firmwareVersion.minor = self.minor();
-        info.utcTime.fill(0);
+        self.format_token_info(info);
         Ok(())
     }
 }
@@ -422,7 +405,6 @@ impl Session for YubiKeySession {
 
 trait Connector {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
-    fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
     fn serial(&self) -> &str;
@@ -431,6 +413,10 @@ trait Connector {
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
+
+    fn name(&self) -> String {
+        format!("{} {} {}", self.manufacturer(), self.product(), self.serial())
+    }
 
     fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
         let mut receive_buffer = vec![0u8; self.buffer_size()];
@@ -461,9 +447,6 @@ struct UsbConnector {
 impl Connector for UsbConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
-    }
-    fn name(&self) -> String {
-        format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
     fn manufacturer(&self) -> &str {
         &self.manufacturer
@@ -602,39 +585,27 @@ impl Connector for CurlConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
-
-    fn name(&self) -> String {
-        format!("{} {} {}", self.manufacturer(), self.product(), self.serial())
-    }
-
     fn manufacturer(&self) -> &str {
         "Yubico"
     }
-
     fn product(&self) -> &str {
         "CurlConnector"
     }
-
     fn serial(&self) -> &str {
         &self.serial
     }
-
     fn major(&self) -> u8 {
         0
     }
-
     fn minor(&self) -> u8 {
         1
     }
-
     fn is_present(&self) -> bool {
         self.connected
     }
-
     fn buffer_size(&self) -> usize {
         2048
     }
-
     fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
         let mut write_len = 0usize;
         let mut read_len = 0usize;
