@@ -29,7 +29,7 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn next_key<T>(map: &HashMap<u64, T>, min: u64) -> u64 {
+fn next_key<T>(map: &HashMap<::std::os::raw::c_ulong, T>, min: ::std::os::raw::c_ulong) -> ::std::os::raw::c_ulong {
     match map.keys().max() {
         Some(k) => k + 1,
         None => min
