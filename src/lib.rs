@@ -258,7 +258,7 @@ impl Slot for YubiKeySlot {
     fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        self.connector.send(&send_buffer, timeout)?;
+        self.send_cmd(&send_buffer, timeout)?;
         Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
@@ -268,9 +268,15 @@ impl Slot for YubiKeySlot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        self.connector.send(&send_buffer, timeout)?;
+        self.send_cmd(&send_buffer, timeout)?;
         self.format_token_info(info);
         Ok(())
+    }
+}
+
+impl YubiKeySlot {
+    fn send_cmd(&self, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.connector.send(data, timeout)
     }
 }
 
@@ -372,7 +378,7 @@ impl Session for YubiKeySession {
     fn state(&self) -> CK_STATE {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if self.connector.send(&send_buffer, timeout).is_ok() {
+        if self.send_cmd(&send_buffer, timeout).is_ok() {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
@@ -381,7 +387,7 @@ impl Session for YubiKeySession {
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        if self.connector.send(&send_buffer, timeout).is_ok() {
+        if self.send_cmd(&send_buffer, timeout).is_ok() {
             let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
             self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
@@ -393,17 +399,23 @@ impl Session for YubiKeySession {
     fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        self.connector.send(&send_buffer, timeout).map(|_| ())
+        self.send_cmd(&send_buffer, timeout).map(|_| ())
     }
     fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        self.connector.send(&send_buffer, timeout).map(|_| ())
+        self.send_cmd(&send_buffer, timeout).map(|_| ())
     }
     fn generate(&self) ->Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        self.connector.send(&send_buffer, timeout).map(|_| ())
+        self.send_cmd(&send_buffer, timeout).map(|_| ())
+    }
+}
+
+impl YubiKeySession {
+    fn send_cmd(&self, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        self.connector.send(data, timeout)
     }
 }
 
