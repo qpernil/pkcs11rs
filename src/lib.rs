@@ -253,7 +253,7 @@ impl Slot for YubiKeySlot {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone()})
+        Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone(), session: None})
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -355,7 +355,8 @@ impl YubiHsmSession {
 struct YubiKeySession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
-    connector: Rc<dyn Connector>
+    connector: Rc<dyn Connector>,
+    session: Option<Scp03Session>
 }
 
 impl Session for YubiKeySession {
@@ -381,6 +382,9 @@ impl Session for YubiKeySession {
         let timeout = Duration::from_millis(100);
         let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         if self.connector.send(&send_buffer, timeout).is_ok() {
+            let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+            let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+            self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
             Ok(())
         } else {
             Err(CKR_PIN_INCORRECT.into())
@@ -1193,7 +1197,7 @@ fn login(
 ) -> Result<(), Error> {
     let session = get_ctx_mut()?.get_session_mut(session_handle)?;
     let pin = from_raw_parts(pin, pin_len as usize)?;
-    eprintln!("login {:?} {:?}", session, pin);
+    eprintln!("login {:?} {:?}", session.1, pin);
     session.1.login(pin)
 }
 
@@ -1208,23 +1212,18 @@ pub extern "C" fn C_Login(
     map(login(session_handle, user_type, pin, pin_len))
 }
 
+fn logout(
+    session_handle: CK_SESSION_HANDLE
+) -> Result<(), Error> {
+    let session = get_ctx_mut()?.get_session_mut(session_handle)?;
+    eprintln!("logout {:?}", session.1);
+    session.1.logout()    
+}
+
 #[no_mangle]
 pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_Logout called with {:?}", session_handle);
-    unsafe {
-        match G_CONTEXT.as_mut() {
-            Some(ctx) => {
-                match ctx.get_session_mut_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_Logout {:?}", session);
-                        map(session.1.logout())
-                    }
-                    None => CKR_SESSION_HANDLE_INVALID as CK_RV
-                }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
-        }
-    }
+    map(logout(session_handle))
 }
 
 #[no_mangle]
