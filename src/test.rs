@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::pkcs11::*;
 
 #[test]
