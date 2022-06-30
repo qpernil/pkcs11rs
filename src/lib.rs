@@ -15,6 +15,7 @@ use error::*;
 pub mod pkcs11;
 use pkcs11::*;
 
+#[cfg(test)]
 mod test;
 
 fn str_pad(src: &str, dst: &mut [u8]) {
@@ -37,43 +38,19 @@ fn next_key<T>(map: &HashMap<::std::os::raw::c_ulong, T>, min: ::std::os::raw::c
 }
 
 fn get_ctx() -> Result<&'static Context, Error> {
-    unsafe {
-        if let Some(context) = G_CONTEXT.as_ref() {
-            Ok(context)
-        } else {
-            Err(CKR_CRYPTOKI_NOT_INITIALIZED.into())
-        }
-    }
+    unsafe { G_CONTEXT.as_ref() }.ok_or(CKR_CRYPTOKI_NOT_INITIALIZED.into())
 }
 
 fn get_ctx_mut() -> Result<&'static mut Context, Error> {
-    unsafe {
-        if let Some(context) = G_CONTEXT.as_mut() {
-            Ok(context)
-        } else {
-            Err(CKR_CRYPTOKI_NOT_INITIALIZED.into())
-        }
-    }
+    unsafe { G_CONTEXT.as_mut() }.ok_or(CKR_CRYPTOKI_NOT_INITIALIZED.into())
 }
 
 fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
-    unsafe {
-        if let Some(p) = ptr.as_ref() {
-            Ok(p)
-        } else {
-            Err(CKR_ARGUMENTS_BAD.into())
-        }
-    }
+    unsafe { ptr.as_ref() }.ok_or(CKR_ARGUMENTS_BAD.into())
 }
 
 fn as_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, Error> {
-    unsafe {
-        if let Some(p) = ptr.as_mut() {
-            Ok(p)
-        } else {
-            Err(CKR_ARGUMENTS_BAD.into())
-        }
-    }
+    unsafe { ptr.as_mut() }.ok_or(CKR_ARGUMENTS_BAD.into())
 }
 
 fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
@@ -855,7 +832,7 @@ static mut G_CONTEXT: Option<Context> = None;
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
-    unsafe {       
+    unsafe {
         match G_CONTEXT.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED,
             None => {
