@@ -829,6 +829,14 @@ impl Context {
 
 static mut G_CONTEXT: Option<Context> = None;
 
+fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    let result: Result<(), Error> = (|| {
+        get_ctx()?._get_session(session_handle)?;
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    })();
+    map(result)
+}
+
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
@@ -1052,22 +1060,22 @@ pub extern "C" fn C_InitToken(
 
 #[no_mangle]
 pub extern "C" fn C_InitPIN(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _pin: *mut ::std::os::raw::c_uchar,
     _pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SetPIN(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _old_pin: *mut ::std::os::raw::c_uchar,
     _old_len: ::std::os::raw::c_ulong,
     _new_pin: *mut ::std::os::raw::c_uchar,
     _new_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
@@ -1177,22 +1185,22 @@ pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: 
 
 #[no_mangle]
 pub extern "C" fn C_GetOperationState(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _operation_state: *mut ::std::os::raw::c_uchar,
     _operation_state_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SetOperationState(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _operation_state: *mut ::std::os::raw::c_uchar,
     _operation_state_len: ::std::os::raw::c_ulong,
     _encryption_key: CK_OBJECT_HANDLE,
     _authentiation_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 fn login(
@@ -1234,57 +1242,57 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 
 #[no_mangle]
 pub extern "C" fn C_CreateObject(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
     _object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_CopyObject(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
     _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
     _new_object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
-pub extern "C" fn C_DestroyObject(_session: CK_SESSION_HANDLE, _object: CK_OBJECT_HANDLE) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+pub extern "C" fn C_DestroyObject(session_handle: CK_SESSION_HANDLE, _object: CK_OBJECT_HANDLE) -> CK_RV {
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_GetObjectSize(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
     _size: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_GetAttributeValue(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
     _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SetAttributeValue(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _object: CK_OBJECT_HANDLE,
     _templ: *mut CK_ATTRIBUTE,
     _count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
@@ -1373,285 +1381,285 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
 
 #[no_mangle]
 pub extern "C" fn C_EncryptInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Encrypt(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _encrypted_data: *mut ::std::os::raw::c_uchar,
     _encrypted_data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_EncryptUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_EncryptFinal(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _last_encrypted_part: *mut ::std::os::raw::c_uchar,
     _last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Decrypt(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _encrypted_data: *mut ::std::os::raw::c_uchar,
     _encrypted_data_len: ::std::os::raw::c_ulong,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: ::std::os::raw::c_ulong,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptFinal(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _last_part: *mut ::std::os::raw::c_uchar,
     _last_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Digest(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _digest: *mut ::std::os::raw::c_uchar,
     _digest_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestKey(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _key: CK_OBJECT_HANDLE) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestFinal(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _digest: *mut ::std::os::raw::c_uchar,
     _digest_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Sign(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignFinal(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignRecoverInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignRecover(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Verify(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyFinal(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyRecoverInit(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyRecover(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: ::std::os::raw::c_ulong,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestEncryptUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptDigestUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: ::std::os::raw::c_ulong,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignEncryptUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptVerifyUpdate(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: ::std::os::raw::c_ulong,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
@@ -1699,7 +1707,7 @@ pub extern "C" fn C_GenerateKey(
 
 #[no_mangle]
 pub extern "C" fn C_GenerateKeyPair(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _public_key_template: *mut CK_ATTRIBUTE,
     _public_key_attribute_count: ::std::os::raw::c_ulong,
@@ -1708,24 +1716,24 @@ pub extern "C" fn C_GenerateKeyPair(
     _public_key: *mut CK_OBJECT_HANDLE,
     _private_key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_WrapKey(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _wrapping_key: CK_OBJECT_HANDLE,
     _key: CK_OBJECT_HANDLE,
     _wrapped_key: *mut ::std::os::raw::c_uchar,
     _wrapped_key_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_UnwrapKey(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _unwrapping_key: CK_OBJECT_HANDLE,
     _wrapped_key: *mut ::std::os::raw::c_uchar,
@@ -1734,19 +1742,19 @@ pub extern "C" fn C_UnwrapKey(
     _attribute_count: ::std::os::raw::c_ulong,
     _key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
 pub extern "C" fn C_DeriveKey(
-    _session: CK_SESSION_HANDLE,
+    session_handle: CK_SESSION_HANDLE,
     _mechanism: *mut CK_MECHANISM,
     _base_key: CK_OBJECT_HANDLE,
     _templ: *mut CK_ATTRIBUTE,
     _attribute_count: ::std::os::raw::c_ulong,
     _key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
@@ -1770,13 +1778,13 @@ pub extern "C" fn C_GenerateRandom(
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetFunctionStatus(_session: CK_SESSION_HANDLE) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+pub extern "C" fn C_GetFunctionStatus(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
-pub extern "C" fn C_CancelFunction(_session: CK_SESSION_HANDLE) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+pub extern "C" fn C_CancelFunction(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    session_function_not_supported(session_handle)
 }
 
 static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
