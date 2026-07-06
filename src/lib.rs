@@ -1,13 +1,22 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-extern crate rusb;
-extern crate pcsc;
 extern crate curl;
 extern crate openssl;
+extern crate pcsc;
+extern crate rusb;
 
-use std::{ptr, slice, collections::HashMap, time::Duration, rc::Rc, cell::{RefCell}, io::Write};
 use rusb::UsbContext;
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    io::Write,
+    ptr,
+    rc::Rc,
+    slice,
+    sync::{Mutex, MutexGuard},
+    time::Duration,
+};
 
 pub mod error;
 use error::*;
@@ -37,12 +46,20 @@ fn next_key<T>(map: &HashMap<::std::os::raw::c_ulong, T>, min: ::std::os::raw::c
     }
 }
 
-fn get_ctx() -> Result<&'static Context, Error> {
-    unsafe { G_CONTEXT.as_ref() }.ok_or(CKR_CRYPTOKI_NOT_INITIALIZED.into())
+fn lock_context() -> Result<MutexGuard<'static, Option<Context>>, Error> {
+    G_CONTEXT.lock().map_err(|_| CKR_MUTEX_BAD.into())
 }
 
-fn get_ctx_mut() -> Result<&'static mut Context, Error> {
-    unsafe { G_CONTEXT.as_mut() }.ok_or(CKR_CRYPTOKI_NOT_INITIALIZED.into())
+fn with_context<T>(f: impl FnOnce(&Context) -> Result<T, Error>) -> Result<T, Error> {
+    let guard = lock_context()?;
+    let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    f(ctx)
+}
+
+fn with_context_mut<T>(f: impl FnOnce(&mut Context) -> Result<T, Error>) -> Result<T, Error> {
+    let mut guard = lock_context()?;
+    let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    f(ctx)
 }
 
 fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
@@ -129,7 +146,7 @@ trait Slot {
     }
 }
 
-impl std::fmt::Debug for dyn Slot {
+impl std::fmt::Debug for dyn Slot + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
     }
@@ -268,7 +285,7 @@ trait Session {
     fn generate(&self) -> Result<(), Error>;
 }
 
-impl std::fmt::Debug for dyn Session {
+impl std::fmt::Debug for dyn Session + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
     }
@@ -420,7 +437,7 @@ trait Connector {
     }
 }
 
-impl std::fmt::Debug for dyn Connector {
+impl std::fmt::Debug for dyn Connector + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
     }
@@ -488,13 +505,13 @@ impl UsbConnector {
     }
 }
 
-struct PcscConnector<'a> {
+struct PcscConnector {
     reader: std::ffi::CString,
-    context: &'a pcsc::Context,
+    context: Rc<pcsc::Context>,
     card: Option<pcsc::Card>,
 }
 
-impl std::fmt::Debug for PcscConnector<'_> {
+impl std::fmt::Debug for PcscConnector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("PcscConnector")
             .field("reader", &self.reader)
@@ -503,7 +520,7 @@ impl std::fmt::Debug for PcscConnector<'_> {
     }
 }
 
-impl Connector for PcscConnector<'_> {
+impl Connector for PcscConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -545,7 +562,7 @@ impl Connector for PcscConnector<'_> {
     }
 }
 
-impl PcscConnector<'_> {
+impl PcscConnector {
     fn connect(&mut self) -> Result<(), Error> {
         self.card = Some(self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1)?);
         Ok(())
@@ -685,7 +702,7 @@ impl Scp03Session {
 
 struct Context {
     libusb: Option<rusb::Context>,
-    pcsc: Option<pcsc::Context>,
+    pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
 }
@@ -715,7 +732,7 @@ impl Context {
             },
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
                 Ok(context) => {
-                    Some(context)
+                    Some(Rc::new(context))
                 },
                 Err(e) => {
                     eprintln!("pcsc::Context::establish: {}", e);
@@ -738,41 +755,41 @@ impl Context {
         str_pad("Yubico", &mut info.manufacturerID);
         Ok(())
     }
-    fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&dyn Slot, Error> {
+    fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
         match self.slots.get(&slot_id) {
             Some(slot) => Ok(slot.as_ref()),
             None => Err(CKR_SLOT_ID_INVALID.into())
         }
     }
-    fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut dyn Slot, Error> {
+    fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut (dyn Slot + '_), Error> {
         match self.slots.get_mut(&slot_id) {
             Some(slot) => Ok(slot.as_mut()),
             None => Err(CKR_SLOT_ID_INVALID.into())
         }
     }
-    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&dyn Slot, &dyn Session)> {
+    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&(dyn Slot + '_), &(dyn Session + '_))> {
         let session = self.sessions.get(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot.as_ref(), session.as_ref()))
     }
-    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&dyn Slot, &dyn Session), Error> {
+    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&(dyn Slot + '_), &(dyn Session + '_)), Error> {
         match self.get_session_(session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into())
         }
     }
-    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&dyn Slot, &mut dyn Session)> {
+    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&(dyn Slot + '_), &mut (dyn Session + '_))> {
         let session = self.sessions.get_mut(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot.as_ref(), session.as_mut()))
     }
-    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&dyn Slot, &mut dyn Session), Error> {
+    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&(dyn Slot + '_), &mut (dyn Session + '_)), Error> {
         match self.get_session_mut_(session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into())
         }
     }
-    fn init(&'static mut self) {
+    fn init(&mut self) {
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
@@ -810,7 +827,7 @@ impl Context {
         if let Some(context) = self.pcsc.as_ref() {
             if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
-                    let mut connector = PcscConnector {reader, context, card: None};
+                    let mut connector = PcscConnector {reader, context: context.clone(), card: None};
                     let name = connector.name();
                     eprintln!("{}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
@@ -827,42 +844,50 @@ impl Context {
     }
 }
 
-static mut G_CONTEXT: Option<Context> = None;
+// The PKCS#11 entry points serialize all access through G_CONTEXT. Some connector
+// handles are not marked Send by their crates, so Context must not escape the
+// mutex guard even though the global mutex itself may be touched by any caller
+// thread.
+unsafe impl Send for Context {}
+
+static G_CONTEXT: Mutex<Option<Context>> = Mutex::new(None);
 
 fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    let result: Result<(), Error> = (|| {
-        get_ctx()?._get_session(session_handle)?;
+    let result: Result<(), Error> = with_context(|ctx| {
+        ctx._get_session(session_handle)?;
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
-    })();
+    });
     map(result)
 }
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
-    unsafe {
-        match G_CONTEXT.as_mut() {
-            Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED,
+    match lock_context() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
             None => {
-                G_CONTEXT = Some(Context::new());
-                CKR_OK
+                *guard = Some(Context::new());
+                CKR_OK as CK_RV
             }
-        }
-    }.into()
+        },
+        Err(e) => e.into(),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called with {:?}", pReserved);
-    unsafe {
-        match G_CONTEXT.as_mut() {
+    match lock_context() {
+        Ok(mut guard) => match guard.as_mut() {
             Some(_) => {
-                G_CONTEXT = None;
-                CKR_OK
+                *guard = None;
+                CKR_OK as CK_RV
             },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }
-    }.into()
+            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV,
+        },
+        Err(e) => e.into(),
+    }
 }
 
 #[no_mangle]
@@ -883,7 +908,7 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -
 fn get_info(
     info_ptr: CK_INFO_PTR
 ) -> Result<(), Error> {
-    get_ctx()?.get_info(as_mut(info_ptr)?)
+    with_context(|ctx| ctx.get_info(as_mut(info_ptr)?))
 }
 
 #[no_mangle]
@@ -904,38 +929,36 @@ pub extern "C" fn C_GetSlotList(
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        if let Some(ctx) = G_CONTEXT.as_mut() {
+        match with_context_mut(|ctx| {
             ctx.init();
-        }
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
-                    ctx.slots.keys().cloned().collect()
-                } else {
-                    ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0).map(|s| *s.0).collect()
-                };
-                match slot_list.as_mut() {
-                    Some(_) => {
-                        if *count >= keys.len() as ::std::os::raw::c_ulong {
-                            keys.sort();
-                            ptr::copy(keys.as_ptr(), slot_list, keys.len());
-                            *count = keys.len() as ::std::os::raw::c_ulong;
-                            eprintln!("C_GetSlotList returning {:?}", (keys, *count));
-                            CKR_OK
-                        } else {
-                            *count = keys.len() as ::std::os::raw::c_ulong;
-                            eprintln!("C_GetSlotList returning {:?}", *count);
-                            CKR_BUFFER_TOO_SMALL
-                        }
-                    },
-                    None => {
+            let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
+                ctx.slots.keys().cloned().collect()
+            } else {
+                ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0).map(|s| *s.0).collect()
+            };
+            match slot_list.as_mut() {
+                Some(_) => {
+                    if *count >= keys.len() as ::std::os::raw::c_ulong {
+                        keys.sort();
+                        ptr::copy(keys.as_ptr(), slot_list, keys.len());
+                        *count = keys.len() as ::std::os::raw::c_ulong;
+                        eprintln!("C_GetSlotList returning {:?}", (keys, *count));
+                        Ok(CKR_OK as CK_RV)
+                    } else {
                         *count = keys.len() as ::std::os::raw::c_ulong;
                         eprintln!("C_GetSlotList returning {:?}", *count);
-                        CKR_OK
+                        Ok(CKR_BUFFER_TOO_SMALL as CK_RV)
                     }
+                },
+                None => {
+                    *count = keys.len() as ::std::os::raw::c_ulong;
+                    eprintln!("C_GetSlotList returning {:?}", *count);
+                    Ok(CKR_OK as CK_RV)
                 }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            }
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -944,7 +967,7 @@ fn get_slot_info(
     slotID: CK_SLOT_ID,
     info_ptr: CK_SLOT_INFO_PTR
 ) -> Result<(), Error> {
-    get_ctx()?.get_slot(slotID)?.get_slot_info(as_mut(info_ptr)?)
+    with_context(|ctx| ctx.get_slot(slotID)?.get_slot_info(as_mut(info_ptr)?))
 }
 
 #[no_mangle]
@@ -957,7 +980,7 @@ fn get_token_info(
     slotID: CK_SLOT_ID,
     info_ptr: CK_TOKEN_INFO_PTR
 ) -> Result<(), Error> {
-    get_ctx()?.get_slot(slotID)?.get_token_info(as_mut(info_ptr)?)
+    with_context(|ctx| ctx.get_slot(slotID)?.get_token_info(as_mut(info_ptr)?))
 }
 
 #[no_mangle]
@@ -987,31 +1010,31 @@ pub extern "C" fn C_GetMechanismList(
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.slots.get(&slotID) {
-                    Some(slot) => {
-                        eprintln!("{:?}", slot);
-                        match mechanism_list.as_mut() {
-                            Some(_) => {
-                                let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
-                                for i in 0..*count {
-                                    list[i as usize] = i;
-                                }
-                                eprintln!("C_GetMechanismList returning {:?}", list);
-                                CKR_OK
-                            },
-                            None => {
-                                eprintln!("C_GetMechanismList returning {:?}", 7);
-                                *count = 7;
-                                CKR_OK
+        match with_context(|ctx| {
+            match ctx.slots.get(&slotID) {
+                Some(slot) => {
+                    eprintln!("{:?}", slot);
+                    match mechanism_list.as_mut() {
+                        Some(_) => {
+                            let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
+                            for i in 0..*count {
+                                list[i as usize] = i;
                             }
+                            eprintln!("C_GetMechanismList returning {:?}", list);
+                            Ok(CKR_OK as CK_RV)
+                        },
+                        None => {
+                            eprintln!("C_GetMechanismList returning {:?}", 7);
+                            *count = 7;
+                            Ok(CKR_OK as CK_RV)
                         }
                     }
-                    None => CKR_SLOT_ID_INVALID
                 }
+                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1024,26 +1047,26 @@ pub extern "C" fn C_GetMechanismInfo(
 ) -> CK_RV {
     eprintln!("C_GetMechanismInfo called with {:?}", (slotID, type_, info_ptr));
     unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.slots.get(&slotID) {
-                    Some(slot) => {
-                        eprintln!("{:?}", slot);
-                        match info_ptr.as_mut() {
-                            Some(info) => {
-                                info.ulMinKeySize = 1024;
-                                info.ulMaxKeySize = 4096;
-                                info.flags = 0;
-                                eprintln!("C_GetMechanismInfo returning {:?}", info);
-                                CKR_OK
-                            },
-                            None => CKR_ARGUMENTS_BAD
-                        }
+        match with_context(|ctx| {
+            match ctx.slots.get(&slotID) {
+                Some(slot) => {
+                    eprintln!("{:?}", slot);
+                    match info_ptr.as_mut() {
+                        Some(info) => {
+                            info.ulMinKeySize = 1024;
+                            info.ulMaxKeySize = 4096;
+                            info.flags = 0;
+                            eprintln!("C_GetMechanismInfo returning {:?}", info);
+                            Ok(CKR_OK as CK_RV)
+                        },
+                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
                     }
-                    None => CKR_SLOT_ID_INVALID
                 }
+                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1092,27 +1115,27 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match G_CONTEXT.as_mut() {
-            Some(ctx) => {
-                match ctx.slots.get_mut(&slotID) {
-                    Some(slot) => {
-                        eprintln!("{:?}", slot);
-                        if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                            let k = next_key(&ctx.sessions, 1);
-                            eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
-                            ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                            eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
-                            eprintln!("C_OpenSession returning {:?}", k);
-                            *session = k;
-                            CKR_OK
-                        } else {
-                            CKR_TOKEN_NOT_PRESENT
-                        }
+        match with_context_mut(|ctx| {
+            match ctx.slots.get_mut(&slotID) {
+                Some(slot) => {
+                    eprintln!("{:?}", slot);
+                    if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                        let k = next_key(&ctx.sessions, 1);
+                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                        ctx.sessions.insert(k, slot.open_session(slotID, flags));
+                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
+                        eprintln!("C_OpenSession returning {:?}", k);
+                        *session = k;
+                        Ok(CKR_OK as CK_RV)
+                    } else {
+                        Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
                     }
-                    None => CKR_SLOT_ID_INVALID
                 }
+                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1120,37 +1143,33 @@ pub extern "C" fn C_OpenSession(
 #[no_mangle]
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_CloseSession called with {:?}", session_handle);
-    unsafe {
-        match G_CONTEXT.as_mut() {
-            Some(ctx) => {
-                eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
-                match ctx.sessions.remove(&session_handle) {
-                    Some(session) => {
-                        eprintln!("C_CloseSession removed {:?}", (session_handle, session));
-                        eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
-                        CKR_OK
-                    }
-                    None => CKR_SESSION_HANDLE_INVALID
-                }
+    match with_context_mut(|ctx| {
+        eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
+        match ctx.sessions.remove(&session_handle) {
+            Some(session) => {
+                eprintln!("C_CloseSession removed {:?}", (session_handle, session));
+                eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
+                Ok(CKR_OK as CK_RV)
             }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
         }
+    }) {
+        Ok(rv) => rv,
+        Err(e) => e.into(),
     }.into()
 }
 
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     eprintln!("C_CloseAllSessions called with {:?}", slotID);
-    unsafe {
-        match G_CONTEXT.as_mut() {
-            Some(ctx) => {
-                eprintln!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
-                ctx.sessions.retain(|_k, v| v.slotID() != slotID);
-                eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
-                CKR_OK
-            }
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
-        }
+    match with_context_mut(|ctx| {
+        eprintln!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
+        ctx.sessions.retain(|_k, v| v.slotID() != slotID);
+        eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
+        Ok(CKR_OK as CK_RV)
+    }) {
+        Ok(rv) => rv,
+        Err(e) => e.into(),
     }.into()
 }
 
@@ -1158,27 +1177,27 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
 pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut CK_SESSION_INFO) -> CK_RV {
     eprintln!("C_GetSessionInfo called with {:?}", session_handle);
     unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.get_session_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_GetSessionInfo {:?}", session);
-                        match info_ptr.as_mut() {
-                            Some(info) => {
-                                info.slotID = session.1.slotID();
-                                info.state = session.1.state();
-                                info.flags = session.1.flags();
-                                info.ulDeviceError = 0;
-                                eprintln!("C_GetSessionInfo returning {:?}", info);
-                                CKR_OK
-                            },
-                            None => CKR_ARGUMENTS_BAD
-                        }
+        match with_context(|ctx| {
+            match ctx.get_session_(session_handle) {
+                Some(session) => {
+                    eprintln!("C_GetSessionInfo {:?}", session);
+                    match info_ptr.as_mut() {
+                        Some(info) => {
+                            info.slotID = session.1.slotID();
+                            info.state = session.1.state();
+                            info.flags = session.1.flags();
+                            info.ulDeviceError = 0;
+                            eprintln!("C_GetSessionInfo returning {:?}", info);
+                            Ok(CKR_OK as CK_RV)
+                        },
+                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
                     }
-                    None => CKR_SESSION_HANDLE_INVALID
                 }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            }
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1209,10 +1228,12 @@ fn login(
     pin: *const ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> Result<(), Error> {
-    let session = get_ctx_mut()?.get_session_mut(session_handle)?;
-    let pin = from_raw_parts(pin, pin_len as usize)?;
-    eprintln!("login {:?} {:?}", session.1, pin);
-    session.1.login(pin)
+    with_context_mut(|ctx| {
+        let session = ctx.get_session_mut(session_handle)?;
+        let pin = from_raw_parts(pin, pin_len as usize)?;
+        eprintln!("login {:?} {:?}", session.1, pin);
+        session.1.login(pin)
+    })
 }
 
 #[no_mangle]
@@ -1229,9 +1250,11 @@ pub extern "C" fn C_Login(
 fn logout(
     session_handle: CK_SESSION_HANDLE
 ) -> Result<(), Error> {
-    let session = get_ctx_mut()?.get_session_mut(session_handle)?;
-    eprintln!("logout {:?}", session.1);
-    session.1.logout()    
+    with_context_mut(|ctx| {
+        let session = ctx.get_session_mut(session_handle)?;
+        eprintln!("logout {:?}", session.1);
+        session.1.logout()
+    })
 }
 
 #[no_mangle]
@@ -1303,24 +1326,24 @@ pub extern "C" fn C_FindObjectsInit(
 ) -> CK_RV {
     eprintln!("C_FindObjectsInit called with {:?}", (session_handle, templ, count));
     unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.get_session_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_FindObjectsInit {:?}", session);
-                        match templ.as_ref() {
-                            Some(_info) => { 
-                                CKR_OK
-                            },
-                            None => {
-                                CKR_OK
-                            }
+        match with_context(|ctx| {
+            match ctx.get_session_(session_handle) {
+                Some(session) => {
+                    eprintln!("C_FindObjectsInit {:?}", session);
+                    match templ.as_ref() {
+                        Some(_info) => {
+                            Ok(CKR_OK as CK_RV)
+                        },
+                        None => {
+                            Ok(CKR_OK as CK_RV)
                         }
                     }
-                    None => CKR_SESSION_HANDLE_INVALID
                 }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            }
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1338,24 +1361,24 @@ pub extern "C" fn C_FindObjects(
             Some(object_count) => object_count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.get_session_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_FindObjects {:?}", session);
-                        match object.as_mut() {
-                            Some(_info) => {
-                                eprintln!("C_FindObjects returning {:?}", 0);
-                                *object_count = 0;
-                                CKR_OK
-                            },
-                            None => CKR_ARGUMENTS_BAD
-                        }
+        match with_context(|ctx| {
+            match ctx.get_session_(session_handle) {
+                Some(session) => {
+                    eprintln!("C_FindObjects {:?}", session);
+                    match object.as_mut() {
+                        Some(_info) => {
+                            eprintln!("C_FindObjects returning {:?}", 0);
+                            *object_count = 0;
+                            Ok(CKR_OK as CK_RV)
+                        },
+                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
                     }
-                    None => CKR_SESSION_HANDLE_INVALID
                 }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            }
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }.into()
 }
@@ -1363,19 +1386,17 @@ pub extern "C" fn C_FindObjects(
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
-    unsafe {
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.get_session_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_FindObjectsFinal {:?}", session);
-                        CKR_OK
-                    }
-                    None => CKR_SESSION_HANDLE_INVALID
-                }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED
+    match with_context(|ctx| {
+        match ctx.get_session_(session_handle) {
+            Some(session) => {
+                eprintln!("C_FindObjectsFinal {:?}", session);
+                Ok(CKR_OK as CK_RV)
+            }
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
         }
+    }) {
+        Ok(rv) => rv,
+        Err(e) => e.into(),
     }.into()
 }
 
@@ -1676,31 +1697,31 @@ pub extern "C" fn C_GenerateKey(
             Some(key) => key,
             None => return CKR_ARGUMENTS_BAD as CK_RV,
         };
-        match G_CONTEXT.as_ref() {
-            Some(ctx) => {
-                match ctx.get_session_(session_handle) {
-                    Some(session) => {
-                        eprintln!("C_GenerateKey {:?}", session);
-                        if let Some(mechanism) = mechanism.as_ref() {
-                            eprintln!("C_GenerateKey {:?}", mechanism);
-                            let templ = if count == 0 {
-                                &[]
-                            } else if templ.is_null() {
-                                return CKR_ARGUMENTS_BAD as CK_RV;
-                            } else {
-                                slice::from_raw_parts(templ, count as usize)
-                            };
-                            eprintln!("C_GenerateKey {:?}", templ);
-                            *key = 99;
-                            map(session.1.generate())
+        match with_context(|ctx| {
+            match ctx.get_session_(session_handle) {
+                Some(session) => {
+                    eprintln!("C_GenerateKey {:?}", session);
+                    if let Some(mechanism) = mechanism.as_ref() {
+                        eprintln!("C_GenerateKey {:?}", mechanism);
+                        let templ = if count == 0 {
+                            &[]
+                        } else if templ.is_null() {
+                            return Ok(CKR_ARGUMENTS_BAD as CK_RV);
                         } else {
-                            CKR_ARGUMENTS_BAD as CK_RV
-                        }
-                    },
-                    None => CKR_SESSION_HANDLE_INVALID as CK_RV
+                            slice::from_raw_parts(templ, count as usize)
+                        };
+                        eprintln!("C_GenerateKey {:?}", templ);
+                        *key = 99;
+                        Ok(map(session.1.generate()))
+                    } else {
+                        Ok(CKR_ARGUMENTS_BAD as CK_RV)
+                    }
                 }
-            },
-            None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            }
+        }) {
+            Ok(rv) => rv,
+            Err(e) => e.into(),
         }
     }
 }
