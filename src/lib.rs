@@ -860,10 +860,15 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     unsafe {
-        eprintln!("C_GetFunctionList called with {:?}", (function_list, *function_list));
-        *function_list = &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
-        eprintln!("C_GetFunctionList returning {:?}", *function_list);
-        CKR_OK
+        eprintln!("C_GetFunctionList called with {:?}", function_list);
+        match function_list.as_mut() {
+            Some(function_list) => {
+                *function_list = &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
+                eprintln!("C_GetFunctionList returning {:?}", *function_list);
+                CKR_OK
+            },
+            None => CKR_ARGUMENTS_BAD,
+        }
     }.into()
 }
 
@@ -886,7 +891,11 @@ pub extern "C" fn C_GetSlotList(
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
     unsafe {
-        eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, *count));
+        eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, count));
+        let count = match count.as_mut() {
+            Some(count) => count,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
         if let Some(ctx) = G_CONTEXT.as_mut() {
             ctx.init();
         }
@@ -965,7 +974,11 @@ pub extern "C" fn C_GetMechanismList(
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
     unsafe {
-        eprintln!("C_GetMechanismList called with {:?}", (slotID, mechanism_list, *count));
+        eprintln!("C_GetMechanismList called with {:?}", (slotID, mechanism_list, count));
+        let count = match count.as_mut() {
+            Some(count) => count,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.slots.get(&slotID) {
@@ -1067,6 +1080,10 @@ pub extern "C" fn C_OpenSession(
 ) -> CK_RV {
     eprintln!("C_OpenSession called with {:?}", (slotID, flags));
     unsafe {
+        let session = match session.as_mut() {
+            Some(session) => session,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
         match G_CONTEXT.as_mut() {
             Some(ctx) => {
                 match ctx.slots.get_mut(&slotID) {
@@ -1309,6 +1326,10 @@ pub extern "C" fn C_FindObjects(
 ) -> CK_RV {
     eprintln!("C_FindObjects called with {:?}", (session_handle, object, max_object_count, object_count));
     unsafe {
+        let object_count = match object_count.as_mut() {
+            Some(object_count) => object_count,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.get_session_(session_handle) {
@@ -1643,6 +1664,10 @@ pub extern "C" fn C_GenerateKey(
 ) -> CK_RV {
     eprintln!("C_GenerateKey called with {:?}", (session_handle, mechanism, templ, count, key));
     unsafe {
+        let key = match key.as_mut() {
+            Some(key) => key,
+            None => return CKR_ARGUMENTS_BAD as CK_RV,
+        };
         match G_CONTEXT.as_ref() {
             Some(ctx) => {
                 match ctx.get_session_(session_handle) {
@@ -1650,14 +1675,16 @@ pub extern "C" fn C_GenerateKey(
                         eprintln!("C_GenerateKey {:?}", session);
                         if let Some(mechanism) = mechanism.as_ref() {
                             eprintln!("C_GenerateKey {:?}", mechanism);
-                            if let Some(_) = templ.as_ref() {
-                                let templ = slice::from_raw_parts(templ, count as usize);
-                                eprintln!("C_GenerateKey {:?}", templ);
-                                *key = 99;
-                                map(session.1.generate())
+                            let templ = if count == 0 {
+                                &[]
+                            } else if templ.is_null() {
+                                return CKR_ARGUMENTS_BAD as CK_RV;
                             } else {
-                                CKR_ARGUMENTS_BAD as CK_RV
-                            }
+                                slice::from_raw_parts(templ, count as usize)
+                            };
+                            eprintln!("C_GenerateKey {:?}", templ);
+                            *key = 99;
+                            map(session.1.generate())
                         } else {
                             CKR_ARGUMENTS_BAD as CK_RV
                         }
