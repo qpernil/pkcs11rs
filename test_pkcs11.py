@@ -302,6 +302,12 @@ class CK_FUNCTION_LIST(ctypes.Structure):
     ]
 
 
+class CK_FUNCTION_LIST_3_0(ctypes.Structure):
+    _fields_ = [("version", CK_VERSION)] + [
+        (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS
+    ]
+
+
 class CK_FUNCTION_LIST_3_2(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
         (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS
@@ -401,6 +407,8 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         self.assertEqual(self.lib.C_GetFunctionList(ctypes.byref(function_list)), CKR_OK)
         self.assertTrue(function_list)
+        self.assertEqual(function_list.contents.version.major, 2)
+        self.assertEqual(function_list.contents.version.minor, 40)
         self.assert_function_entries_present(function_list.contents, LEGACY_FUNCTIONS)
 
     def test_3_2_interface_function_list_entries_are_stubbed(self) -> None:
@@ -728,7 +736,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         for name in ["C_GetInterface", "C_EncapsulateKey", "C_UnwrapKeyAuthenticated"]:
             self.assertTrue(getattr(function_list, name), name)
 
-    def test_get_interface_returns_3_2_function_table_for_3_1_request(self) -> None:
+    def test_get_interface_returns_3_1_function_table_for_3_1_request(self) -> None:
         version = CK_VERSION(3, 1)
         interface = ctypes.POINTER(CK_INTERFACE)()
 
@@ -740,15 +748,15 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         function_list = ctypes.cast(
             interface.contents.pFunctionList,
-            ctypes.POINTER(CK_FUNCTION_LIST_3_2),
+            ctypes.POINTER(CK_FUNCTION_LIST_3_0),
         ).contents
         self.assertEqual(function_list.version.major, 3)
-        self.assertEqual(function_list.version.minor, 2)
+        self.assertEqual(function_list.version.minor, 1)
 
-        for name in ["C_GetInterface", "C_EncapsulateKey", "C_UnwrapKeyAuthenticated"]:
+        for name in ["C_GetInterface", "C_MessageEncryptInit", "C_MessageVerifyFinal"]:
             self.assertTrue(getattr(function_list, name), name)
 
-    def test_get_interface_returns_3_2_function_table_for_3_0_request(self) -> None:
+    def test_get_interface_returns_3_0_function_table_for_3_0_request(self) -> None:
         version = CK_VERSION(3, 0)
         interface = ctypes.POINTER(CK_INTERFACE)()
 
@@ -760,15 +768,15 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         function_list = ctypes.cast(
             interface.contents.pFunctionList,
-            ctypes.POINTER(CK_FUNCTION_LIST_3_2),
+            ctypes.POINTER(CK_FUNCTION_LIST_3_0),
         ).contents
         self.assertEqual(function_list.version.major, 3)
-        self.assertEqual(function_list.version.minor, 2)
+        self.assertEqual(function_list.version.minor, 0)
 
-        for name in ["C_GetInterface", "C_EncapsulateKey", "C_UnwrapKeyAuthenticated"]:
+        for name in ["C_GetInterface", "C_MessageEncryptInit", "C_MessageVerifyFinal"]:
             self.assertTrue(getattr(function_list, name), name)
 
-    def test_get_interface_returns_3_2_function_table_for_2_40_request(self) -> None:
+    def test_get_interface_returns_2_40_function_table_for_2_40_request(self) -> None:
         version = CK_VERSION(2, 40)
         interface = ctypes.POINTER(CK_INTERFACE)()
 
@@ -780,12 +788,12 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         function_list = ctypes.cast(
             interface.contents.pFunctionList,
-            ctypes.POINTER(CK_FUNCTION_LIST_3_2),
+            ctypes.POINTER(CK_FUNCTION_LIST),
         ).contents
-        self.assertEqual(function_list.version.major, 3)
-        self.assertEqual(function_list.version.minor, 2)
+        self.assertEqual(function_list.version.major, 2)
+        self.assertEqual(function_list.version.minor, 40)
 
-        for name in ["C_GetInterface", "C_EncapsulateKey", "C_UnwrapKeyAuthenticated"]:
+        for name in ["C_GetFunctionList", "C_Initialize", "C_Finalize"]:
             self.assertTrue(getattr(function_list, name), name)
 
     def test_get_interface_rejects_wrong_version(self) -> None:
