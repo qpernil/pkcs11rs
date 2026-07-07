@@ -95,9 +95,9 @@ pub fn cryptoki_3_2_interface_is_discoverable() {
     assert!(!interface.pFunctionList.is_null());
 
     let function_list = interface.pFunctionList as CK_FUNCTION_LIST_3_2_PTR;
-    assert_eq!(unsafe { (*function_list).version.major }, 3);
-    assert_eq!(unsafe { (*function_list).version.minor }, 2);
-    assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+    assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
+    assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
+    assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
     assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
 }
 
@@ -214,9 +214,9 @@ fn assert_get_interface_returns_3_2_table(version: CK_VERSION) {
 
     let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_2_PTR };
     assert!(!function_list.is_null());
-    assert_eq!(unsafe { (*function_list).version.major }, 3);
-    assert_eq!(unsafe { (*function_list).version.minor }, 2);
-    assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+    assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
+    assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
+    assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
     assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
     assert!(unsafe { (*function_list).C_UnwrapKeyAuthenticated.is_some() });
 }
