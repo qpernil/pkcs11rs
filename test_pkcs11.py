@@ -15,6 +15,7 @@ CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
+CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 
@@ -327,8 +328,29 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_Finalize.restype = CK_RV
         cls.lib.C_GetFunctionList.argtypes = [ctypes.POINTER(ctypes.POINTER(CK_FUNCTION_LIST))]
         cls.lib.C_GetFunctionList.restype = CK_RV
+        cls.lib.C_InitToken.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+        ]
+        cls.lib.C_InitToken.restype = CK_RV
+        cls.lib.C_InitPIN.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_InitPIN.restype = CK_RV
+        cls.lib.C_WaitForSlotEvent.argtypes = [
+            CK_FLAGS,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.c_void_p,
+        ]
+        cls.lib.C_WaitForSlotEvent.restype = CK_RV
         cls.lib.C_CloseAllSessions.argtypes = [CK_ULONG]
         cls.lib.C_CloseAllSessions.restype = CK_RV
+        cls.lib.C_GetFunctionStatus.argtypes = [CK_ULONG]
+        cls.lib.C_GetFunctionStatus.restype = CK_RV
         cls.lib.C_GetInfo.argtypes = [ctypes.POINTER(CK_INFO)]
         cls.lib.C_GetInfo.restype = CK_RV
         cls.lib.C_GetMechanismList.argtypes = [
@@ -355,6 +377,14 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_FLAGS,
         ]
         cls.lib.C_GetInterface.restype = CK_RV
+        cls.lib.C_MessageEncryptFinal.argtypes = [CK_ULONG]
+        cls.lib.C_MessageEncryptFinal.restype = CK_RV
+        cls.lib.C_GetSessionValidationFlags.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_FLAGS),
+        ]
+        cls.lib.C_GetSessionValidationFlags.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)
@@ -390,6 +420,35 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assert_function_entries_present(
             function_list,
             LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS,
+        )
+
+    def test_representative_session_stubs_validate_initialization_and_session(self) -> None:
+        flags = CK_FLAGS()
+
+        session_stubs = [
+            ("C_InitPIN", lambda: self.lib.C_InitPIN(999, None, 0)),
+            ("C_GetFunctionStatus", lambda: self.lib.C_GetFunctionStatus(999)),
+            ("C_MessageEncryptFinal", lambda: self.lib.C_MessageEncryptFinal(999)),
+            (
+                "C_GetSessionValidationFlags",
+                lambda: self.lib.C_GetSessionValidationFlags(999, 0, ctypes.byref(flags)),
+            ),
+        ]
+
+        for name, call in session_stubs:
+            self.assertEqual(call(), CKR_CRYPTOKI_NOT_INITIALIZED, name)
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        for name, call in session_stubs:
+            self.assertEqual(call(), CKR_SESSION_HANDLE_INVALID, name)
+
+    def test_representative_non_session_stubs_report_unsupported(self) -> None:
+        slot = CK_ULONG()
+
+        self.assertEqual(self.lib.C_InitToken(0, None, 0, None), CKR_FUNCTION_NOT_SUPPORTED)
+        self.assertEqual(
+            self.lib.C_WaitForSlotEvent(0, ctypes.byref(slot), None),
+            CKR_FUNCTION_NOT_SUPPORTED,
         )
 
     def test_layout_ck_info(self) -> None:
