@@ -325,6 +325,8 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_Initialize.restype = CK_RV
         cls.lib.C_Finalize.argtypes = [ctypes.c_void_p]
         cls.lib.C_Finalize.restype = CK_RV
+        cls.lib.C_GetFunctionList.argtypes = [ctypes.POINTER(ctypes.POINTER(CK_FUNCTION_LIST))]
+        cls.lib.C_GetFunctionList.restype = CK_RV
         cls.lib.C_CloseAllSessions.argtypes = [CK_ULONG]
         cls.lib.C_CloseAllSessions.restype = CK_RV
         cls.lib.C_GetInfo.argtypes = [ctypes.POINTER(CK_INFO)]
@@ -359,6 +361,36 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.lib.C_Finalize(None)
+
+    def assert_function_entries_present(self, function_list, names: list[str]) -> None:
+        for name in names:
+            self.assertTrue(getattr(function_list, name), name)
+
+    def test_legacy_function_list_entries_are_stubbed(self) -> None:
+        function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
+
+        self.assertEqual(self.lib.C_GetFunctionList(ctypes.byref(function_list)), CKR_OK)
+        self.assertTrue(function_list)
+        self.assert_function_entries_present(function_list.contents, LEGACY_FUNCTIONS)
+
+    def test_3_2_interface_function_list_entries_are_stubbed(self) -> None:
+        version = CK_VERSION(3, 2)
+        interface = ctypes.POINTER(CK_INTERFACE)()
+
+        self.assertEqual(
+            self.lib.C_GetInterface(b"PKCS 11", ctypes.byref(version), ctypes.byref(interface), 0),
+            CKR_OK,
+        )
+        self.assertTrue(interface)
+
+        function_list = ctypes.cast(
+            interface.contents.pFunctionList,
+            ctypes.POINTER(CK_FUNCTION_LIST_3_2),
+        ).contents
+        self.assert_function_entries_present(
+            function_list,
+            LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS,
+        )
 
     def test_layout_ck_info(self) -> None:
         self.assert_layout(
