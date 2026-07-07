@@ -27,6 +27,578 @@ fn assert_function_slots_present<T>(function_list: *const T, function_count: usi
     }
 }
 
+fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected: CK_RV) {
+    let mut data = [0u8; 8];
+    let mut data_len = data.len() as CK_ULONG;
+    let mut object = 0;
+    let mut second_object = 0;
+    let mut flags = 0;
+    let mut async_data = CK_ASYNC_DATA {
+        ulVersionNum: 0,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+        hObject: 0,
+        hAdditionalObject: 0,
+    };
+
+    macro_rules! assert_stub {
+        ($name:literal, $call:expr) => {
+            assert_eq!($call, expected, "{} should behave as a stub", $name);
+        };
+    }
+
+    assert_stub!(
+        "C_InitPIN",
+        crate::C_InitPIN(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_SetPIN",
+        crate::C_SetPIN(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_GetOperationState",
+        crate::C_GetOperationState(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_SetOperationState",
+        crate::C_SetOperationState(session, data.as_mut_ptr(), data.len() as CK_ULONG, 0, 0)
+    );
+    assert_stub!(
+        "C_CreateObject",
+        crate::C_CreateObject(session, ::std::ptr::null_mut(), 0, &mut object)
+    );
+    assert_stub!(
+        "C_CopyObject",
+        crate::C_CopyObject(session, 0, ::std::ptr::null_mut(), 0, &mut object)
+    );
+    assert_stub!("C_DestroyObject", crate::C_DestroyObject(session, 0));
+    assert_stub!(
+        "C_GetObjectSize",
+        crate::C_GetObjectSize(session, 0, &mut data_len)
+    );
+    assert_stub!(
+        "C_GetAttributeValue",
+        crate::C_GetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_SetAttributeValue",
+        crate::C_SetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_EncryptInit",
+        crate::C_EncryptInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_Encrypt",
+        crate::C_Encrypt(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_EncryptUpdate",
+        crate::C_EncryptUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_EncryptFinal",
+        crate::C_EncryptFinal(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_DecryptInit",
+        crate::C_DecryptInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_Decrypt",
+        crate::C_Decrypt(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DecryptUpdate",
+        crate::C_DecryptUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DecryptFinal",
+        crate::C_DecryptFinal(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_DigestInit",
+        crate::C_DigestInit(session, ::std::ptr::null_mut())
+    );
+    assert_stub!(
+        "C_Digest",
+        crate::C_Digest(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DigestUpdate",
+        crate::C_DigestUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!("C_DigestKey", crate::C_DigestKey(session, 0));
+    assert_stub!(
+        "C_DigestFinal",
+        crate::C_DigestFinal(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_SignInit",
+        crate::C_SignInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_Sign",
+        crate::C_Sign(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_SignUpdate",
+        crate::C_SignUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_SignFinal",
+        crate::C_SignFinal(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_SignRecoverInit",
+        crate::C_SignRecoverInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_SignRecover",
+        crate::C_SignRecover(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_VerifyInit",
+        crate::C_VerifyInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_Verify",
+        crate::C_Verify(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_VerifyUpdate",
+        crate::C_VerifyUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_VerifyFinal",
+        crate::C_VerifyFinal(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_VerifyRecoverInit",
+        crate::C_VerifyRecoverInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_VerifyRecover",
+        crate::C_VerifyRecover(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DigestEncryptUpdate",
+        crate::C_DigestEncryptUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DecryptDigestUpdate",
+        crate::C_DecryptDigestUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_SignEncryptUpdate",
+        crate::C_SignEncryptUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DecryptVerifyUpdate",
+        crate::C_DecryptVerifyUpdate(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_GenerateKeyPair",
+        crate::C_GenerateKeyPair(
+            session,
+            ::std::ptr::null_mut(),
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut(),
+            0,
+            &mut object,
+            &mut second_object
+        )
+    );
+    assert_stub!(
+        "C_WrapKey",
+        crate::C_WrapKey(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            0,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_UnwrapKey",
+        crate::C_UnwrapKey(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            0,
+            &mut object
+        )
+    );
+    assert_stub!(
+        "C_DeriveKey",
+        crate::C_DeriveKey(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut(),
+            0,
+            &mut object
+        )
+    );
+    assert_stub!("C_GetFunctionStatus", crate::C_GetFunctionStatus(session));
+    assert_stub!("C_CancelFunction", crate::C_CancelFunction(session));
+    assert_stub!(
+        "C_LoginUser",
+        crate::C_LoginUser(
+            session,
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!("C_SessionCancel", crate::C_SessionCancel(session, 0));
+    assert_stub!(
+        "C_MessageEncryptInit",
+        crate::C_MessageEncryptInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_EncryptMessage",
+        crate::C_EncryptMessage(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_EncryptMessageBegin",
+        crate::C_EncryptMessageBegin(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_EncryptMessageNext",
+        crate::C_EncryptMessageNext(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len,
+            0
+        )
+    );
+    assert_stub!(
+        "C_MessageEncryptFinal",
+        crate::C_MessageEncryptFinal(session)
+    );
+    assert_stub!(
+        "C_MessageDecryptInit",
+        crate::C_MessageDecryptInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_DecryptMessage",
+        crate::C_DecryptMessage(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_DecryptMessageBegin",
+        crate::C_DecryptMessageBegin(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_DecryptMessageNext",
+        crate::C_DecryptMessageNext(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len,
+            0
+        )
+    );
+    assert_stub!(
+        "C_MessageDecryptFinal",
+        crate::C_MessageDecryptFinal(session)
+    );
+    assert_stub!(
+        "C_MessageSignInit",
+        crate::C_MessageSignInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_SignMessage",
+        crate::C_SignMessage(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_SignMessageBegin",
+        crate::C_SignMessageBegin(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_SignMessageNext",
+        crate::C_SignMessageNext(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!("C_MessageSignFinal", crate::C_MessageSignFinal(session));
+    assert_stub!(
+        "C_MessageVerifyInit",
+        crate::C_MessageVerifyInit(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_VerifyMessage",
+        crate::C_VerifyMessage(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_VerifyMessageBegin",
+        crate::C_VerifyMessageBegin(session, ::std::ptr::null_mut(), 0)
+    );
+    assert_stub!(
+        "C_VerifyMessageNext",
+        crate::C_VerifyMessageNext(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!("C_MessageVerifyFinal", crate::C_MessageVerifyFinal(session));
+    assert_stub!(
+        "C_EncapsulateKey",
+        crate::C_EncapsulateKey(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            &mut data_len,
+            &mut object
+        )
+    );
+    assert_stub!(
+        "C_DecapsulateKey",
+        crate::C_DecapsulateKey(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            &mut data_len,
+            &mut object
+        )
+    );
+    assert_stub!(
+        "C_VerifySignatureInit",
+        crate::C_VerifySignatureInit(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_VerifySignature",
+        crate::C_VerifySignature(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_VerifySignatureUpdate",
+        crate::C_VerifySignatureUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+    );
+    assert_stub!(
+        "C_VerifySignatureFinal",
+        crate::C_VerifySignatureFinal(session)
+    );
+    assert_stub!(
+        "C_GetSessionValidationFlags",
+        crate::C_GetSessionValidationFlags(session, 0, &mut flags)
+    );
+    assert_stub!(
+        "C_AsyncComplete",
+        crate::C_AsyncComplete(session, data.as_mut_ptr(), &mut async_data)
+    );
+    assert_stub!(
+        "C_AsyncGetID",
+        crate::C_AsyncGetID(session, data.as_mut_ptr(), &mut data_len)
+    );
+    assert_stub!(
+        "C_AsyncJoin",
+        crate::C_AsyncJoin(
+            session,
+            data.as_mut_ptr(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG
+        )
+    );
+    assert_stub!(
+        "C_WrapKeyAuthenticated",
+        crate::C_WrapKeyAuthenticated(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            data.as_mut_ptr(),
+            &mut data_len
+        )
+    );
+    assert_stub!(
+        "C_UnwrapKeyAuthenticated",
+        crate::C_UnwrapKeyAuthenticated(
+            session,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            0,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            &mut object
+        )
+    );
+}
+
 #[test]
 pub fn bindgen_test_layout_CK_INFO() {
     assert_eq!(
@@ -176,6 +748,35 @@ pub fn initialize_and_finalize_reject_reserved_args() {
     assert_eq!(
         crate::C_Finalize(1 as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
+#[test]
+pub fn session_stub_entry_points_validate_initialization_and_session() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    assert_unsupported_session_stubs_return(999, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_unsupported_session_stubs_return(999, CKR_SESSION_HANDLE_INVALID as CK_RV);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn non_session_stub_entry_points_report_unsupported() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut slot = 0;
+
+    assert_eq!(
+        crate::C_InitToken(0, ::std::ptr::null_mut(), 0, ::std::ptr::null_mut()),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(
+        crate::C_WaitForSlotEvent(0, &mut slot, ::std::ptr::null_mut()),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
     );
 }
 
