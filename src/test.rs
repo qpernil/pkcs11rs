@@ -2,9 +2,29 @@
 use crate::pkcs11::*;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const LEGACY_FUNCTION_COUNT: usize = 68;
+const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
+const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
+}
+
+fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {
+    assert!(!function_list.is_null());
+    let first_function_offset = ::std::mem::offset_of!(CK_FUNCTION_LIST, C_Initialize);
+    let pointer_size = ::std::mem::size_of::<*const ::std::os::raw::c_void>();
+
+    for index in 0..function_count {
+        let slot = unsafe {
+            (function_list as *const u8).add(first_function_offset + index * pointer_size)
+                as *const *const ::std::os::raw::c_void
+        };
+        assert!(
+            !unsafe { *slot }.is_null(),
+            "function slot {index} should be stubbed"
+        );
+    }
 }
 
 #[test]
@@ -72,6 +92,17 @@ pub fn bindgen_test_layout_CK_INFO() {
 }
 
 #[test]
+pub fn all_legacy_function_list_entries_are_stubbed() {
+    let mut function_list: CK_FUNCTION_LIST_PTR = ::std::ptr::null_mut();
+
+    assert_eq!(
+        crate::C_GetFunctionList(&mut function_list),
+        CKR_OK as CK_RV
+    );
+    assert_function_slots_present(function_list, LEGACY_FUNCTION_COUNT);
+}
+
+#[test]
 pub fn cryptoki_3_2_interface_is_discoverable() {
     let _guard = TEST_LOCK.lock().unwrap();
     let mut count = 0;
@@ -99,6 +130,10 @@ pub fn cryptoki_3_2_interface_is_discoverable() {
     assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
     assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
     assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
+    assert_function_slots_present(
+        function_list,
+        LEGACY_FUNCTION_COUNT + PKCS11_3_0_FUNCTION_COUNT + PKCS11_3_2_FUNCTION_COUNT,
+    );
 }
 
 #[test]
