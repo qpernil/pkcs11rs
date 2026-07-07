@@ -12,8 +12,11 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent
 CKR_OK = 0
+CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
+CKR_SESSION_HANDLE_INVALID = 0xB3
+CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 
 
 def library_path() -> pathlib.Path:
@@ -29,8 +32,7 @@ def library_path() -> pathlib.Path:
 
 def load_library() -> ctypes.CDLL:
     path = library_path()
-    if not path.exists():
-        subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
     return ctypes.CDLL(str(path))
 
 
@@ -54,6 +56,17 @@ class CK_INFO(ctypes.Structure):
         ("flags", CK_FLAGS),
         ("libraryDescription", CK_BYTE * 32),
         ("libraryVersion", CK_VERSION),
+    ]
+
+
+class CK_C_INITIALIZE_ARGS(ctypes.Structure):
+    _fields_ = [
+        ("pfnCreateMutex", ctypes.c_void_p),
+        ("pfnDestroyMutex", ctypes.c_void_p),
+        ("pfnLockMutex", ctypes.c_void_p),
+        ("pfnUnlockMutex", ctypes.c_void_p),
+        ("flags", CK_FLAGS),
+        ("pReserved", ctypes.c_void_p),
     ]
 
 
@@ -193,8 +206,22 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_Initialize.restype = CK_RV
         cls.lib.C_Finalize.argtypes = [ctypes.c_void_p]
         cls.lib.C_Finalize.restype = CK_RV
+        cls.lib.C_CloseAllSessions.argtypes = [CK_ULONG]
+        cls.lib.C_CloseAllSessions.restype = CK_RV
         cls.lib.C_GetInfo.argtypes = [ctypes.POINTER(CK_INFO)]
         cls.lib.C_GetInfo.restype = CK_RV
+        cls.lib.C_GetMechanismList.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GetMechanismList.restype = CK_RV
+        cls.lib.C_GenerateRandom.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_GenerateRandom.restype = CK_RV
         cls.lib.C_GetInterfaceList.argtypes = [
             ctypes.POINTER(CK_INTERFACE),
             ctypes.POINTER(CK_ULONG),
@@ -222,6 +249,36 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         self.assertEqual(info.cryptokiVersion.major, 3)
         self.assertEqual(info.cryptokiVersion.minor, 2)
+
+    def test_initialize_and_finalize_reject_reserved_args(self) -> None:
+        init_args = CK_C_INITIALIZE_ARGS()
+        init_args.pReserved = ctypes.c_void_p(1)
+
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_ARGUMENTS_BAD)
+        self.assertEqual(self.lib.C_Finalize(ctypes.c_void_p(1)), CKR_ARGUMENTS_BAD)
+
+    def test_slot_and_mechanism_calls_validate_slot_ids(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        count = CK_ULONG()
+
+        self.assertEqual(self.lib.C_CloseAllSessions(999), CKR_SLOT_ID_INVALID)
+        self.assertEqual(
+            self.lib.C_GetMechanismList(999, None, ctypes.byref(count)),
+            CKR_SLOT_ID_INVALID,
+        )
+
+    def test_generate_random_validates_initialization_and_session(self) -> None:
+        random_data = (CK_BYTE * 16)()
+
+        self.assertEqual(
+            self.lib.C_GenerateRandom(1, random_data, len(random_data)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GenerateRandom(999, random_data, len(random_data)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
 
     def test_interface_list_reports_one_pkcs11_interface(self) -> None:
         count = CK_ULONG()
@@ -336,6 +393,15 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         self.assertEqual(
             self.lib.C_GetInterface(b"PKCS 11", ctypes.byref(version), ctypes.byref(interface), 0),
+            CKR_ARGUMENTS_BAD,
+        )
+
+    def test_get_interface_rejects_wrong_name(self) -> None:
+        version = CK_VERSION(3, 2)
+        interface = ctypes.POINTER(CK_INTERFACE)()
+
+        self.assertEqual(
+            self.lib.C_GetInterface(b"NOT PKCS", ctypes.byref(version), ctypes.byref(interface), 0),
             CKR_ARGUMENTS_BAD,
         )
 
