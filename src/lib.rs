@@ -1987,7 +1987,9 @@ pub extern "C" fn C_GetInterface(
         };
 
         if let Some(version) = version.as_ref() {
-            if version.major != 3 || version.minor != 2 {
+            let supported_v2 = version.major == 2 && version.minor == 40;
+            let supported_v3 = version.major == 3 && version.minor <= 2;
+            if !supported_v2 && !supported_v3 {
                 return CKR_ARGUMENTS_BAD.into();
             }
         }
