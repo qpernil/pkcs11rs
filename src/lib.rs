@@ -10,6 +10,7 @@ use rusb::UsbContext;
 use std::{
     cell::RefCell,
     collections::HashMap,
+    ffi::CStr,
     io::Write,
     ptr,
     rc::Rc,
@@ -23,6 +24,8 @@ use error::*;
 
 pub mod pkcs11;
 use pkcs11::*;
+
+unsafe impl Sync for CK_INTERFACE {}
 
 #[cfg(test)]
 mod test;
@@ -39,10 +42,13 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn next_key<T>(map: &HashMap<::std::os::raw::c_ulong, T>, min: ::std::os::raw::c_ulong) -> ::std::os::raw::c_ulong {
+fn next_key<T>(
+    map: &HashMap<::std::os::raw::c_ulong, T>,
+    min: ::std::os::raw::c_ulong,
+) -> ::std::os::raw::c_ulong {
     match map.keys().max() {
         Some(k) => k + 1,
-        None => min
+        None => min,
     }
 }
 
@@ -127,7 +133,9 @@ trait Slot {
         str_pad(self.manufacturer(), &mut info.manufacturerID);
         str_pad(self.product(), &mut info.model);
         str_pad(self.serial(), &mut info.serialNumber);
-        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        info.flags =
+            (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED)
+                as CK_FLAGS;
         info.ulMaxSessionCount = 0;
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = 0;
@@ -154,7 +162,7 @@ impl std::fmt::Debug for dyn Slot + '_ {
 
 #[derive(Debug)]
 struct YubiHsmSlot {
-    connector: Rc<dyn Connector>
+    connector: Rc<dyn Connector>,
 }
 
 impl Slot for YubiHsmSlot {
@@ -183,7 +191,12 @@ impl Slot for YubiHsmSlot {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiHsmSession {slotID, flags, connector: self.connector.clone(), session: None })
+        Box::new(YubiHsmSession {
+            slotID,
+            flags,
+            connector: self.connector.clone(),
+            session: None,
+        })
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -212,13 +225,14 @@ impl YubiHsmSlot {
         vec
     }
     fn send_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+        self.connector
+            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
     }
 }
 
 #[derive(Debug)]
 struct YubiKeySlot {
-    connector: Rc<dyn Connector>
+    connector: Rc<dyn Connector>,
 }
 
 impl Slot for YubiKeySlot {
@@ -247,11 +261,20 @@ impl Slot for YubiKeySlot {
         self.connector.is_present()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiKeySession {slotID, flags, connector: self.connector.clone(), session: None})
+        Box::new(YubiKeySession {
+            slotID,
+            flags,
+            connector: self.connector.clone(),
+            session: None,
+        })
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         self.send_cmd(&send_buffer, timeout)?;
         Ok(())
     }
@@ -261,7 +284,11 @@ impl Slot for YubiKeySlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         self.send_cmd(&send_buffer, timeout)?;
         self.format_token_info(info);
         Ok(())
@@ -296,7 +323,7 @@ struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
-    session: Option<Scp03Session>
+    session: Option<Scp03Session>,
 }
 
 impl Session for YubiHsmSession {
@@ -314,14 +341,19 @@ impl Session for YubiHsmSession {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
-        }.into()
+        }
+        .into()
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(1, &[5; 100], timeout)?;
         let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-        self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
+        self.session = Some(Scp03Session {
+            cipher: openssl::symm::Cipher::aes_128_cbc(),
+            key,
+            iv,
+        });
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
@@ -335,7 +367,7 @@ impl Session for YubiHsmSession {
         let _vec = self.send_secure_cmd(1, &[7; 99], timeout)?;
         Ok(())
     }
-    fn generate(&self) ->Result<(), Error> {
+    fn generate(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_secure_cmd(1, &[8; 72], timeout)?;
         Ok(())
@@ -344,10 +376,12 @@ impl Session for YubiHsmSession {
 
 impl YubiHsmSession {
     fn send_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+        self.connector
+            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
     }
     fn send_secure_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector.send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+        self.connector
+            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
     }
 }
 
@@ -356,7 +390,7 @@ struct YubiKeySession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
-    session: Option<Scp03Session>
+    session: Option<Scp03Session>,
 }
 
 impl Session for YubiKeySession {
@@ -371,20 +405,33 @@ impl Session for YubiKeySession {
     }
     fn state(&self) -> CK_STATE {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         if self.send_cmd(&send_buffer, timeout).is_ok() {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
-        }.into()
+        }
+        .into()
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         if self.send_cmd(&send_buffer, timeout).is_ok() {
             let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
             let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-            self.session = Some(Scp03Session {cipher: openssl::symm::Cipher::aes_128_cbc(), key, iv});
+            self.session = Some(Scp03Session {
+                cipher: openssl::symm::Cipher::aes_128_cbc(),
+                key,
+                iv,
+            });
             Ok(())
         } else {
             Err(CKR_PIN_INCORRECT.into())
@@ -392,17 +439,29 @@ impl Session for YubiKeySession {
     }
     fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         self.send_cmd(&send_buffer, timeout).map(|_| ())
     }
     fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         self.send_cmd(&send_buffer, timeout).map(|_| ())
     }
-    fn generate(&self) ->Result<(), Error> {
+    fn generate(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
-        let send_buffer = [1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let send_buffer = [
+            1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         self.send_cmd(&send_buffer, timeout).map(|_| ())
     }
 }
@@ -422,10 +481,20 @@ trait Connector {
     fn minor(&self) -> u8;
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error>;
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        timeout: Duration,
+    ) -> Result<&'a [u8], Error>;
 
     fn name(&self) -> String {
-        format!("{} {} {}", self.manufacturer(), self.product(), self.serial())
+        format!(
+            "{} {} {}",
+            self.manufacturer(),
+            self.product(),
+            self.serial()
+        )
     }
 
     fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
@@ -451,7 +520,7 @@ struct UsbConnector {
     product: String,
     serial: String,
     packet_size: usize,
-    claimed: bool
+    claimed: bool,
 }
 
 impl Connector for UsbConnector {
@@ -479,10 +548,16 @@ impl Connector for UsbConnector {
     fn buffer_size(&self) -> usize {
         2048 + self.packet_size
     }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], timeout: Duration) -> Result<&'a [u8], Error> {
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
         eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
-        if len % self.packet_size == 0 { // Write a ZLP if last packet is full
+        if len % self.packet_size == 0 {
+            // Write a ZLP if last packet is full
             let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
             eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
         }
@@ -548,33 +623,42 @@ impl Connector for PcscConnector {
     fn buffer_size(&self) -> usize {
         4096
     }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
         match self.card.as_ref() {
             Some(card) => {
                 let received = card.transmit(send_buffer, receive_buffer)?;
                 eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, received);
                 Ok(received)
             }
-            None => {
-                Err(Error::from(pcsc::Error::NoSmartcard))
-            }
+            None => Err(Error::from(pcsc::Error::NoSmartcard)),
         }
     }
 }
 
 impl PcscConnector {
     fn connect(&mut self) -> Result<(), Error> {
-        self.card = Some(self.context.connect(&self.reader, pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1)?);
+        self.card = Some(self.context.connect(
+            &self.reader,
+            pcsc::ShareMode::Exclusive,
+            pcsc::Protocols::T0 | pcsc::Protocols::T1,
+        )?);
         Ok(())
     }
     fn _reconnect(&mut self) -> Result<(), Error> {
         match self.card.as_mut() {
-            Some(card) => {
-                card.reconnect(pcsc::ShareMode::Exclusive, pcsc::Protocols::T0 | pcsc::Protocols::T1, pcsc::Disposition::ResetCard).map_err(|e| e .into())
-            },
-            None => {
-                Err(Error::from(pcsc::Error::NoSmartcard))
-            }
+            Some(card) => card
+                .reconnect(
+                    pcsc::ShareMode::Exclusive,
+                    pcsc::Protocols::T0 | pcsc::Protocols::T1,
+                    pcsc::Disposition::ResetCard,
+                )
+                .map_err(|e| e.into()),
+            None => Err(Error::from(pcsc::Error::NoSmartcard)),
         }
     }
     fn _disconnect(&mut self) -> Result<(), Error> {
@@ -588,7 +672,7 @@ struct CurlConnector {
     serial: String,
     url: String,
     connected: bool,
-    curl: RefCell<curl::easy::Easy>
+    curl: RefCell<curl::easy::Easy>,
 }
 
 impl Connector for CurlConnector {
@@ -616,7 +700,12 @@ impl Connector for CurlConnector {
     fn buffer_size(&self) -> usize {
         2048
     }
-    fn transmit<'a>(&self, send_buffer: &[u8], receive_buffer: &'a mut [u8], _timeout: Duration) -> Result<&'a [u8], Error> {
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
         let mut write_len = 0usize;
         let mut read_len = 0usize;
         let mut curl = self.curl.try_borrow_mut()?;
@@ -655,7 +744,10 @@ impl CurlConnector {
             })?;
             transfer.perform()?;
         }
-        eprintln!("curl.get() -> {:?}", String::from_utf8_lossy(&received).to_string());
+        eprintln!(
+            "curl.get() -> {:?}",
+            String::from_utf8_lossy(&received).to_string()
+        );
         curl.url(&format!("{}/connector/api", self.url))?;
         curl.post(true)?;
         self.connected = true;
@@ -666,7 +758,7 @@ impl CurlConnector {
 struct Scp03Session {
     cipher: openssl::symm::Cipher,
     key: Vec<u8>,
-    iv: Option<Vec<u8>>
+    iv: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Scp03Session {
@@ -678,9 +770,10 @@ impl std::fmt::Debug for Scp03Session {
 }
 
 impl Scp03Session {
-    fn _encrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
+    fn _encrypt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let iv = self.iv.as_ref().map(|v| &v[..]);
-        let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Encrypt, &self.key, iv)?;
+        let mut c =
+            openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Encrypt, &self.key, iv)?;
         //c.pad(false);
         let mut out = vec![0; data.len() + self.cipher.block_size()];
         let count = c.update(data, &mut out)?;
@@ -688,9 +781,10 @@ impl Scp03Session {
         out.truncate(count + rest);
         Ok(out)
     }
-    fn _decrypt(&self, data : &[u8]) -> Result<Vec<u8>, Error> {
+    fn _decrypt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let iv = self.iv.as_ref().map(|v| &v[..]);
-        let mut c = openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Decrypt, &self.key, iv)?;
+        let mut c =
+            openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Decrypt, &self.key, iv)?;
         //c.pad(false);
         let mut out = vec![0; data.len() + self.cipher.block_size()];
         let count = c.update(data, &mut out)?;
@@ -722,18 +816,14 @@ impl Context {
     fn new() -> Context {
         let context = Context {
             libusb: match rusb::Context::new() {
-                Ok(context) => {
-                    Some(context)
-                },
+                Ok(context) => Some(context),
                 Err(e) => {
                     eprintln!("libusb::Context::new: {}", e);
                     None
                 }
             },
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
-                Ok(context) => {
-                    Some(Rc::new(context))
-                },
+                Ok(context) => Some(Rc::new(context)),
                 Err(e) => {
                     eprintln!("pcsc::Context::establish: {}", e);
                     None
@@ -746,47 +836,62 @@ impl Context {
         context
     }
     fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
-        info.cryptokiVersion.major = 2;
-        info.cryptokiVersion.minor = 40;
+        info.cryptokiVersion.major = 3;
+        info.cryptokiVersion.minor = 2;
         info.libraryVersion.major = 1;
         info.libraryVersion.minor = 0;
         info.flags = 0;
-        str_pad("YubiHSM & YubiKey PKCS#11 module", &mut info.libraryDescription);
+        str_pad(
+            "YubiHSM & YubiKey PKCS#11 module",
+            &mut info.libraryDescription,
+        );
         str_pad("Yubico", &mut info.manufacturerID);
         Ok(())
     }
     fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
         match self.slots.get(&slot_id) {
             Some(slot) => Ok(slot.as_ref()),
-            None => Err(CKR_SLOT_ID_INVALID.into())
+            None => Err(CKR_SLOT_ID_INVALID.into()),
         }
     }
     fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut (dyn Slot + '_), Error> {
         match self.slots.get_mut(&slot_id) {
             Some(slot) => Ok(slot.as_mut()),
-            None => Err(CKR_SLOT_ID_INVALID.into())
+            None => Err(CKR_SLOT_ID_INVALID.into()),
         }
     }
-    fn get_session_(&self, session_handle: CK_SESSION_HANDLE) -> Option<(&(dyn Slot + '_), &(dyn Session + '_))> {
+    fn get_session_(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Option<(&(dyn Slot + '_), &(dyn Session + '_))> {
         let session = self.sessions.get(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot.as_ref(), session.as_ref()))
     }
-    fn _get_session(&self, session_handle: CK_SESSION_HANDLE) -> Result<(&(dyn Slot + '_), &(dyn Session + '_)), Error> {
+    fn _get_session(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(&(dyn Slot + '_), &(dyn Session + '_)), Error> {
         match self.get_session_(session_handle) {
             Some(ctx) => Ok(ctx),
-            None => Err(CKR_SESSION_HANDLE_INVALID.into())
+            None => Err(CKR_SESSION_HANDLE_INVALID.into()),
         }
     }
-    fn get_session_mut_(&mut self, session_handle: CK_SESSION_HANDLE) -> Option<(&(dyn Slot + '_), &mut (dyn Session + '_))> {
+    fn get_session_mut_(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Option<(&(dyn Slot + '_), &mut (dyn Session + '_))> {
         let session = self.sessions.get_mut(&session_handle)?;
         let slot = self.slots.get(&session.slotID())?;
         Some((slot.as_ref(), session.as_mut()))
     }
-    fn get_session_mut(&mut self, session_handle: CK_SESSION_HANDLE) -> Result<(&(dyn Slot + '_), &mut (dyn Session + '_)), Error> {
+    fn get_session_mut(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(&(dyn Slot + '_), &mut (dyn Session + '_)), Error> {
         match self.get_session_mut_(session_handle) {
             Some(ctx) => Ok(ctx),
-            None => Err(CKR_SESSION_HANDLE_INVALID.into())
+            None => Err(CKR_SESSION_HANDLE_INVALID.into()),
         }
     }
     fn init(&mut self) {
@@ -800,21 +905,36 @@ impl Context {
                                 Ok(handle) => {
                                     let version = desc.device_version();
                                     let packet_size = desc.max_packet_size() as usize;
-                                    let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
-                                    let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-                                    let serial = handle.read_serial_number_string_ascii(&desc).unwrap_or_default();
-                                    let mut connector = UsbConnector {handle, version, manufacturer, product, serial, packet_size, claimed: false};
+                                    let manufacturer = handle
+                                        .read_manufacturer_string_ascii(&desc)
+                                        .unwrap_or_default();
+                                    let product =
+                                        handle.read_product_string_ascii(&desc).unwrap_or_default();
+                                    let serial = handle
+                                        .read_serial_number_string_ascii(&desc)
+                                        .unwrap_or_default();
+                                    let mut connector = UsbConnector {
+                                        handle,
+                                        version,
+                                        manufacturer,
+                                        product,
+                                        serial,
+                                        packet_size,
+                                        claimed: false,
+                                    };
                                     //let mut connector = CurlConnector { serial, url: String::from("http://127.0.0.1:12345"), connected: false, curl: RefCell::new(curl::easy::Easy::new()) };
                                     let name = connector.name();
                                     eprintln!("{}", name);
                                     if !self.slots.values().any(|s| s.name() == name) {
                                         map(connector.connect());
                                         let k = next_key(&self.slots, 0);
-                                        let mut v = Box::new(YubiHsmSlot { connector: Rc::new(connector) });
+                                        let mut v = Box::new(YubiHsmSlot {
+                                            connector: Rc::new(connector),
+                                        });
                                         map(v.init_slot());
                                         self.slots.insert(k, v);
                                     }
-                                },
+                                }
                                 Err(e) => {
                                     eprintln!("libusb.open: {}", e);
                                 }
@@ -822,18 +942,24 @@ impl Context {
                         }
                     }
                 }
-            } 
+            }
         }
         if let Some(context) = self.pcsc.as_ref() {
             if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
-                    let mut connector = PcscConnector {reader, context: context.clone(), card: None};
+                    let mut connector = PcscConnector {
+                        reader,
+                        context: context.clone(),
+                        card: None,
+                    };
                     let name = connector.name();
                     eprintln!("{}", name);
                     if !self.slots.values().any(|s| s.name() == name) {
                         map(connector.connect());
                         let k = next_key(&self.slots, 0);
-                        let mut v = Box::new(YubiKeySlot { connector: Rc::new(connector) });
+                        let mut v = Box::new(YubiKeySlot {
+                            connector: Rc::new(connector),
+                        });
                         map(v.init_slot());
                         self.slots.insert(k, v);
                     }
@@ -883,7 +1009,7 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
             Some(_) => {
                 *guard = None;
                 CKR_OK as CK_RV
-            },
+            }
             None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV,
         },
         Err(e) => e.into(),
@@ -896,18 +1022,18 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -
         eprintln!("C_GetFunctionList called with {:?}", function_list);
         match function_list.as_mut() {
             Some(function_list) => {
-                *function_list = &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
+                *function_list =
+                    &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
                 eprintln!("C_GetFunctionList returning {:?}", *function_list);
                 CKR_OK
-            },
+            }
             None => CKR_ARGUMENTS_BAD,
         }
-    }.into()
+    }
+    .into()
 }
 
-fn get_info(
-    info_ptr: CK_INFO_PTR
-) -> Result<(), Error> {
+fn get_info(info_ptr: CK_INFO_PTR) -> Result<(), Error> {
     with_context(|ctx| ctx.get_info(as_mut(info_ptr)?))
 }
 
@@ -924,7 +1050,10 @@ pub extern "C" fn C_GetSlotList(
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
     unsafe {
-        eprintln!("C_GetSlotList called with {:?}", (token_present, slot_list, count));
+        eprintln!(
+            "C_GetSlotList called with {:?}",
+            (token_present, slot_list, count)
+        );
         let count = match count.as_mut() {
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
@@ -934,7 +1063,11 @@ pub extern "C" fn C_GetSlotList(
             let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                 ctx.slots.keys().cloned().collect()
             } else {
-                ctx.slots.iter().filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0).map(|s| *s.0).collect()
+                ctx.slots
+                    .iter()
+                    .filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0)
+                    .map(|s| *s.0)
+                    .collect()
             };
             match slot_list.as_mut() {
                 Some(_) => {
@@ -949,7 +1082,7 @@ pub extern "C" fn C_GetSlotList(
                         eprintln!("C_GetSlotList returning {:?}", *count);
                         Ok(CKR_BUFFER_TOO_SMALL as CK_RV)
                     }
-                },
+                }
                 None => {
                     *count = keys.len() as ::std::os::raw::c_ulong;
                     eprintln!("C_GetSlotList returning {:?}", *count);
@@ -960,13 +1093,11 @@ pub extern "C" fn C_GetSlotList(
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
-fn get_slot_info(
-    slotID: CK_SLOT_ID,
-    info_ptr: CK_SLOT_INFO_PTR
-) -> Result<(), Error> {
+fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
     with_context(|ctx| ctx.get_slot(slotID)?.get_slot_info(as_mut(info_ptr)?))
 }
 
@@ -976,10 +1107,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO)
     map(get_slot_info(slotID, info_ptr))
 }
 
-fn get_token_info(
-    slotID: CK_SLOT_ID,
-    info_ptr: CK_TOKEN_INFO_PTR
-) -> Result<(), Error> {
+fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     with_context(|ctx| ctx.get_slot(slotID)?.get_token_info(as_mut(info_ptr)?))
 }
 
@@ -1005,38 +1133,40 @@ pub extern "C" fn C_GetMechanismList(
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
     unsafe {
-        eprintln!("C_GetMechanismList called with {:?}", (slotID, mechanism_list, count));
+        eprintln!(
+            "C_GetMechanismList called with {:?}",
+            (slotID, mechanism_list, count)
+        );
         let count = match count.as_mut() {
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context(|ctx| {
-            match ctx.slots.get(&slotID) {
-                Some(slot) => {
-                    eprintln!("{:?}", slot);
-                    match mechanism_list.as_mut() {
-                        Some(_) => {
-                            let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
-                            for i in 0..*count {
-                                list[i as usize] = i;
-                            }
-                            eprintln!("C_GetMechanismList returning {:?}", list);
-                            Ok(CKR_OK as CK_RV)
-                        },
-                        None => {
-                            eprintln!("C_GetMechanismList returning {:?}", 7);
-                            *count = 7;
-                            Ok(CKR_OK as CK_RV)
+        match with_context(|ctx| match ctx.slots.get(&slotID) {
+            Some(slot) => {
+                eprintln!("{:?}", slot);
+                match mechanism_list.as_mut() {
+                    Some(_) => {
+                        let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
+                        for i in 0..*count {
+                            list[i as usize] = i;
                         }
+                        eprintln!("C_GetMechanismList returning {:?}", list);
+                        Ok(CKR_OK as CK_RV)
+                    }
+                    None => {
+                        eprintln!("C_GetMechanismList returning {:?}", 7);
+                        *count = 7;
+                        Ok(CKR_OK as CK_RV)
                     }
                 }
-                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
+            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1045,30 +1175,32 @@ pub extern "C" fn C_GetMechanismInfo(
     type_: CK_MECHANISM_TYPE,
     info_ptr: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
-    eprintln!("C_GetMechanismInfo called with {:?}", (slotID, type_, info_ptr));
+    eprintln!(
+        "C_GetMechanismInfo called with {:?}",
+        (slotID, type_, info_ptr)
+    );
     unsafe {
-        match with_context(|ctx| {
-            match ctx.slots.get(&slotID) {
-                Some(slot) => {
-                    eprintln!("{:?}", slot);
-                    match info_ptr.as_mut() {
-                        Some(info) => {
-                            info.ulMinKeySize = 1024;
-                            info.ulMaxKeySize = 4096;
-                            info.flags = 0;
-                            eprintln!("C_GetMechanismInfo returning {:?}", info);
-                            Ok(CKR_OK as CK_RV)
-                        },
-                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
+        match with_context(|ctx| match ctx.slots.get(&slotID) {
+            Some(slot) => {
+                eprintln!("{:?}", slot);
+                match info_ptr.as_mut() {
+                    Some(info) => {
+                        info.ulMinKeySize = 1024;
+                        info.ulMaxKeySize = 4096;
+                        info.flags = 0;
+                        eprintln!("C_GetMechanismInfo returning {:?}", info);
+                        Ok(CKR_OK as CK_RV)
                     }
+                    None => Ok(CKR_ARGUMENTS_BAD as CK_RV),
                 }
-                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
+            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1115,29 +1247,28 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context_mut(|ctx| {
-            match ctx.slots.get_mut(&slotID) {
-                Some(slot) => {
-                    eprintln!("{:?}", slot);
-                    if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                        let k = next_key(&ctx.sessions, 1);
-                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
-                        ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
-                        eprintln!("C_OpenSession returning {:?}", k);
-                        *session = k;
-                        Ok(CKR_OK as CK_RV)
-                    } else {
-                        Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
-                    }
+        match with_context_mut(|ctx| match ctx.slots.get_mut(&slotID) {
+            Some(slot) => {
+                eprintln!("{:?}", slot);
+                if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                    let k = next_key(&ctx.sessions, 1);
+                    eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                    ctx.sessions.insert(k, slot.open_session(slotID, flags));
+                    eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
+                    eprintln!("C_OpenSession returning {:?}", k);
+                    *session = k;
+                    Ok(CKR_OK as CK_RV)
+                } else {
+                    Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
                 }
-                None => Ok(CKR_SLOT_ID_INVALID as CK_RV)
             }
+            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1151,12 +1282,13 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
             }
-            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         }
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1170,36 +1302,39 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
-pub extern "C" fn C_GetSessionInfo(session_handle: CK_SESSION_HANDLE, info_ptr: *mut CK_SESSION_INFO) -> CK_RV {
+pub extern "C" fn C_GetSessionInfo(
+    session_handle: CK_SESSION_HANDLE,
+    info_ptr: *mut CK_SESSION_INFO,
+) -> CK_RV {
     eprintln!("C_GetSessionInfo called with {:?}", session_handle);
     unsafe {
-        match with_context(|ctx| {
-            match ctx.get_session_(session_handle) {
-                Some(session) => {
-                    eprintln!("C_GetSessionInfo {:?}", session);
-                    match info_ptr.as_mut() {
-                        Some(info) => {
-                            info.slotID = session.1.slotID();
-                            info.state = session.1.state();
-                            info.flags = session.1.flags();
-                            info.ulDeviceError = 0;
-                            eprintln!("C_GetSessionInfo returning {:?}", info);
-                            Ok(CKR_OK as CK_RV)
-                        },
-                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
+        match with_context(|ctx| match ctx.get_session_(session_handle) {
+            Some(session) => {
+                eprintln!("C_GetSessionInfo {:?}", session);
+                match info_ptr.as_mut() {
+                    Some(info) => {
+                        info.slotID = session.1.slotID();
+                        info.state = session.1.state();
+                        info.flags = session.1.flags();
+                        info.ulDeviceError = 0;
+                        eprintln!("C_GetSessionInfo returning {:?}", info);
+                        Ok(CKR_OK as CK_RV)
                     }
+                    None => Ok(CKR_ARGUMENTS_BAD as CK_RV),
                 }
-                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
             }
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1243,13 +1378,14 @@ pub extern "C" fn C_Login(
     pin: *mut ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!("C_Login called with {:?}", (session_handle, user_type, pin, pin_len));
+    eprintln!(
+        "C_Login called with {:?}",
+        (session_handle, user_type, pin, pin_len)
+    );
     map(login(session_handle, user_type, pin, pin_len))
 }
 
-fn logout(
-    session_handle: CK_SESSION_HANDLE
-) -> Result<(), Error> {
+fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_context_mut(|ctx| {
         let session = ctx.get_session_mut(session_handle)?;
         eprintln!("logout {:?}", session.1);
@@ -1285,7 +1421,10 @@ pub extern "C" fn C_CopyObject(
 }
 
 #[no_mangle]
-pub extern "C" fn C_DestroyObject(session_handle: CK_SESSION_HANDLE, _object: CK_OBJECT_HANDLE) -> CK_RV {
+pub extern "C" fn C_DestroyObject(
+    session_handle: CK_SESSION_HANDLE,
+    _object: CK_OBJECT_HANDLE,
+) -> CK_RV {
     session_function_not_supported(session_handle)
 }
 
@@ -1324,28 +1463,26 @@ pub extern "C" fn C_FindObjectsInit(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!("C_FindObjectsInit called with {:?}", (session_handle, templ, count));
+    eprintln!(
+        "C_FindObjectsInit called with {:?}",
+        (session_handle, templ, count)
+    );
     unsafe {
-        match with_context(|ctx| {
-            match ctx.get_session_(session_handle) {
-                Some(session) => {
-                    eprintln!("C_FindObjectsInit {:?}", session);
-                    match templ.as_ref() {
-                        Some(_info) => {
-                            Ok(CKR_OK as CK_RV)
-                        },
-                        None => {
-                            Ok(CKR_OK as CK_RV)
-                        }
-                    }
+        match with_context(|ctx| match ctx.get_session_(session_handle) {
+            Some(session) => {
+                eprintln!("C_FindObjectsInit {:?}", session);
+                match templ.as_ref() {
+                    Some(_info) => Ok(CKR_OK as CK_RV),
+                    None => Ok(CKR_OK as CK_RV),
                 }
-                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
             }
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1355,49 +1492,50 @@ pub extern "C" fn C_FindObjects(
     max_object_count: ::std::os::raw::c_ulong,
     object_count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!("C_FindObjects called with {:?}", (session_handle, object, max_object_count, object_count));
+    eprintln!(
+        "C_FindObjects called with {:?}",
+        (session_handle, object, max_object_count, object_count)
+    );
     unsafe {
         let object_count = match object_count.as_mut() {
             Some(object_count) => object_count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context(|ctx| {
-            match ctx.get_session_(session_handle) {
-                Some(session) => {
-                    eprintln!("C_FindObjects {:?}", session);
-                    match object.as_mut() {
-                        Some(_info) => {
-                            eprintln!("C_FindObjects returning {:?}", 0);
-                            *object_count = 0;
-                            Ok(CKR_OK as CK_RV)
-                        },
-                        None => Ok(CKR_ARGUMENTS_BAD as CK_RV)
+        match with_context(|ctx| match ctx.get_session_(session_handle) {
+            Some(session) => {
+                eprintln!("C_FindObjects {:?}", session);
+                match object.as_mut() {
+                    Some(_info) => {
+                        eprintln!("C_FindObjects returning {:?}", 0);
+                        *object_count = 0;
+                        Ok(CKR_OK as CK_RV)
                     }
+                    None => Ok(CKR_ARGUMENTS_BAD as CK_RV),
                 }
-                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
             }
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
         }
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
-    match with_context(|ctx| {
-        match ctx.get_session_(session_handle) {
-            Some(session) => {
-                eprintln!("C_FindObjectsFinal {:?}", session);
-                Ok(CKR_OK as CK_RV)
-            }
-            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
+    match with_context(|ctx| match ctx.get_session_(session_handle) {
+        Some(session) => {
+            eprintln!("C_FindObjectsFinal {:?}", session);
+            Ok(CKR_OK as CK_RV)
         }
+        None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
-    }.into()
+    }
+    .into()
 }
 
 #[no_mangle]
@@ -1483,7 +1621,8 @@ pub extern "C" fn C_DecryptFinal(
 #[no_mangle]
 pub extern "C" fn C_DigestInit(
     session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM) -> CK_RV {
+    _mechanism: *mut CK_MECHANISM,
+) -> CK_RV {
     session_function_not_supported(session_handle)
 }
 
@@ -1508,9 +1647,7 @@ pub extern "C" fn C_DigestUpdate(
 }
 
 #[no_mangle]
-pub extern "C" fn C_DigestKey(
-    session_handle: CK_SESSION_HANDLE,
-    _key: CK_OBJECT_HANDLE) -> CK_RV {
+pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, _key: CK_OBJECT_HANDLE) -> CK_RV {
     session_function_not_supported(session_handle)
 }
 
@@ -1691,34 +1828,35 @@ pub extern "C" fn C_GenerateKey(
     count: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!("C_GenerateKey called with {:?}", (session_handle, mechanism, templ, count, key));
+    eprintln!(
+        "C_GenerateKey called with {:?}",
+        (session_handle, mechanism, templ, count, key)
+    );
     unsafe {
         let key = match key.as_mut() {
             Some(key) => key,
             None => return CKR_ARGUMENTS_BAD as CK_RV,
         };
-        match with_context(|ctx| {
-            match ctx.get_session_(session_handle) {
-                Some(session) => {
-                    eprintln!("C_GenerateKey {:?}", session);
-                    if let Some(mechanism) = mechanism.as_ref() {
-                        eprintln!("C_GenerateKey {:?}", mechanism);
-                        let templ = if count == 0 {
-                            &[]
-                        } else if templ.is_null() {
-                            return Ok(CKR_ARGUMENTS_BAD as CK_RV);
-                        } else {
-                            slice::from_raw_parts(templ, count as usize)
-                        };
-                        eprintln!("C_GenerateKey {:?}", templ);
-                        *key = 99;
-                        Ok(map(session.1.generate()))
+        match with_context(|ctx| match ctx.get_session_(session_handle) {
+            Some(session) => {
+                eprintln!("C_GenerateKey {:?}", session);
+                if let Some(mechanism) = mechanism.as_ref() {
+                    eprintln!("C_GenerateKey {:?}", mechanism);
+                    let templ = if count == 0 {
+                        &[]
+                    } else if templ.is_null() {
+                        return Ok(CKR_ARGUMENTS_BAD as CK_RV);
                     } else {
-                        Ok(CKR_ARGUMENTS_BAD as CK_RV)
-                    }
+                        slice::from_raw_parts(templ, count as usize)
+                    };
+                    eprintln!("C_GenerateKey {:?}", templ);
+                    *key = 99;
+                    Ok(map(session.1.generate()))
+                } else {
+                    Ok(CKR_ARGUMENTS_BAD as CK_RV)
                 }
-                None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV)
             }
+            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
@@ -1808,8 +1946,279 @@ pub extern "C" fn C_CancelFunction(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     session_function_not_supported(session_handle)
 }
 
+#[no_mangle]
+pub extern "C" fn C_GetInterfaceList(
+    interfaces_list: *mut CK_INTERFACE,
+    count: *mut ::std::os::raw::c_ulong,
+) -> CK_RV {
+    unsafe {
+        let count = match count.as_mut() {
+            Some(count) => count,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
+
+        if interfaces_list.is_null() {
+            *count = 1;
+            return CKR_OK.into();
+        }
+
+        if *count < 1 {
+            *count = 1;
+            return CKR_BUFFER_TOO_SMALL.into();
+        }
+
+        *interfaces_list = G_INTERFACE;
+        *count = 1;
+        CKR_OK.into()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn C_GetInterface(
+    interface_name: *mut ::std::os::raw::c_uchar,
+    version: *mut CK_VERSION,
+    interface_: *mut *mut CK_INTERFACE,
+    _flags: CK_FLAGS,
+) -> CK_RV {
+    unsafe {
+        let interface_ = match interface_.as_mut() {
+            Some(interface_) => interface_,
+            None => return CKR_ARGUMENTS_BAD.into(),
+        };
+
+        if let Some(version) = version.as_ref() {
+            if version.major != 3 || version.minor != 2 {
+                return CKR_ARGUMENTS_BAD.into();
+            }
+        }
+
+        if !interface_name.is_null() {
+            let name = CStr::from_ptr(interface_name as *const ::std::os::raw::c_char);
+            if name.to_bytes() != b"PKCS 11" {
+                return CKR_ARGUMENTS_BAD.into();
+            }
+        }
+
+        *interface_ = &G_INTERFACE as *const CK_INTERFACE as CK_INTERFACE_PTR;
+        CKR_OK.into()
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn C_LoginUser(
+    session_handle: CK_SESSION_HANDLE,
+    _user_type: CK_USER_TYPE,
+    _pin: *mut ::std::os::raw::c_uchar,
+    _pin_len: ::std::os::raw::c_ulong,
+    _username: *mut ::std::os::raw::c_uchar,
+    _username_len: ::std::os::raw::c_ulong,
+) -> CK_RV {
+    session_function_not_supported(session_handle)
+}
+
+#[no_mangle]
+pub extern "C" fn C_SessionCancel(session_handle: CK_SESSION_HANDLE, _flags: CK_FLAGS) -> CK_RV {
+    session_function_not_supported(session_handle)
+}
+
+macro_rules! message_stub {
+    ($name:ident ( $($arg:ident : $typ:ty),* $(,)? )) => {
+        #[no_mangle]
+        pub extern "C" fn $name(session_handle: CK_SESSION_HANDLE, $($arg: $typ),*) -> CK_RV {
+            $(let _ = $arg;)*
+            session_function_not_supported(session_handle)
+        }
+    };
+}
+
+message_stub!(C_MessageEncryptInit(
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+));
+message_stub!(C_EncryptMessage(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+    plaintext: *mut ::std::os::raw::c_uchar,
+    plaintext_len: ::std::os::raw::c_ulong,
+    ciphertext: *mut ::std::os::raw::c_uchar,
+    ciphertext_len: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_EncryptMessageBegin(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_EncryptMessageNext(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    plaintext_part: *mut ::std::os::raw::c_uchar,
+    plaintext_part_len: ::std::os::raw::c_ulong,
+    ciphertext_part: *mut ::std::os::raw::c_uchar,
+    ciphertext_part_len: *mut ::std::os::raw::c_ulong,
+    flags: CK_FLAGS,
+));
+message_stub!(C_MessageEncryptFinal());
+
+message_stub!(C_MessageDecryptInit(
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+));
+message_stub!(C_DecryptMessage(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+    ciphertext: *mut ::std::os::raw::c_uchar,
+    ciphertext_len: ::std::os::raw::c_ulong,
+    plaintext: *mut ::std::os::raw::c_uchar,
+    plaintext_len: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_DecryptMessageBegin(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_DecryptMessageNext(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    ciphertext_part: *mut ::std::os::raw::c_uchar,
+    ciphertext_part_len: ::std::os::raw::c_ulong,
+    plaintext_part: *mut ::std::os::raw::c_uchar,
+    plaintext_part_len: *mut ::std::os::raw::c_ulong,
+    flags: CK_FLAGS,
+));
+message_stub!(C_MessageDecryptFinal());
+
+message_stub!(C_MessageSignInit(
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+));
+message_stub!(C_SignMessage(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_SignMessageBegin(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_SignMessageNext(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_MessageSignFinal());
+
+message_stub!(C_MessageVerifyInit(
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+));
+message_stub!(C_VerifyMessage(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_VerifyMessageBegin(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_VerifyMessageNext(
+    parameter: *mut ::std::os::raw::c_void,
+    parameter_len: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_MessageVerifyFinal());
+
+message_stub!(C_EncapsulateKey(
+    mechanism: *mut CK_MECHANISM,
+    public_key: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    attribute_count: ::std::os::raw::c_ulong,
+    ciphertext: *mut ::std::os::raw::c_uchar,
+    ciphertext_len: *mut ::std::os::raw::c_ulong,
+    key: *mut CK_OBJECT_HANDLE,
+));
+message_stub!(C_DecapsulateKey(
+    mechanism: *mut CK_MECHANISM,
+    private_key: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    attribute_count: ::std::os::raw::c_ulong,
+    ciphertext: *mut ::std::os::raw::c_uchar,
+    ciphertext_len: *mut ::std::os::raw::c_ulong,
+    key: *mut CK_OBJECT_HANDLE,
+));
+message_stub!(C_VerifySignatureInit(
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_VerifySignature(
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_VerifySignatureUpdate(
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_VerifySignatureFinal());
+message_stub!(C_GetSessionValidationFlags(
+    type_: CK_SESSION_VALIDATION_FLAGS_TYPE,
+    flags: *mut CK_FLAGS,
+));
+message_stub!(C_AsyncComplete(
+    function_name: *mut ::std::os::raw::c_uchar,
+    result: *mut CK_ASYNC_DATA,
+));
+message_stub!(C_AsyncGetID(
+    function_name: *mut ::std::os::raw::c_uchar,
+    id: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_AsyncJoin(
+    function_name: *mut ::std::os::raw::c_uchar,
+    id: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+));
+message_stub!(C_WrapKeyAuthenticated(
+    mechanism: *mut CK_MECHANISM,
+    wrapping_key: CK_OBJECT_HANDLE,
+    key: CK_OBJECT_HANDLE,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+    wrapped_key: *mut ::std::os::raw::c_uchar,
+    wrapped_key_len: *mut ::std::os::raw::c_ulong,
+));
+message_stub!(C_UnwrapKeyAuthenticated(
+    mechanism: *mut CK_MECHANISM,
+    unwrapping_key: CK_OBJECT_HANDLE,
+    wrapped_key: *mut ::std::os::raw::c_uchar,
+    wrapped_key_len: ::std::os::raw::c_ulong,
+    templ: *mut CK_ATTRIBUTE,
+    attribute_count: ::std::os::raw::c_ulong,
+    associated_data: *mut ::std::os::raw::c_uchar,
+    associated_data_len: ::std::os::raw::c_ulong,
+    key: *mut CK_OBJECT_HANDLE,
+));
+
 static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
-    version : CK_VERSION {major: 2, minor: 40},
+    version: CK_VERSION { major: 3, minor: 2 },
 
     C_Initialize: Some(C_Initialize),
     C_Finalize: Some(C_Finalize),
@@ -1898,4 +2307,145 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = CK_FUNCTION_LIST {
     C_GetFunctionStatus: Some(C_GetFunctionStatus),
     C_CancelFunction: Some(C_CancelFunction),
     C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
+};
+
+static G_FUNCTION_LIST_3_2: CK_FUNCTION_LIST_3_2 = CK_FUNCTION_LIST_3_2 {
+    version: CK_VERSION { major: 3, minor: 2 },
+
+    C_Initialize: Some(C_Initialize),
+    C_Finalize: Some(C_Finalize),
+    C_GetInfo: Some(C_GetInfo),
+    C_GetFunctionList: Some(C_GetFunctionList),
+
+    C_GetSlotList: Some(C_GetSlotList),
+    C_GetSlotInfo: Some(C_GetSlotInfo),
+    C_GetTokenInfo: Some(C_GetTokenInfo),
+
+    C_GetMechanismList: Some(C_GetMechanismList),
+    C_GetMechanismInfo: Some(C_GetMechanismInfo),
+
+    C_InitToken: Some(C_InitToken),
+    C_InitPIN: Some(C_InitPIN),
+    C_SetPIN: Some(C_SetPIN),
+
+    C_OpenSession: Some(C_OpenSession),
+    C_CloseSession: Some(C_CloseSession),
+    C_CloseAllSessions: Some(C_CloseAllSessions),
+    C_GetSessionInfo: Some(C_GetSessionInfo),
+
+    C_GetOperationState: Some(C_GetOperationState),
+    C_SetOperationState: Some(C_SetOperationState),
+
+    C_Login: Some(C_Login),
+    C_Logout: Some(C_Logout),
+
+    C_CreateObject: Some(C_CreateObject),
+    C_CopyObject: Some(C_CopyObject),
+    C_DestroyObject: Some(C_DestroyObject),
+    C_GetObjectSize: Some(C_GetObjectSize),
+
+    C_GetAttributeValue: Some(C_GetAttributeValue),
+    C_SetAttributeValue: Some(C_SetAttributeValue),
+
+    C_FindObjectsInit: Some(C_FindObjectsInit),
+    C_FindObjects: Some(C_FindObjects),
+    C_FindObjectsFinal: Some(C_FindObjectsFinal),
+
+    C_EncryptInit: Some(C_EncryptInit),
+    C_Encrypt: Some(C_Encrypt),
+    C_EncryptUpdate: Some(C_EncryptUpdate),
+    C_EncryptFinal: Some(C_EncryptFinal),
+
+    C_DecryptInit: Some(C_DecryptInit),
+    C_Decrypt: Some(C_Decrypt),
+    C_DecryptUpdate: Some(C_DecryptUpdate),
+    C_DecryptFinal: Some(C_DecryptFinal),
+
+    C_DigestInit: Some(C_DigestInit),
+    C_Digest: Some(C_Digest),
+    C_DigestUpdate: Some(C_DigestUpdate),
+    C_DigestKey: Some(C_DigestKey),
+    C_DigestFinal: Some(C_DigestFinal),
+
+    C_SignInit: Some(C_SignInit),
+    C_Sign: Some(C_Sign),
+    C_SignUpdate: Some(C_SignUpdate),
+    C_SignFinal: Some(C_SignFinal),
+    C_SignRecoverInit: Some(C_SignRecoverInit),
+    C_SignRecover: Some(C_SignRecover),
+
+    C_VerifyInit: Some(C_VerifyInit),
+    C_Verify: Some(C_Verify),
+    C_VerifyUpdate: Some(C_VerifyUpdate),
+    C_VerifyFinal: Some(C_VerifyFinal),
+    C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
+    C_VerifyRecover: Some(C_VerifyRecover),
+
+    C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
+    C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
+    C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
+    C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
+
+    C_GenerateKey: Some(C_GenerateKey),
+    C_GenerateKeyPair: Some(C_GenerateKeyPair),
+
+    C_WrapKey: Some(C_WrapKey),
+    C_UnwrapKey: Some(C_UnwrapKey),
+    C_DeriveKey: Some(C_DeriveKey),
+
+    C_SeedRandom: Some(C_SeedRandom),
+    C_GenerateRandom: Some(C_GenerateRandom),
+
+    C_GetFunctionStatus: Some(C_GetFunctionStatus),
+    C_CancelFunction: Some(C_CancelFunction),
+    C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
+
+    C_GetInterfaceList: Some(C_GetInterfaceList),
+    C_GetInterface: Some(C_GetInterface),
+    C_LoginUser: Some(C_LoginUser),
+    C_SessionCancel: Some(C_SessionCancel),
+
+    C_MessageEncryptInit: Some(C_MessageEncryptInit),
+    C_EncryptMessage: Some(C_EncryptMessage),
+    C_EncryptMessageBegin: Some(C_EncryptMessageBegin),
+    C_EncryptMessageNext: Some(C_EncryptMessageNext),
+    C_MessageEncryptFinal: Some(C_MessageEncryptFinal),
+
+    C_MessageDecryptInit: Some(C_MessageDecryptInit),
+    C_DecryptMessage: Some(C_DecryptMessage),
+    C_DecryptMessageBegin: Some(C_DecryptMessageBegin),
+    C_DecryptMessageNext: Some(C_DecryptMessageNext),
+    C_MessageDecryptFinal: Some(C_MessageDecryptFinal),
+
+    C_MessageSignInit: Some(C_MessageSignInit),
+    C_SignMessage: Some(C_SignMessage),
+    C_SignMessageBegin: Some(C_SignMessageBegin),
+    C_SignMessageNext: Some(C_SignMessageNext),
+    C_MessageSignFinal: Some(C_MessageSignFinal),
+
+    C_MessageVerifyInit: Some(C_MessageVerifyInit),
+    C_VerifyMessage: Some(C_VerifyMessage),
+    C_VerifyMessageBegin: Some(C_VerifyMessageBegin),
+    C_VerifyMessageNext: Some(C_VerifyMessageNext),
+    C_MessageVerifyFinal: Some(C_MessageVerifyFinal),
+
+    C_EncapsulateKey: Some(C_EncapsulateKey),
+    C_DecapsulateKey: Some(C_DecapsulateKey),
+    C_VerifySignatureInit: Some(C_VerifySignatureInit),
+    C_VerifySignature: Some(C_VerifySignature),
+    C_VerifySignatureUpdate: Some(C_VerifySignatureUpdate),
+    C_VerifySignatureFinal: Some(C_VerifySignatureFinal),
+    C_GetSessionValidationFlags: Some(C_GetSessionValidationFlags),
+    C_AsyncComplete: Some(C_AsyncComplete),
+    C_AsyncGetID: Some(C_AsyncGetID),
+    C_AsyncJoin: Some(C_AsyncJoin),
+    C_WrapKeyAuthenticated: Some(C_WrapKeyAuthenticated),
+    C_UnwrapKeyAuthenticated: Some(C_UnwrapKeyAuthenticated),
+};
+
+static G_INTERFACE: CK_INTERFACE = CK_INTERFACE {
+    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut ::std::os::raw::c_char,
+    pFunctionList: &G_FUNCTION_LIST_3_2 as *const CK_FUNCTION_LIST_3_2
+        as *mut ::std::os::raw::c_void,
+    flags: 0,
 };

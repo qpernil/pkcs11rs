@@ -64,6 +64,54 @@ pub fn bindgen_test_layout_CK_INFO() {
         )
     );
 }
+
+#[test]
+pub fn cryptoki_3_2_interface_is_discoverable() {
+    let mut count = 0;
+    assert_eq!(
+        crate::C_GetInterfaceList(::std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+
+    let mut interface = CK_INTERFACE {
+        pInterfaceName: ::std::ptr::null_mut(),
+        pFunctionList: ::std::ptr::null_mut(),
+        flags: 0,
+    };
+    assert_eq!(
+        crate::C_GetInterfaceList(&mut interface, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert!(!interface.pInterfaceName.is_null());
+    assert!(!interface.pFunctionList.is_null());
+
+    let function_list = interface.pFunctionList as CK_FUNCTION_LIST_3_2_PTR;
+    assert_eq!(unsafe { (*function_list).version.major }, 3);
+    assert_eq!(unsafe { (*function_list).version.minor }, 2);
+    assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+    assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
+}
+
+#[test]
+pub fn get_info_reports_cryptoki_3_2() {
+    let _ = crate::C_Finalize(::std::ptr::null_mut());
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let mut info = CK_INFO {
+        cryptokiVersion: CK_VERSION { major: 0, minor: 0 },
+        manufacturerID: [0; 32usize],
+        flags: 0,
+        libraryDescription: [0; 32usize],
+        libraryVersion: CK_VERSION { major: 0, minor: 0 },
+    };
+    assert_eq!(crate::C_GetInfo(&mut info), CKR_OK as CK_RV);
+    assert_eq!(info.cryptokiVersion.major, 3);
+    assert_eq!(info.cryptokiVersion.minor, 2);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
 #[test]
 pub fn bindgen_test_layout_CK_SLOT_INFO() {
     assert_eq!(
