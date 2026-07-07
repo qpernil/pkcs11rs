@@ -238,23 +238,30 @@ pub fn get_interface_rejects_wrong_version_and_name() {
     let _guard = TEST_LOCK.lock().unwrap();
     let name = b"PKCS 11\0";
     let wrong_name = b"NOT PKCS\0";
-    let mut version = CK_VERSION {
-        major: 2,
-        minor: 39,
-    };
+
+    for rejected_version in [
+        CK_VERSION {
+            major: 2,
+            minor: 39,
+        },
+        CK_VERSION { major: 3, minor: 3 },
+        CK_VERSION { major: 3, minor: 4 },
+    ] {
+        let mut version = rejected_version;
+        let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
+        assert_eq!(
+            crate::C_GetInterface(
+                name.as_ptr() as *mut CK_BYTE,
+                &mut version,
+                &mut interface,
+                0
+            ),
+            CKR_ARGUMENTS_BAD as CK_RV
+        );
+    }
+
+    let mut version = CK_VERSION { major: 3, minor: 2 };
     let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
-
-    assert_eq!(
-        crate::C_GetInterface(
-            name.as_ptr() as *mut CK_BYTE,
-            &mut version,
-            &mut interface,
-            0
-        ),
-        CKR_ARGUMENTS_BAD as CK_RV
-    );
-
-    version = CK_VERSION { major: 3, minor: 2 };
     assert_eq!(
         crate::C_GetInterface(
             wrong_name.as_ptr() as *mut CK_BYTE,

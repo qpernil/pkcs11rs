@@ -360,7 +360,7 @@ class Pkcs11AbiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.lib.C_Finalize(None)
 
-    def test_ctypes_layouts_match_rust_abi_tests(self) -> None:
+    def test_layout_ck_info(self) -> None:
         self.assert_layout(
             CK_INFO,
             88,
@@ -373,6 +373,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "libraryVersion": 80,
             },
         )
+
+    def test_layout_ck_slot_info(self) -> None:
         self.assert_layout(
             CK_SLOT_INFO,
             112,
@@ -385,6 +387,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "firmwareVersion": 106,
             },
         )
+
+    def test_layout_ck_token_info(self) -> None:
         self.assert_layout(
             CK_TOKEN_INFO,
             208,
@@ -410,6 +414,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "utcTime": 188,
             },
         )
+
+    def test_layout_ck_session_info(self) -> None:
         self.assert_layout(
             CK_SESSION_INFO,
             32,
@@ -421,6 +427,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "ulDeviceError": 24,
             },
         )
+
+    def test_layout_ck_attribute(self) -> None:
         self.assert_layout(
             CK_ATTRIBUTE,
             24,
@@ -431,6 +439,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "ulValueLen": 16,
             },
         )
+
+    def test_layout_ck_date(self) -> None:
         self.assert_layout(
             CK_DATE,
             8,
@@ -441,6 +451,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "day": 6,
             },
         )
+
+    def test_layout_ck_mechanism(self) -> None:
         self.assert_layout(
             CK_MECHANISM,
             24,
@@ -451,6 +463,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "ulParameterLen": 16,
             },
         )
+
+    def test_layout_ck_mechanism_info(self) -> None:
         self.assert_layout(
             CK_MECHANISM_INFO,
             24,
@@ -461,6 +475,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "flags": 16,
             },
         )
+
+    def test_layout_ck_ecdh1_derive_params(self) -> None:
         self.assert_layout(
             CK_ECDH1_DERIVE_PARAMS,
             40,
@@ -473,6 +489,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "pPublicData": 32,
             },
         )
+
+    def test_layout_ck_rsa_pkcs_oaep_params(self) -> None:
         self.assert_layout(
             CK_RSA_PKCS_OAEP_PARAMS,
             40,
@@ -485,6 +503,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "ulSourceDataLen": 32,
             },
         )
+
+    def test_layout_ck_rsa_pkcs_pss_params(self) -> None:
         self.assert_layout(
             CK_RSA_PKCS_PSS_PARAMS,
             24,
@@ -495,6 +515,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "sLen": 16,
             },
         )
+
+    def test_layout_ck_version(self) -> None:
         self.assert_layout(
             CK_VERSION,
             2,
@@ -504,6 +526,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "minor": 1,
             },
         )
+
+    def test_layout_ck_c_initialize_args(self) -> None:
         self.assert_layout(
             CK_C_INITIALIZE_ARGS,
             48,
@@ -517,6 +541,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "pReserved": 40,
             },
         )
+
+    def test_layout_ck_function_list(self) -> None:
         self.assert_layout(CK_FUNCTION_LIST, 552, 8, {"version": 0})
         for index, name in enumerate(LEGACY_FUNCTIONS):
             self.assertEqual(
@@ -672,13 +698,20 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.assertTrue(getattr(function_list, name), name)
 
     def test_get_interface_rejects_wrong_version(self) -> None:
-        version = CK_VERSION(2, 39)
-        interface = ctypes.POINTER(CK_INTERFACE)()
+        for major, minor in [(2, 39), (3, 3), (3, 4)]:
+            version = CK_VERSION(major, minor)
+            interface = ctypes.POINTER(CK_INTERFACE)()
 
-        self.assertEqual(
-            self.lib.C_GetInterface(b"PKCS 11", ctypes.byref(version), ctypes.byref(interface), 0),
-            CKR_ARGUMENTS_BAD,
-        )
+            self.assertEqual(
+                self.lib.C_GetInterface(
+                    b"PKCS 11",
+                    ctypes.byref(version),
+                    ctypes.byref(interface),
+                    0,
+                ),
+                CKR_ARGUMENTS_BAD,
+                f"{major}.{minor}",
+            )
 
     def test_get_interface_rejects_wrong_name(self) -> None:
         version = CK_VERSION(3, 2)
