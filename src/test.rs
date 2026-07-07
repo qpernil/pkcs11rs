@@ -27,6 +27,13 @@ fn assert_function_slots_present<T>(function_list: *const T, function_count: usi
     }
 }
 
+#[test]
+pub fn cryptoki_header_version_matches_vendored_header() {
+    assert_eq!(CRYPTOKI_VERSION_MAJOR, 2);
+    assert_eq!(CRYPTOKI_VERSION_MINOR, 40);
+    assert_eq!(CRYPTOKI_VERSION_REVISION, 0);
+}
+
 fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected: CK_RV) {
     let mut data = [0u8; 8];
     let mut data_len = data.len() as CK_ULONG;
@@ -671,6 +678,8 @@ pub fn all_legacy_function_list_entries_are_stubbed() {
         crate::C_GetFunctionList(&mut function_list),
         CKR_OK as CK_RV
     );
+    assert_eq!(unsafe { (*function_list).version.major }, 2);
+    assert_eq!(unsafe { (*function_list).version.minor }, 40);
     assert_function_slots_present(function_list, LEGACY_FUNCTION_COUNT);
 }
 
@@ -832,7 +841,7 @@ pub fn interface_list_checks_buffer_size() {
     assert_eq!(count, 1);
 }
 
-fn assert_get_interface_returns_3_2_table(version: CK_VERSION) {
+fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
     let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
     let mut version = version;
     let name = b"PKCS 11\0";
@@ -848,22 +857,48 @@ fn assert_get_interface_returns_3_2_table(version: CK_VERSION) {
     );
     assert!(!interface.is_null());
 
-    let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_2_PTR };
-    assert!(!function_list.is_null());
-    assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
-    assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
-    assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
-    assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
-    assert!(unsafe { (*function_list).C_UnwrapKeyAuthenticated.is_some() });
+    match (version.major, version.minor) {
+        (2, 40) => {
+            let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_PTR };
+            assert!(!function_list.is_null());
+            assert_eq!(unsafe { (*function_list).version.major }, 2);
+            assert_eq!(unsafe { (*function_list).version.minor }, 40);
+            assert!(unsafe { (*function_list).C_GetFunctionList.is_some() });
+        }
+        (3, 0) | (3, 1) => {
+            let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_0_PTR };
+            assert!(!function_list.is_null());
+            assert_eq!(
+                unsafe { (*function_list).base.version.major },
+                version.major
+            );
+            assert_eq!(
+                unsafe { (*function_list).base.version.minor },
+                version.minor
+            );
+            assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+            assert!(unsafe { (*function_list).C_MessageEncryptInit.is_some() });
+        }
+        (3, 2) => {
+            let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_2_PTR };
+            assert!(!function_list.is_null());
+            assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
+            assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
+            assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
+            assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
+            assert!(unsafe { (*function_list).C_UnwrapKeyAuthenticated.is_some() });
+        }
+        _ => panic!("unexpected supported version"),
+    }
 }
 
 #[test]
-pub fn get_interface_returns_3_2_function_table_for_supported_versions() {
+pub fn get_interface_returns_requested_function_table_version() {
     let _guard = TEST_LOCK.lock().unwrap();
-    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 2 });
-    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 1 });
-    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 0 });
-    assert_get_interface_returns_3_2_table(CK_VERSION {
+    assert_get_interface_returns_requested_table(CK_VERSION { major: 3, minor: 2 });
+    assert_get_interface_returns_requested_table(CK_VERSION { major: 3, minor: 1 });
+    assert_get_interface_returns_requested_table(CK_VERSION { major: 3, minor: 0 });
+    assert_get_interface_returns_requested_table(CK_VERSION {
         major: 2,
         minor: 40,
     });
