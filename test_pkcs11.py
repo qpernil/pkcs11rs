@@ -40,6 +40,7 @@ CK_BYTE = ctypes.c_ubyte
 CK_ULONG = ctypes.c_ulong
 CK_RV = CK_ULONG
 CK_FLAGS = CK_ULONG
+CK_VOID_PTR = ctypes.c_void_p
 
 
 class CK_VERSION(ctypes.Structure):
@@ -56,6 +57,108 @@ class CK_INFO(ctypes.Structure):
         ("flags", CK_FLAGS),
         ("libraryDescription", CK_BYTE * 32),
         ("libraryVersion", CK_VERSION),
+    ]
+
+
+class CK_SLOT_INFO(ctypes.Structure):
+    _fields_ = [
+        ("slotDescription", CK_BYTE * 64),
+        ("manufacturerID", CK_BYTE * 32),
+        ("flags", CK_FLAGS),
+        ("hardwareVersion", CK_VERSION),
+        ("firmwareVersion", CK_VERSION),
+    ]
+
+
+class CK_TOKEN_INFO(ctypes.Structure):
+    _fields_ = [
+        ("label", CK_BYTE * 32),
+        ("manufacturerID", CK_BYTE * 32),
+        ("model", CK_BYTE * 16),
+        ("serialNumber", CK_BYTE * 16),
+        ("flags", CK_FLAGS),
+        ("ulMaxSessionCount", CK_ULONG),
+        ("ulSessionCount", CK_ULONG),
+        ("ulMaxRwSessionCount", CK_ULONG),
+        ("ulRwSessionCount", CK_ULONG),
+        ("ulMaxPinLen", CK_ULONG),
+        ("ulMinPinLen", CK_ULONG),
+        ("ulTotalPublicMemory", CK_ULONG),
+        ("ulFreePublicMemory", CK_ULONG),
+        ("ulTotalPrivateMemory", CK_ULONG),
+        ("ulFreePrivateMemory", CK_ULONG),
+        ("hardwareVersion", CK_VERSION),
+        ("firmwareVersion", CK_VERSION),
+        ("utcTime", CK_BYTE * 16),
+    ]
+
+
+class CK_SESSION_INFO(ctypes.Structure):
+    _fields_ = [
+        ("slotID", CK_ULONG),
+        ("state", CK_ULONG),
+        ("flags", CK_FLAGS),
+        ("ulDeviceError", CK_ULONG),
+    ]
+
+
+class CK_ATTRIBUTE(ctypes.Structure):
+    _fields_ = [
+        ("type_", CK_ULONG),
+        ("pValue", CK_VOID_PTR),
+        ("ulValueLen", CK_ULONG),
+    ]
+
+
+class CK_DATE(ctypes.Structure):
+    _fields_ = [
+        ("year", CK_BYTE * 4),
+        ("month", CK_BYTE * 2),
+        ("day", CK_BYTE * 2),
+    ]
+
+
+class CK_MECHANISM(ctypes.Structure):
+    _fields_ = [
+        ("mechanism", CK_ULONG),
+        ("pParameter", CK_VOID_PTR),
+        ("ulParameterLen", CK_ULONG),
+    ]
+
+
+class CK_MECHANISM_INFO(ctypes.Structure):
+    _fields_ = [
+        ("ulMinKeySize", CK_ULONG),
+        ("ulMaxKeySize", CK_ULONG),
+        ("flags", CK_FLAGS),
+    ]
+
+
+class CK_ECDH1_DERIVE_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("kdf", CK_ULONG),
+        ("ulSharedDataLen", CK_ULONG),
+        ("pSharedData", ctypes.POINTER(CK_BYTE)),
+        ("ulPublicDataLen", CK_ULONG),
+        ("pPublicData", ctypes.POINTER(CK_BYTE)),
+    ]
+
+
+class CK_RSA_PKCS_OAEP_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("hashAlg", CK_ULONG),
+        ("mgf", CK_ULONG),
+        ("source", CK_ULONG),
+        ("pSourceData", CK_VOID_PTR),
+        ("ulSourceDataLen", CK_ULONG),
+    ]
+
+
+class CK_RSA_PKCS_PSS_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("hashAlg", CK_ULONG),
+        ("mgf", CK_ULONG),
+        ("sLen", CK_ULONG),
     ]
 
 
@@ -192,6 +295,12 @@ V3_2_FUNCTIONS = [
 ]
 
 
+class CK_FUNCTION_LIST(ctypes.Structure):
+    _fields_ = [("version", CK_VERSION)] + [
+        (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS
+    ]
+
+
 class CK_FUNCTION_LIST_3_2(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
         (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS
@@ -199,6 +308,16 @@ class CK_FUNCTION_LIST_3_2(ctypes.Structure):
 
 
 class Pkcs11AbiTests(unittest.TestCase):
+    def assert_layout(self, structure, size: int, alignment: int, offsets: dict[str, int]) -> None:
+        self.assertEqual(ctypes.sizeof(structure), size, structure.__name__)
+        self.assertEqual(ctypes.alignment(structure), alignment, structure.__name__)
+        for field, offset in offsets.items():
+            self.assertEqual(
+                getattr(structure, field).offset,
+                offset,
+                f"{structure.__name__}.{field}",
+            )
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.lib = load_library()
@@ -240,6 +359,171 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.lib.C_Finalize(None)
+
+    def test_ctypes_layouts_match_rust_abi_tests(self) -> None:
+        self.assert_layout(
+            CK_INFO,
+            88,
+            8,
+            {
+                "cryptokiVersion": 0,
+                "manufacturerID": 2,
+                "flags": 40,
+                "libraryDescription": 48,
+                "libraryVersion": 80,
+            },
+        )
+        self.assert_layout(
+            CK_SLOT_INFO,
+            112,
+            8,
+            {
+                "slotDescription": 0,
+                "manufacturerID": 64,
+                "flags": 96,
+                "hardwareVersion": 104,
+                "firmwareVersion": 106,
+            },
+        )
+        self.assert_layout(
+            CK_TOKEN_INFO,
+            208,
+            8,
+            {
+                "label": 0,
+                "manufacturerID": 32,
+                "model": 64,
+                "serialNumber": 80,
+                "flags": 96,
+                "ulMaxSessionCount": 104,
+                "ulSessionCount": 112,
+                "ulMaxRwSessionCount": 120,
+                "ulRwSessionCount": 128,
+                "ulMaxPinLen": 136,
+                "ulMinPinLen": 144,
+                "ulTotalPublicMemory": 152,
+                "ulFreePublicMemory": 160,
+                "ulTotalPrivateMemory": 168,
+                "ulFreePrivateMemory": 176,
+                "hardwareVersion": 184,
+                "firmwareVersion": 186,
+                "utcTime": 188,
+            },
+        )
+        self.assert_layout(
+            CK_SESSION_INFO,
+            32,
+            8,
+            {
+                "slotID": 0,
+                "state": 8,
+                "flags": 16,
+                "ulDeviceError": 24,
+            },
+        )
+        self.assert_layout(
+            CK_ATTRIBUTE,
+            24,
+            8,
+            {
+                "type_": 0,
+                "pValue": 8,
+                "ulValueLen": 16,
+            },
+        )
+        self.assert_layout(
+            CK_DATE,
+            8,
+            1,
+            {
+                "year": 0,
+                "month": 4,
+                "day": 6,
+            },
+        )
+        self.assert_layout(
+            CK_MECHANISM,
+            24,
+            8,
+            {
+                "mechanism": 0,
+                "pParameter": 8,
+                "ulParameterLen": 16,
+            },
+        )
+        self.assert_layout(
+            CK_MECHANISM_INFO,
+            24,
+            8,
+            {
+                "ulMinKeySize": 0,
+                "ulMaxKeySize": 8,
+                "flags": 16,
+            },
+        )
+        self.assert_layout(
+            CK_ECDH1_DERIVE_PARAMS,
+            40,
+            8,
+            {
+                "kdf": 0,
+                "ulSharedDataLen": 8,
+                "pSharedData": 16,
+                "ulPublicDataLen": 24,
+                "pPublicData": 32,
+            },
+        )
+        self.assert_layout(
+            CK_RSA_PKCS_OAEP_PARAMS,
+            40,
+            8,
+            {
+                "hashAlg": 0,
+                "mgf": 8,
+                "source": 16,
+                "pSourceData": 24,
+                "ulSourceDataLen": 32,
+            },
+        )
+        self.assert_layout(
+            CK_RSA_PKCS_PSS_PARAMS,
+            24,
+            8,
+            {
+                "hashAlg": 0,
+                "mgf": 8,
+                "sLen": 16,
+            },
+        )
+        self.assert_layout(
+            CK_VERSION,
+            2,
+            1,
+            {
+                "major": 0,
+                "minor": 1,
+            },
+        )
+        self.assert_layout(
+            CK_C_INITIALIZE_ARGS,
+            48,
+            8,
+            {
+                "pfnCreateMutex": 0,
+                "pfnDestroyMutex": 8,
+                "pfnLockMutex": 16,
+                "pfnUnlockMutex": 24,
+                "flags": 32,
+                "pReserved": 40,
+            },
+        )
+        self.assert_layout(CK_FUNCTION_LIST, 552, 8, {"version": 0})
+        for index, name in enumerate(LEGACY_FUNCTIONS):
+            self.assertEqual(
+                getattr(CK_FUNCTION_LIST, name).offset,
+                8 + index * ctypes.sizeof(ctypes.c_void_p),
+                f"CK_FUNCTION_LIST.{name}",
+            )
 
     def test_get_info_reports_cryptoki_3_2(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

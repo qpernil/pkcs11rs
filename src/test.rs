@@ -1,6 +1,12 @@
 #[cfg(test)]
 use crate::pkcs11::*;
 
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn finalize_for_test() {
+    let _ = crate::C_Finalize(::std::ptr::null_mut());
+}
+
 #[test]
 pub fn bindgen_test_layout_CK_INFO() {
     assert_eq!(
@@ -67,6 +73,7 @@ pub fn bindgen_test_layout_CK_INFO() {
 
 #[test]
 pub fn cryptoki_3_2_interface_is_discoverable() {
+    let _guard = TEST_LOCK.lock().unwrap();
     let mut count = 0;
     assert_eq!(
         crate::C_GetInterfaceList(::std::ptr::null_mut(), &mut count),
@@ -96,7 +103,8 @@ pub fn cryptoki_3_2_interface_is_discoverable() {
 
 #[test]
 pub fn get_info_reports_cryptoki_3_2() {
-    let _ = crate::C_Finalize(::std::ptr::null_mut());
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
     let mut info = CK_INFO {
@@ -111,6 +119,151 @@ pub fn get_info_reports_cryptoki_3_2() {
     assert_eq!(info.cryptokiVersion.minor, 2);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn initialize_and_finalize_reject_reserved_args() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut init_args = CK_C_INITIALIZE_ARGS {
+        pfnCreateMutex: None,
+        pfnDestroyMutex: None,
+        pfnLockMutex: None,
+        pfnUnlockMutex: None,
+        flags: 0,
+        pReserved: 1 as CK_VOID_PTR,
+    };
+
+    assert_eq!(
+        crate::C_Initialize(&mut init_args),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_Finalize(1 as CK_VOID_PTR),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
+#[test]
+pub fn slot_and_mechanism_calls_validate_slot_ids() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    let mut count = 0;
+
+    assert_eq!(crate::C_CloseAllSessions(999), CKR_SLOT_ID_INVALID as CK_RV);
+    assert_eq!(
+        crate::C_GetMechanismList(999, ::std::ptr::null_mut(), &mut count),
+        CKR_SLOT_ID_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn generate_random_validates_initialization_and_session() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut random_data = [0u8; 16];
+
+    assert_eq!(
+        crate::C_GenerateRandom(1, random_data.as_mut_ptr(), random_data.len() as CK_ULONG),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::C_GenerateRandom(999, random_data.as_mut_ptr(), random_data.len() as CK_ULONG),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn interface_list_checks_buffer_size() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut count = 0;
+    let mut interface = CK_INTERFACE {
+        pInterfaceName: ::std::ptr::null_mut(),
+        pFunctionList: ::std::ptr::null_mut(),
+        flags: 0,
+    };
+
+    assert_eq!(
+        crate::C_GetInterfaceList(&mut interface, &mut count),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(count, 1);
+}
+
+fn assert_get_interface_returns_3_2_table(version: CK_VERSION) {
+    let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
+    let mut version = version;
+    let name = b"PKCS 11\0";
+
+    assert_eq!(
+        crate::C_GetInterface(
+            name.as_ptr() as *mut CK_BYTE,
+            &mut version,
+            &mut interface,
+            0
+        ),
+        CKR_OK as CK_RV
+    );
+    assert!(!interface.is_null());
+
+    let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_2_PTR };
+    assert!(!function_list.is_null());
+    assert_eq!(unsafe { (*function_list).version.major }, 3);
+    assert_eq!(unsafe { (*function_list).version.minor }, 2);
+    assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+    assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
+    assert!(unsafe { (*function_list).C_UnwrapKeyAuthenticated.is_some() });
+}
+
+#[test]
+pub fn get_interface_returns_3_2_function_table_for_supported_versions() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 2 });
+    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 1 });
+    assert_get_interface_returns_3_2_table(CK_VERSION { major: 3, minor: 0 });
+    assert_get_interface_returns_3_2_table(CK_VERSION {
+        major: 2,
+        minor: 40,
+    });
+}
+
+#[test]
+pub fn get_interface_rejects_wrong_version_and_name() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let name = b"PKCS 11\0";
+    let wrong_name = b"NOT PKCS\0";
+    let mut version = CK_VERSION {
+        major: 2,
+        minor: 39,
+    };
+    let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
+
+    assert_eq!(
+        crate::C_GetInterface(
+            name.as_ptr() as *mut CK_BYTE,
+            &mut version,
+            &mut interface,
+            0
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    version = CK_VERSION { major: 3, minor: 2 };
+    assert_eq!(
+        crate::C_GetInterface(
+            wrong_name.as_ptr() as *mut CK_BYTE,
+            &mut version,
+            &mut interface,
+            0
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
 }
 #[test]
 pub fn bindgen_test_layout_CK_SLOT_INFO() {
