@@ -9,8 +9,7 @@ extern crate rusb;
 use rusb::UsbContext;
 use std::{
     cell::RefCell,
-    collections::HashMap,
-    ffi::CStr,
+    collections::{HashMap, HashSet},
     io::Write,
     ptr,
     rc::Rc,
@@ -77,7 +76,9 @@ fn as_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, Error> {
 }
 
 fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
-    if ptr.is_null() {
+    if len == 0 {
+        Ok(&[])
+    } else if ptr.is_null() {
         Err(CKR_ARGUMENTS_BAD.into())
     } else {
         Ok(unsafe { slice::from_raw_parts(ptr, len) })
@@ -85,7 +86,9 @@ fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
 }
 
 fn _from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], Error> {
-    if ptr.is_null() {
+    if len == 0 {
+        Ok(&mut [])
+    } else if ptr.is_null() {
         Err(CKR_ARGUMENTS_BAD.into())
     } else {
         Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
@@ -712,16 +715,22 @@ impl Connector for CurlConnector {
         curl.post_field_size(send_buffer.len() as u64)?;
         {
             let mut transfer = curl.transfer();
-            transfer.read_function(|mut slice| {
-                let read = slice.write(&send_buffer[read_len..]).unwrap();
-                read_len += read;
-                Ok(read)
+            transfer.read_function(|mut slice| match slice.write(&send_buffer[read_len..]) {
+                Ok(read) => {
+                    read_len += read;
+                    Ok(read)
+                }
+                Err(_) => Err(curl::easy::ReadError::Abort),
             })?;
             transfer.write_function(|slice| {
                 let mut rslice = &mut receive_buffer[write_len..];
-                let writ = rslice.write(slice).unwrap();
-                write_len += writ;
-                Ok(writ)
+                match rslice.write(slice) {
+                    Ok(writ) => {
+                        write_len += writ;
+                        Ok(writ)
+                    }
+                    Err(_) => Err(curl::easy::WriteError::Pause),
+                }
             })?;
             transfer.perform()?;
         }
@@ -799,6 +808,7 @@ struct Context {
     pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
+    find_operations: HashSet<CK_SESSION_HANDLE>,
 }
 
 impl std::fmt::Debug for Context {
@@ -808,6 +818,7 @@ impl std::fmt::Debug for Context {
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("slots", &self.slots)
             .field("sessions", &self.sessions)
+            .field("find_operations", &self.find_operations)
             .finish()
     }
 }
@@ -831,6 +842,7 @@ impl Context {
             },
             slots: HashMap::new(),
             sessions: HashMap::new(),
+            find_operations: HashSet::new(),
         };
         eprintln!("Context.new {:?}", context);
         context
@@ -989,6 +1001,12 @@ fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
+    if !init_args.is_null() {
+        let args = unsafe { &*init_args };
+        if !args.pReserved.is_null() {
+            return CKR_ARGUMENTS_BAD.into();
+        }
+    }
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
@@ -1004,6 +1022,9 @@ pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     eprintln!("C_Finalize called with {:?}", pReserved);
+    if !pReserved.is_null() {
+        return CKR_ARGUMENTS_BAD.into();
+    }
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
             Some(_) => {
@@ -1141,21 +1162,27 @@ pub extern "C" fn C_GetMechanismList(
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
+        const MECHANISMS: [CK_MECHANISM_TYPE; 7] = [0, 1, 2, 3, 4, 5, 6];
+
         match with_context(|ctx| match ctx.slots.get(&slotID) {
             Some(slot) => {
                 eprintln!("{:?}", slot);
                 match mechanism_list.as_mut() {
                     Some(_) => {
-                        let list = slice::from_raw_parts_mut(mechanism_list, *count as usize);
-                        for i in 0..*count {
-                            list[i as usize] = i;
+                        let required = MECHANISMS.len() as ::std::os::raw::c_ulong;
+                        if *count < required {
+                            *count = required;
+                            return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
                         }
+                        let list = slice::from_raw_parts_mut(mechanism_list, MECHANISMS.len());
+                        list.copy_from_slice(&MECHANISMS);
+                        *count = required;
                         eprintln!("C_GetMechanismList returning {:?}", list);
                         Ok(CKR_OK as CK_RV)
                     }
                     None => {
-                        eprintln!("C_GetMechanismList returning {:?}", 7);
-                        *count = 7;
+                        eprintln!("C_GetMechanismList returning {:?}", MECHANISMS.len());
+                        *count = MECHANISMS.len() as ::std::os::raw::c_ulong;
                         Ok(CKR_OK as CK_RV)
                     }
                 }
@@ -1278,6 +1305,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
         match ctx.sessions.remove(&session_handle) {
             Some(session) => {
+                ctx.find_operations.remove(&session_handle);
                 eprintln!("C_CloseSession removed {:?}", (session_handle, session));
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
@@ -1295,8 +1323,20 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     eprintln!("C_CloseAllSessions called with {:?}", slotID);
     match with_context_mut(|ctx| {
+        ctx.init();
+        if !ctx.slots.contains_key(&slotID) {
+            return Ok(CKR_SLOT_ID_INVALID as CK_RV);
+        }
         eprintln!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
+        let closed_sessions: HashSet<CK_SESSION_HANDLE> = ctx
+            .sessions
+            .iter()
+            .filter(|(_k, v)| v.slotID() == slotID)
+            .map(|(k, _v)| *k)
+            .collect();
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
+        ctx.find_operations
+            .retain(|session| !closed_sessions.contains(session));
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         Ok(CKR_OK as CK_RV)
     }) {
@@ -1467,20 +1507,25 @@ pub extern "C" fn C_FindObjectsInit(
         "C_FindObjectsInit called with {:?}",
         (session_handle, templ, count)
     );
-    unsafe {
-        match with_context(|ctx| match ctx.get_session_(session_handle) {
-            Some(session) => {
-                eprintln!("C_FindObjectsInit {:?}", session);
-                match templ.as_ref() {
-                    Some(_info) => Ok(CKR_OK as CK_RV),
-                    None => Ok(CKR_OK as CK_RV),
-                }
-            }
-            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
+    if count > 0 && templ.is_null() {
+        return CKR_ARGUMENTS_BAD.into();
+    }
+    match with_context_mut(|ctx| {
+        if ctx.get_session_(session_handle).is_none() {
+            return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
         }
+        if ctx.find_operations.contains(&session_handle) {
+            return Ok(CKR_OPERATION_ACTIVE as CK_RV);
+        }
+        if count > 0 {
+            let templ = unsafe { slice::from_raw_parts(templ, count as usize) };
+            eprintln!("C_FindObjectsInit template {:?}", templ);
+        }
+        ctx.find_operations.insert(session_handle);
+        Ok(CKR_OK as CK_RV)
+    }) {
+        Ok(rv) => rv,
+        Err(e) => e.into(),
     }
     .into()
 }
@@ -1501,19 +1546,18 @@ pub extern "C" fn C_FindObjects(
             Some(object_count) => object_count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context(|ctx| match ctx.get_session_(session_handle) {
-            Some(session) => {
-                eprintln!("C_FindObjects {:?}", session);
-                match object.as_mut() {
-                    Some(_info) => {
-                        eprintln!("C_FindObjects returning {:?}", 0);
-                        *object_count = 0;
-                        Ok(CKR_OK as CK_RV)
-                    }
-                    None => Ok(CKR_ARGUMENTS_BAD as CK_RV),
-                }
+        if max_object_count > 0 && object.is_null() {
+            return CKR_ARGUMENTS_BAD.into();
+        }
+        match with_context(|ctx| {
+            if ctx.get_session_(session_handle).is_none() {
+                return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
             }
-            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
+            if !ctx.find_operations.contains(&session_handle) {
+                return Ok(CKR_OPERATION_NOT_INITIALIZED as CK_RV);
+            }
+            *object_count = 0;
+            Ok(CKR_OK as CK_RV)
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
@@ -1525,12 +1569,15 @@ pub extern "C" fn C_FindObjects(
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
-    match with_context(|ctx| match ctx.get_session_(session_handle) {
-        Some(session) => {
-            eprintln!("C_FindObjectsFinal {:?}", session);
-            Ok(CKR_OK as CK_RV)
+    match with_context_mut(|ctx| {
+        if ctx.get_session_(session_handle).is_none() {
+            return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
         }
-        None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
+        if ctx.find_operations.remove(&session_handle) {
+            Ok(CKR_OK as CK_RV)
+        } else {
+            Ok(CKR_OPERATION_NOT_INITIALIZED as CK_RV)
+        }
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
@@ -1918,22 +1965,32 @@ pub extern "C" fn C_DeriveKey(
 
 #[no_mangle]
 pub extern "C" fn C_SeedRandom(
-    _session: CK_SESSION_HANDLE,
+    session: CK_SESSION_HANDLE,
     _seed: *mut ::std::os::raw::c_uchar,
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_SeedRandom called");
-    CKR_OK.into()
+    let result: Result<(), Error> = with_context(|ctx| {
+        ctx._get_session(session)?;
+        Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
+    });
+    map(result)
 }
 
 #[no_mangle]
 pub extern "C" fn C_GenerateRandom(
-    _session: CK_SESSION_HANDLE,
-    _random_data: *mut ::std::os::raw::c_uchar,
-    _random_len: ::std::os::raw::c_ulong,
+    session: CK_SESSION_HANDLE,
+    random_data: *mut ::std::os::raw::c_uchar,
+    random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     eprintln!("C_GenerateRandom called");
-    CKR_OK.into()
+    let result: Result<(), Error> = with_context(|ctx| {
+        ctx._get_session(session)?;
+        let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
+        openssl::rand::rand_bytes(random_data).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        Ok(())
+    });
+    map(result)
 }
 
 #[no_mangle]
@@ -1995,8 +2052,8 @@ pub extern "C" fn C_GetInterface(
         }
 
         if !interface_name.is_null() {
-            let name = CStr::from_ptr(interface_name as *const ::std::os::raw::c_char);
-            if name.to_bytes() != b"PKCS 11" {
+            let name = slice::from_raw_parts(interface_name, 8);
+            if name != b"PKCS 11\0" {
                 return CKR_ARGUMENTS_BAD.into();
             }
         }
