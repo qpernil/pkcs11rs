@@ -377,6 +377,21 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_MECHANISM_INFO),
         ]
         cls.lib.C_GetMechanismInfo.restype = CK_RV
+        cls.lib.C_FindObjectsInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_FindObjectsInit.restype = CK_RV
+        cls.lib.C_FindObjects.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_FindObjects.restype = CK_RV
+        cls.lib.C_FindObjectsFinal.argtypes = [CK_ULONG]
+        cls.lib.C_FindObjectsFinal.restype = CK_RV
         cls.lib.C_GenerateRandom.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_BYTE),
@@ -703,6 +718,23 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         self.assertEqual(
             self.lib.C_GenerateRandom(999, random_data, len(random_data)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_find_objects_validate_session_handles(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        count = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(999, None, 0),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(999, None, 0, ctypes.byref(count)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsFinal(999),
             CKR_SESSION_HANDLE_INVALID,
         )
 
