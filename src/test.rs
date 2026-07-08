@@ -1070,8 +1070,20 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
         ),
         CKR_OK as CK_RV
     );
+    assert_eq!(count, 2);
+    assert_eq!(objects, [1, 2]);
+
+    count = 999;
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OK as CK_RV
+    );
     assert_eq!(count, 0);
-    assert_eq!(objects, [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2]);
 
     assert_eq!(
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
@@ -1080,6 +1092,49 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
     assert_eq!(
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn find_objects_filters_by_attribute_template() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut templ = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
+    let mut count = 0;
+
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], 2);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -1118,6 +1173,117 @@ pub fn find_objects_validates_sessions_and_cleans_up_on_close() {
     assert_eq!(
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn get_attribute_value_reports_sizes_and_values() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut label_attr = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        label_attr.ulValueLen,
+        b"Test RSA public key".len() as CK_ULONG
+    );
+
+    let mut label = [0u8; 19];
+    label_attr.pValue = label.as_mut_ptr() as CK_VOID_PTR;
+    label_attr.ulValueLen = label.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&label, b"Test RSA public key");
+
+    let mut class = 0 as CK_OBJECT_CLASS;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sign as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            attrs.as_mut_ptr(),
+            attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    assert_eq!(sign, CK_FALSE as CK_BBOOL);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn get_attribute_value_reports_attribute_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut small_label = [0u8; 4];
+    let mut small_attr = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: small_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: small_label.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut small_attr, 1),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(
+        small_attr.ulValueLen,
+        b"Test RSA public key".len() as CK_ULONG
+    );
+
+    let mut unknown_attr = CK_ATTRIBUTE {
+        type_: CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut unknown_attr, 1),
+        CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+    );
+    assert_eq!(
+        unknown_attr.ulValueLen,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
+
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 999, &mut unknown_attr, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetAttributeValue(999, 1, &mut unknown_attr, 1),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
+        CKR_ARGUMENTS_BAD as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);

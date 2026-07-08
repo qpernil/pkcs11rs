@@ -822,7 +822,22 @@ struct Context {
     pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
+    objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
+}
+
+#[derive(Debug, Clone)]
+struct TokenObject {
+    class: CK_OBJECT_CLASS,
+    key_type: CK_KEY_TYPE,
+    label: Vec<u8>,
+    id: Vec<u8>,
+    token: bool,
+    private: bool,
+    encrypt: bool,
+    decrypt: bool,
+    sign: bool,
+    verify: bool,
 }
 
 #[derive(Debug)]
@@ -838,6 +853,7 @@ impl std::fmt::Debug for Context {
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("slots", &self.slots)
             .field("sessions", &self.sessions)
+            .field("objects", &self.objects)
             .field("find_operations", &self.find_operations)
             .finish()
     }
@@ -862,6 +878,7 @@ impl Context {
             },
             slots: HashMap::new(),
             sessions: HashMap::new(),
+            objects: default_objects(),
             find_operations: HashMap::new(),
         };
         eprintln!("Context.new {:?}", context);
@@ -999,6 +1016,86 @@ impl Context {
             }
         }
         eprintln!("Context.init {:?}", self);
+    }
+}
+
+fn default_objects() -> HashMap<CK_OBJECT_HANDLE, TokenObject> {
+    HashMap::from([
+        (
+            1,
+            TokenObject {
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                label: b"Test RSA public key".to_vec(),
+                id: vec![1],
+                token: true,
+                private: false,
+                encrypt: true,
+                decrypt: false,
+                sign: false,
+                verify: true,
+            },
+        ),
+        (
+            2,
+            TokenObject {
+                class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                label: b"Test RSA private key".to_vec(),
+                id: vec![1],
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: true,
+                sign: true,
+                verify: false,
+            },
+        ),
+    ])
+}
+
+fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
+    value.to_ne_bytes().to_vec()
+}
+
+fn bool_attribute(value: bool) -> Vec<u8> {
+    vec![if value {
+        CK_TRUE as CK_BBOOL
+    } else {
+        CK_FALSE as CK_BBOOL
+    }]
+}
+
+impl TokenObject {
+    fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+        match attribute_type {
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
+            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.key_type)),
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.clone()),
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
+            x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.encrypt)),
+            x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.decrypt)),
+            x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.sign)),
+            x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.verify)),
+            _ => None,
+        }
+    }
+
+    fn matches_template(&self, templ: &[CK_ATTRIBUTE]) -> bool {
+        templ.iter().all(|attribute| {
+            let Some(value) = self.attribute_value(attribute.type_) else {
+                return false;
+            };
+            if attribute.pValue.is_null() {
+                return true;
+            }
+            let expected = unsafe {
+                slice::from_raw_parts(attribute.pValue as *const u8, attribute.ulValueLen as usize)
+            };
+            expected == value.as_slice()
+        })
     }
 }
 
@@ -1537,11 +1634,82 @@ pub extern "C" fn C_GetObjectSize(
 #[no_mangle]
 pub extern "C" fn C_GetAttributeValue(
     session_handle: CK_SESSION_HANDLE,
-    _object: CK_OBJECT_HANDLE,
-    _templ: *mut CK_ATTRIBUTE,
-    _count: ::std::os::raw::c_ulong,
+    object: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_GetAttributeValue called with {:?}",
+        (session_handle, object, templ, count)
+    );
+    match get_attribute_value(session_handle, object, templ, count) {
+        Ok(()) => CKR_OK as CK_RV,
+        Err(e) => e.into(),
+    }
+}
+
+fn get_attribute_value(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+) -> Result<(), Error> {
+    let templ = _from_raw_parts_mut(templ, count as usize)?;
+    with_context(|ctx| {
+        ctx._get_session(session_handle)?;
+        let object = ctx.objects.get(&object).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+
+        let mut rv = CKR_OK as CK_RV;
+        for attribute in templ {
+            match object.attribute_value(attribute.type_) {
+                Some(value) => {
+                    if let Err(e) = write_attribute_value(attribute, &value) {
+                        rv = combine_attribute_rv(rv, e);
+                    }
+                }
+                None => {
+                    attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                    rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+            }
+        }
+
+        if rv == CKR_OK as CK_RV {
+            Ok(())
+        } else {
+            Err(rv.into())
+        }
+    })
+}
+
+fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
+    let required_len = value.len() as CK_ULONG;
+    if attribute.pValue.is_null() {
+        attribute.ulValueLen = required_len;
+        return Ok(());
+    }
+    if attribute.ulValueLen < required_len {
+        attribute.ulValueLen = required_len;
+        return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(value.as_ptr(), attribute.pValue as *mut u8, value.len());
+    }
+    attribute.ulValueLen = required_len;
+    Ok(())
+}
+
+fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
+    if current == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
+        current
+    } else if next == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
+        next
+    } else if current == CKR_BUFFER_TOO_SMALL as CK_RV {
+        current
+    } else {
+        next
+    }
 }
 
 #[no_mangle]
@@ -1582,13 +1750,15 @@ fn find_objects_init(
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         eprintln!("C_FindObjectsInit template {:?}", templ);
-        ctx.find_operations.insert(
-            session_handle,
-            FindOperation {
-                objects: Vec::new(),
-                next: 0,
-            },
-        );
+        let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
+            .objects
+            .iter()
+            .filter(|(_handle, object)| object.matches_template(templ))
+            .map(|(handle, _object)| *handle)
+            .collect();
+        objects.sort();
+        ctx.find_operations
+            .insert(session_handle, FindOperation { objects, next: 0 });
         Ok(())
     })
 }
