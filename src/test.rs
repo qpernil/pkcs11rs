@@ -5,9 +5,74 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const LEGACY_FUNCTION_COUNT: usize = 68;
 const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
 const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
+const TEST_SLOT_ID: CK_SLOT_ID = 77;
 
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
+}
+
+#[derive(Debug)]
+struct TestSlot;
+
+impl crate::Slot for TestSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn name(&self) -> String {
+        String::from("Test Slot")
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+
+    fn product(&self) -> &str {
+        "Test Token"
+    }
+
+    fn serial(&self) -> &str {
+        "TEST0001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn open_session(&mut self, _slotID: CK_SLOT_ID, _flags: CK_FLAGS) -> Box<dyn crate::Session> {
+        panic!("test slot does not open sessions")
+    }
+
+    fn init_slot(&mut self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), crate::error::Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), crate::error::Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+}
+
+fn install_test_slot(slot_id: CK_SLOT_ID) {
+    let mut context = crate::lock_context().unwrap();
+    context
+        .as_mut()
+        .unwrap()
+        .slots
+        .insert(slot_id, Box::new(TestSlot));
 }
 
 fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {
@@ -788,11 +853,108 @@ pub fn slot_and_mechanism_calls_validate_slot_ids() {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     let mut count = 0;
+    let mut mechanism_info = CK_MECHANISM_INFO {
+        ulMinKeySize: 0,
+        ulMaxKeySize: 0,
+        flags: 0,
+    };
 
     assert_eq!(crate::C_CloseAllSessions(999), CKR_SLOT_ID_INVALID as CK_RV);
     assert_eq!(
         crate::C_GetMechanismList(999, ::std::ptr::null_mut(), &mut count),
         CKR_SLOT_ID_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetMechanismInfo(999, CKM_RSA_PKCS as CK_MECHANISM_TYPE, &mut mechanism_info),
+        CKR_SLOT_ID_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn mechanism_list_reports_supported_mechanisms() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+
+    let expected = [
+        CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        CKM_ECDSA as CK_MECHANISM_TYPE,
+    ];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, ::std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, expected.len() as CK_ULONG);
+
+    let mut too_small = [0; 1];
+    count = too_small.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, too_small.as_mut_ptr(), &mut count),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(count, expected.len() as CK_ULONG);
+
+    let mut mechanisms = [0; 4];
+    count = mechanisms.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, mechanisms.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, expected.len() as CK_ULONG);
+    assert_eq!(mechanisms, expected);
+
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, ::std::ptr::null_mut(), ::std::ptr::null_mut()),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn mechanism_info_reports_supported_mechanism_details() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+
+    let mut info = CK_MECHANISM_INFO {
+        ulMinKeySize: 0,
+        ulMaxKeySize: 0,
+        flags: 0,
+    };
+    assert_eq!(
+        crate::C_GetMechanismInfo(TEST_SLOT_ID, CKM_RSA_PKCS as CK_MECHANISM_TYPE, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.ulMinKeySize, 1024);
+    assert_eq!(info.ulMaxKeySize, 4096);
+    assert_eq!(
+        info.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
+
+    assert_eq!(
+        crate::C_GetMechanismInfo(
+            TEST_SLOT_ID,
+            CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE,
+            &mut info
+        ),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetMechanismInfo(
+            TEST_SLOT_ID,
+            CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
