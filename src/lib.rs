@@ -21,7 +21,16 @@ use std::{
 pub mod error;
 use error::*;
 
-pub mod pkcs11;
+pub mod pkcs11 {
+    #![allow(
+        dead_code,
+        non_camel_case_types,
+        non_snake_case,
+        non_upper_case_globals
+    )]
+
+    include!(concat!(env!("OUT_DIR"), "/pkcs11.rs"));
+}
 use pkcs11::*;
 
 unsafe impl Sync for CK_INTERFACE {}
@@ -999,10 +1008,10 @@ fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 }
 
 #[no_mangle]
-pub extern "C" fn C_Initialize(init_args: *mut CK_C_INITIALIZE_ARGS) -> CK_RV {
+pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
     if !init_args.is_null() {
-        let args = unsafe { &*init_args };
+        let args = unsafe { &*(init_args as CK_C_INITIALIZE_ARGS_PTR) };
         if !args.pReserved.is_null() {
             return CKR_ARGUMENTS_BAD.into();
         }
@@ -2222,7 +2231,7 @@ message_stub!(C_DecapsulateKey(
     templ: *mut CK_ATTRIBUTE,
     attribute_count: ::std::os::raw::c_ulong,
     ciphertext: *mut ::std::os::raw::c_uchar,
-    ciphertext_len: *mut ::std::os::raw::c_ulong,
+    ciphertext_len: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ));
 message_stub!(C_VerifySignatureInit(
@@ -2375,7 +2384,95 @@ const fn legacy_function_list(version: CK_VERSION) -> CK_FUNCTION_LIST {
 
 const fn function_list_3_0(version: CK_VERSION) -> CK_FUNCTION_LIST_3_0 {
     CK_FUNCTION_LIST_3_0 {
-        base: legacy_function_list(version),
+        version,
+
+        C_Initialize: Some(C_Initialize),
+        C_Finalize: Some(C_Finalize),
+        C_GetInfo: Some(C_GetInfo),
+        C_GetFunctionList: Some(C_GetFunctionList),
+
+        C_GetSlotList: Some(C_GetSlotList),
+        C_GetSlotInfo: Some(C_GetSlotInfo),
+        C_GetTokenInfo: Some(C_GetTokenInfo),
+
+        C_GetMechanismList: Some(C_GetMechanismList),
+        C_GetMechanismInfo: Some(C_GetMechanismInfo),
+
+        C_InitToken: Some(C_InitToken),
+        C_InitPIN: Some(C_InitPIN),
+        C_SetPIN: Some(C_SetPIN),
+
+        C_OpenSession: Some(C_OpenSession),
+        C_CloseSession: Some(C_CloseSession),
+        C_CloseAllSessions: Some(C_CloseAllSessions),
+        C_GetSessionInfo: Some(C_GetSessionInfo),
+
+        C_GetOperationState: Some(C_GetOperationState),
+        C_SetOperationState: Some(C_SetOperationState),
+
+        C_Login: Some(C_Login),
+        C_Logout: Some(C_Logout),
+
+        C_CreateObject: Some(C_CreateObject),
+        C_CopyObject: Some(C_CopyObject),
+        C_DestroyObject: Some(C_DestroyObject),
+        C_GetObjectSize: Some(C_GetObjectSize),
+
+        C_GetAttributeValue: Some(C_GetAttributeValue),
+        C_SetAttributeValue: Some(C_SetAttributeValue),
+
+        C_FindObjectsInit: Some(C_FindObjectsInit),
+        C_FindObjects: Some(C_FindObjects),
+        C_FindObjectsFinal: Some(C_FindObjectsFinal),
+
+        C_EncryptInit: Some(C_EncryptInit),
+        C_Encrypt: Some(C_Encrypt),
+        C_EncryptUpdate: Some(C_EncryptUpdate),
+        C_EncryptFinal: Some(C_EncryptFinal),
+
+        C_DecryptInit: Some(C_DecryptInit),
+        C_Decrypt: Some(C_Decrypt),
+        C_DecryptUpdate: Some(C_DecryptUpdate),
+        C_DecryptFinal: Some(C_DecryptFinal),
+
+        C_DigestInit: Some(C_DigestInit),
+        C_Digest: Some(C_Digest),
+        C_DigestUpdate: Some(C_DigestUpdate),
+        C_DigestKey: Some(C_DigestKey),
+        C_DigestFinal: Some(C_DigestFinal),
+
+        C_SignInit: Some(C_SignInit),
+        C_Sign: Some(C_Sign),
+        C_SignUpdate: Some(C_SignUpdate),
+        C_SignFinal: Some(C_SignFinal),
+        C_SignRecoverInit: Some(C_SignRecoverInit),
+        C_SignRecover: Some(C_SignRecover),
+
+        C_VerifyInit: Some(C_VerifyInit),
+        C_Verify: Some(C_Verify),
+        C_VerifyUpdate: Some(C_VerifyUpdate),
+        C_VerifyFinal: Some(C_VerifyFinal),
+        C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
+        C_VerifyRecover: Some(C_VerifyRecover),
+
+        C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
+        C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
+        C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
+        C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
+
+        C_GenerateKey: Some(C_GenerateKey),
+        C_GenerateKeyPair: Some(C_GenerateKeyPair),
+
+        C_WrapKey: Some(C_WrapKey),
+        C_UnwrapKey: Some(C_UnwrapKey),
+        C_DeriveKey: Some(C_DeriveKey),
+
+        C_SeedRandom: Some(C_SeedRandom),
+        C_GenerateRandom: Some(C_GenerateRandom),
+
+        C_GetFunctionStatus: Some(C_GetFunctionStatus),
+        C_CancelFunction: Some(C_CancelFunction),
+        C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
 
         C_GetInterfaceList: Some(C_GetInterfaceList),
         C_GetInterface: Some(C_GetInterface),
@@ -2410,7 +2507,124 @@ const fn function_list_3_0(version: CK_VERSION) -> CK_FUNCTION_LIST_3_0 {
 
 const fn function_list_3_2(version: CK_VERSION) -> CK_FUNCTION_LIST_3_2 {
     CK_FUNCTION_LIST_3_2 {
-        base: function_list_3_0(version),
+        version,
+
+        C_Initialize: Some(C_Initialize),
+        C_Finalize: Some(C_Finalize),
+        C_GetInfo: Some(C_GetInfo),
+        C_GetFunctionList: Some(C_GetFunctionList),
+
+        C_GetSlotList: Some(C_GetSlotList),
+        C_GetSlotInfo: Some(C_GetSlotInfo),
+        C_GetTokenInfo: Some(C_GetTokenInfo),
+
+        C_GetMechanismList: Some(C_GetMechanismList),
+        C_GetMechanismInfo: Some(C_GetMechanismInfo),
+
+        C_InitToken: Some(C_InitToken),
+        C_InitPIN: Some(C_InitPIN),
+        C_SetPIN: Some(C_SetPIN),
+
+        C_OpenSession: Some(C_OpenSession),
+        C_CloseSession: Some(C_CloseSession),
+        C_CloseAllSessions: Some(C_CloseAllSessions),
+        C_GetSessionInfo: Some(C_GetSessionInfo),
+
+        C_GetOperationState: Some(C_GetOperationState),
+        C_SetOperationState: Some(C_SetOperationState),
+
+        C_Login: Some(C_Login),
+        C_Logout: Some(C_Logout),
+
+        C_CreateObject: Some(C_CreateObject),
+        C_CopyObject: Some(C_CopyObject),
+        C_DestroyObject: Some(C_DestroyObject),
+        C_GetObjectSize: Some(C_GetObjectSize),
+
+        C_GetAttributeValue: Some(C_GetAttributeValue),
+        C_SetAttributeValue: Some(C_SetAttributeValue),
+
+        C_FindObjectsInit: Some(C_FindObjectsInit),
+        C_FindObjects: Some(C_FindObjects),
+        C_FindObjectsFinal: Some(C_FindObjectsFinal),
+
+        C_EncryptInit: Some(C_EncryptInit),
+        C_Encrypt: Some(C_Encrypt),
+        C_EncryptUpdate: Some(C_EncryptUpdate),
+        C_EncryptFinal: Some(C_EncryptFinal),
+
+        C_DecryptInit: Some(C_DecryptInit),
+        C_Decrypt: Some(C_Decrypt),
+        C_DecryptUpdate: Some(C_DecryptUpdate),
+        C_DecryptFinal: Some(C_DecryptFinal),
+
+        C_DigestInit: Some(C_DigestInit),
+        C_Digest: Some(C_Digest),
+        C_DigestUpdate: Some(C_DigestUpdate),
+        C_DigestKey: Some(C_DigestKey),
+        C_DigestFinal: Some(C_DigestFinal),
+
+        C_SignInit: Some(C_SignInit),
+        C_Sign: Some(C_Sign),
+        C_SignUpdate: Some(C_SignUpdate),
+        C_SignFinal: Some(C_SignFinal),
+        C_SignRecoverInit: Some(C_SignRecoverInit),
+        C_SignRecover: Some(C_SignRecover),
+
+        C_VerifyInit: Some(C_VerifyInit),
+        C_Verify: Some(C_Verify),
+        C_VerifyUpdate: Some(C_VerifyUpdate),
+        C_VerifyFinal: Some(C_VerifyFinal),
+        C_VerifyRecoverInit: Some(C_VerifyRecoverInit),
+        C_VerifyRecover: Some(C_VerifyRecover),
+
+        C_DigestEncryptUpdate: Some(C_DigestEncryptUpdate),
+        C_DecryptDigestUpdate: Some(C_DecryptDigestUpdate),
+        C_SignEncryptUpdate: Some(C_SignEncryptUpdate),
+        C_DecryptVerifyUpdate: Some(C_DecryptVerifyUpdate),
+
+        C_GenerateKey: Some(C_GenerateKey),
+        C_GenerateKeyPair: Some(C_GenerateKeyPair),
+
+        C_WrapKey: Some(C_WrapKey),
+        C_UnwrapKey: Some(C_UnwrapKey),
+        C_DeriveKey: Some(C_DeriveKey),
+
+        C_SeedRandom: Some(C_SeedRandom),
+        C_GenerateRandom: Some(C_GenerateRandom),
+
+        C_GetFunctionStatus: Some(C_GetFunctionStatus),
+        C_CancelFunction: Some(C_CancelFunction),
+        C_WaitForSlotEvent: Some(C_WaitForSlotEvent),
+
+        C_GetInterfaceList: Some(C_GetInterfaceList),
+        C_GetInterface: Some(C_GetInterface),
+        C_LoginUser: Some(C_LoginUser),
+        C_SessionCancel: Some(C_SessionCancel),
+
+        C_MessageEncryptInit: Some(C_MessageEncryptInit),
+        C_EncryptMessage: Some(C_EncryptMessage),
+        C_EncryptMessageBegin: Some(C_EncryptMessageBegin),
+        C_EncryptMessageNext: Some(C_EncryptMessageNext),
+        C_MessageEncryptFinal: Some(C_MessageEncryptFinal),
+
+        C_MessageDecryptInit: Some(C_MessageDecryptInit),
+        C_DecryptMessage: Some(C_DecryptMessage),
+        C_DecryptMessageBegin: Some(C_DecryptMessageBegin),
+        C_DecryptMessageNext: Some(C_DecryptMessageNext),
+        C_MessageDecryptFinal: Some(C_MessageDecryptFinal),
+
+        C_MessageSignInit: Some(C_MessageSignInit),
+        C_SignMessage: Some(C_SignMessage),
+        C_SignMessageBegin: Some(C_SignMessageBegin),
+        C_SignMessageNext: Some(C_SignMessageNext),
+        C_MessageSignFinal: Some(C_MessageSignFinal),
+
+        C_MessageVerifyInit: Some(C_MessageVerifyInit),
+        C_VerifyMessage: Some(C_VerifyMessage),
+        C_VerifyMessageBegin: Some(C_VerifyMessageBegin),
+        C_VerifyMessageNext: Some(C_VerifyMessageNext),
+        C_MessageVerifyFinal: Some(C_MessageVerifyFinal),
 
         C_EncapsulateKey: Some(C_EncapsulateKey),
         C_DecapsulateKey: Some(C_DecapsulateKey),
@@ -2442,27 +2656,27 @@ static G_FUNCTION_LIST_3_2: CK_FUNCTION_LIST_3_2 =
     function_list_3_2(CK_VERSION { major: 3, minor: 2 });
 
 static G_INTERFACE_2_40: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut ::std::os::raw::c_char,
+    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_0: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut ::std::os::raw::c_char,
+    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_0 as *const CK_FUNCTION_LIST_3_0
         as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_1: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut ::std::os::raw::c_char,
+    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_1 as *const CK_FUNCTION_LIST_3_0
         as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_2: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut ::std::os::raw::c_char,
+    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_2 as *const CK_FUNCTION_LIST_3_2
         as *mut ::std::os::raw::c_void,
     flags: 0,
