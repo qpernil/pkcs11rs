@@ -19,6 +19,7 @@ CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 CKM_RSA_PKCS = 0x00000001
+CKA_LABEL = 0x00000003
 
 
 def library_path() -> pathlib.Path:
@@ -377,6 +378,13 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_MECHANISM_INFO),
         ]
         cls.lib.C_GetMechanismInfo.restype = CK_RV
+        cls.lib.C_GetAttributeValue.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_GetAttributeValue.restype = CK_RV
         cls.lib.C_FindObjectsInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_ATTRIBUTE),
@@ -735,6 +743,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.lib.C_FindObjectsFinal(999),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_get_attribute_value_validates_state_and_arguments(self) -> None:
+        attr = CK_ATTRIBUTE(CKA_LABEL, None, 0)
+
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(1, 1, ctypes.byref(attr), 1),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(1, 1, None, 1),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(999, 1, ctypes.byref(attr), 1),
             CKR_SESSION_HANDLE_INVALID,
         )
 
