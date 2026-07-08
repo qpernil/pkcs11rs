@@ -385,6 +385,13 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_ULONG,
         ]
         cls.lib.C_GetAttributeValue.restype = CK_RV
+        cls.lib.C_SetAttributeValue.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_SetAttributeValue.restype = CK_RV
         cls.lib.C_FindObjectsInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_ATTRIBUTE),
@@ -761,6 +768,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.lib.C_GetAttributeValue(999, 1, ctypes.byref(attr), 1),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_set_attribute_value_validates_state_and_arguments(self) -> None:
+        attr = CK_ATTRIBUTE(CKA_LABEL, None, 0)
+
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(1, 1, ctypes.byref(attr), 1),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(1, 1, None, 1),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(999, 1, ctypes.byref(attr), 1),
             CKR_SESSION_HANDLE_INVALID,
         )
 
