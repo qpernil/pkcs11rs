@@ -1290,6 +1290,121 @@ pub fn get_attribute_value_reports_attribute_errors() {
 }
 
 #[test]
+pub fn set_attribute_value_updates_mutable_attributes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut label = *b"Renamed public key";
+    let mut id = [9u8, 8, 7];
+    let mut attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+    ];
+
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            attrs.as_mut_ptr(),
+            attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut read_label = [0u8; 18];
+    let mut read_id = [0u8; 3];
+    let mut read_attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: read_label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: read_id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_id.len() as CK_ULONG,
+        },
+    ];
+
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            read_attrs.as_mut_ptr(),
+            read_attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&read_label, b"Renamed public key");
+    assert_eq!(read_id, id);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn set_attribute_value_reports_attribute_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut readonly_attr = CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut readonly_attr, 1),
+        CKR_ATTRIBUTE_READ_ONLY as CK_RV
+    );
+
+    let mut invalid_attr = CK_ATTRIBUTE {
+        type_: CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut invalid_attr, 1),
+        CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+    );
+
+    let mut bad_attr = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 1,
+    };
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut bad_attr, 1),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 999, &mut invalid_attr, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetAttributeValue(999, 1, &mut invalid_attr, 1),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn generate_random_validates_initialization_and_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

@@ -1083,6 +1083,22 @@ impl TokenObject {
         }
     }
 
+    fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        let value = read_attribute_value(attribute)?;
+        match attribute.type_ {
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
+                self.label = value;
+                Ok(())
+            }
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                self.id = value;
+                Ok(())
+            }
+            x if self.attribute_value(x).is_some() => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
+            _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
+        }
+    }
+
     fn matches_template(&self, templ: &[CK_ATTRIBUTE]) -> bool {
         templ.iter().all(|attribute| {
             let Some(value) = self.attribute_value(attribute.type_) else {
@@ -1700,10 +1716,32 @@ fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(
     Ok(())
 }
 
+fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
+    if attribute.ulValueLen > 0 && attribute.pValue.is_null() {
+        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    }
+    let value = if attribute.ulValueLen == 0 {
+        &[]
+    } else {
+        unsafe {
+            slice::from_raw_parts(attribute.pValue as *const u8, attribute.ulValueLen as usize)
+        }
+    };
+    Ok(value.to_vec())
+}
+
 fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
-    if current == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
+    if current == CKR_ARGUMENTS_BAD as CK_RV {
+        current
+    } else if next == CKR_ARGUMENTS_BAD as CK_RV {
+        next
+    } else if current == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
         current
     } else if next == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
+        next
+    } else if current == CKR_ATTRIBUTE_READ_ONLY as CK_RV {
+        current
+    } else if next == CKR_ATTRIBUTE_READ_ONLY as CK_RV {
         next
     } else if current == CKR_BUFFER_TOO_SMALL as CK_RV {
         current
@@ -1715,11 +1753,47 @@ fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_SetAttributeValue(
     session_handle: CK_SESSION_HANDLE,
-    _object: CK_OBJECT_HANDLE,
-    _templ: *mut CK_ATTRIBUTE,
-    _count: ::std::os::raw::c_ulong,
+    object: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_SetAttributeValue called with {:?}",
+        (session_handle, object, templ, count)
+    );
+    match set_attribute_value(session_handle, object, templ, count) {
+        Ok(()) => CKR_OK as CK_RV,
+        Err(e) => e.into(),
+    }
+}
+
+fn set_attribute_value(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+) -> Result<(), Error> {
+    let templ = from_raw_parts(templ, count as usize)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let object = ctx
+            .objects
+            .get_mut(&object)
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+
+        let mut rv = CKR_OK as CK_RV;
+        for attribute in templ {
+            if let Err(e) = object.set_attribute_value(attribute) {
+                rv = combine_attribute_rv(rv, e);
+            }
+        }
+
+        if rv == CKR_OK as CK_RV {
+            Ok(())
+        } else {
+            Err(rv.into())
+        }
+    })
 }
 
 #[no_mangle]
