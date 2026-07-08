@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libclang-dev \
+            libcurl4-openssl-dev \
+            libpcsclite-dev \
+            libssl-dev \
+            libusb-1.0-0-dev \
+            pkg-config
+
+      - name: Run Rust tests
+        run: cargo test
+
+      - name: Run Python ABI tests
+        run: python3 test_pkcs11.py
