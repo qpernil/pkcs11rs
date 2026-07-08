@@ -1161,53 +1161,92 @@ pub extern "C" fn C_WaitForSlotEvent(
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MechanismDetails {
+    type_: CK_MECHANISM_TYPE,
+    min_key_size: CK_ULONG,
+    max_key_size: CK_ULONG,
+    flags: CK_FLAGS,
+}
+
+const MECHANISMS: [MechanismDetails; 4] = [
+    MechanismDetails {
+        type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 1024,
+        max_key_size: 4096,
+        flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        min_key_size: 1024,
+        max_key_size: 4096,
+        flags: (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_WRAP | CKF_UNWRAP)
+            as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 256,
+        max_key_size: 521,
+        flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_ECDSA as CK_MECHANISM_TYPE,
+        min_key_size: 256,
+        max_key_size: 521,
+        flags: (CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+    },
+];
+
+fn mechanism_details(type_: CK_MECHANISM_TYPE) -> Result<MechanismDetails, Error> {
+    MECHANISMS
+        .iter()
+        .copied()
+        .find(|mechanism| mechanism.type_ == type_)
+        .ok_or(CKR_MECHANISM_INVALID.into())
+}
+
 #[no_mangle]
 pub extern "C" fn C_GetMechanismList(
     slotID: CK_SLOT_ID,
     mechanism_list: *mut CK_MECHANISM_TYPE,
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    unsafe {
-        eprintln!(
-            "C_GetMechanismList called with {:?}",
-            (slotID, mechanism_list, count)
-        );
-        let count = match count.as_mut() {
-            Some(count) => count,
-            None => return CKR_ARGUMENTS_BAD.into(),
-        };
-        const MECHANISMS: [CK_MECHANISM_TYPE; 7] = [0, 1, 2, 3, 4, 5, 6];
+    eprintln!(
+        "C_GetMechanismList called with {:?}",
+        (slotID, mechanism_list, count)
+    );
+    map(get_mechanism_list(slotID, mechanism_list, count))
+}
 
-        match with_context(|ctx| match ctx.slots.get(&slotID) {
-            Some(slot) => {
-                eprintln!("{:?}", slot);
-                match mechanism_list.as_mut() {
-                    Some(_) => {
-                        let required = MECHANISMS.len() as ::std::os::raw::c_ulong;
-                        if *count < required {
-                            *count = required;
-                            return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
-                        }
-                        let list = slice::from_raw_parts_mut(mechanism_list, MECHANISMS.len());
-                        list.copy_from_slice(&MECHANISMS);
-                        *count = required;
-                        eprintln!("C_GetMechanismList returning {:?}", list);
-                        Ok(CKR_OK as CK_RV)
-                    }
-                    None => {
-                        eprintln!("C_GetMechanismList returning {:?}", MECHANISMS.len());
-                        *count = MECHANISMS.len() as ::std::os::raw::c_ulong;
-                        Ok(CKR_OK as CK_RV)
-                    }
-                }
-            }
-            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
+fn get_mechanism_list(
+    slotID: CK_SLOT_ID,
+    mechanism_list: *mut CK_MECHANISM_TYPE,
+    count: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let count = as_mut(count)?;
+    with_context_mut(|ctx| {
+        ctx.init();
+        ctx.get_slot(slotID)?;
+
+        let required = MECHANISMS.len() as CK_ULONG;
+        if mechanism_list.is_null() {
+            *count = required;
+            eprintln!("C_GetMechanismList returning {:?}", *count);
+            return Ok(());
         }
-    }
-    .into()
+        if *count < required {
+            *count = required;
+            return Err(CKR_BUFFER_TOO_SMALL.into());
+        }
+
+        let list = unsafe { slice::from_raw_parts_mut(mechanism_list, MECHANISMS.len()) };
+        for (slot, mechanism) in list.iter_mut().zip(MECHANISMS) {
+            *slot = mechanism.type_;
+        }
+        *count = required;
+        eprintln!("C_GetMechanismList returning {:?}", list);
+        Ok(())
+    })
 }
 
 #[no_mangle]
@@ -1220,28 +1259,26 @@ pub extern "C" fn C_GetMechanismInfo(
         "C_GetMechanismInfo called with {:?}",
         (slotID, type_, info_ptr)
     );
-    unsafe {
-        match with_context(|ctx| match ctx.slots.get(&slotID) {
-            Some(slot) => {
-                eprintln!("{:?}", slot);
-                match info_ptr.as_mut() {
-                    Some(info) => {
-                        info.ulMinKeySize = 1024;
-                        info.ulMaxKeySize = 4096;
-                        info.flags = 0;
-                        eprintln!("C_GetMechanismInfo returning {:?}", info);
-                        Ok(CKR_OK as CK_RV)
-                    }
-                    None => Ok(CKR_ARGUMENTS_BAD as CK_RV),
-                }
-            }
-            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
-        }
-    }
-    .into()
+    map(get_mechanism_info(slotID, type_, info_ptr))
+}
+
+fn get_mechanism_info(
+    slotID: CK_SLOT_ID,
+    type_: CK_MECHANISM_TYPE,
+    info_ptr: CK_MECHANISM_INFO_PTR,
+) -> Result<(), Error> {
+    let info = as_mut(info_ptr)?;
+    with_context_mut(|ctx| {
+        ctx.init();
+        ctx.get_slot(slotID)?;
+
+        let mechanism = mechanism_details(type_)?;
+        info.ulMinKeySize = mechanism.min_key_size;
+        info.ulMaxKeySize = mechanism.max_key_size;
+        info.flags = mechanism.flags;
+        eprintln!("C_GetMechanismInfo returning {:?}", info);
+        Ok(())
+    })
 }
 
 #[no_mangle]

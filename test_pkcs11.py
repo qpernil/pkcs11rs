@@ -18,6 +18,7 @@ CKR_ARGUMENTS_BAD = 7
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
+CKM_RSA_PKCS = 0x00000001
 
 
 def library_path() -> pathlib.Path:
@@ -370,6 +371,12 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_GetMechanismList.restype = CK_RV
+        cls.lib.C_GetMechanismInfo.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM_INFO),
+        ]
+        cls.lib.C_GetMechanismInfo.restype = CK_RV
         cls.lib.C_GenerateRandom.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_BYTE),
@@ -674,10 +681,15 @@ class Pkcs11AbiTests(unittest.TestCase):
     def test_slot_and_mechanism_calls_validate_slot_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         count = CK_ULONG()
+        info = CK_MECHANISM_INFO()
 
         self.assertEqual(self.lib.C_CloseAllSessions(999), CKR_SLOT_ID_INVALID)
         self.assertEqual(
             self.lib.C_GetMechanismList(999, None, ctypes.byref(count)),
+            CKR_SLOT_ID_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(999, CKM_RSA_PKCS, ctypes.byref(info)),
             CKR_SLOT_ID_INVALID,
         )
 
