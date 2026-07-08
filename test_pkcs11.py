@@ -165,10 +165,10 @@ class CK_RSA_PKCS_PSS_PARAMS(ctypes.Structure):
 
 class CK_C_INITIALIZE_ARGS(ctypes.Structure):
     _fields_ = [
-        ("pfnCreateMutex", ctypes.c_void_p),
-        ("pfnDestroyMutex", ctypes.c_void_p),
-        ("pfnLockMutex", ctypes.c_void_p),
-        ("pfnUnlockMutex", ctypes.c_void_p),
+        ("CreateMutex", ctypes.c_void_p),
+        ("DestroyMutex", ctypes.c_void_p),
+        ("LockMutex", ctypes.c_void_p),
+        ("UnlockMutex", ctypes.c_void_p),
         ("flags", CK_FLAGS),
         ("pReserved", ctypes.c_void_p),
     ]
@@ -306,6 +306,9 @@ class CK_FUNCTION_LIST_3_0(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
         (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS
     ]
+
+
+CK_FUNCTION_LIST_3_1 = CK_FUNCTION_LIST_3_0
 
 
 class CK_FUNCTION_LIST_3_2(ctypes.Structure):
@@ -632,10 +635,10 @@ class Pkcs11AbiTests(unittest.TestCase):
             48,
             8,
             {
-                "pfnCreateMutex": 0,
-                "pfnDestroyMutex": 8,
-                "pfnLockMutex": 16,
-                "pfnUnlockMutex": 24,
+                "CreateMutex": 0,
+                "DestroyMutex": 8,
+                "LockMutex": 16,
+                "UnlockMutex": 24,
                 "flags": 32,
                 "pReserved": 40,
             },
@@ -748,7 +751,7 @@ class Pkcs11AbiTests(unittest.TestCase):
 
         function_list = ctypes.cast(
             interface.contents.pFunctionList,
-            ctypes.POINTER(CK_FUNCTION_LIST_3_0),
+            ctypes.POINTER(CK_FUNCTION_LIST_3_1),
         ).contents
         self.assertEqual(function_list.version.major, 3)
         self.assertEqual(function_list.version.minor, 1)

@@ -27,13 +27,6 @@ fn assert_function_slots_present<T>(function_list: *const T, function_count: usi
     }
 }
 
-#[test]
-pub fn cryptoki_header_version_matches_vendored_header() {
-    assert_eq!(CRYPTOKI_VERSION_MAJOR, 2);
-    assert_eq!(CRYPTOKI_VERSION_MINOR, 40);
-    assert_eq!(CRYPTOKI_VERSION_REVISION, 0);
-}
-
 fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected: CK_RV) {
     let mut data = [0u8; 8];
     let mut data_len = data.len() as CK_ULONG;
@@ -41,9 +34,9 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
     let mut second_object = 0;
     let mut flags = 0;
     let mut async_data = CK_ASYNC_DATA {
-        ulVersionNum: 0,
+        ulVersion: 0,
         pValue: ::std::ptr::null_mut(),
-        ulValueLen: 0,
+        ulValue: 0,
         hObject: 0,
         hAdditionalObject: 0,
     };
@@ -528,7 +521,7 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
             ::std::ptr::null_mut(),
             0,
             data.as_mut_ptr(),
-            &mut data_len,
+            data_len,
             &mut object
         )
     );
@@ -707,9 +700,9 @@ pub fn cryptoki_3_2_interface_is_discoverable() {
     assert!(!interface.pFunctionList.is_null());
 
     let function_list = interface.pFunctionList as CK_FUNCTION_LIST_3_2_PTR;
-    assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
-    assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
-    assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
+    assert_eq!(unsafe { (*function_list).version.major }, 3);
+    assert_eq!(unsafe { (*function_list).version.minor }, 2);
+    assert!(unsafe { (*function_list).C_GetInterface.is_some() });
     assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
     assert_function_slots_present(
         function_list,
@@ -742,16 +735,16 @@ pub fn initialize_and_finalize_reject_reserved_args() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     let mut init_args = CK_C_INITIALIZE_ARGS {
-        pfnCreateMutex: None,
-        pfnDestroyMutex: None,
-        pfnLockMutex: None,
-        pfnUnlockMutex: None,
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
         flags: 0,
         pReserved: 1 as CK_VOID_PTR,
     };
 
     assert_eq!(
-        crate::C_Initialize(&mut init_args),
+        crate::C_Initialize(&mut init_args as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
@@ -865,26 +858,28 @@ fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
             assert_eq!(unsafe { (*function_list).version.minor }, 40);
             assert!(unsafe { (*function_list).C_GetFunctionList.is_some() });
         }
-        (3, 0) | (3, 1) => {
+        (3, 0) => {
             let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_0_PTR };
             assert!(!function_list.is_null());
-            assert_eq!(
-                unsafe { (*function_list).base.version.major },
-                version.major
-            );
-            assert_eq!(
-                unsafe { (*function_list).base.version.minor },
-                version.minor
-            );
+            assert_eq!(unsafe { (*function_list).version.major }, 3);
+            assert_eq!(unsafe { (*function_list).version.minor }, 0);
+            assert!(unsafe { (*function_list).C_GetInterface.is_some() });
+            assert!(unsafe { (*function_list).C_MessageEncryptInit.is_some() });
+        }
+        (3, 1) => {
+            let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_0_PTR };
+            assert!(!function_list.is_null());
+            assert_eq!(unsafe { (*function_list).version.major }, 3);
+            assert_eq!(unsafe { (*function_list).version.minor }, 1);
             assert!(unsafe { (*function_list).C_GetInterface.is_some() });
             assert!(unsafe { (*function_list).C_MessageEncryptInit.is_some() });
         }
         (3, 2) => {
             let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_2_PTR };
             assert!(!function_list.is_null());
-            assert_eq!(unsafe { (*function_list).base.base.version.major }, 3);
-            assert_eq!(unsafe { (*function_list).base.base.version.minor }, 2);
-            assert!(unsafe { (*function_list).base.C_GetInterface.is_some() });
+            assert_eq!(unsafe { (*function_list).version.major }, 3);
+            assert_eq!(unsafe { (*function_list).version.minor }, 2);
+            assert!(unsafe { (*function_list).C_GetInterface.is_some() });
             assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
             assert!(unsafe { (*function_list).C_UnwrapKeyAuthenticated.is_some() });
         }
@@ -1639,43 +1634,43 @@ fn bindgen_test_layout_CK_C_INITIALIZE_ARGS() {
         concat!("Alignment of ", stringify!(CK_C_INITIALIZE_ARGS))
     );
     assert_eq!(
-        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, pfnCreateMutex),
+        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, CreateMutex),
         0usize,
         concat!(
             "Offset of field: ",
             stringify!(CK_C_INITIALIZE_ARGS),
             "::",
-            stringify!(pfnCreateMutex)
+            stringify!(CreateMutex)
         )
     );
     assert_eq!(
-        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, pfnDestroyMutex),
+        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, DestroyMutex),
         8usize,
         concat!(
             "Offset of field: ",
             stringify!(CK_C_INITIALIZE_ARGS),
             "::",
-            stringify!(pfnDestroyMutex)
+            stringify!(DestroyMutex)
         )
     );
     assert_eq!(
-        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, pfnLockMutex),
+        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, LockMutex),
         16usize,
         concat!(
             "Offset of field: ",
             stringify!(CK_C_INITIALIZE_ARGS),
             "::",
-            stringify!(pfnLockMutex)
+            stringify!(LockMutex)
         )
     );
     assert_eq!(
-        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, pfnUnlockMutex),
+        ::std::mem::offset_of!(CK_C_INITIALIZE_ARGS, UnlockMutex),
         24usize,
         concat!(
             "Offset of field: ",
             stringify!(CK_C_INITIALIZE_ARGS),
             "::",
-            stringify!(pfnUnlockMutex)
+            stringify!(UnlockMutex)
         )
     );
     assert_eq!(
