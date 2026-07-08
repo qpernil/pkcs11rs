@@ -1179,6 +1179,95 @@ pub fn find_objects_validates_sessions_and_cleans_up_on_close() {
 }
 
 #[test]
+pub fn destroy_object_removes_object_from_store_and_search() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_DestroyObject(TEST_SESSION_HANDLE, 1),
+        CKR_OK as CK_RV
+    );
+
+    let mut label_attr = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_DestroyObject(TEST_SESSION_HANDLE, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], 2);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn destroy_object_updates_active_search_results() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], 1);
+
+    assert_eq!(
+        crate::C_DestroyObject(TEST_SESSION_HANDLE, 2),
+        CKR_OK as CK_RV
+    );
+    count = 999;
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 0);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn get_attribute_value_reports_sizes_and_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

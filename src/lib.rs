@@ -1633,9 +1633,39 @@ pub extern "C" fn C_CopyObject(
 #[no_mangle]
 pub extern "C" fn C_DestroyObject(
     session_handle: CK_SESSION_HANDLE,
-    _object: CK_OBJECT_HANDLE,
+    object: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!("C_DestroyObject called with {:?}", (session_handle, object));
+    map(destroy_object(session_handle, object))
+}
+
+fn destroy_object(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        ctx.objects
+            .remove(&object)
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        remove_object_from_find_operations(&mut ctx.find_operations, object);
+        Ok(())
+    })
+}
+
+fn remove_object_from_find_operations(
+    find_operations: &mut HashMap<CK_SESSION_HANDLE, FindOperation>,
+    object: CK_OBJECT_HANDLE,
+) {
+    for operation in find_operations.values_mut() {
+        let already_returned = operation.next.min(operation.objects.len());
+        let removed_before_cursor = operation.objects[..already_returned]
+            .iter()
+            .filter(|&&handle| handle == object)
+            .count();
+        operation.objects.retain(|&handle| handle != object);
+        operation.next -= removed_before_cursor;
+    }
 }
 
 #[no_mangle]

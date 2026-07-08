@@ -378,6 +378,8 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_MECHANISM_INFO),
         ]
         cls.lib.C_GetMechanismInfo.restype = CK_RV
+        cls.lib.C_DestroyObject.argtypes = [CK_ULONG, CK_ULONG]
+        cls.lib.C_DestroyObject.restype = CK_RV
         cls.lib.C_GetAttributeValue.argtypes = [
             CK_ULONG,
             CK_ULONG,
@@ -786,6 +788,18 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.lib.C_SetAttributeValue(999, 1, ctypes.byref(attr), 1),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_destroy_object_validates_state_and_session(self) -> None:
+        self.assertEqual(
+            self.lib.C_DestroyObject(1, 1),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_DestroyObject(999, 1),
             CKR_SESSION_HANDLE_INVALID,
         )
 
