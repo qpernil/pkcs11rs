@@ -320,6 +320,7 @@ trait Session {
     fn state(&self) -> CK_STATE;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
     fn logout(&mut self) -> Result<(), Error>;
+    #[allow(dead_code)]
     fn get_session_info(&self) -> Result<(), Error>;
     fn generate(&self) -> Result<(), Error>;
 }
@@ -680,6 +681,7 @@ impl PcscConnector {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct CurlConnector {
     serial: String,
     url: String,
@@ -750,6 +752,7 @@ impl Connector for CurlConnector {
 }
 
 impl CurlConnector {
+    #[allow(dead_code)]
     fn connect(&mut self) -> Result<(), Error> {
         let mut received = Vec::new();
         let mut curl = self.curl.try_borrow_mut()?;
@@ -775,7 +778,9 @@ impl CurlConnector {
 
 struct Scp03Session {
     cipher: openssl::symm::Cipher,
+    #[allow(dead_code)]
     key: Vec<u8>,
+    #[allow(dead_code)]
     iv: Option<Vec<u8>>,
 }
 
