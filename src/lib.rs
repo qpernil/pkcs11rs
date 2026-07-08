@@ -2654,6 +2654,8 @@ static G_FUNCTION_LIST: CK_FUNCTION_LIST = legacy_function_list(CK_VERSION {
 static G_FUNCTION_LIST_3_0: CK_FUNCTION_LIST_3_0 =
     function_list_3_0(CK_VERSION { major: 3, minor: 0 });
 
+// PKCS #11 3.2 headers do not define a CK_FUNCTION_LIST_3_1 layout.
+// A 3.1 request gets the 3.0-shaped table with the requested 3.1 version.
 static G_FUNCTION_LIST_3_1: CK_FUNCTION_LIST_3_0 =
     function_list_3_0(CK_VERSION { major: 3, minor: 1 });
 
