@@ -308,6 +308,8 @@ class CK_FUNCTION_LIST_3_0(ctypes.Structure):
     ]
 
 
+# PKCS #11 3.2 headers do not define a CK_FUNCTION_LIST_3_1 layout.
+# A 3.1 request uses the 3.0-shaped table while reporting version 3.1.
 CK_FUNCTION_LIST_3_1 = CK_FUNCTION_LIST_3_0
 
 
@@ -739,7 +741,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         for name in ["C_GetInterface", "C_EncapsulateKey", "C_UnwrapKeyAuthenticated"]:
             self.assertTrue(getattr(function_list, name), name)
 
-    def test_get_interface_returns_3_1_function_table_for_3_1_request(self) -> None:
+    def test_get_interface_returns_3_0_shaped_table_for_3_1_request(self) -> None:
         version = CK_VERSION(3, 1)
         interface = ctypes.POINTER(CK_INTERFACE)()
 

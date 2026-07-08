@@ -867,6 +867,8 @@ fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
             assert!(unsafe { (*function_list).C_MessageEncryptInit.is_some() });
         }
         (3, 1) => {
+            // PKCS #11 3.2 headers have no CK_FUNCTION_LIST_3_1 type; 3.1 uses
+            // the 3.0-shaped function list while reporting version 3.1.
             let function_list = unsafe { (*interface).pFunctionList as CK_FUNCTION_LIST_3_0_PTR };
             assert!(!function_list.is_null());
             assert_eq!(unsafe { (*function_list).version.major }, 3);
@@ -888,7 +890,7 @@ fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
 }
 
 #[test]
-pub fn get_interface_returns_requested_function_table_version() {
+pub fn get_interface_returns_requested_version_and_documented_table_layout() {
     let _guard = TEST_LOCK.lock().unwrap();
     assert_get_interface_returns_requested_table(CK_VERSION { major: 3, minor: 2 });
     assert_get_interface_returns_requested_table(CK_VERSION { major: 3, minor: 1 });
