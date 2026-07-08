@@ -6,6 +6,7 @@ const LEGACY_FUNCTION_COUNT: usize = 68;
 const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
 const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
+const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
@@ -13,6 +14,45 @@ fn finalize_for_test() {
 
 #[derive(Debug)]
 struct TestSlot;
+
+#[derive(Debug)]
+struct TestSession {
+    slot_id: CK_SLOT_ID,
+}
+
+impl crate::Session for TestSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        CKF_SERIAL_SESSION as CK_FLAGS
+    }
+
+    fn state(&self) -> CK_STATE {
+        CKS_RO_PUBLIC_SESSION as CK_STATE
+    }
+
+    fn login(&mut self, _pin: &[u8]) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn logout(&mut self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn get_session_info(&self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn generate(&self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+}
 
 impl crate::Slot for TestSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
@@ -47,8 +87,8 @@ impl crate::Slot for TestSlot {
         true
     }
 
-    fn open_session(&mut self, _slotID: CK_SLOT_ID, _flags: CK_FLAGS) -> Box<dyn crate::Session> {
-        panic!("test slot does not open sessions")
+    fn open_session(&mut self, slotID: CK_SLOT_ID, _flags: CK_FLAGS) -> Box<dyn crate::Session> {
+        Box::new(TestSession { slot_id: slotID })
     }
 
     fn init_slot(&mut self) -> Result<(), crate::error::Error> {
@@ -73,6 +113,15 @@ fn install_test_slot(slot_id: CK_SLOT_ID) {
         .unwrap()
         .slots
         .insert(slot_id, Box::new(TestSlot));
+}
+
+fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
+    let mut context = crate::lock_context().unwrap();
+    let context = context.as_mut().unwrap();
+    context.slots.insert(slot_id, Box::new(TestSlot));
+    context
+        .sessions
+        .insert(session_handle, Box::new(TestSession { slot_id }));
 }
 
 fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {
@@ -955,6 +1004,120 @@ pub fn mechanism_info_reports_supported_mechanism_details() {
             ::std::ptr::null_mut()
         ),
         CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn find_objects_tracks_empty_search_lifecycle() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
+    let mut count = 999;
+
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OPERATION_ACTIVE as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            ::std::ptr::null_mut(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    count = 999;
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 0);
+    assert_eq!(objects, [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2]);
+
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn find_objects_validates_sessions_and_cleans_up_on_close() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut count = 0;
+
+    assert_eq!(
+        crate::C_FindObjectsInit(999, ::std::ptr::null_mut(), 0),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(999, ::std::ptr::null_mut(), 0, &mut count),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjectsFinal(999),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);

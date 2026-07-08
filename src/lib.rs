@@ -822,7 +822,13 @@ struct Context {
     pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
-    find_operations: HashSet<CK_SESSION_HANDLE>,
+    find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
+}
+
+#[derive(Debug)]
+struct FindOperation {
+    objects: Vec<CK_OBJECT_HANDLE>,
+    next: usize,
 }
 
 impl std::fmt::Debug for Context {
@@ -856,7 +862,7 @@ impl Context {
             },
             slots: HashMap::new(),
             sessions: HashMap::new(),
-            find_operations: HashSet::new(),
+            find_operations: HashMap::new(),
         };
         eprintln!("Context.new {:?}", context);
         context
@@ -1387,7 +1393,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .collect();
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
         ctx.find_operations
-            .retain(|session| !closed_sessions.contains(session));
+            .retain(|session, _operation| !closed_sessions.contains(session));
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         Ok(CKR_OK as CK_RV)
     }) {
@@ -1561,24 +1567,30 @@ pub extern "C" fn C_FindObjectsInit(
     if count > 0 && templ.is_null() {
         return CKR_ARGUMENTS_BAD.into();
     }
-    match with_context_mut(|ctx| {
-        if ctx.get_session_(session_handle).is_none() {
-            return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
+    map(find_objects_init(session_handle, templ, count))
+}
+
+fn find_objects_init(
+    session_handle: CK_SESSION_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+) -> Result<(), Error> {
+    let templ = from_raw_parts(templ, count as usize)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        if ctx.find_operations.contains_key(&session_handle) {
+            return Err(CKR_OPERATION_ACTIVE.into());
         }
-        if ctx.find_operations.contains(&session_handle) {
-            return Ok(CKR_OPERATION_ACTIVE as CK_RV);
-        }
-        if count > 0 {
-            let templ = unsafe { slice::from_raw_parts(templ, count as usize) };
-            eprintln!("C_FindObjectsInit template {:?}", templ);
-        }
-        ctx.find_operations.insert(session_handle);
-        Ok(CKR_OK as CK_RV)
-    }) {
-        Ok(rv) => rv,
-        Err(e) => e.into(),
-    }
-    .into()
+        eprintln!("C_FindObjectsInit template {:?}", templ);
+        ctx.find_operations.insert(
+            session_handle,
+            FindOperation {
+                objects: Vec::new(),
+                next: 0,
+            },
+        );
+        Ok(())
+    })
 }
 
 #[no_mangle]
@@ -1592,48 +1604,53 @@ pub extern "C" fn C_FindObjects(
         "C_FindObjects called with {:?}",
         (session_handle, object, max_object_count, object_count)
     );
-    unsafe {
-        let object_count = match object_count.as_mut() {
-            Some(object_count) => object_count,
-            None => return CKR_ARGUMENTS_BAD.into(),
-        };
-        if max_object_count > 0 && object.is_null() {
-            return CKR_ARGUMENTS_BAD.into();
-        }
-        match with_context(|ctx| {
-            if ctx.get_session_(session_handle).is_none() {
-                return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
-            }
-            if !ctx.find_operations.contains(&session_handle) {
-                return Ok(CKR_OPERATION_NOT_INITIALIZED as CK_RV);
-            }
-            *object_count = 0;
-            Ok(CKR_OK as CK_RV)
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
-        }
-    }
-    .into()
+    map(find_objects(
+        session_handle,
+        object,
+        max_object_count,
+        object_count,
+    ))
+}
+
+fn find_objects(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE_PTR,
+    max_object_count: CK_ULONG,
+    object_count: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let object_count = as_mut(object_count)?;
+    let output = _from_raw_parts_mut(object, max_object_count as usize)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let operation = ctx
+            .find_operations
+            .get_mut(&session_handle)
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+
+        let remaining = &operation.objects[operation.next..];
+        let returned = remaining.len().min(max_object_count as usize);
+        output[..returned].copy_from_slice(&remaining[..returned]);
+        operation.next += returned;
+        *object_count = returned as CK_ULONG;
+        eprintln!("C_FindObjects returning {:?}", &output[..returned]);
+        Ok(())
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
-    match with_context_mut(|ctx| {
-        if ctx.get_session_(session_handle).is_none() {
-            return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV);
-        }
-        if ctx.find_operations.remove(&session_handle) {
-            Ok(CKR_OK as CK_RV)
-        } else {
-            Ok(CKR_OPERATION_NOT_INITIALIZED as CK_RV)
-        }
-    }) {
-        Ok(rv) => rv,
-        Err(e) => e.into(),
-    }
-    .into()
+    map(find_objects_final(session_handle))
+}
+
+fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        ctx.find_operations
+            .remove(&session_handle)
+            .map(|_| ())
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED.into())
+    })
 }
 
 #[no_mangle]
