@@ -831,6 +831,10 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_CreateObject(999, None, 0, ctypes.byref(object_handle)),
             CKR_SESSION_HANDLE_INVALID,
         )
+        self.assertEqual(
+            self.lib.C_CreateObject(999, None, 1, ctypes.byref(object_handle)),
+            CKR_ARGUMENTS_BAD,
+        )
 
     def test_interface_list_reports_one_pkcs11_interface(self) -> None:
         count = CK_ULONG()
