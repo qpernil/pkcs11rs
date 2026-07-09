@@ -385,6 +385,14 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_CreateObject.restype = CK_RV
+        cls.lib.C_CopyObject.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_CopyObject.restype = CK_RV
         cls.lib.C_DestroyObject.argtypes = [CK_ULONG, CK_ULONG]
         cls.lib.C_DestroyObject.restype = CK_RV
         cls.lib.C_GetAttributeValue.argtypes = [
@@ -833,6 +841,28 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.lib.C_CreateObject(999, None, 1, ctypes.byref(object_handle)),
+            CKR_ARGUMENTS_BAD,
+        )
+
+    def test_copy_object_validates_state_and_arguments(self) -> None:
+        object_handle = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_CopyObject(1, 1, None, 0, ctypes.byref(object_handle)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_CopyObject(1, 1, None, 0, None),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_CopyObject(1, 1, None, 0, ctypes.byref(object_handle)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_CopyObject(999, 1, None, 1, ctypes.byref(object_handle)),
             CKR_ARGUMENTS_BAD,
         )
 
