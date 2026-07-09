@@ -395,6 +395,12 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_CopyObject.restype = CK_RV
         cls.lib.C_DestroyObject.argtypes = [CK_ULONG, CK_ULONG]
         cls.lib.C_DestroyObject.restype = CK_RV
+        cls.lib.C_GetObjectSize.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GetObjectSize.restype = CK_RV
         cls.lib.C_GetAttributeValue.argtypes = [
             CK_ULONG,
             CK_ULONG,
@@ -864,6 +870,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_CopyObject(999, 1, None, 1, ctypes.byref(object_handle)),
             CKR_ARGUMENTS_BAD,
+        )
+
+    def test_get_object_size_validates_state_and_arguments(self) -> None:
+        size = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_GetObjectSize(1, 1, ctypes.byref(size)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetObjectSize(1, 1, None),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_GetObjectSize(999, 1, ctypes.byref(size)),
+            CKR_SESSION_HANDLE_INVALID,
         )
 
     def test_interface_list_reports_one_pkcs11_interface(self) -> None:

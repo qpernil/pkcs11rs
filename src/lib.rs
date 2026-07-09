@@ -1081,6 +1081,25 @@ fn bool_attribute(value: bool) -> Vec<u8> {
 }
 
 impl TokenObject {
+    fn size(&self) -> CK_ULONG {
+        [
+            CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            CKA_ID as CK_ATTRIBUTE_TYPE,
+            CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+            CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+        ]
+        .iter()
+        .filter_map(|&attribute_type| self.attribute_value(attribute_type))
+        .map(|value| value.len() as CK_ULONG)
+        .sum()
+    }
+
     fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
@@ -1824,10 +1843,28 @@ fn remove_object_from_find_operations(
 #[no_mangle]
 pub extern "C" fn C_GetObjectSize(
     session_handle: CK_SESSION_HANDLE,
-    _object: CK_OBJECT_HANDLE,
-    _size: *mut ::std::os::raw::c_ulong,
+    object: CK_OBJECT_HANDLE,
+    size: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_GetObjectSize called with {:?}",
+        (session_handle, object, size)
+    );
+    map(get_object_size(session_handle, object, size))
+}
+
+fn get_object_size(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    size: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let size = as_mut(size)?;
+    with_context(|ctx| {
+        ctx._get_session(session_handle)?;
+        let object = ctx.objects.get(&object).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        *size = object.size();
+        Ok(())
+    })
 }
 
 #[no_mangle]
