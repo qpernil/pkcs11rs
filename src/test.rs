@@ -2007,6 +2007,127 @@ pub fn copy_object_reports_template_and_handle_errors() {
 }
 
 #[test]
+pub fn get_object_size_reports_attribute_storage_size() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut size = 0;
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        size,
+        (2 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 1 + 6) as CK_ULONG
+    );
+
+    let mut label = *b"Short";
+    let mut id = [9u8, 8, 7];
+    let mut attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            attrs.as_mut_ptr(),
+            attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        size,
+        (2 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 6) as CK_ULONG
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn get_object_size_reports_created_object_size_and_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut label = *b"Sized key";
+    let mut id = [1u8, 2, 3, 4, 5];
+    let mut templ = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+    ];
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut size = 0;
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, object, &mut size),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        size,
+        (2 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 6) as CK_ULONG
+    );
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetObjectSize(999, object, &mut size),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, object, ::std::ptr::null_mut()),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn get_attribute_value_reports_sizes_and_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
