@@ -1268,6 +1268,208 @@ pub fn destroy_object_updates_active_search_results() {
 }
 
 #[test]
+pub fn create_object_adds_readable_findable_object() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut label = *b"Created public key";
+    let mut id = [4u8, 5, 6];
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut templ = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: &mut verify as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(object, 3);
+
+    let mut read_label = [0u8; 18];
+    let mut read_verify = CK_FALSE as CK_BBOOL;
+    let mut read_attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: read_label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_verify as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            object,
+            read_attrs.as_mut_ptr(),
+            read_attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&read_label, b"Created public key");
+    assert_eq!(read_verify, CK_TRUE as CK_BBOOL);
+
+    let mut search_label = *b"Created public key";
+    let mut search_templ = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: search_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: search_label.len() as CK_ULONG,
+    }];
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            search_templ.as_mut_ptr(),
+            search_templ.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], object);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_DestroyObject(TEST_SESSION_HANDLE, object),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object, read_attrs.as_mut_ptr(), 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn create_object_reports_template_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0, &mut object),
+        CKR_TEMPLATE_INCOMPLETE as CK_RV
+    );
+    assert_eq!(
+        crate::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1, &mut object),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut incomplete = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            incomplete.as_mut_ptr(),
+            incomplete.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_TEMPLATE_INCOMPLETE as CK_RV
+    );
+
+    let mut bad_bool = 2 as CK_BBOOL;
+    let mut invalid_bool = [CK_ATTRIBUTE {
+        type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+        pValue: &mut bad_bool as *mut CK_BBOOL as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            invalid_bool.as_mut_ptr(),
+            invalid_bool.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+
+    let mut unknown = [CK_ATTRIBUTE {
+        type_: CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    }];
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            unknown.as_mut_ptr(),
+            unknown.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_CreateObject(
+            999,
+            unknown.as_mut_ptr(),
+            unknown.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn get_attribute_value_reports_sizes_and_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

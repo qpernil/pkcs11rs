@@ -840,6 +840,20 @@ struct TokenObject {
     verify: bool,
 }
 
+#[derive(Debug, Default)]
+struct TokenObjectTemplate {
+    class: Option<CK_OBJECT_CLASS>,
+    key_type: Option<CK_KEY_TYPE>,
+    label: Vec<u8>,
+    id: Vec<u8>,
+    token: bool,
+    private: bool,
+    encrypt: bool,
+    decrypt: bool,
+    sign: bool,
+    verify: bool,
+}
+
 #[derive(Debug)]
 struct FindOperation {
     objects: Vec<CK_OBJECT_HANDLE>,
@@ -1111,6 +1125,69 @@ impl TokenObject {
                 slice::from_raw_parts(attribute.pValue as *const u8, attribute.ulValueLen as usize)
             };
             expected == value.as_slice()
+        })
+    }
+}
+
+impl TokenObjectTemplate {
+    fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        match attribute.type_ {
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => {
+                self.class = Some(read_ulong_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE => {
+                self.key_type = Some(read_ulong_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
+                self.label = read_attribute_value(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                self.id = read_attribute_value(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => {
+                self.token = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => {
+                self.private = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => {
+                self.encrypt = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => {
+                self.decrypt = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => {
+                self.sign = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => {
+                self.verify = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
+        }
+    }
+
+    fn into_object(self) -> Result<TokenObject, CK_RV> {
+        Ok(TokenObject {
+            class: self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
+            key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
+            label: self.label,
+            id: self.id,
+            token: self.token,
+            private: self.private,
+            encrypt: self.encrypt,
+            decrypt: self.decrypt,
+            sign: self.sign,
+            verify: self.verify,
         })
     }
 }
@@ -1612,11 +1689,46 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CreateObject(
     session_handle: CK_SESSION_HANDLE,
-    _templ: *mut CK_ATTRIBUTE,
-    _count: ::std::os::raw::c_ulong,
-    _object: *mut CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
+    object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_CreateObject called with {:?}",
+        (session_handle, templ, count, object)
+    );
+    match create_object(session_handle, templ, count, object) {
+        Ok(()) => CKR_OK as CK_RV,
+        Err(e) => e.into(),
+    }
+}
+
+fn create_object(
+    session_handle: CK_SESSION_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+    object: CK_OBJECT_HANDLE_PTR,
+) -> Result<(), Error> {
+    let object_handle = as_mut(object)?;
+    let templ = from_raw_parts(templ, count as usize)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let object = parse_create_object_template(templ)?;
+        let handle = next_key(&ctx.objects, 1);
+        ctx.objects.insert(handle, object);
+        *object_handle = handle;
+        Ok(())
+    })
+}
+
+fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    let mut object_template = TokenObjectTemplate::default();
+    for attribute in templ {
+        object_template
+            .apply_attribute(attribute)
+            .map_err(Error::from)?;
+    }
+    object_template.into_object().map_err(Error::from)
 }
 
 #[no_mangle]
@@ -1758,6 +1870,28 @@ fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
         }
     };
     Ok(value.to_vec())
+}
+
+fn read_ulong_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<CK_ULONG, CK_RV> {
+    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_ULONG>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let value = read_attribute_value(attribute)?;
+    let mut bytes = [0u8; ::std::mem::size_of::<CK_ULONG>()];
+    bytes.copy_from_slice(&value);
+    Ok(CK_ULONG::from_ne_bytes(bytes))
+}
+
+fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<bool, CK_RV> {
+    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_BBOOL>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let value = read_attribute_value(attribute)?[0];
+    match value {
+        x if x == CK_FALSE as CK_BBOOL => Ok(false),
+        x if x == CK_TRUE as CK_BBOOL => Ok(true),
+        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV),
+    }
 }
 
 fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
