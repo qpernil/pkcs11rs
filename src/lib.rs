@@ -1734,12 +1734,53 @@ fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, E
 #[no_mangle]
 pub extern "C" fn C_CopyObject(
     session_handle: CK_SESSION_HANDLE,
-    _object: CK_OBJECT_HANDLE,
-    _templ: *mut CK_ATTRIBUTE,
-    _count: ::std::os::raw::c_ulong,
-    _new_object: *mut CK_OBJECT_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    count: ::std::os::raw::c_ulong,
+    new_object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_CopyObject called with {:?}",
+        (session_handle, object, templ, count, new_object)
+    );
+    match copy_object(session_handle, object, templ, count, new_object) {
+        Ok(()) => CKR_OK as CK_RV,
+        Err(e) => e.into(),
+    }
+}
+
+fn copy_object(
+    session_handle: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+    new_object: CK_OBJECT_HANDLE_PTR,
+) -> Result<(), Error> {
+    let new_object_handle = as_mut(new_object)?;
+    let templ = from_raw_parts(templ, count as usize)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let mut copied_object = ctx
+            .objects
+            .get(&object)
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?
+            .clone();
+
+        let mut rv = CKR_OK as CK_RV;
+        for attribute in templ {
+            if let Err(e) = copied_object.set_attribute_value(attribute) {
+                rv = combine_attribute_rv(rv, e);
+            }
+        }
+        if rv != CKR_OK as CK_RV {
+            return Err(rv.into());
+        }
+
+        let handle = next_key(&ctx.objects, 1);
+        ctx.objects.insert(handle, copied_object);
+        *new_object_handle = handle;
+        Ok(())
+    })
 }
 
 #[no_mangle]

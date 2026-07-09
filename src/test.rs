@@ -1793,6 +1793,220 @@ pub fn create_object_reports_template_errors() {
 }
 
 #[test]
+pub fn copy_object_clones_and_overrides_mutable_attributes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut label = *b"Copied public key";
+    let mut id = [8u8, 6, 4, 2];
+    let mut templ = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+    ];
+    let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG,
+            &mut copied
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(copied, 3);
+
+    let mut copied_class = 0 as CK_OBJECT_CLASS;
+    let mut copied_key_type = 999 as CK_KEY_TYPE;
+    let mut copied_label = [0u8; 17];
+    let mut copied_id = [0u8; 4];
+    let mut copied_verify = CK_FALSE as CK_BBOOL;
+    let mut copied_attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut copied_class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut copied_key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: copied_label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: copied_label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: copied_id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: copied_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: &mut copied_verify as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            copied,
+            copied_attrs.as_mut_ptr(),
+            copied_attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(copied_class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    assert_eq!(copied_key_type, CKK_RSA as CK_KEY_TYPE);
+    assert_eq!(&copied_label, b"Copied public key");
+    assert_eq!(copied_id, id);
+    assert_eq!(copied_verify, CK_TRUE as CK_BBOOL);
+
+    let mut original_label = [0u8; 19];
+    let mut original_attr = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: original_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: original_label.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_attr, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&original_label, b"Test RSA public key");
+
+    let mut search_label = *b"Copied public key";
+    let mut search_templ = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: search_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: search_label.len() as CK_ULONG,
+    }];
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            search_templ.as_mut_ptr(),
+            search_templ.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], copied);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn copy_object_reports_template_and_handle_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            999,
+            ::std::ptr::null_mut(),
+            0,
+            &mut copied
+        ),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            ::std::ptr::null_mut(),
+            1,
+            &mut copied
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut readonly_attr = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            readonly_attr.as_mut_ptr(),
+            readonly_attr.len() as CK_ULONG,
+            &mut copied
+        ),
+        CKR_ATTRIBUTE_READ_ONLY as CK_RV
+    );
+
+    let mut unknown = [CK_ATTRIBUTE {
+        type_: CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    }];
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            unknown.as_mut_ptr(),
+            unknown.len() as CK_ULONG,
+            &mut copied
+        ),
+        CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_CopyObject(
+            999,
+            1,
+            unknown.as_mut_ptr(),
+            unknown.len() as CK_ULONG,
+            &mut copied
+        ),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 3, unknown.as_mut_ptr(), 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn get_attribute_value_reports_sizes_and_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
