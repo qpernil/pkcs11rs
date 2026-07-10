@@ -1299,6 +1299,243 @@ pub fn sign_operation_is_cleared_when_session_closes() {
 }
 
 #[test]
+pub fn verify_accepts_matching_placeholder_signature() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut data = [1u8, 2, 3, 4];
+    let mut signature = [0u8; 32];
+    let mut signature_len = signature.len() as CK_ULONG;
+
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn verify_reports_signature_mismatches() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut data = [1u8, 2, 3, 4];
+    let mut signature = [0u8; 32];
+    let mut signature_len = signature.len() as CK_ULONG;
+
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut short_signature = [0u8; 4];
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            short_signature.as_mut_ptr(),
+            short_signature.len() as CK_ULONG
+        ),
+        CKR_SIGNATURE_LEN_RANGE as CK_RV
+    );
+
+    signature[0] ^= 0xff;
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_SIGNATURE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn verify_init_reports_key_and_mechanism_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_VerifyInit(999, &mut mechanism, 1),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    let mut unsupported = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut unsupported, 1),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
+    let mut parameter = 1u8;
+    mechanism.pParameter = &mut parameter as *mut u8 as CK_VOID_PTR;
+    mechanism.ulParameterLen = 1;
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    mechanism.pParameter = ::std::ptr::null_mut();
+    mechanism.ulParameterLen = 0;
+
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 999),
+        CKR_KEY_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OPERATION_ACTIVE as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn verify_operation_is_cleared_when_session_closes() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+
+    let mut data = [1u8];
+    let mut signature = [0u8; 32];
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature.len() as CK_ULONG
+        ),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn find_objects_filters_by_attribute_template() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
