@@ -957,6 +957,7 @@ struct TokenObject {
 }
 
 #[derive(Clone)]
+#[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
 enum KeyMaterial {
     None,
     RsaPrivate(Rsa<Private>),
@@ -1184,6 +1185,12 @@ impl Context {
     }
 }
 
+#[cfg(not(any(test, feature = "abi-tests")))]
+fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
+    Ok(HashMap::new())
+}
+
+#[cfg(any(test, feature = "abi-tests"))]
 fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
     let private_key = Rsa::generate(2048)?;
     let public_key =
