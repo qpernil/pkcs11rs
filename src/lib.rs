@@ -6,11 +6,14 @@ extern crate openssl;
 extern crate pcsc;
 extern crate rusb;
 
+use openssl::{
+    pkey::{Private, Public},
+    rsa::{Padding, Rsa},
+};
 use rusb::UsbContext;
 use std::{
     cell::RefCell,
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    hash::{Hash, Hasher},
+    collections::{HashMap, HashSet},
     io::Write,
     ptr,
     rc::Rc,
@@ -330,6 +333,108 @@ trait Session {
 impl std::fmt::Debug for dyn Session + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+const ABI_TEST_SLOT_ID: CK_SLOT_ID = 77;
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiTestSlot;
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiTestSession {
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+}
+
+#[cfg(feature = "abi-tests")]
+impl Slot for AbiTestSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn name(&self) -> String {
+        String::from("PKCS11RS ABI test slot")
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        "ABI test token"
+    }
+
+    fn serial(&self) -> &str {
+        "ABI00001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(AbiTestSession { slot_id, flags })
+    }
+
+    fn init_slot(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+impl Session for AbiTestSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+
+    fn state(&self) -> CK_STATE {
+        CKS_RO_PUBLIC_SESSION as CK_STATE
+    }
+
+    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn logout(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_session_info(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn generate(&self) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -842,6 +947,25 @@ struct TokenObject {
     decrypt: bool,
     sign: bool,
     verify: bool,
+    owner_session: Option<CK_SESSION_HANDLE>,
+    material: KeyMaterial,
+}
+
+#[derive(Clone)]
+enum KeyMaterial {
+    None,
+    RsaPrivate(Rsa<Private>),
+    RsaPublic(Rsa<Public>),
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => fmt.write_str("None"),
+            Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
+            Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -866,8 +990,7 @@ struct FindOperation {
 
 #[derive(Debug, Clone)]
 struct SignatureOperation {
-    mechanism: CK_MECHANISM_TYPE,
-    key_id: Vec<u8>,
+    key: KeyMaterial,
 }
 
 impl std::fmt::Debug for Context {
@@ -886,7 +1009,12 @@ impl std::fmt::Debug for Context {
 }
 
 impl Context {
-    fn new() -> Context {
+    fn new() -> Result<Context, Error> {
+        #[cfg(feature = "abi-tests")]
+        let slots = HashMap::from([(ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>)]);
+        #[cfg(not(feature = "abi-tests"))]
+        let slots = HashMap::new();
+
         let context = Context {
             libusb: match rusb::Context::new() {
                 Ok(context) => Some(context),
@@ -902,15 +1030,15 @@ impl Context {
                     None
                 }
             },
-            slots: HashMap::new(),
+            slots,
             sessions: HashMap::new(),
-            objects: default_objects(),
+            objects: default_objects()?,
             find_operations: HashMap::new(),
             sign_operations: HashMap::new(),
             verify_operations: HashMap::new(),
         };
         eprintln!("Context.new {:?}", context);
-        context
+        Ok(context)
     }
     fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
         info.cryptokiVersion.major = 3;
@@ -1047,8 +1175,11 @@ impl Context {
     }
 }
 
-fn default_objects() -> HashMap<CK_OBJECT_HANDLE, TokenObject> {
-    HashMap::from([
+fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
+    let private_key = Rsa::generate(2048)?;
+    let public_key =
+        Rsa::from_public_components(private_key.n().to_owned()?, private_key.e().to_owned()?)?;
+    Ok(HashMap::from([
         (
             1,
             TokenObject {
@@ -1062,6 +1193,8 @@ fn default_objects() -> HashMap<CK_OBJECT_HANDLE, TokenObject> {
                 decrypt: false,
                 sign: false,
                 verify: true,
+                owner_session: None,
+                material: KeyMaterial::RsaPublic(public_key),
             },
         ),
         (
@@ -1077,9 +1210,11 @@ fn default_objects() -> HashMap<CK_OBJECT_HANDLE, TokenObject> {
                 decrypt: true,
                 sign: true,
                 verify: false,
+                owner_session: None,
+                material: KeyMaterial::RsaPrivate(private_key),
             },
         ),
-    ])
+    ]))
 }
 
 fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
@@ -1095,6 +1230,16 @@ fn bool_attribute(value: bool) -> Vec<u8> {
 }
 
 impl TokenObject {
+    fn is_visible_to(&self, session_handle: CK_SESSION_HANDLE) -> bool {
+        self.owner_session
+            .map(|owner| owner == session_handle)
+            .unwrap_or(true)
+    }
+
+    fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE) {
+        self.owner_session = (!self.token).then_some(session_handle);
+    }
+
     fn size(&self) -> CK_ULONG {
         [
             CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -1221,6 +1366,8 @@ impl TokenObjectTemplate {
             decrypt: self.decrypt,
             sign: self.sign,
             verify: self.verify,
+            owner_session: None,
+            material: KeyMaterial::None,
         })
     }
 }
@@ -1253,10 +1400,13 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
-            None => {
-                *guard = Some(Context::new());
-                CKR_OK as CK_RV
-            }
+            None => match Context::new() {
+                Ok(context) => {
+                    *guard = Some(context);
+                    CKR_OK as CK_RV
+                }
+                Err(error) => error.into(),
+            },
         },
         Err(e) => e.into(),
     }
@@ -1594,6 +1744,8 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
                 ctx.find_operations.remove(&session_handle);
                 ctx.sign_operations.remove(&session_handle);
                 ctx.verify_operations.remove(&session_handle);
+                ctx.objects
+                    .retain(|_, object| object.owner_session != Some(session_handle));
                 eprintln!("C_CloseSession removed {:?}", (session_handle, session));
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
@@ -1629,6 +1781,12 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .retain(|session, _operation| !closed_sessions.contains(session));
         ctx.verify_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
+        ctx.objects.retain(|_, object| {
+            object
+                .owner_session
+                .map(|owner| !closed_sessions.contains(&owner))
+                .unwrap_or(true)
+        });
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         Ok(CKR_OK as CK_RV)
     }) {
@@ -1758,7 +1916,8 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
         ctx._get_session(session_handle)?;
-        let object = parse_create_object_template(templ)?;
+        let mut object = parse_create_object_template(templ)?;
+        object.set_owner(session_handle);
         let handle = next_key(&ctx.objects, 1);
         ctx.objects.insert(handle, object);
         *object_handle = handle;
@@ -1808,6 +1967,7 @@ fn copy_object(
         let mut copied_object = ctx
             .objects
             .get(&object)
+            .filter(|object| object.is_visible_to(session_handle))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?
             .clone();
 
@@ -1820,6 +1980,7 @@ fn copy_object(
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
         }
+        copied_object.set_owner(session_handle);
 
         let handle = next_key(&ctx.objects, 1);
         ctx.objects.insert(handle, copied_object);
@@ -1843,9 +2004,15 @@ fn destroy_object(
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
         ctx._get_session(session_handle)?;
-        ctx.objects
-            .remove(&object)
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        let visible = ctx
+            .objects
+            .get(&object)
+            .map(|object| object.is_visible_to(session_handle))
+            .unwrap_or(false);
+        if !visible {
+            return Err(CKR_OBJECT_HANDLE_INVALID.into());
+        }
+        ctx.objects.remove(&object);
         remove_object_from_find_operations(&mut ctx.find_operations, object);
         Ok(())
     })
@@ -1887,7 +2054,11 @@ fn get_object_size(
     let size = as_mut(size)?;
     with_context(|ctx| {
         ctx._get_session(session_handle)?;
-        let object = ctx.objects.get(&object).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        let object = ctx
+            .objects
+            .get(&object)
+            .filter(|object| object.is_visible_to(session_handle))
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
         Ok(())
     })
@@ -1919,7 +2090,11 @@ fn get_attribute_value(
     let templ = _from_raw_parts_mut(templ, count as usize)?;
     with_context(|ctx| {
         ctx._get_session(session_handle)?;
-        let object = ctx.objects.get(&object).ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        let object = ctx
+            .objects
+            .get(&object)
+            .filter(|object| object.is_visible_to(session_handle))
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
@@ -2044,10 +2219,15 @@ fn set_attribute_value(
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
         ctx._get_session(session_handle)?;
-        let object = ctx
+        let visible = ctx
             .objects
-            .get_mut(&object)
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+            .get(&object)
+            .map(|object| object.is_visible_to(session_handle))
+            .unwrap_or(false);
+        if !visible {
+            return Err(CKR_OBJECT_HANDLE_INVALID.into());
+        }
+        let object = ctx.objects.get_mut(&object).unwrap();
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
@@ -2095,7 +2275,9 @@ fn find_objects_init(
         let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
             .objects
             .iter()
-            .filter(|(_handle, object)| object.matches_template(templ))
+            .filter(|(_handle, object)| {
+                object.is_visible_to(session_handle) && object.matches_template(templ)
+            })
             .map(|(handle, _object)| *handle)
             .collect();
         objects.sort();
@@ -2320,16 +2502,25 @@ fn sign_init(
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
 
-        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx
+            .objects
+            .get(&key)
+            .filter(|object| object.is_visible_to(session_handle))
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if !object.sign {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+        if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || object.key_type != CKK_RSA as CK_KEY_TYPE
+            || !matches!(object.material, KeyMaterial::RsaPrivate(_))
+        {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
 
         ctx.sign_operations.insert(
             session_handle,
             SignatureOperation {
-                mechanism: mechanism.mechanism,
-                key_id: object.id.clone(),
+                key: object.material.clone(),
             },
         );
         Ok(())
@@ -2373,8 +2564,14 @@ fn sign(
             .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         let data = from_raw_parts(data, data_len as usize)?;
-        let signature_bytes = sign_placeholder_signature(&operation, data);
-        let required = signature_bytes.len() as CK_ULONG;
+        let private_key = match &operation.key {
+            KeyMaterial::RsaPrivate(key) => key,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        let required = private_key.size() as CK_ULONG;
+        if data.len() > private_key.size() as usize - 11 {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
 
         if signature.is_null() {
             *signature_len = required;
@@ -2385,6 +2582,10 @@ fn sign(
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
 
+        let mut signature_bytes = vec![0; private_key.size() as usize];
+        let written = private_key.private_encrypt(data, &mut signature_bytes, Padding::PKCS1)?;
+        signature_bytes.truncate(written);
+
         unsafe {
             ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
         }
@@ -2392,22 +2593,6 @@ fn sign(
         ctx.sign_operations.remove(&session_handle);
         Ok(())
     })
-}
-
-const PLACEHOLDER_SIGNATURE_LEN: usize = 32;
-
-fn sign_placeholder_signature(operation: &SignatureOperation, data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(PLACEHOLDER_SIGNATURE_LEN);
-    for domain in 0u64..4 {
-        let mut hasher = DefaultHasher::new();
-        b"pkcs11rs-placeholder-signature-v1".hash(&mut hasher);
-        operation.mechanism.hash(&mut hasher);
-        operation.key_id.hash(&mut hasher);
-        domain.hash(&mut hasher);
-        data.hash(&mut hasher);
-        out.extend(hasher.finish().to_ne_bytes());
-    }
-    out
 }
 
 #[no_mangle]
@@ -2481,16 +2666,25 @@ fn verify_init(
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
 
-        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx
+            .objects
+            .get(&key)
+            .filter(|object| object.is_visible_to(session_handle))
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+        if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            || object.key_type != CKK_RSA as CK_KEY_TYPE
+            || !matches!(object.material, KeyMaterial::RsaPublic(_))
+        {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
 
         ctx.verify_operations.insert(
             session_handle,
             SignatureOperation {
-                mechanism: mechanism.mechanism,
-                key_id: object.id.clone(),
+                key: object.material.clone(),
             },
         );
         Ok(())
@@ -2534,13 +2728,22 @@ fn verify(
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         let data = from_raw_parts(data, data_len as usize)?;
         let signature = from_raw_parts(signature, signature_len as usize)?;
-        let expected_signature = sign_placeholder_signature(&operation, data);
-
         ctx.verify_operations.remove(&session_handle);
-        if signature.len() != expected_signature.len() {
+        let public_key = match &operation.key {
+            KeyMaterial::RsaPublic(key) => key,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        if signature.len() != public_key.size() as usize {
             return Err(CKR_SIGNATURE_LEN_RANGE.into());
         }
-        if signature != expected_signature {
+        let mut recovered = vec![0; public_key.size() as usize];
+        let recovered_len =
+            match public_key.public_decrypt(signature, &mut recovered, Padding::PKCS1) {
+                Ok(len) => len,
+                Err(_) => return Err(CKR_SIGNATURE_INVALID.into()),
+            };
+        recovered.truncate(recovered_len);
+        if recovered != data {
             return Err(CKR_SIGNATURE_INVALID.into());
         }
         Ok(())
@@ -2660,7 +2863,8 @@ fn generate_key(
 
     with_context_mut(|ctx| {
         ctx._get_session(session_handle)?;
-        let key = generate_key_object(mechanism, templ)?;
+        let mut key = generate_key_object(mechanism, templ)?;
+        key.set_owner(session_handle);
         let handle = next_key(&ctx.objects, 1);
         ctx.objects.insert(handle, key);
         *key_handle = handle;
