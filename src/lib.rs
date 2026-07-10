@@ -9,7 +9,8 @@ extern crate rusb;
 use rusb::UsbContext;
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
     io::Write,
     ptr,
     rc::Rc,
@@ -825,6 +826,7 @@ struct Context {
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
     objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
+    sign_operations: HashMap<CK_SESSION_HANDLE, SignOperation>,
 }
 
 #[derive(Debug, Clone)]
@@ -861,6 +863,12 @@ struct FindOperation {
     next: usize,
 }
 
+#[derive(Debug, Clone)]
+struct SignOperation {
+    mechanism: CK_MECHANISM_TYPE,
+    key: CK_OBJECT_HANDLE,
+}
+
 impl std::fmt::Debug for Context {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("Context")
@@ -870,6 +878,7 @@ impl std::fmt::Debug for Context {
             .field("sessions", &self.sessions)
             .field("objects", &self.objects)
             .field("find_operations", &self.find_operations)
+            .field("sign_operations", &self.sign_operations)
             .finish()
     }
 }
@@ -895,6 +904,7 @@ impl Context {
             sessions: HashMap::new(),
             objects: default_objects(),
             find_operations: HashMap::new(),
+            sign_operations: HashMap::new(),
         };
         eprintln!("Context.new {:?}", context);
         context
@@ -1579,6 +1589,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         match ctx.sessions.remove(&session_handle) {
             Some(session) => {
                 ctx.find_operations.remove(&session_handle);
+                ctx.sign_operations.remove(&session_handle);
                 eprintln!("C_CloseSession removed {:?}", (session_handle, session));
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
@@ -1609,6 +1620,8 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .collect();
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
         ctx.find_operations
+            .retain(|session, _operation| !closed_sessions.contains(session));
+        ctx.sign_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         Ok(CKR_OK as CK_RV)
@@ -2271,21 +2284,124 @@ pub extern "C" fn C_DigestFinal(
 #[no_mangle]
 pub extern "C" fn C_SignInit(
     session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
-    _key: CK_OBJECT_HANDLE,
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_SignInit called with {:?}",
+        (session_handle, mechanism, key)
+    );
+    map(sign_init(session_handle, mechanism, key))
+}
+
+fn sign_init(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: CK_MECHANISM_PTR,
+    key: CK_OBJECT_HANDLE,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+
+        if ctx.sign_operations.contains_key(&session_handle) {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
+
+        let mechanism = _as_ref(mechanism)?;
+        if mechanism.mechanism != CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+
+        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if !object.sign {
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+
+        ctx.sign_operations.insert(
+            session_handle,
+            SignOperation {
+                mechanism: mechanism.mechanism,
+                key,
+            },
+        );
+        Ok(())
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn C_Sign(
     session_handle: CK_SESSION_HANDLE,
-    _data: *mut ::std::os::raw::c_uchar,
-    _data_len: ::std::os::raw::c_ulong,
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: *mut ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_Sign called with {:?}",
+        (session_handle, data, data_len, signature, signature_len)
+    );
+    map(sign(
+        session_handle,
+        data,
+        data_len,
+        signature,
+        signature_len,
+    ))
+}
+
+fn sign(
+    session_handle: CK_SESSION_HANDLE,
+    data: *const ::std::os::raw::c_uchar,
+    data_len: CK_ULONG,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let signature_len = as_mut(signature_len)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let operation = ctx
+            .sign_operations
+            .get(&session_handle)
+            .cloned()
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let data = from_raw_parts(data, data_len as usize)?;
+        let signature_bytes = sign_placeholder_signature(&operation, data);
+        let required = signature_bytes.len() as CK_ULONG;
+
+        if signature.is_null() {
+            *signature_len = required;
+            return Ok(());
+        }
+        if *signature_len < required {
+            *signature_len = required;
+            return Err(CKR_BUFFER_TOO_SMALL.into());
+        }
+
+        unsafe {
+            ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
+        }
+        *signature_len = required;
+        ctx.sign_operations.remove(&session_handle);
+        Ok(())
+    })
+}
+
+const PLACEHOLDER_SIGNATURE_LEN: usize = 32;
+
+fn sign_placeholder_signature(operation: &SignOperation, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PLACEHOLDER_SIGNATURE_LEN);
+    for domain in 0u64..4 {
+        let mut hasher = DefaultHasher::new();
+        b"pkcs11rs-placeholder-signature-v1".hash(&mut hasher);
+        operation.mechanism.hash(&mut hasher);
+        operation.key.hash(&mut hasher);
+        domain.hash(&mut hasher);
+        data.hash(&mut hasher);
+        out.extend(hasher.finish().to_ne_bytes());
+    }
+    out
 }
 
 #[no_mangle]
