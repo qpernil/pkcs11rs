@@ -1152,7 +1152,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(signature_len, 32);
+    assert_eq!(signature_len, 256);
 
     let mut small_signature = [0u8; 4];
     signature_len = small_signature.len() as CK_ULONG;
@@ -1166,9 +1166,9 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
         ),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
-    assert_eq!(signature_len, 32);
+    assert_eq!(signature_len, 256);
 
-    let mut signature = [0u8; 32];
+    let mut signature = [0u8; 256];
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
         crate::C_Sign(
@@ -1180,7 +1180,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(signature_len, 32);
+    assert_eq!(signature_len, 256);
     assert!(signature.iter().any(|byte| *byte != 0));
     assert_eq!(
         crate::C_Sign(
@@ -1299,7 +1299,7 @@ pub fn sign_operation_is_cleared_when_session_closes() {
 }
 
 #[test]
-pub fn verify_accepts_matching_placeholder_signature() {
+pub fn verify_accepts_matching_rsa_signature() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -1311,7 +1311,7 @@ pub fn verify_accepts_matching_placeholder_signature() {
         ulParameterLen: 0,
     };
     let mut data = [1u8, 2, 3, 4];
-    let mut signature = [0u8; 32];
+    let mut signature = [0u8; 256];
     let mut signature_len = signature.len() as CK_ULONG;
 
     assert_eq!(
@@ -1380,7 +1380,7 @@ pub fn verify_reports_signature_mismatches() {
         ulParameterLen: 0,
     };
     let mut data = [1u8, 2, 3, 4];
-    let mut signature = [0u8; 32];
+    let mut signature = [0u8; 256];
     let mut signature_len = signature.len() as CK_ULONG;
 
     assert_eq!(
@@ -2897,6 +2897,16 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(read_token, CK_TRUE as CK_BBOOL);
     assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
 
+    let mut rsa_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, key),
+        CKR_KEY_TYPE_INCONSISTENT as CK_RV
+    );
+
     let mut search_label = *b"Generated secret";
     let mut search_templ = [CK_ATTRIBUTE {
         type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
@@ -2923,6 +2933,54 @@ pub fn generate_key_creates_secret_key_object() {
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE + 1);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut class = 0 as CK_OBJECT_CLASS;
+    let mut class_attribute = CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut class_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE + 1, key, &mut class_attribute, 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+    let context = crate::lock_context().unwrap();
+    assert!(!context.as_ref().unwrap().objects.contains_key(&key));
+    drop(context);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }

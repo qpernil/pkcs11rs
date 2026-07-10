@@ -16,12 +16,29 @@ CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
+CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_MECHANISM_INVALID = 0x70
+CKR_OBJECT_HANDLE_INVALID = 0x82
+CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_SESSION_HANDLE_INVALID = 0xB3
+CKR_SIGNATURE_INVALID = 0xC0
+CKR_SIGNATURE_LEN_RANGE = 0xC1
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
+CKF_SERIAL_SESSION = 0x00000004
+CKF_GENERATE = 0x00008000
+CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
+CKM_EC_KEY_PAIR_GEN = 0x00001040
+CKM_ECDSA = 0x00001041
+CKO_SECRET_KEY = 0x00000004
+CKK_GENERIC_SECRET = 0x00000010
+CKA_CLASS = 0x00000000
+CKA_TOKEN = 0x00000001
 CKA_LABEL = 0x00000003
+CKA_KEY_TYPE = 0x00000100
+CKA_SIGN = 0x00000108
+ABI_TEST_SLOT_ID = 77
 
 
 def library_path() -> pathlib.Path:
@@ -37,7 +54,7 @@ def library_path() -> pathlib.Path:
 
 def load_library() -> ctypes.CDLL:
     path = library_path()
-    subprocess.run(["cargo", "build"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--features", "abi-tests"], cwd=ROOT, check=True)
     return ctypes.CDLL(str(path))
 
 
@@ -368,6 +385,22 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_GetFunctionStatus.restype = CK_RV
         cls.lib.C_GetInfo.argtypes = [ctypes.POINTER(CK_INFO)]
         cls.lib.C_GetInfo.restype = CK_RV
+        cls.lib.C_GetSlotList.argtypes = [
+            CK_BYTE,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GetSlotList.restype = CK_RV
+        cls.lib.C_OpenSession.argtypes = [
+            CK_ULONG,
+            CK_FLAGS,
+            CK_VOID_PTR,
+            CK_VOID_PTR,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_OpenSession.restype = CK_RV
+        cls.lib.C_CloseSession.argtypes = [CK_ULONG]
+        cls.lib.C_CloseSession.restype = CK_RV
         cls.lib.C_GetMechanismList.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_ULONG),
@@ -504,6 +537,21 @@ class Pkcs11AbiTests(unittest.TestCase):
     def assert_function_entries_present(self, function_list, names: list[str]) -> None:
         for name in names:
             self.assertTrue(getattr(function_list, name), name)
+
+    def initialize_and_open_session(self) -> int:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        return session.value
 
     def test_legacy_function_list_entries_are_stubbed(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
@@ -784,6 +832,45 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_SLOT_ID_INVALID,
         )
 
+    def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        expected = [
+            CKM_RSA_PKCS_KEY_PAIR_GEN,
+            CKM_RSA_PKCS,
+            CKM_EC_KEY_PAIR_GEN,
+            CKM_ECDSA,
+            CKM_GENERIC_SECRET_KEY_GEN,
+        ]
+        count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(ABI_TEST_SLOT_ID, None, ctypes.byref(count)),
+            CKR_OK,
+        )
+        self.assertEqual(count.value, len(expected))
+
+        mechanisms = (CK_ULONG * count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_SLOT_ID,
+                mechanisms,
+                ctypes.byref(count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(list(mechanisms), expected)
+
+        info = CK_MECHANISM_INFO()
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(
+                ABI_TEST_SLOT_ID,
+                CKM_GENERIC_SECRET_KEY_GEN,
+                ctypes.byref(info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 4096))
+        self.assertEqual(info.flags & CKF_GENERATE, CKF_GENERATE)
+
     def test_generate_random_validates_initialization_and_session(self) -> None:
         random_data = (CK_BYTE * 16)()
 
@@ -796,6 +883,15 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_GenerateRandom(999, random_data, len(random_data)),
             CKR_SESSION_HANDLE_INVALID,
         )
+
+    def test_generate_random_succeeds_for_open_session(self) -> None:
+        session = self.initialize_and_open_session()
+        random_data = (CK_BYTE * 32)()
+        self.assertEqual(
+            self.lib.C_GenerateRandom(session, random_data, len(random_data)),
+            CKR_OK,
+        )
+        self.assertNotEqual(bytes(random_data), bytes(len(random_data)))
 
     def test_find_objects_validate_session_handles(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -864,6 +960,144 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_Verify(999, data, len(data), signature, len(signature)),
             CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_sign_and_verify_rsa_pkcs_round_trip(self) -> None:
+        session = self.initialize_and_open_session()
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        data = (CK_BYTE * 4)(1, 2, 3, 4)
+        signature_len = CK_ULONG()
+
+        self.assertEqual(self.lib.C_SignInit(session, ctypes.byref(mechanism), 2), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Sign(session, data, len(data), None, ctypes.byref(signature_len)),
+            CKR_OK,
+        )
+        self.assertEqual(signature_len.value, 256)
+
+        signature = (CK_BYTE * signature_len.value)()
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                data,
+                len(data),
+                signature,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                data,
+                len(data),
+                signature,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_VerifyInit(session, ctypes.byref(mechanism), 1), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Verify(session, data, len(data), signature, signature_len.value),
+            CKR_OK,
+        )
+
+        signature[0] ^= 0xFF
+        self.assertEqual(self.lib.C_VerifyInit(session, ctypes.byref(mechanism), 1), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Verify(session, data, len(data), signature, signature_len.value),
+            CKR_SIGNATURE_INVALID,
+        )
+
+        short_signature = (CK_BYTE * 4)()
+        self.assertEqual(self.lib.C_VerifyInit(session, ctypes.byref(mechanism), 1), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Verify(
+                session,
+                data,
+                len(data),
+                short_signature,
+                len(short_signature),
+            ),
+            CKR_SIGNATURE_LEN_RANGE,
+        )
+
+    def test_generic_secret_key_is_rejected_for_rsa_signing(self) -> None:
+        session = self.initialize_and_open_session()
+        generate_mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        sign_value = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_SIGN,
+                ctypes.cast(ctypes.byref(sign_value), CK_VOID_PTR),
+                ctypes.sizeof(sign_value),
+            )
+        )
+        key = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(generate_mechanism),
+                template,
+                len(template),
+                ctypes.byref(key),
+            ),
+            CKR_OK,
+        )
+
+        rsa_mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(rsa_mechanism), key.value),
+            CKR_KEY_TYPE_INCONSISTENT,
+        )
+
+    def test_session_objects_are_isolated_and_removed_on_close(self) -> None:
+        owner = self.initialize_and_open_session()
+        other = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(other),
+            ),
+            CKR_OK,
+        )
+
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        key = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                owner,
+                ctypes.byref(mechanism),
+                None,
+                0,
+                ctypes.byref(key),
+            ),
+            CKR_OK,
+        )
+        key_class = CK_ULONG()
+        attribute = CK_ATTRIBUTE(
+            CKA_CLASS,
+            ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+            ctypes.sizeof(key_class),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(owner, key.value, ctypes.byref(attribute), 1),
+            CKR_OK,
+        )
+        self.assertEqual(key_class.value, CKO_SECRET_KEY)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(other.value, key.value, ctypes.byref(attribute), 1),
+            CKR_OBJECT_HANDLE_INVALID,
+        )
+
+        self.assertEqual(self.lib.C_CloseSession(owner), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(other.value, key.value, ctypes.byref(attribute), 1),
+            CKR_OBJECT_HANDLE_INVALID,
         )
 
     def test_get_attribute_value_validates_state_and_arguments(self) -> None:
@@ -938,6 +1172,130 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_CreateObject(999, None, 1, ctypes.byref(object_handle)),
             CKR_ARGUMENTS_BAD,
+        )
+
+    def test_object_lifecycle_succeeds_through_abi(self) -> None:
+        session = self.initialize_and_open_session()
+        key_class = CK_ULONG(CKO_SECRET_KEY)
+        key_type = CK_ULONG(CKK_GENERIC_SECRET)
+        label = (CK_BYTE * len(b"ABI object"))(*b"ABI object")
+        template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_LABEL,
+                ctypes.cast(label, CK_VOID_PTR),
+                len(label),
+            ),
+        )
+        object_handle = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session,
+                template,
+                len(template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_OK,
+        )
+
+        label_attribute = CK_ATTRIBUTE(CKA_LABEL, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                object_handle.value,
+                ctypes.byref(label_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        read_label = (CK_BYTE * label_attribute.ulValueLen)()
+        label_attribute.pValue = ctypes.cast(read_label, CK_VOID_PTR)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                object_handle.value,
+                ctypes.byref(label_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(read_label), b"ABI object")
+
+        size = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetObjectSize(session, object_handle.value, ctypes.byref(size)),
+            CKR_OK,
+        )
+        self.assertGreater(size.value, len(label))
+
+        renamed_label = (CK_BYTE * len(b"ABI renamed"))(*b"ABI renamed")
+        rename_attribute = CK_ATTRIBUTE(
+            CKA_LABEL,
+            ctypes.cast(renamed_label, CK_VOID_PTR),
+            len(renamed_label),
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(
+                session,
+                object_handle.value,
+                ctypes.byref(rename_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+
+        copied_label = (CK_BYTE * len(b"ABI copy"))(*b"ABI copy")
+        copy_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_LABEL,
+                ctypes.cast(copied_label, CK_VOID_PTR),
+                len(copied_label),
+            )
+        )
+        copied_handle = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CopyObject(
+                session,
+                object_handle.value,
+                copy_template,
+                len(copy_template),
+                ctypes.byref(copied_handle),
+            ),
+            CKR_OK,
+        )
+
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, copy_template, len(copy_template)),
+            CKR_OK,
+        )
+        found = CK_ULONG()
+        found_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                ctypes.byref(found),
+                1,
+                ctypes.byref(found_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual((found_count.value, found.value), (1, copied_handle.value))
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        self.assertEqual(self.lib.C_DestroyObject(session, object_handle.value), CKR_OK)
+        self.assertEqual(self.lib.C_DestroyObject(session, copied_handle.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetObjectSize(session, copied_handle.value, ctypes.byref(size)),
+            CKR_OBJECT_HANDLE_INVALID,
         )
 
     def test_copy_object_validates_state_and_arguments(self) -> None:
