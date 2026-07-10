@@ -956,6 +956,7 @@ enum KeyMaterial {
     None,
     RsaPrivate(Rsa<Private>),
     RsaPublic(Rsa<Public>),
+    Secret(Vec<u8>),
 }
 
 impl std::fmt::Debug for KeyMaterial {
@@ -964,6 +965,7 @@ impl std::fmt::Debug for KeyMaterial {
             Self::None => fmt.write_str("None"),
             Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
             Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
+            Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
         }
     }
 }
@@ -1252,6 +1254,7 @@ impl TokenObject {
             CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
             CKA_SIGN as CK_ATTRIBUTE_TYPE,
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -1271,6 +1274,10 @@ impl TokenObject {
             x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.decrypt)),
             x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.sign)),
             x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.verify)),
+            x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Secret(value) => Some(ulong_attribute(value.len() as CK_ULONG)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -2888,17 +2895,36 @@ fn generate_key_object(
         key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
         ..TokenObjectTemplate::default()
     };
+    let mut value_len = None;
     for attribute in templ {
+        if attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE {
+            if value_len.is_some() {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            value_len = Some(read_ulong_template_attribute(attribute).map_err(Error::from)?);
+            continue;
+        }
         key_template
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    let key = key_template.into_object().map_err(Error::from)?;
+    let mut key = key_template.into_object().map_err(Error::from)?;
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
         || key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
+    let value_len = value_len.ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let key_size_bits = value_len
+        .checked_mul(8)
+        .ok_or(CKR_KEY_SIZE_RANGE as CK_RV)?;
+    let details = mechanism_details(mechanism.mechanism)?;
+    if key_size_bits < details.min_key_size || key_size_bits > details.max_key_size {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    let mut value = vec![0; value_len as usize];
+    openssl::rand::rand_bytes(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    key.material = KeyMaterial::Secret(value);
     Ok(key)
 }
 

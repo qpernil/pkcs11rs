@@ -2807,6 +2807,7 @@ pub fn generate_key_creates_secret_key_object() {
     let mut id = [3u8, 1, 4];
     let mut token = CK_TRUE as CK_BBOOL;
     let mut sign = CK_TRUE as CK_BBOOL;
+    let mut value_len = 32 as CK_ULONG;
     let mut templ = [
         CK_ATTRIBUTE {
             type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
@@ -2827,6 +2828,11 @@ pub fn generate_key_creates_secret_key_object() {
             type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
             pValue: &mut sign as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
         },
     ];
     let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -2849,6 +2855,7 @@ pub fn generate_key_creates_secret_key_object() {
     let mut read_id = [0u8; 3];
     let mut read_token = CK_FALSE as CK_BBOOL;
     let mut read_sign = CK_FALSE as CK_BBOOL;
+    let mut read_value_len = 0 as CK_ULONG;
     let mut read_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -2880,6 +2887,11 @@ pub fn generate_key_creates_secret_key_object() {
             pValue: &mut read_sign as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_value_len as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
     ];
     assert_eq!(
         crate::C_GetAttributeValue(
@@ -2896,6 +2908,18 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(read_id, id);
     assert_eq!(read_token, CK_TRUE as CK_BBOOL);
     assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_value_len, value_len);
+    {
+        let context = crate::lock_context().unwrap();
+        let object = context.as_ref().unwrap().objects.get(&key).unwrap();
+        match &object.material {
+            crate::KeyMaterial::Secret(value) => {
+                assert_eq!(value.len(), value_len as usize);
+                assert!(value.iter().any(|byte| *byte != 0));
+            }
+            material => panic!("expected generated secret material, got {material:?}"),
+        }
+    }
 
     let mut rsa_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -2950,13 +2974,19 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
         pParameter: ::std::ptr::null_mut(),
         ulParameterLen: 0,
     };
+    let mut value_len = 16 as CK_ULONG;
+    let mut template = [CK_ATTRIBUTE {
+        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    }];
     let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
         crate::C_GenerateKey(
             TEST_SESSION_HANDLE,
             &mut mechanism,
-            ::std::ptr::null_mut(),
-            0,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
             &mut key
         ),
         CKR_OK as CK_RV
@@ -3009,6 +3039,17 @@ pub fn generate_key_reports_mechanism_and_template_errors() {
 
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_TEMPLATE_INCOMPLETE as CK_RV
+    );
 
     assert_eq!(
         crate::C_GenerateKey(
@@ -3109,6 +3150,58 @@ pub fn generate_key_reports_mechanism_and_template_errors() {
             &mut key
         ),
         CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+
+    let mut zero_len = 0 as CK_ULONG;
+    let mut zero_len_template = [CK_ATTRIBUTE {
+        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        pValue: &mut zero_len as *mut CK_ULONG as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            zero_len_template.as_mut_ptr(),
+            zero_len_template.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_KEY_SIZE_RANGE as CK_RV
+    );
+
+    let mut oversized_len = 513 as CK_ULONG;
+    let mut oversized_template = [CK_ATTRIBUTE {
+        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        pValue: &mut oversized_len as *mut CK_ULONG as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            oversized_template.as_mut_ptr(),
+            oversized_template.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_KEY_SIZE_RANGE as CK_RV
+    );
+
+    let mut duplicate_len = 16 as CK_ULONG;
+    let duplicate_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        pValue: &mut duplicate_len as *mut CK_ULONG as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    };
+    let mut duplicate_template = [duplicate_attribute, duplicate_attribute];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            duplicate_template.as_mut_ptr(),
+            duplicate_template.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
     );
 
     assert_eq!(
