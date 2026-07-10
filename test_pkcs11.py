@@ -16,9 +16,11 @@ CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
+CKR_MECHANISM_INVALID = 0x70
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 CKM_RSA_PKCS = 0x00000001
+CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKA_LABEL = 0x00000003
 
 
@@ -430,6 +432,14 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_FindObjects.restype = CK_RV
         cls.lib.C_FindObjectsFinal.argtypes = [CK_ULONG]
         cls.lib.C_FindObjectsFinal.restype = CK_RV
+        cls.lib.C_GenerateKey.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GenerateKey.restype = CK_RV
         cls.lib.C_GenerateRandom.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_BYTE),
@@ -888,6 +898,44 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_GetObjectSize(999, 1, ctypes.byref(size)),
             CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_generate_key_validates_state_and_arguments(self) -> None:
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        key = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_GenerateKey(1, ctypes.byref(mechanism), None, 0, ctypes.byref(key)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GenerateKey(1, None, None, 0, ctypes.byref(key)),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(1, ctypes.byref(mechanism), None, 0, None),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(999, ctypes.byref(mechanism), None, 0, ctypes.byref(key)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        unsupported = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        self.assertEqual(
+            self.lib.C_GenerateKey(999, ctypes.byref(unsupported), None, 0, ctypes.byref(key)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                999,
+                ctypes.byref(mechanism),
+                None,
+                1,
+                ctypes.byref(key),
+            ),
+            CKR_ARGUMENTS_BAD,
         )
 
     def test_interface_list_reports_one_pkcs11_interface(self) -> None:

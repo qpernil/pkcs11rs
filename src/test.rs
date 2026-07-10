@@ -933,6 +933,7 @@ pub fn mechanism_list_reports_supported_mechanisms() {
         CKM_RSA_PKCS as CK_MECHANISM_TYPE,
         CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         CKM_ECDSA as CK_MECHANISM_TYPE,
+        CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
     ];
     let mut count = 0;
     assert_eq!(
@@ -949,7 +950,7 @@ pub fn mechanism_list_reports_supported_mechanisms() {
     );
     assert_eq!(count, expected.len() as CK_ULONG);
 
-    let mut mechanisms = [0; 4];
+    let mut mechanisms = [0; 5];
     count = mechanisms.len() as CK_ULONG;
     assert_eq!(
         crate::C_GetMechanismList(TEST_SLOT_ID, mechanisms.as_mut_ptr(), &mut count),
@@ -987,6 +988,21 @@ pub fn mechanism_info_reports_supported_mechanism_details() {
     assert_eq!(
         info.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
+
+    assert_eq!(
+        crate::C_GetMechanismInfo(
+            TEST_SLOT_ID,
+            CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+            &mut info
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.ulMinKeySize, 1);
+    assert_eq!(info.ulMaxKeySize, 4096);
+    assert_eq!(
+        info.flags & CKF_GENERATE as CK_FLAGS,
+        CKF_GENERATE as CK_FLAGS
     );
 
     assert_eq!(
@@ -2348,6 +2364,276 @@ pub fn set_attribute_value_reports_attribute_errors() {
     assert_eq!(
         crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
         CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn generate_key_creates_secret_key_object() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut label = *b"Generated secret";
+    let mut id = [3u8, 1, 4];
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut templ = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sign as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(key, 3);
+
+    let mut class = 0 as CK_OBJECT_CLASS;
+    let mut key_type = 999 as CK_KEY_TYPE;
+    let mut read_label = [0u8; 16];
+    let mut read_id = [0u8; 3];
+    let mut read_token = CK_FALSE as CK_BBOOL;
+    let mut read_sign = CK_FALSE as CK_BBOOL;
+    let mut read_attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: read_label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: read_id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_sign as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            key,
+            read_attrs.as_mut_ptr(),
+            read_attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert_eq!(key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
+    assert_eq!(&read_label, b"Generated secret");
+    assert_eq!(read_id, id);
+    assert_eq!(read_token, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
+
+    let mut search_label = *b"Generated secret";
+    let mut search_templ = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: search_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: search_label.len() as CK_ULONG,
+    }];
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            search_templ.as_mut_ptr(),
+            search_templ.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], key);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn generate_key_reports_mechanism_and_template_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            ::std::ptr::null_mut(),
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_GenerateKey(999, &mut mechanism, ::std::ptr::null_mut(), 0, &mut key),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            1,
+            &mut key
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    let mut unsupported = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut unsupported,
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
+    let mut parameter = 1u8;
+    mechanism.pParameter = &mut parameter as *mut u8 as CK_VOID_PTR;
+    mechanism.ulParameterLen = 1;
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            ::std::ptr::null_mut(),
+            0,
+            &mut key
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    mechanism.pParameter = ::std::ptr::null_mut();
+    mechanism.ulParameterLen = 0;
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut inconsistent = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            inconsistent.as_mut_ptr(),
+            inconsistent.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    let mut bad_bool = 2 as CK_BBOOL;
+    let mut invalid_bool = [CK_ATTRIBUTE {
+        type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+        pValue: &mut bad_bool as *mut CK_BBOOL as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            invalid_bool.as_mut_ptr(),
+            invalid_bool.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 3, invalid_bool.as_mut_ptr(), 1),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
