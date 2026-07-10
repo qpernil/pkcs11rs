@@ -826,7 +826,8 @@ struct Context {
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
     objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
-    sign_operations: HashMap<CK_SESSION_HANDLE, SignOperation>,
+    sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
+    verify_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
 }
 
 #[derive(Debug, Clone)]
@@ -864,9 +865,9 @@ struct FindOperation {
 }
 
 #[derive(Debug, Clone)]
-struct SignOperation {
+struct SignatureOperation {
     mechanism: CK_MECHANISM_TYPE,
-    key: CK_OBJECT_HANDLE,
+    key_id: Vec<u8>,
 }
 
 impl std::fmt::Debug for Context {
@@ -879,6 +880,7 @@ impl std::fmt::Debug for Context {
             .field("objects", &self.objects)
             .field("find_operations", &self.find_operations)
             .field("sign_operations", &self.sign_operations)
+            .field("verify_operations", &self.verify_operations)
             .finish()
     }
 }
@@ -905,6 +907,7 @@ impl Context {
             objects: default_objects(),
             find_operations: HashMap::new(),
             sign_operations: HashMap::new(),
+            verify_operations: HashMap::new(),
         };
         eprintln!("Context.new {:?}", context);
         context
@@ -1590,6 +1593,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             Some(session) => {
                 ctx.find_operations.remove(&session_handle);
                 ctx.sign_operations.remove(&session_handle);
+                ctx.verify_operations.remove(&session_handle);
                 eprintln!("C_CloseSession removed {:?}", (session_handle, session));
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
@@ -1622,6 +1626,8 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
         ctx.find_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
         ctx.sign_operations
+            .retain(|session, _operation| !closed_sessions.contains(session));
+        ctx.verify_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         Ok(CKR_OK as CK_RV)
@@ -2321,9 +2327,9 @@ fn sign_init(
 
         ctx.sign_operations.insert(
             session_handle,
-            SignOperation {
+            SignatureOperation {
                 mechanism: mechanism.mechanism,
-                key,
+                key_id: object.id.clone(),
             },
         );
         Ok(())
@@ -2390,13 +2396,13 @@ fn sign(
 
 const PLACEHOLDER_SIGNATURE_LEN: usize = 32;
 
-fn sign_placeholder_signature(operation: &SignOperation, data: &[u8]) -> Vec<u8> {
+fn sign_placeholder_signature(operation: &SignatureOperation, data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(PLACEHOLDER_SIGNATURE_LEN);
     for domain in 0u64..4 {
         let mut hasher = DefaultHasher::new();
         b"pkcs11rs-placeholder-signature-v1".hash(&mut hasher);
         operation.mechanism.hash(&mut hasher);
-        operation.key.hash(&mut hasher);
+        operation.key_id.hash(&mut hasher);
         domain.hash(&mut hasher);
         data.hash(&mut hasher);
         out.extend(hasher.finish().to_ne_bytes());
@@ -2445,21 +2451,100 @@ pub extern "C" fn C_SignRecover(
 #[no_mangle]
 pub extern "C" fn C_VerifyInit(
     session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
-    _key: CK_OBJECT_HANDLE,
+    mechanism: *mut CK_MECHANISM,
+    key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_VerifyInit called with {:?}",
+        (session_handle, mechanism, key)
+    );
+    map(verify_init(session_handle, mechanism, key))
+}
+
+fn verify_init(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: CK_MECHANISM_PTR,
+    key: CK_OBJECT_HANDLE,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+
+        if ctx.verify_operations.contains_key(&session_handle) {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
+
+        let mechanism = _as_ref(mechanism)?;
+        if mechanism.mechanism != CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+
+        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if !object.verify {
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+
+        ctx.verify_operations.insert(
+            session_handle,
+            SignatureOperation {
+                mechanism: mechanism.mechanism,
+                key_id: object.id.clone(),
+            },
+        );
+        Ok(())
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn C_Verify(
     session_handle: CK_SESSION_HANDLE,
-    _data: *mut ::std::os::raw::c_uchar,
-    _data_len: ::std::os::raw::c_ulong,
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    eprintln!(
+        "C_Verify called with {:?}",
+        (session_handle, data, data_len, signature, signature_len)
+    );
+    map(verify(
+        session_handle,
+        data,
+        data_len,
+        signature,
+        signature_len,
+    ))
+}
+
+fn verify(
+    session_handle: CK_SESSION_HANDLE,
+    data: *const ::std::os::raw::c_uchar,
+    data_len: CK_ULONG,
+    signature: *const ::std::os::raw::c_uchar,
+    signature_len: CK_ULONG,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let operation = ctx
+            .verify_operations
+            .get(&session_handle)
+            .cloned()
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let data = from_raw_parts(data, data_len as usize)?;
+        let signature = from_raw_parts(signature, signature_len as usize)?;
+        let expected_signature = sign_placeholder_signature(&operation, data);
+
+        ctx.verify_operations.remove(&session_handle);
+        if signature.len() != expected_signature.len() {
+            return Err(CKR_SIGNATURE_LEN_RANGE.into());
+        }
+        if signature != expected_signature {
+            return Err(CKR_SIGNATURE_INVALID.into());
+        }
+        Ok(())
+    })
 }
 
 #[no_mangle]

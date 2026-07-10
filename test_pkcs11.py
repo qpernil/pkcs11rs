@@ -446,6 +446,20 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_Sign.restype = CK_RV
+        cls.lib.C_VerifyInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+        ]
+        cls.lib.C_VerifyInit.restype = CK_RV
+        cls.lib.C_Verify.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_Verify.restype = CK_RV
         cls.lib.C_GenerateKey.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -825,6 +839,30 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             self.lib.C_Sign(999, data, len(data), None, ctypes.byref(signature_len)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+
+    def test_verify_validates_state_and_session_handles(self) -> None:
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        data = (CK_BYTE * 4)(1, 2, 3, 4)
+        signature = (CK_BYTE * 32)()
+
+        self.assertEqual(
+            self.lib.C_VerifyInit(1, ctypes.byref(mechanism), 1),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(1, data, len(data), signature, len(signature)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_VerifyInit(999, ctypes.byref(mechanism), 1),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(999, data, len(data), signature, len(signature)),
             CKR_SESSION_HANDLE_INVALID,
         )
 
