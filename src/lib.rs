@@ -322,6 +322,7 @@ trait Session {
     fn logout(&mut self) -> Result<(), Error>;
     #[allow(dead_code)]
     fn get_session_info(&self) -> Result<(), Error>;
+    #[allow(dead_code)]
     fn generate(&self) -> Result<(), Error>;
 }
 
@@ -1384,7 +1385,7 @@ struct MechanismDetails {
     flags: CK_FLAGS,
 }
 
-const MECHANISMS: [MechanismDetails; 4] = [
+const MECHANISMS: [MechanismDetails; 5] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 1024,
@@ -1409,6 +1410,12 @@ const MECHANISMS: [MechanismDetails; 4] = [
         min_key_size: 256,
         max_key_size: 521,
         flags: (CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 1,
+        max_key_size: 4096,
+        flags: CKF_GENERATE as CK_FLAGS,
     },
 ];
 
@@ -2433,36 +2440,61 @@ pub extern "C" fn C_GenerateKey(
         "C_GenerateKey called with {:?}",
         (session_handle, mechanism, templ, count, key)
     );
-    unsafe {
-        let key = match key.as_mut() {
-            Some(key) => key,
-            None => return CKR_ARGUMENTS_BAD as CK_RV,
-        };
-        match with_context(|ctx| match ctx.get_session_(session_handle) {
-            Some(session) => {
-                eprintln!("C_GenerateKey {:?}", session);
-                if let Some(mechanism) = mechanism.as_ref() {
-                    eprintln!("C_GenerateKey {:?}", mechanism);
-                    let templ = if count == 0 {
-                        &[]
-                    } else if templ.is_null() {
-                        return Ok(CKR_ARGUMENTS_BAD as CK_RV);
-                    } else {
-                        slice::from_raw_parts(templ, count as usize)
-                    };
-                    eprintln!("C_GenerateKey {:?}", templ);
-                    *key = 99;
-                    Ok(map(session.1.generate()))
-                } else {
-                    Ok(CKR_ARGUMENTS_BAD as CK_RV)
-                }
-            }
-            None => Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
-        }
+    match generate_key(session_handle, mechanism, templ, count, key) {
+        Ok(()) => CKR_OK as CK_RV,
+        Err(e) => e.into(),
     }
+}
+
+fn generate_key(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: CK_MECHANISM_PTR,
+    templ: CK_ATTRIBUTE_PTR,
+    count: CK_ULONG,
+    key: CK_OBJECT_HANDLE_PTR,
+) -> Result<(), Error> {
+    let key_handle = as_mut(key)?;
+    let mechanism = _as_ref(mechanism)?;
+    let templ = from_raw_parts(templ, count as usize)?;
+
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let key = generate_key_object(mechanism, templ)?;
+        let handle = next_key(&ctx.objects, 1);
+        ctx.objects.insert(handle, key);
+        *key_handle = handle;
+        Ok(())
+    })
+}
+
+fn generate_key_object(
+    mechanism: &CK_MECHANISM,
+    templ: &[CK_ATTRIBUTE],
+) -> Result<TokenObject, Error> {
+    if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE {
+        return Err(CKR_MECHANISM_INVALID.into());
+    }
+    if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+
+    let mut key_template = TokenObjectTemplate {
+        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+        key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in templ {
+        key_template
+            .apply_attribute(attribute)
+            .map_err(Error::from)?;
+    }
+    let key = key_template.into_object().map_err(Error::from)?;
+    if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+        || key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    Ok(key)
 }
 
 #[no_mangle]
