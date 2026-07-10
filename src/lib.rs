@@ -21,6 +21,7 @@ use std::{
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
+use zeroize::Zeroizing;
 
 pub mod error;
 use error::*;
@@ -947,6 +948,10 @@ struct TokenObject {
     decrypt: bool,
     sign: bool,
     verify: bool,
+    sensitive: bool,
+    extractable: bool,
+    always_sensitive: bool,
+    never_extractable: bool,
     owner_session: Option<CK_SESSION_HANDLE>,
     material: KeyMaterial,
 }
@@ -956,7 +961,7 @@ enum KeyMaterial {
     None,
     RsaPrivate(Rsa<Private>),
     RsaPublic(Rsa<Public>),
-    Secret(Vec<u8>),
+    Secret(Zeroizing<Vec<u8>>),
 }
 
 impl std::fmt::Debug for KeyMaterial {
@@ -982,6 +987,8 @@ struct TokenObjectTemplate {
     decrypt: bool,
     sign: bool,
     verify: bool,
+    sensitive: Option<bool>,
+    extractable: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -1195,6 +1202,10 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 decrypt: false,
                 sign: false,
                 verify: true,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
                 owner_session: None,
                 material: KeyMaterial::RsaPublic(public_key),
             },
@@ -1212,6 +1223,10 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 decrypt: true,
                 sign: true,
                 verify: false,
+                sensitive: true,
+                extractable: false,
+                always_sensitive: true,
+                never_extractable: true,
                 owner_session: None,
                 material: KeyMaterial::RsaPrivate(private_key),
             },
@@ -1232,6 +1247,11 @@ fn bool_attribute(value: bool) -> Vec<u8> {
 }
 
 impl TokenObject {
+    fn has_sensitive_attributes(&self) -> bool {
+        self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
     fn is_visible_to(&self, session_handle: CK_SESSION_HANDLE) -> bool {
         self.owner_session
             .map(|owner| owner == session_handle)
@@ -1255,6 +1275,10 @@ impl TokenObject {
             CKA_SIGN as CK_ATTRIBUTE_TYPE,
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -1278,6 +1302,22 @@ impl TokenObject {
                 KeyMaterial::Secret(value) => Some(ulong_attribute(value.len() as CK_ULONG)),
                 _ => None,
             },
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE && self.has_sensitive_attributes() => {
+                Some(bool_attribute(self.sensitive))
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE && self.has_sensitive_attributes() => {
+                Some(bool_attribute(self.extractable))
+            }
+            x if x == CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE
+                && self.has_sensitive_attributes() =>
+            {
+                Some(bool_attribute(self.always_sensitive))
+            }
+            x if x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+                && self.has_sensitive_attributes() =>
+            {
+                Some(bool_attribute(self.never_extractable))
+            }
             _ => None,
         }
     }
@@ -1291,6 +1331,28 @@ impl TokenObject {
             }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
                 self.id = value;
+                Ok(())
+            }
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
+                if !self.has_sensitive_attributes() {
+                    return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+                let requested = read_bool_template_attribute(attribute)?;
+                if self.sensitive && !requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
+                self.sensitive = requested;
+                Ok(())
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE => {
+                if !self.has_sensitive_attributes() {
+                    return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+                let requested = read_bool_template_attribute(attribute)?;
+                if !self.extractable && requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
+                self.extractable = requested;
                 Ok(())
             }
             x if self.attribute_value(x).is_some() => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
@@ -1357,11 +1419,21 @@ impl TokenObjectTemplate {
                 self.verify = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
+                self.sensitive = Some(read_bool_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE => {
+                self.extractable = Some(read_bool_template_attribute(attribute)?);
+                Ok(())
+            }
             _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
         }
     }
 
     fn into_object(self) -> Result<TokenObject, CK_RV> {
+        let sensitive = self.sensitive.unwrap_or(false);
+        let extractable = self.extractable.unwrap_or(true);
         Ok(TokenObject {
             class: self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
@@ -1373,6 +1445,10 @@ impl TokenObjectTemplate {
             decrypt: self.decrypt,
             sign: self.sign,
             verify: self.verify,
+            sensitive,
+            extractable,
+            always_sensitive: sensitive,
+            never_extractable: !extractable,
             owner_session: None,
             material: KeyMaterial::None,
         })
@@ -2105,6 +2181,24 @@ fn get_attribute_value(
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
+            if attribute.type_ == CKA_VALUE as CK_ATTRIBUTE_TYPE {
+                match &object.material {
+                    KeyMaterial::Secret(value) if !object.sensitive && object.extractable => {
+                        if let Err(e) = write_attribute_value(attribute, value.as_slice()) {
+                            rv = combine_attribute_rv(rv, e);
+                        }
+                    }
+                    KeyMaterial::Secret(_) => {
+                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
+                    }
+                    _ => {
+                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                    }
+                }
+                continue;
+            }
             match object.attribute_value(attribute.type_) {
                 Some(value) => {
                     if let Err(e) = write_attribute_value(attribute, &value) {
@@ -2184,6 +2278,10 @@ fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
     if current == CKR_ARGUMENTS_BAD as CK_RV {
         current
     } else if next == CKR_ARGUMENTS_BAD as CK_RV {
+        next
+    } else if current == CKR_ATTRIBUTE_SENSITIVE as CK_RV {
+        current
+    } else if next == CKR_ATTRIBUTE_SENSITIVE as CK_RV {
         next
     } else if current == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV {
         current
@@ -2893,6 +2991,8 @@ fn generate_key_object(
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
         key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        sensitive: Some(true),
+        extractable: Some(false),
         ..TokenObjectTemplate::default()
     };
     let mut value_len = None;
@@ -2924,7 +3024,7 @@ fn generate_key_object(
     }
     let mut value = vec![0; value_len as usize];
     openssl::rand::rand_bytes(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-    key.material = KeyMaterial::Secret(value);
+    key.material = KeyMaterial::Secret(Zeroizing::new(value));
     Ok(key)
 }
 

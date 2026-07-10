@@ -2856,6 +2856,10 @@ pub fn generate_key_creates_secret_key_object() {
     let mut read_token = CK_FALSE as CK_BBOOL;
     let mut read_sign = CK_FALSE as CK_BBOOL;
     let mut read_value_len = 0 as CK_ULONG;
+    let mut read_sensitive = CK_FALSE as CK_BBOOL;
+    let mut read_extractable = CK_TRUE as CK_BBOOL;
+    let mut read_always_sensitive = CK_FALSE as CK_BBOOL;
+    let mut read_never_extractable = CK_FALSE as CK_BBOOL;
     let mut read_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -2892,6 +2896,26 @@ pub fn generate_key_creates_secret_key_object() {
             pValue: &mut read_value_len as *mut CK_ULONG as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_extractable as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_always_sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_never_extractable as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
     ];
     assert_eq!(
         crate::C_GetAttributeValue(
@@ -2909,6 +2933,10 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(read_token, CK_TRUE as CK_BBOOL);
     assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
     assert_eq!(read_value_len, value_len);
+    assert_eq!(read_sensitive, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_extractable, CK_FALSE as CK_BBOOL);
+    assert_eq!(read_always_sensitive, CK_TRUE as CK_BBOOL);
+    assert_eq!(read_never_extractable, CK_TRUE as CK_BBOOL);
     {
         let context = crate::lock_context().unwrap();
         let object = context.as_ref().unwrap().objects.get(&key).unwrap();
@@ -2920,6 +2948,20 @@ pub fn generate_key_creates_secret_key_object() {
             material => panic!("expected generated secret material, got {material:?}"),
         }
     }
+
+    let mut value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
+        CKR_ATTRIBUTE_SENSITIVE as CK_RV
+    );
+    assert_eq!(
+        value_attribute.ulValueLen,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
 
     let mut rsa_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -2956,6 +2998,153 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn generated_secret_key_enforces_sensitivity_policy() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut value_len = 24 as CK_ULONG;
+    let mut sensitive = CK_FALSE as CK_BBOOL;
+    let mut extractable = CK_TRUE as CK_BBOOL;
+    let mut template = [
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut extractable as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value_attribute.ulValueLen, value_len);
+    let mut value = vec![0; value_len as usize];
+    value_attribute.pValue = value.as_mut_ptr() as CK_VOID_PTR;
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert!(value.iter().any(|byte| *byte != 0));
+
+    sensitive = CK_TRUE as CK_BBOOL;
+    extractable = CK_FALSE as CK_BBOOL;
+    let mut harden = [
+        CK_ATTRIBUTE {
+            type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut extractable as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            key,
+            harden.as_mut_ptr(),
+            harden.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut make_non_sensitive = CK_FALSE as CK_BBOOL;
+    let mut make_non_sensitive_attribute = CK_ATTRIBUTE {
+        type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+        pValue: &mut make_non_sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            key,
+            &mut make_non_sensitive_attribute,
+            1
+        ),
+        CKR_ATTRIBUTE_READ_ONLY as CK_RV
+    );
+    let mut make_extractable = CK_TRUE as CK_BBOOL;
+    let mut make_extractable_attribute = CK_ATTRIBUTE {
+        type_: CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+        pValue: &mut make_extractable as *mut CK_BBOOL as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, key, &mut make_extractable_attribute, 1),
+        CKR_ATTRIBUTE_READ_ONLY as CK_RV
+    );
+
+    let mut always_sensitive = CK_TRUE as CK_BBOOL;
+    let mut never_extractable = CK_TRUE as CK_BBOOL;
+    let mut history = [
+        CK_ATTRIBUTE {
+            type_: CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut always_sensitive as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut never_extractable as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            key,
+            history.as_mut_ptr(),
+            history.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(always_sensitive, CK_FALSE as CK_BBOOL);
+    assert_eq!(never_extractable, CK_FALSE as CK_BBOOL);
+
+    value_attribute.pValue = ::std::ptr::null_mut();
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
+        CKR_ATTRIBUTE_SENSITIVE as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);

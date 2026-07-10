@@ -15,6 +15,8 @@ CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
+CKR_ATTRIBUTE_READ_ONLY = 0x10
+CKR_ATTRIBUTE_SENSITIVE = 0x11
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
@@ -39,9 +41,14 @@ CKK_GENERIC_SECRET = 0x00000010
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
 CKA_LABEL = 0x00000003
+CKA_VALUE = 0x00000011
 CKA_KEY_TYPE = 0x00000100
+CKA_SENSITIVE = 0x00000103
 CKA_SIGN = 0x00000108
 CKA_VALUE_LEN = 0x00000161
+CKA_EXTRACTABLE = 0x00000162
+CKA_NEVER_EXTRACTABLE = 0x00000164
+CKA_ALWAYS_SENSITIVE = 0x00000165
 ABI_TEST_SLOT_ID = 77
 
 
@@ -1072,10 +1079,184 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(read_value_len.value, value_len.value)
 
+        sensitive = CK_BYTE()
+        extractable = CK_BYTE(1)
+        always_sensitive = CK_BYTE()
+        never_extractable = CK_BYTE()
+        policy = (CK_ATTRIBUTE * 4)(
+            CK_ATTRIBUTE(
+                CKA_SENSITIVE,
+                ctypes.cast(ctypes.byref(sensitive), CK_VOID_PTR),
+                ctypes.sizeof(sensitive),
+            ),
+            CK_ATTRIBUTE(
+                CKA_EXTRACTABLE,
+                ctypes.cast(ctypes.byref(extractable), CK_VOID_PTR),
+                ctypes.sizeof(extractable),
+            ),
+            CK_ATTRIBUTE(
+                CKA_ALWAYS_SENSITIVE,
+                ctypes.cast(ctypes.byref(always_sensitive), CK_VOID_PTR),
+                ctypes.sizeof(always_sensitive),
+            ),
+            CK_ATTRIBUTE(
+                CKA_NEVER_EXTRACTABLE,
+                ctypes.cast(ctypes.byref(never_extractable), CK_VOID_PTR),
+                ctypes.sizeof(never_extractable),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(session, key.value, policy, len(policy)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            (sensitive.value, extractable.value),
+            (1, 0),
+        )
+        self.assertEqual(
+            (always_sensitive.value, never_extractable.value),
+            (1, 1),
+        )
+
+        value_attribute = CK_ATTRIBUTE(CKA_VALUE, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_attribute),
+                1,
+            ),
+            CKR_ATTRIBUTE_SENSITIVE,
+        )
+        self.assertEqual(value_attribute.ulValueLen, CK_ULONG(-1).value)
+
         rsa_mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
         self.assertEqual(
             self.lib.C_SignInit(session, ctypes.byref(rsa_mechanism), key.value),
             CKR_KEY_TYPE_INCONSISTENT,
+        )
+
+    def test_generated_secret_key_enforces_sensitivity_policy(self) -> None:
+        session = self.initialize_and_open_session()
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        value_len = CK_ULONG(24)
+        sensitive = CK_BYTE(0)
+        extractable = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+            CK_ATTRIBUTE(
+                CKA_SENSITIVE,
+                ctypes.cast(ctypes.byref(sensitive), CK_VOID_PTR),
+                ctypes.sizeof(sensitive),
+            ),
+            CK_ATTRIBUTE(
+                CKA_EXTRACTABLE,
+                ctypes.cast(ctypes.byref(extractable), CK_VOID_PTR),
+                ctypes.sizeof(extractable),
+            ),
+        )
+        key = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(mechanism),
+                template,
+                len(template),
+                ctypes.byref(key),
+            ),
+            CKR_OK,
+        )
+
+        value_attribute = CK_ATTRIBUTE(CKA_VALUE, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(value_attribute.ulValueLen, value_len.value)
+        value = (CK_BYTE * value_attribute.ulValueLen)()
+        value_attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertNotEqual(bytes(value), bytes(len(value)))
+
+        sensitive.value = 1
+        extractable.value = 0
+        harden = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_SENSITIVE,
+                ctypes.cast(ctypes.byref(sensitive), CK_VOID_PTR),
+                ctypes.sizeof(sensitive),
+            ),
+            CK_ATTRIBUTE(
+                CKA_EXTRACTABLE,
+                ctypes.cast(ctypes.byref(extractable), CK_VOID_PTR),
+                ctypes.sizeof(extractable),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(session, key.value, harden, len(harden)),
+            CKR_OK,
+        )
+
+        sensitive.value = 0
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(session, key.value, ctypes.byref(harden[0]), 1),
+            CKR_ATTRIBUTE_READ_ONLY,
+        )
+        extractable.value = 1
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(session, key.value, ctypes.byref(harden[1]), 1),
+            CKR_ATTRIBUTE_READ_ONLY,
+        )
+
+        always_sensitive = CK_BYTE(1)
+        never_extractable = CK_BYTE(1)
+        history = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_ALWAYS_SENSITIVE,
+                ctypes.cast(ctypes.byref(always_sensitive), CK_VOID_PTR),
+                ctypes.sizeof(always_sensitive),
+            ),
+            CK_ATTRIBUTE(
+                CKA_NEVER_EXTRACTABLE,
+                ctypes.cast(ctypes.byref(never_extractable), CK_VOID_PTR),
+                ctypes.sizeof(never_extractable),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(session, key.value, history, len(history)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            (always_sensitive.value, never_extractable.value),
+            (0, 0),
+        )
+
+        value_attribute.pValue = None
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_attribute),
+                1,
+            ),
+            CKR_ATTRIBUTE_SENSITIVE,
         )
 
     def test_session_objects_are_isolated_and_removed_on_close(self) -> None:
