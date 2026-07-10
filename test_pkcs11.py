@@ -16,6 +16,7 @@ CKR_SLOT_ID_INVALID = 3
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
+CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_MECHANISM_INVALID = 0x70
 CKR_OBJECT_HANDLE_INVALID = 0x82
@@ -23,6 +24,8 @@ CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_SIGNATURE_INVALID = 0xC0
 CKR_SIGNATURE_LEN_RANGE = 0xC1
+CKR_TEMPLATE_INCOMPLETE = 0xD0
+CKR_TEMPLATE_INCONSISTENT = 0xD1
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 CKF_SERIAL_SESSION = 0x00000004
 CKF_GENERATE = 0x00008000
@@ -38,6 +41,7 @@ CKA_TOKEN = 0x00000001
 CKA_LABEL = 0x00000003
 CKA_KEY_TYPE = 0x00000100
 CKA_SIGN = 0x00000108
+CKA_VALUE_LEN = 0x00000161
 ABI_TEST_SLOT_ID = 77
 
 
@@ -1027,12 +1031,18 @@ class Pkcs11AbiTests(unittest.TestCase):
         session = self.initialize_and_open_session()
         generate_mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
         sign_value = CK_BYTE(1)
-        template = (CK_ATTRIBUTE * 1)(
+        value_len = CK_ULONG(32)
+        template = (CK_ATTRIBUTE * 2)(
             CK_ATTRIBUTE(
                 CKA_SIGN,
                 ctypes.cast(ctypes.byref(sign_value), CK_VOID_PTR),
                 ctypes.sizeof(sign_value),
-            )
+            ),
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
         )
         key = CK_ULONG()
         self.assertEqual(
@@ -1045,6 +1055,22 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
+        read_value_len = CK_ULONG()
+        value_len_attribute = CK_ATTRIBUTE(
+            CKA_VALUE_LEN,
+            ctypes.cast(ctypes.byref(read_value_len), CK_VOID_PTR),
+            ctypes.sizeof(read_value_len),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_len_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(read_value_len.value, value_len.value)
 
         rsa_mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
         self.assertEqual(
@@ -1067,13 +1093,21 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
 
         mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        value_len = CK_ULONG(16)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            )
+        )
         key = CK_ULONG()
         self.assertEqual(
             self.lib.C_GenerateKey(
                 owner,
                 ctypes.byref(mechanism),
-                None,
-                0,
+                template,
+                len(template),
                 ctypes.byref(key),
             ),
             CKR_OK,
@@ -1098,6 +1132,63 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_GetAttributeValue(other.value, key.value, ctypes.byref(attribute), 1),
             CKR_OBJECT_HANDLE_INVALID,
+        )
+
+    def test_generate_key_requires_valid_value_length(self) -> None:
+        session = self.initialize_and_open_session()
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        key = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(mechanism),
+                None,
+                0,
+                ctypes.byref(key),
+            ),
+            CKR_TEMPLATE_INCOMPLETE,
+        )
+
+        for invalid_length in (0, 513):
+            value_len = CK_ULONG(invalid_length)
+            template = (CK_ATTRIBUTE * 1)(
+                CK_ATTRIBUTE(
+                    CKA_VALUE_LEN,
+                    ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                    ctypes.sizeof(value_len),
+                )
+            )
+            self.assertEqual(
+                self.lib.C_GenerateKey(
+                    session,
+                    ctypes.byref(mechanism),
+                    template,
+                    len(template),
+                    ctypes.byref(key),
+                ),
+                CKR_KEY_SIZE_RANGE,
+            )
+
+        value_len = CK_ULONG(16)
+        value_len_attribute = CK_ATTRIBUTE(
+            CKA_VALUE_LEN,
+            ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+            ctypes.sizeof(value_len),
+        )
+        duplicate_template = (CK_ATTRIBUTE * 2)(
+            value_len_attribute,
+            value_len_attribute,
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(mechanism),
+                duplicate_template,
+                len(duplicate_template),
+                ctypes.byref(key),
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
         )
 
     def test_get_attribute_value_validates_state_and_arguments(self) -> None:
