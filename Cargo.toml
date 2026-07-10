@@ -17,6 +17,7 @@ rusb = "0.9.4"
 pcsc = "2.9.0"
 curl = "0.4.50"
 openssl = "0.10.81"
+zeroize = "1.9.0"
 
 [build-dependencies]
 bindgen = "0.72.1"
