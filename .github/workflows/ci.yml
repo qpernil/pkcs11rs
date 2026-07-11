@@ -27,5 +27,8 @@ jobs:
       - name: Run Rust tests
         run: cargo test
 
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Run Python ABI tests
         run: python3 test_pkcs11.py
