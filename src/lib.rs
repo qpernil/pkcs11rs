@@ -1520,6 +1520,10 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     }
 }
 
+// Cryptoki declares these as callable C function pointers. They validate each
+// caller-owned pointer before dereferencing it, but cannot be exposed as unsafe
+// Rust functions without changing the generated PKCS #11 function-list types.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     unsafe {
@@ -1547,6 +1551,7 @@ pub extern "C" fn C_GetInfo(info_ptr: *mut CK_INFO) -> CK_RV {
     map(get_info(info_ptr))
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_GetSlotList(
     token_present: ::std::os::raw::c_uchar,
@@ -1598,7 +1603,6 @@ pub extern "C" fn C_GetSlotList(
             Err(e) => e.into(),
         }
     }
-    .into()
 }
 
 fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
@@ -1786,6 +1790,7 @@ pub extern "C" fn C_SetPIN(
     session_function_not_supported(session_handle)
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_OpenSession(
     slotID: CK_SLOT_ID,
@@ -1821,7 +1826,6 @@ pub extern "C" fn C_OpenSession(
             Err(e) => e.into(),
         }
     }
-    .into()
 }
 
 #[no_mangle]
@@ -1846,7 +1850,6 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         Ok(rv) => rv,
         Err(e) => e.into(),
     }
-    .into()
 }
 
 #[no_mangle]
@@ -1883,9 +1886,9 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
         Ok(rv) => rv,
         Err(e) => e.into(),
     }
-    .into()
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_GetSessionInfo(
     session_handle: CK_SESSION_HANDLE,
@@ -1914,7 +1917,6 @@ pub extern "C" fn C_GetSessionInfo(
             Err(e) => e.into(),
         }
     }
-    .into()
 }
 
 #[no_mangle]
@@ -3127,6 +3129,7 @@ pub extern "C" fn C_CancelFunction(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     session_function_not_supported(session_handle)
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_GetInterfaceList(
     interfaces_list: *mut CK_INTERFACE,
@@ -3154,6 +3157,7 @@ pub extern "C" fn C_GetInterfaceList(
     }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_GetInterface(
     interface_name: *mut ::std::os::raw::c_uchar,
@@ -3773,27 +3777,27 @@ static G_FUNCTION_LIST_3_2: CK_FUNCTION_LIST_3_2 =
     function_list_3_2(CK_VERSION { major: 3, minor: 2 });
 
 static G_INTERFACE_2_40: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
+    pInterfaceName: c"PKCS 11".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_0: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
+    pInterfaceName: c"PKCS 11".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_0 as *const CK_FUNCTION_LIST_3_0
         as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_1: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
+    pInterfaceName: c"PKCS 11".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_1 as *const CK_FUNCTION_LIST_3_0
         as *mut ::std::os::raw::c_void,
     flags: 0,
 };
 
 static G_INTERFACE_3_2: CK_INTERFACE = CK_INTERFACE {
-    pInterfaceName: b"PKCS 11\0".as_ptr() as *mut CK_UTF8CHAR,
+    pInterfaceName: c"PKCS 11".as_ptr() as *mut CK_UTF8CHAR,
     pFunctionList: &G_FUNCTION_LIST_3_2 as *const CK_FUNCTION_LIST_3_2
         as *mut ::std::os::raw::c_void,
     flags: 0,

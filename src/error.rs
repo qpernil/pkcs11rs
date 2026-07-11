@@ -56,15 +56,15 @@ impl From<u32> for Error {
     }
 }
 
-impl Into<CK_RV> for Error {
-    fn into(self) -> CK_RV {
-        eprintln!("{:?}", self);
-        match self {
-            Self::Generic(rv) => rv,
-            Self::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
-            Self::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
-            Self::Curl(_) => CKR_DEVICE_REMOVED as CK_RV,
-            Self::OpenSsl(_) => CKR_FUNCTION_FAILED as CK_RV,
+impl From<Error> for CK_RV {
+    fn from(error: Error) -> Self {
+        eprintln!("{:?}", error);
+        match error {
+            Error::Generic(rv) => rv,
+            Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
+            Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
+            Error::Curl(_) => CKR_DEVICE_REMOVED as CK_RV,
+            Error::OpenSsl(_) => CKR_FUNCTION_FAILED as CK_RV,
         }
     }
 }
