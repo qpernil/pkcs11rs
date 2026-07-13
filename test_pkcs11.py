@@ -23,11 +23,15 @@ CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_MECHANISM_INVALID = 0x70
 CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
+CKR_PIN_INCORRECT = 0xA0
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_SIGNATURE_INVALID = 0xC0
 CKR_SIGNATURE_LEN_RANGE = 0xC1
 CKR_TEMPLATE_INCOMPLETE = 0xD0
 CKR_TEMPLATE_INCONSISTENT = 0xD1
+CKR_USER_ALREADY_LOGGED_IN = 0x100
+CKR_USER_NOT_LOGGED_IN = 0x101
+CKR_USER_TYPE_INVALID = 0x103
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 CKF_SERIAL_SESSION = 0x00000004
 CKF_GENERATE = 0x00008000
@@ -37,9 +41,11 @@ CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
 CKO_SECRET_KEY = 0x00000004
+CKO_PRIVATE_KEY = 0x00000003
 CKK_GENERIC_SECRET = 0x00000010
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
+CKA_PRIVATE = 0x00000002
 CKA_LABEL = 0x00000003
 CKA_VALUE = 0x00000011
 CKA_KEY_TYPE = 0x00000100
@@ -49,6 +55,10 @@ CKA_VALUE_LEN = 0x00000161
 CKA_EXTRACTABLE = 0x00000162
 CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
+CKU_SO = 0
+CKU_USER = 1
+CKS_RO_PUBLIC_SESSION = 0
+CKS_RO_USER_FUNCTIONS = 1
 ABI_TEST_SLOT_ID = 77
 
 
@@ -412,6 +422,20 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_OpenSession.restype = CK_RV
         cls.lib.C_CloseSession.argtypes = [CK_ULONG]
         cls.lib.C_CloseSession.restype = CK_RV
+        cls.lib.C_GetSessionInfo.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_SESSION_INFO),
+        ]
+        cls.lib.C_GetSessionInfo.restype = CK_RV
+        cls.lib.C_Login.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_Login.restype = CK_RV
+        cls.lib.C_Logout.argtypes = [CK_ULONG]
+        cls.lib.C_Logout.restype = CK_RV
         cls.lib.C_GetMechanismList.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_ULONG),
@@ -563,6 +587,13 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         return session.value
+
+    def login_session(self, session: int) -> None:
+        pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
 
     def test_legacy_function_list_entries_are_stubbed(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
@@ -921,6 +952,125 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_SESSION_HANDLE_INVALID,
         )
 
+    def test_login_controls_private_object_visibility_and_signing(self) -> None:
+        pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_Login(1, CKU_USER, pin, len(pin)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+        session = self.initialize_and_open_session()
+        self.assertEqual(
+            self.lib.C_Login(999, CKU_USER, pin, len(pin)),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(session, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.state, CKS_RO_PUBLIC_SESSION)
+
+        key_class = CK_ULONG(CKO_PRIVATE_KEY)
+        private_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            )
+        )
+        found = CK_ULONG()
+        found_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, private_template, len(private_template)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                ctypes.byref(found),
+                1,
+                ctypes.byref(found_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found_count.value, 0)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        object_size = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetObjectSize(session, 2, ctypes.byref(object_size)),
+            CKR_OBJECT_HANDLE_INVALID,
+        )
+
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), 2),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+
+        bad_pin = (CK_BYTE * 4)(*b"9999")
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_SO, pin, len(pin)),
+            CKR_USER_TYPE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, bad_pin, len(bad_pin)),
+            CKR_PIN_INCORRECT,
+        )
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)),
+            CKR_USER_ALREADY_LOGGED_IN,
+        )
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(session, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.state, CKS_RO_USER_FUNCTIONS)
+
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, private_template, len(private_template)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                ctypes.byref(found),
+                1,
+                ctypes.byref(found_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual((found_count.value, found.value), (1, 2))
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), 2),
+            CKR_OK,
+        )
+
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(session, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.state, CKS_RO_PUBLIC_SESSION)
+        self.assertEqual(self.lib.C_Logout(session), CKR_USER_NOT_LOGGED_IN)
+
+        data = (CK_BYTE * 1)(1)
+        signature_len = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                data,
+                len(data),
+                None,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
     def test_sign_validates_state_and_session_handles(self) -> None:
         mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
         data = (CK_BYTE * 4)(1, 2, 3, 4)
@@ -975,6 +1125,7 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def test_sign_and_verify_rsa_pkcs_round_trip(self) -> None:
         session = self.initialize_and_open_session()
+        self.login_session(session)
         mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
         data = (CK_BYTE * 4)(1, 2, 3, 4)
         signature_len = CK_ULONG()
