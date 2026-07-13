@@ -1117,6 +1117,59 @@ pub fn slot_and_mechanism_calls_validate_slot_ids() {
 }
 
 #[test]
+pub fn open_session_validates_session_flags() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+
+    assert_eq!(
+        crate::C_OpenSession(TEST_SLOT_ID, 0, ::std::ptr::null_mut(), None, &mut session),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+    assert_eq!(
+        crate::C_OpenSession(TEST_SLOT_ID, 0, ::std::ptr::null_mut(), None, &mut session),
+        CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(session, CK_INVALID_HANDLE as CK_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_ASYNC_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(session, CK_INVALID_HANDLE as CK_SESSION_HANDLE);
+
+    for flags in [
+        CKF_SERIAL_SESSION as CK_FLAGS,
+        (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+    ] {
+        assert_eq!(
+            crate::C_OpenSession(
+                TEST_SLOT_ID,
+                flags,
+                ::std::ptr::null_mut(),
+                None,
+                &mut session
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(session, CK_INVALID_HANDLE as CK_SESSION_HANDLE);
+        assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+        session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    }
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn mechanism_list_reports_supported_mechanisms() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
