@@ -26,6 +26,7 @@ CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_PIN_INCORRECT = 0xA0
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_SESSION_PARALLEL_NOT_SUPPORTED = 0xB4
+CKR_SESSION_READ_ONLY = 0xB5
 CKR_SIGNATURE_INVALID = 0xC0
 CKR_SIGNATURE_LEN_RANGE = 0xC1
 CKR_TEMPLATE_INCOMPLETE = 0xD0
@@ -63,6 +64,8 @@ CKU_SO = 0
 CKU_USER = 1
 CKS_RO_PUBLIC_SESSION = 0
 CKS_RO_USER_FUNCTIONS = 1
+CKS_RW_PUBLIC_SESSION = 2
+CKS_RW_USER_FUNCTIONS = 3
 ABI_TEST_SLOT_ID = 77
 
 
@@ -1113,6 +1116,350 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ctypes.byref(signature_len),
             ),
             CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+    def test_login_is_shared_and_logout_invalidates_private_objects(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        read_only_session = CK_ULONG()
+        read_write_session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(read_only_session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(read_write_session),
+            ),
+            CKR_OK,
+        )
+
+        pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_Login(read_only_session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Login(read_write_session.value, CKU_USER, pin, len(pin)),
+            CKR_USER_ALREADY_LOGGED_IN,
+        )
+
+        read_only_info = CK_SESSION_INFO()
+        read_write_info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(
+                read_only_session.value,
+                ctypes.byref(read_only_info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(
+                read_write_session.value,
+                ctypes.byref(read_write_info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(read_only_info.state, CKS_RO_USER_FUNCTIONS)
+        self.assertEqual(read_write_info.state, CKS_RW_USER_FUNCTIONS)
+
+        signing_mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(
+                read_only_session.value,
+                ctypes.byref(signing_mechanism),
+                2,
+            ),
+            CKR_OK,
+        )
+
+        generation_mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        value_len = CK_ULONG(16)
+        private_true = CK_BYTE(1)
+        private_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private_true), CK_VOID_PTR),
+                ctypes.sizeof(private_true),
+            ),
+        )
+        private_session_key = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                read_write_session.value,
+                ctypes.byref(generation_mechanism),
+                private_template,
+                len(private_template),
+                ctypes.byref(private_session_key),
+            ),
+            CKR_OK,
+        )
+
+        self.assertEqual(self.lib.C_Logout(read_write_session.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(
+                read_only_session.value,
+                ctypes.byref(read_only_info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(
+                read_write_session.value,
+                ctypes.byref(read_write_info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(read_only_info.state, CKS_RO_PUBLIC_SESSION)
+        self.assertEqual(read_write_info.state, CKS_RW_PUBLIC_SESSION)
+
+        data = (CK_BYTE * 1)(1)
+        signature_len = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_Sign(
+                read_only_session.value,
+                data,
+                len(data),
+                None,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(
+            self.lib.C_Login(read_only_session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        object_size = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetObjectSize(
+                read_only_session.value,
+                2,
+                ctypes.byref(object_size),
+            ),
+            CKR_OBJECT_HANDLE_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_GetObjectSize(
+                read_only_session.value,
+                private_session_key.value,
+                ctypes.byref(object_size),
+            ),
+            CKR_OBJECT_HANDLE_INVALID,
+        )
+
+        key_class = CK_ULONG(CKO_PRIVATE_KEY)
+        find_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            )
+        )
+        found = CK_ULONG()
+        found_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                read_only_session.value,
+                find_template,
+                len(find_template),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                read_only_session.value,
+                ctypes.byref(found),
+                1,
+                ctypes.byref(found_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found_count.value, 1)
+        self.assertNotEqual(found.value, 2)
+        self.assertNotEqual(found.value, private_session_key.value)
+        self.assertEqual(
+            self.lib.C_FindObjectsFinal(read_only_session.value),
+            CKR_OK,
+        )
+
+    def test_read_only_sessions_cannot_mutate_token_or_private_objects(self) -> None:
+        session = self.initialize_and_open_session()
+        label = (CK_BYTE * len(b"read only"))(*b"read only")
+        label_attribute = CK_ATTRIBUTE(
+            CKA_LABEL,
+            ctypes.cast(label, CK_VOID_PTR),
+            len(label),
+        )
+        object_handle = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(
+                session,
+                1,
+                ctypes.byref(label_attribute),
+                1,
+            ),
+            CKR_SESSION_READ_ONLY,
+        )
+        self.assertEqual(
+            self.lib.C_DestroyObject(session, 1),
+            CKR_SESSION_READ_ONLY,
+        )
+        self.assertEqual(
+            self.lib.C_CopyObject(session, 1, None, 0, ctypes.byref(object_handle)),
+            CKR_SESSION_READ_ONLY,
+        )
+
+        key_class = CK_ULONG(CKO_SECRET_KEY)
+        key_type = CK_ULONG(CKK_GENERIC_SECRET)
+        token_true = CK_BYTE(1)
+        token_false = CK_BYTE(0)
+        private_true = CK_BYTE(1)
+        private_false = CK_BYTE(0)
+        base_template = (
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+        )
+        token_object_template = (CK_ATTRIBUTE * 4)(
+            *base_template,
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_true), CK_VOID_PTR),
+                ctypes.sizeof(token_true),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private_false), CK_VOID_PTR),
+                ctypes.sizeof(private_false),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session,
+                token_object_template,
+                len(token_object_template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_SESSION_READ_ONLY,
+        )
+
+        private_object_template = (CK_ATTRIBUTE * 4)(
+            *base_template,
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_false), CK_VOID_PTR),
+                ctypes.sizeof(token_false),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private_true), CK_VOID_PTR),
+                ctypes.sizeof(private_true),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session,
+                private_object_template,
+                len(private_object_template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        value_len = CK_ULONG(16)
+        token_key_template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_true), CK_VOID_PTR),
+                ctypes.sizeof(token_true),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private_false), CK_VOID_PTR),
+                ctypes.sizeof(private_false),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(mechanism),
+                token_key_template,
+                len(token_key_template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_SESSION_READ_ONLY,
+        )
+
+        private_key_template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_false), CK_VOID_PTR),
+                ctypes.sizeof(token_false),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private_true), CK_VOID_PTR),
+                ctypes.sizeof(private_true),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session,
+                ctypes.byref(mechanism),
+                private_key_template,
+                len(private_key_template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+
+        public_session_template = (CK_ATTRIBUTE * 2)(*base_template)
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session,
+                public_session_template,
+                len(public_session_template),
+                ctypes.byref(object_handle),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_DestroyObject(session, object_handle.value),
+            CKR_OK,
         )
 
     def test_sign_validates_state_and_session_handles(self) -> None:
