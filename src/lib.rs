@@ -331,6 +331,14 @@ trait Session {
     fn generate(&self) -> Result<(), Error>;
 }
 
+fn session_is_user_logged_in(session: &dyn Session) -> bool {
+    matches!(
+        session.state(),
+        x if x == CKS_RO_USER_FUNCTIONS as CK_STATE
+            || x == CKS_RW_USER_FUNCTIONS as CK_STATE
+    )
+}
+
 impl std::fmt::Debug for dyn Session + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
@@ -349,6 +357,7 @@ struct AbiTestSlot;
 struct AbiTestSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
+    logged_in: bool,
 }
 
 #[cfg(feature = "abi-tests")]
@@ -386,7 +395,11 @@ impl Slot for AbiTestSlot {
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(AbiTestSession { slot_id, flags })
+        Box::new(AbiTestSession {
+            slot_id,
+            flags,
+            logged_in: false,
+        })
     }
 
     fn init_slot(&mut self) -> Result<(), Error> {
@@ -419,14 +432,23 @@ impl Session for AbiTestSession {
     }
 
     fn state(&self) -> CK_STATE {
-        CKS_RO_PUBLIC_SESSION as CK_STATE
+        (if self.logged_in {
+            CKS_RO_USER_FUNCTIONS
+        } else {
+            CKS_RO_PUBLIC_SESSION
+        }) as CK_STATE
     }
 
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        self.logged_in = true;
         Ok(())
     }
 
     fn logout(&mut self) -> Result<(), Error> {
+        self.logged_in = false;
         Ok(())
     }
 
@@ -525,13 +547,7 @@ impl Session for YubiKeySession {
         self.flags
     }
     fn state(&self) -> CK_STATE {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        if self.send_cmd(&send_buffer, timeout).is_ok() {
+        if self.session.is_some() {
             CKS_RW_USER_FUNCTIONS
         } else {
             CKS_RW_PUBLIC_SESSION
@@ -565,7 +581,9 @@ impl Session for YubiKeySession {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        self.send_cmd(&send_buffer, timeout).map(|_| ())
+        self.send_cmd(&send_buffer, timeout)?;
+        self.session = None;
+        Ok(())
     }
     fn get_session_info(&self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -1259,10 +1277,12 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
-    fn is_visible_to(&self, session_handle: CK_SESSION_HANDLE) -> bool {
-        self.owner_session
-            .map(|owner| owner == session_handle)
-            .unwrap_or(true)
+    fn is_visible_to(&self, session_handle: CK_SESSION_HANDLE, logged_in: bool) -> bool {
+        (!self.private || logged_in)
+            && self
+                .owner_session
+                .map(|owner| owner == session_handle)
+                .unwrap_or(true)
     }
 
     fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE) {
@@ -1941,14 +1961,19 @@ pub extern "C" fn C_SetOperationState(
 
 fn login(
     session_handle: CK_SESSION_HANDLE,
-    _user_type: CK_USER_TYPE,
+    user_type: CK_USER_TYPE,
     pin: *const ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
         let session = ctx.get_session_mut(session_handle)?;
+        if user_type != CKU_USER as CK_USER_TYPE {
+            return Err(CKR_USER_TYPE_INVALID.into());
+        }
+        if session_is_user_logged_in(session.1) {
+            return Err(CKR_USER_ALREADY_LOGGED_IN.into());
+        }
         let pin = from_raw_parts(pin, pin_len as usize)?;
-        eprintln!("login {:?} {:?}", session.1, pin);
         session.1.login(pin)
     })
 }
@@ -1969,9 +1994,16 @@ pub extern "C" fn C_Login(
 
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        let session = ctx.get_session_mut(session_handle)?;
-        eprintln!("logout {:?}", session.1);
-        session.1.logout()
+        {
+            let session = ctx.get_session_mut(session_handle)?;
+            if !session_is_user_logged_in(session.1) {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
+            session.1.logout()?;
+        }
+        ctx.find_operations.remove(&session_handle);
+        ctx.sign_operations.remove(&session_handle);
+        Ok(())
     })
 }
 
@@ -2055,11 +2087,11 @@ fn copy_object(
     let new_object_handle = as_mut(new_object)?;
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         let mut copied_object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle))
+            .filter(|object| object.is_visible_to(session_handle, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?
             .clone();
 
@@ -2095,11 +2127,11 @@ fn destroy_object(
     object: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         let visible = ctx
             .objects
             .get(&object)
-            .map(|object| object.is_visible_to(session_handle))
+            .map(|object| object.is_visible_to(session_handle, logged_in))
             .unwrap_or(false);
         if !visible {
             return Err(CKR_OBJECT_HANDLE_INVALID.into());
@@ -2145,11 +2177,11 @@ fn get_object_size(
 ) -> Result<(), Error> {
     let size = as_mut(size)?;
     with_context(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         let object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle))
+            .filter(|object| object.is_visible_to(session_handle, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
         Ok(())
@@ -2181,11 +2213,11 @@ fn get_attribute_value(
 ) -> Result<(), Error> {
     let templ = _from_raw_parts_mut(templ, count as usize)?;
     with_context(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         let object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle))
+            .filter(|object| object.is_visible_to(session_handle, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
         let mut rv = CKR_OK as CK_RV;
@@ -2332,11 +2364,11 @@ fn set_attribute_value(
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         let visible = ctx
             .objects
             .get(&object)
-            .map(|object| object.is_visible_to(session_handle))
+            .map(|object| object.is_visible_to(session_handle, logged_in))
             .unwrap_or(false);
         if !visible {
             return Err(CKR_OBJECT_HANDLE_INVALID.into());
@@ -2381,7 +2413,7 @@ fn find_objects_init(
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
         if ctx.find_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
@@ -2390,7 +2422,7 @@ fn find_objects_init(
             .objects
             .iter()
             .filter(|(_handle, object)| {
-                object.is_visible_to(session_handle) && object.matches_template(templ)
+                object.is_visible_to(session_handle, logged_in) && object.matches_template(templ)
             })
             .map(|(handle, _object)| *handle)
             .collect();
@@ -2602,7 +2634,7 @@ fn sign_init(
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
 
         if ctx.sign_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
@@ -2616,11 +2648,13 @@ fn sign_init(
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
 
-        let object = ctx
-            .objects
-            .get(&key)
-            .filter(|object| object.is_visible_to(session_handle))
-            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if object.private && !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !object.is_visible_to(session_handle, logged_in) {
+            return Err(CKR_KEY_HANDLE_INVALID.into());
+        }
         if !object.sign {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
@@ -2766,7 +2800,7 @@ fn verify_init(
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
 
         if ctx.verify_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
@@ -2783,7 +2817,7 @@ fn verify_init(
         let object = ctx
             .objects
             .get(&key)
-            .filter(|object| object.is_visible_to(session_handle))
+            .filter(|object| object.is_visible_to(session_handle, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());

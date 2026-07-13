@@ -18,6 +18,7 @@ struct TestSlot;
 #[derive(Debug)]
 struct TestSession {
     slot_id: CK_SLOT_ID,
+    logged_in: bool,
 }
 
 impl crate::Session for TestSession {
@@ -34,14 +35,23 @@ impl crate::Session for TestSession {
     }
 
     fn state(&self) -> CK_STATE {
-        CKS_RO_PUBLIC_SESSION as CK_STATE
+        (if self.logged_in {
+            CKS_RO_USER_FUNCTIONS
+        } else {
+            CKS_RO_PUBLIC_SESSION
+        }) as CK_STATE
     }
 
-    fn login(&mut self, _pin: &[u8]) -> Result<(), crate::error::Error> {
+    fn login(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
+        if pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        self.logged_in = true;
         Ok(())
     }
 
     fn logout(&mut self) -> Result<(), crate::error::Error> {
+        self.logged_in = false;
         Ok(())
     }
 
@@ -88,7 +98,10 @@ impl crate::Slot for TestSlot {
     }
 
     fn open_session(&mut self, slotID: CK_SLOT_ID, _flags: CK_FLAGS) -> Box<dyn crate::Session> {
-        Box::new(TestSession { slot_id: slotID })
+        Box::new(TestSession {
+            slot_id: slotID,
+            logged_in: false,
+        })
     }
 
     fn init_slot(&mut self) -> Result<(), crate::error::Error> {
@@ -116,12 +129,24 @@ fn install_test_slot(slot_id: CK_SLOT_ID) {
 }
 
 fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
+    install_test_session_with_login(slot_id, session_handle, true);
+}
+
+fn install_public_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
+    install_test_session_with_login(slot_id, session_handle, false);
+}
+
+fn install_test_session_with_login(
+    slot_id: CK_SLOT_ID,
+    session_handle: CK_SESSION_HANDLE,
+    logged_in: bool,
+) {
     let mut context = crate::lock_context().unwrap();
     let context = context.as_mut().unwrap();
     context.slots.insert(slot_id, Box::new(TestSlot));
     context
         .sessions
-        .insert(session_handle, Box::new(TestSession { slot_id }));
+        .insert(session_handle, Box::new(TestSession { slot_id, logged_in }));
 }
 
 fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {
@@ -865,6 +890,176 @@ pub fn initialize_and_finalize_reject_reserved_args() {
         crate::C_Finalize(1 as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
     );
+}
+
+#[test]
+pub fn login_controls_private_object_visibility_and_signing() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE + 1,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    let mut info = CK_SESSION_INFO {
+        slotID: 0,
+        state: 0,
+        flags: 0,
+        ulDeviceError: 0,
+    };
+    assert_eq!(
+        crate::C_GetSessionInfo(TEST_SESSION_HANDLE, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
+
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut private_template = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 0);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    let mut object_size = 0;
+    assert_eq!(
+        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 2, &mut object_size),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_SO as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_USER_TYPE_INVALID as CK_RV
+    );
+    let mut bad_pin = *b"9999";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_USER as CK_USER_TYPE,
+            bad_pin.as_mut_ptr(),
+            bad_pin.len() as CK_ULONG
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_USER_ALREADY_LOGGED_IN as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetSessionInfo(TEST_SESSION_HANDLE, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RO_USER_FUNCTIONS as CK_STATE);
+
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!((count, objects[0]), (1, 2));
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Logout(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::C_GetSessionInfo(TEST_SESSION_HANDLE, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::C_Logout(TEST_SESSION_HANDLE),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+
+    let mut data = [1u8];
+    let mut signature_len = 0;
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 
 #[test]
