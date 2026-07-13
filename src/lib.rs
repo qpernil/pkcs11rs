@@ -322,7 +322,6 @@ trait Session {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
-    fn state(&self) -> CK_STATE;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
     fn logout(&mut self) -> Result<(), Error>;
     #[allow(dead_code)]
@@ -331,12 +330,13 @@ trait Session {
     fn generate(&self) -> Result<(), Error>;
 }
 
-fn session_is_user_logged_in(session: &dyn Session) -> bool {
-    matches!(
-        session.state(),
-        x if x == CKS_RO_USER_FUNCTIONS as CK_STATE
-            || x == CKS_RW_USER_FUNCTIONS as CK_STATE
-    )
+fn session_state(flags: CK_FLAGS, logged_in: bool) -> CK_STATE {
+    match (flags & CKF_RW_SESSION as CK_FLAGS != 0, logged_in) {
+        (false, false) => CKS_RO_PUBLIC_SESSION as CK_STATE,
+        (false, true) => CKS_RO_USER_FUNCTIONS as CK_STATE,
+        (true, false) => CKS_RW_PUBLIC_SESSION as CK_STATE,
+        (true, true) => CKS_RW_USER_FUNCTIONS as CK_STATE,
+    }
 }
 
 impl std::fmt::Debug for dyn Session + '_ {
@@ -345,7 +345,7 @@ impl std::fmt::Debug for dyn Session + '_ {
     }
 }
 
-#[cfg(feature = "abi-tests")]
+#[cfg(any(test, feature = "abi-tests"))]
 const ABI_TEST_SLOT_ID: CK_SLOT_ID = 77;
 
 #[cfg(feature = "abi-tests")]
@@ -357,7 +357,6 @@ struct AbiTestSlot;
 struct AbiTestSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
-    logged_in: bool,
 }
 
 #[cfg(feature = "abi-tests")]
@@ -395,11 +394,7 @@ impl Slot for AbiTestSlot {
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(AbiTestSession {
-            slot_id,
-            flags,
-            logged_in: false,
-        })
+        Box::new(AbiTestSession { slot_id, flags })
     }
 
     fn init_slot(&mut self) -> Result<(), Error> {
@@ -431,24 +426,14 @@ impl Session for AbiTestSession {
         self.flags
     }
 
-    fn state(&self) -> CK_STATE {
-        (if self.logged_in {
-            CKS_RO_USER_FUNCTIONS
-        } else {
-            CKS_RO_PUBLIC_SESSION
-        }) as CK_STATE
-    }
-
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         if pin != b"1234" {
             return Err(CKR_PIN_INCORRECT.into());
         }
-        self.logged_in = true;
         Ok(())
     }
 
     fn logout(&mut self) -> Result<(), Error> {
-        self.logged_in = false;
         Ok(())
     }
 
@@ -478,14 +463,6 @@ impl Session for YubiHsmSession {
     }
     fn flags(&self) -> CK_FLAGS {
         self.flags
-    }
-    fn state(&self) -> CK_STATE {
-        if self.session.is_some() {
-            CKS_RW_USER_FUNCTIONS
-        } else {
-            CKS_RW_PUBLIC_SESSION
-        }
-        .into()
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -545,14 +522,6 @@ impl Session for YubiKeySession {
     }
     fn flags(&self) -> CK_FLAGS {
         self.flags
-    }
-    fn state(&self) -> CK_STATE {
-        if self.session.is_some() {
-            CKS_RW_USER_FUNCTIONS
-        } else {
-            CKS_RW_PUBLIC_SESSION
-        }
-        .into()
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
@@ -948,7 +917,9 @@ struct Context {
     pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
+    logged_in_slots: HashSet<CK_SLOT_ID>,
     objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
+    next_object_handle: CK_OBJECT_HANDLE,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
     sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
     verify_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
@@ -956,6 +927,7 @@ struct Context {
 
 #[derive(Debug, Clone)]
 struct TokenObject {
+    slot_id: Option<CK_SLOT_ID>,
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
     label: Vec<u8>,
@@ -1043,6 +1015,8 @@ impl Context {
         #[cfg(not(feature = "abi-tests"))]
         let slots = HashMap::new();
 
+        let objects = default_objects()?;
+        let next_object_handle = objects.keys().max().map(|handle| handle + 1).unwrap_or(1);
         let context = Context {
             libusb: match rusb::Context::new() {
                 Ok(context) => Some(context),
@@ -1060,7 +1034,9 @@ impl Context {
             },
             slots,
             sessions: HashMap::new(),
-            objects: default_objects()?,
+            logged_in_slots: HashSet::new(),
+            objects,
+            next_object_handle,
             find_operations: HashMap::new(),
             sign_operations: HashMap::new(),
             verify_operations: HashMap::new(),
@@ -1127,6 +1103,59 @@ impl Context {
             None => Err(CKR_SESSION_HANDLE_INVALID.into()),
         }
     }
+
+    fn session_details(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(CK_SLOT_ID, CK_FLAGS, bool), Error> {
+        let session = self._get_session(session_handle)?.1;
+        let slot_id = session.slotID();
+        Ok((
+            slot_id,
+            session.flags(),
+            self.logged_in_slots.contains(&slot_id),
+        ))
+    }
+
+    fn insert_object(&mut self, object: TokenObject) -> CK_OBJECT_HANDLE {
+        let handle = self.next_object_handle;
+        self.next_object_handle += 1;
+        self.objects.insert(handle, object);
+        handle
+    }
+
+    fn clear_login_state(&mut self, slot_id: CK_SLOT_ID) {
+        self.logged_in_slots.remove(&slot_id);
+        let slot_sessions: HashSet<CK_SESSION_HANDLE> = self
+            .sessions
+            .iter()
+            .filter(|(_handle, session)| session.slotID() == slot_id)
+            .map(|(handle, _session)| *handle)
+            .collect();
+        self.find_operations
+            .retain(|session, _operation| !slot_sessions.contains(session));
+        self.sign_operations
+            .retain(|session, _operation| !slot_sessions.contains(session));
+        self.verify_operations
+            .retain(|session, _operation| !slot_sessions.contains(session));
+
+        self.objects
+            .retain(|_, object| object.slot_id != Some(slot_id) || object.token || !object.private);
+        let private_token_handles: Vec<CK_OBJECT_HANDLE> = self
+            .objects
+            .iter()
+            .filter(|(_handle, object)| {
+                object.slot_id == Some(slot_id) && object.token && object.private
+            })
+            .map(|(handle, _object)| *handle)
+            .collect();
+        for handle in private_token_handles {
+            if let Some(object) = self.objects.remove(&handle) {
+                self.insert_object(object);
+            }
+        }
+    }
+
     fn init(&mut self) {
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
@@ -1217,6 +1246,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
         (
             1,
             TokenObject {
+                slot_id: Some(ABI_TEST_SLOT_ID),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
                 label: b"Test RSA public key".to_vec(),
@@ -1238,6 +1268,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
         (
             2,
             TokenObject {
+                slot_id: Some(ABI_TEST_SLOT_ID),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
                 label: b"Test RSA private key".to_vec(),
@@ -1277,15 +1308,22 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
-    fn is_visible_to(&self, session_handle: CK_SESSION_HANDLE, logged_in: bool) -> bool {
-        (!self.private || logged_in)
+    fn is_visible_to(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+        slot_id: CK_SLOT_ID,
+        logged_in: bool,
+    ) -> bool {
+        self.slot_id == Some(slot_id)
+            && (!self.private || logged_in)
             && self
                 .owner_session
                 .map(|owner| owner == session_handle)
                 .unwrap_or(true)
     }
 
-    fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE) {
+    fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
+        self.slot_id = Some(slot_id);
         self.owner_session = (!self.token).then_some(session_handle);
     }
 
@@ -1403,6 +1441,20 @@ impl TokenObject {
     }
 }
 
+fn validate_new_object_access(
+    object: &TokenObject,
+    session_flags: CK_FLAGS,
+    logged_in: bool,
+) -> Result<(), Error> {
+    if object.private && !logged_in {
+        return Err(CKR_USER_NOT_LOGGED_IN.into());
+    }
+    if object.token && session_flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+        return Err(CKR_SESSION_READ_ONLY.into());
+    }
+    Ok(())
+}
+
 impl TokenObjectTemplate {
     fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         match attribute.type_ {
@@ -1462,6 +1514,7 @@ impl TokenObjectTemplate {
         let sensitive = self.sensitive.unwrap_or(false);
         let extractable = self.extractable.unwrap_or(true);
         Ok(TokenObject {
+            slot_id: None,
             class: self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             label: self.label,
@@ -1864,11 +1917,19 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
         match ctx.sessions.remove(&session_handle) {
             Some(session) => {
+                let slot_id = session.slotID();
                 ctx.find_operations.remove(&session_handle);
                 ctx.sign_operations.remove(&session_handle);
                 ctx.verify_operations.remove(&session_handle);
                 ctx.objects
                     .retain(|_, object| object.owner_session != Some(session_handle));
+                if !ctx
+                    .sessions
+                    .values()
+                    .any(|remaining| remaining.slotID() == slot_id)
+                {
+                    ctx.clear_login_state(slot_id);
+                }
                 eprintln!("C_CloseSession removed {:?}", (session_handle, session));
                 eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
                 Ok(CKR_OK as CK_RV)
@@ -1896,6 +1957,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .filter(|(_k, v)| v.slotID() == slotID)
             .map(|(k, _v)| *k)
             .collect();
+        ctx.clear_login_state(slotID);
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
         ctx.find_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
@@ -1931,7 +1993,10 @@ pub extern "C" fn C_GetSessionInfo(
                 match info_ptr.as_mut() {
                     Some(info) => {
                         info.slotID = session.1.slotID();
-                        info.state = session.1.state();
+                        info.state = session_state(
+                            session.1.flags(),
+                            ctx.logged_in_slots.contains(&session.1.slotID()),
+                        );
                         info.flags = session.1.flags();
                         info.ulDeviceError = 0;
                         eprintln!("C_GetSessionInfo returning {:?}", info);
@@ -1975,15 +2040,17 @@ fn login(
     pin_len: ::std::os::raw::c_ulong,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        let session = ctx.get_session_mut(session_handle)?;
+        let slot_id = ctx._get_session(session_handle)?.1.slotID();
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        if session_is_user_logged_in(session.1) {
+        if ctx.logged_in_slots.contains(&slot_id) {
             return Err(CKR_USER_ALREADY_LOGGED_IN.into());
         }
         let pin = from_raw_parts(pin, pin_len as usize)?;
-        session.1.login(pin)
+        ctx.get_session_mut(session_handle)?.1.login(pin)?;
+        ctx.logged_in_slots.insert(slot_id);
+        Ok(())
     })
 }
 
@@ -2003,15 +2070,12 @@ pub extern "C" fn C_Login(
 
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        {
-            let session = ctx.get_session_mut(session_handle)?;
-            if !session_is_user_logged_in(session.1) {
-                return Err(CKR_USER_NOT_LOGGED_IN.into());
-            }
-            session.1.logout()?;
+        let slot_id = ctx._get_session(session_handle)?.1.slotID();
+        if !ctx.logged_in_slots.contains(&slot_id) {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        ctx.find_operations.remove(&session_handle);
-        ctx.sign_operations.remove(&session_handle);
+        ctx.get_session_mut(session_handle)?.1.logout()?;
+        ctx.clear_login_state(slot_id);
         Ok(())
     })
 }
@@ -2048,11 +2112,11 @@ fn create_object(
     let object_handle = as_mut(object)?;
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut object = parse_create_object_template(templ)?;
-        object.set_owner(session_handle);
-        let handle = next_key(&ctx.objects, 1);
-        ctx.objects.insert(handle, object);
+        validate_new_object_access(&object, flags, logged_in)?;
+        object.set_owner(session_handle, slot_id);
+        let handle = ctx.insert_object(object);
         *object_handle = handle;
         Ok(())
     })
@@ -2096,11 +2160,11 @@ fn copy_object(
     let new_object_handle = as_mut(new_object)?;
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle, logged_in))
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?
             .clone();
 
@@ -2113,10 +2177,10 @@ fn copy_object(
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
         }
-        copied_object.set_owner(session_handle);
+        validate_new_object_access(&copied_object, flags, logged_in)?;
+        copied_object.set_owner(session_handle, slot_id);
 
-        let handle = next_key(&ctx.objects, 1);
-        ctx.objects.insert(handle, copied_object);
+        let handle = ctx.insert_object(copied_object);
         *new_object_handle = handle;
         Ok(())
     })
@@ -2136,14 +2200,14 @@ fn destroy_object(
     object: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
-        let visible = ctx
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        let stored_object = ctx
             .objects
             .get(&object)
-            .map(|object| object.is_visible_to(session_handle, logged_in))
-            .unwrap_or(false);
-        if !visible {
-            return Err(CKR_OBJECT_HANDLE_INVALID.into());
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+            return Err(CKR_SESSION_READ_ONLY.into());
         }
         ctx.objects.remove(&object);
         remove_object_from_find_operations(&mut ctx.find_operations, object);
@@ -2186,11 +2250,11 @@ fn get_object_size(
 ) -> Result<(), Error> {
     let size = as_mut(size)?;
     with_context(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle, logged_in))
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
         Ok(())
@@ -2222,11 +2286,11 @@ fn get_attribute_value(
 ) -> Result<(), Error> {
     let templ = _from_raw_parts_mut(templ, count as usize)?;
     with_context(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .objects
             .get(&object)
-            .filter(|object| object.is_visible_to(session_handle, logged_in))
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
         let mut rv = CKR_OK as CK_RV;
@@ -2373,14 +2437,14 @@ fn set_attribute_value(
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
-        let visible = ctx
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        let stored_object = ctx
             .objects
             .get(&object)
-            .map(|object| object.is_visible_to(session_handle, logged_in))
-            .unwrap_or(false);
-        if !visible {
-            return Err(CKR_OBJECT_HANDLE_INVALID.into());
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+            return Err(CKR_SESSION_READ_ONLY.into());
         }
         let object = ctx.objects.get_mut(&object).unwrap();
 
@@ -2422,7 +2486,7 @@ fn find_objects_init(
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         if ctx.find_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
@@ -2431,7 +2495,8 @@ fn find_objects_init(
             .objects
             .iter()
             .filter(|(_handle, object)| {
-                object.is_visible_to(session_handle, logged_in) && object.matches_template(templ)
+                object.is_visible_to(session_handle, slot_id, logged_in)
+                    && object.matches_template(templ)
             })
             .map(|(handle, _object)| *handle)
             .collect();
@@ -2643,7 +2708,7 @@ fn sign_init(
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
         if ctx.sign_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
@@ -2661,7 +2726,7 @@ fn sign_init(
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !object.is_visible_to(session_handle, logged_in) {
+        if !object.is_visible_to(session_handle, slot_id, logged_in) {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
         if !object.sign {
@@ -2809,7 +2874,7 @@ fn verify_init(
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        let logged_in = session_is_user_logged_in(ctx._get_session(session_handle)?.1);
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
         if ctx.verify_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
@@ -2826,7 +2891,7 @@ fn verify_init(
         let object = ctx
             .objects
             .get(&key)
-            .filter(|object| object.is_visible_to(session_handle, logged_in))
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
@@ -3019,11 +3084,11 @@ fn generate_key(
     let templ = from_raw_parts(templ, count as usize)?;
 
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut key = generate_key_object(mechanism, templ)?;
-        key.set_owner(session_handle);
-        let handle = next_key(&ctx.objects, 1);
-        ctx.objects.insert(handle, key);
+        validate_new_object_access(&key, flags, logged_in)?;
+        key.set_owner(session_handle, slot_id);
+        let handle = ctx.insert_object(key);
         *key_handle = handle;
         Ok(())
     })
