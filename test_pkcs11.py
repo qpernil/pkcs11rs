@@ -25,6 +25,7 @@ CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_PIN_INCORRECT = 0xA0
 CKR_SESSION_HANDLE_INVALID = 0xB3
+CKR_SESSION_PARALLEL_NOT_SUPPORTED = 0xB4
 CKR_SIGNATURE_INVALID = 0xC0
 CKR_SIGNATURE_LEN_RANGE = 0xC1
 CKR_TEMPLATE_INCOMPLETE = 0xD0
@@ -33,7 +34,10 @@ CKR_USER_ALREADY_LOGGED_IN = 0x100
 CKR_USER_NOT_LOGGED_IN = 0x101
 CKR_USER_TYPE_INVALID = 0x103
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
+CKR_SESSION_ASYNC_NOT_SUPPORTED = 0x205
+CKF_RW_SESSION = 0x00000002
 CKF_SERIAL_SESSION = 0x00000004
+CKF_ASYNC_SESSION = 0x00000008
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
@@ -873,6 +877,46 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_GetMechanismInfo(999, CKM_RSA_PKCS, ctypes.byref(info)),
             CKR_SLOT_ID_INVALID,
         )
+
+    def test_open_session_validates_session_flags(self) -> None:
+        session = CK_ULONG(-1)
+        self.assertEqual(
+            self.lib.C_OpenSession(ABI_TEST_SLOT_ID, 0, None, None, ctypes.byref(session)),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_OpenSession(ABI_TEST_SLOT_ID, 0, None, None, ctypes.byref(session)),
+            CKR_SESSION_PARALLEL_NOT_SUPPORTED,
+        )
+        self.assertEqual(session.value, CK_ULONG(-1).value)
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_ASYNC_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_SESSION_ASYNC_NOT_SUPPORTED,
+        )
+        self.assertEqual(session.value, CK_ULONG(-1).value)
+
+        for flags in (CKF_SERIAL_SESSION, CKF_SERIAL_SESSION | CKF_RW_SESSION):
+            self.assertEqual(
+                self.lib.C_OpenSession(
+                    ABI_TEST_SLOT_ID,
+                    flags,
+                    None,
+                    None,
+                    ctypes.byref(session),
+                ),
+                CKR_OK,
+            )
+            self.assertNotEqual(session.value, CK_ULONG(-1).value)
+            self.assertEqual(self.lib.C_CloseSession(session.value), CKR_OK)
+            session.value = CK_ULONG(-1).value
 
     def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

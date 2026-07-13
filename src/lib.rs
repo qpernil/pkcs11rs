@@ -1825,22 +1825,31 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context_mut(|ctx| match ctx.slots.get_mut(&slotID) {
-            Some(slot) => {
-                eprintln!("{:?}", slot);
-                if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                    let k = next_key(&ctx.sessions, 1);
-                    eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
-                    ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                    eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
-                    eprintln!("C_OpenSession returning {:?}", k);
-                    *session = k;
-                    Ok(CKR_OK as CK_RV)
-                } else {
-                    Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
-                }
+        match with_context_mut(|ctx| {
+            if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
+                return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
-            None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
+            if flags & CKF_ASYNC_SESSION as CK_FLAGS != 0 {
+                return Ok(CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV);
+            }
+
+            match ctx.slots.get_mut(&slotID) {
+                Some(slot) => {
+                    eprintln!("{:?}", slot);
+                    if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                        let k = next_key(&ctx.sessions, 1);
+                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                        ctx.sessions.insert(k, slot.open_session(slotID, flags));
+                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
+                        eprintln!("C_OpenSession returning {:?}", k);
+                        *session = k;
+                        Ok(CKR_OK as CK_RV)
+                    } else {
+                        Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
+                    }
+                }
+                None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
+            }
         }) {
             Ok(rv) => rv,
             Err(e) => e.into(),
