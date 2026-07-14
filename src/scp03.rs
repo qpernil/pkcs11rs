@@ -242,6 +242,11 @@ impl Scp03KeySet {
         let key_version =
             environment_byte("PKCS11RS_SCP03_KEY_VERSION", YUBIKEY_FACTORY_KEY_VERSION)?;
         let key_id = environment_byte("PKCS11RS_SCP03_KEY_ID", YUBIKEY_FACTORY_KEY_ID)?;
+        validate_factory_key_selector(
+            key_version,
+            key_id,
+            diversification_bmk.is_some() || direct_keys_configured,
+        )?;
         let keys = Self {
             key_version,
             key_id,
@@ -311,6 +316,20 @@ struct ResolvedKeySet {
 
 fn valid_aes_key(key: &[u8]) -> bool {
     matches!(key.len(), 16 | 24 | 32)
+}
+
+fn validate_factory_key_selector(
+    key_version: u8,
+    key_id: u8,
+    custom_key_material: bool,
+) -> Result<(), Error> {
+    if custom_key_material
+        || (key_version == YUBIKEY_FACTORY_KEY_VERSION && key_id == YUBIKEY_FACTORY_KEY_ID)
+    {
+        Ok(())
+    } else {
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
 }
 
 fn environment_key(name: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -489,6 +508,26 @@ impl Scp03Session {
             }
         }
 
+        let (mut session, host_cryptogram) = Self::from_initialize_update(
+            &static_keys,
+            security_level,
+            host_challenge,
+            &update,
+            &initialize_response.data[21..29],
+        )?;
+        let authenticate = session.external_authenticate(&host_cryptogram)?;
+        transmit(connector, &authenticate)?.require_success()?;
+        Ok(session)
+    }
+
+    fn from_initialize_update(
+        static_keys: &ResolvedKeySet,
+        security_level: u8,
+        host_challenge: [u8; 8],
+        update: &InitializeUpdate,
+        card_cryptogram: &[u8],
+    ) -> Result<(Self, Vec<u8>), Error> {
+        validate_security_level(security_level)?;
         let mut context = [0u8; 16];
         context[..8].copy_from_slice(&host_challenge);
         context[8..].copy_from_slice(&update.card_challenge);
@@ -513,22 +552,22 @@ impl Scp03Session {
             mac_bits,
         )?);
         let expected_card_cryptogram = derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64)?;
-        if !memcmp::eq(&expected_card_cryptogram, &initialize_response.data[21..29]) {
+        if !memcmp::eq(&expected_card_cryptogram, card_cryptogram) {
             return Err(CKR_PIN_INCORRECT.into());
         }
         let host_cryptogram = derive(&s_mac, DERIVATION_HOST_CRYPTOGRAM, &context, 64)?;
 
-        let mut session = Self {
-            s_enc,
-            s_mac,
-            s_rmac,
-            mac_chaining_value: [0; AES_BLOCK_SIZE],
-            encryption_counter: 0,
-            security_level,
-        };
-        let authenticate = session.external_authenticate(&host_cryptogram)?;
-        transmit(connector, &authenticate)?.require_success()?;
-        Ok(session)
+        Ok((
+            Self {
+                s_enc,
+                s_mac,
+                s_rmac,
+                mac_chaining_value: [0; AES_BLOCK_SIZE],
+                encryption_counter: 0,
+                security_level,
+            },
+            host_cryptogram,
+        ))
     }
 
     fn external_authenticate(&mut self, host_cryptogram: &[u8]) -> Result<CommandApdu, Error> {
@@ -1178,6 +1217,19 @@ mod tests {
             Some(YUBIKEY_FACTORY_KEY.as_slice())
         );
         assert_eq!(YUBIKEY_SECURITY_LEVEL, 0x33);
+    }
+
+    #[test]
+    fn non_default_key_selectors_require_custom_key_material() {
+        assert!(validate_factory_key_selector(
+            YUBIKEY_FACTORY_KEY_VERSION,
+            YUBIKEY_FACTORY_KEY_ID,
+            false,
+        )
+        .is_ok());
+        assert!(validate_factory_key_selector(1, YUBIKEY_FACTORY_KEY_ID, false).is_err());
+        assert!(validate_factory_key_selector(YUBIKEY_FACTORY_KEY_VERSION, 1, false).is_err());
+        assert!(validate_factory_key_selector(1, 1, true).is_ok());
     }
 
     #[test]
@@ -1927,48 +1979,18 @@ mod tests {
             let initialize_response =
                 ResponseApdu::parse(&hex(vector.initialize_response)).unwrap();
             let update = InitializeUpdate::parse(&initialize_response.data).unwrap();
-            let mut context = host.to_vec();
-            context.extend_from_slice(&update.card_challenge);
-            let s_enc = Zeroizing::new(
-                derive(
-                    &keys.enc,
-                    DERIVATION_S_ENC,
-                    &context,
-                    (keys.enc.len() * 8) as u16,
-                )
-                .unwrap(),
-            );
-            let s_mac = Zeroizing::new(
-                derive(
-                    &keys.mac,
-                    DERIVATION_S_MAC,
-                    &context,
-                    (keys.mac.len() * 8) as u16,
-                )
-                .unwrap(),
-            );
-            let s_rmac = Zeroizing::new(
-                derive(
-                    &keys.mac,
-                    DERIVATION_S_RMAC,
-                    &context,
-                    (keys.mac.len() * 8) as u16,
-                )
-                .unwrap(),
-            );
-            assert_eq!(
-                derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64).unwrap(),
-                initialize_response.data[21..29]
-            );
-            let host_cryptogram = derive(&s_mac, DERIVATION_HOST_CRYPTOGRAM, &context, 64).unwrap();
-            let mut session = Scp03Session {
-                s_enc,
-                s_mac,
-                s_rmac,
-                mac_chaining_value: [0; AES_BLOCK_SIZE],
-                encryption_counter: 0,
-                security_level: 0x33,
-            };
+            let static_keys = keys.resolve(&update.issuer_context).unwrap();
+            let (mut session, host_cryptogram) = Scp03Session::from_initialize_update(
+                &static_keys,
+                0x33,
+                host,
+                &update,
+                &initialize_response.data[21..29],
+            )
+            .unwrap();
+            assert_eq!(session.s_enc.len(), keys.enc.len());
+            assert_eq!(session.s_mac.len(), keys.mac.len());
+            assert_eq!(session.s_rmac.len(), keys.mac.len());
             let authenticate = session.external_authenticate(&host_cryptogram).unwrap();
             transmit(&connector, &authenticate)
                 .unwrap()
