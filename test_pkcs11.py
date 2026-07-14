@@ -56,14 +56,17 @@ CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
 CKA_PRIVATE = 0x00000002
 CKA_LABEL = 0x00000003
+CKA_UNIQUE_ID = 0x00000004
 CKA_VALUE = 0x00000011
 CKA_KEY_TYPE = 0x00000100
 CKA_SENSITIVE = 0x00000103
 CKA_SIGN = 0x00000108
 CKA_VALUE_LEN = 0x00000161
 CKA_EXTRACTABLE = 0x00000162
+CKA_LOCAL = 0x00000163
 CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
+CKA_KEY_GEN_MECHANISM = 0x00000166
 CKU_SO = 0
 CKU_USER = 1
 CKS_RO_PUBLIC_SESSION = 0
@@ -1043,7 +1046,8 @@ class Pkcs11AbiTests(unittest.TestCase):
         session = self.initialize_and_open_session()
         key_class = CK_ULONG(CKO_SECRET_KEY)
         key_type = CK_ULONG(CKK_GENERIC_SECRET)
-        create_template = (CK_ATTRIBUTE * 2)(
+        value = (CK_BYTE * 16)(*range(16))
+        create_template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_CLASS,
                 ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
@@ -1054,6 +1058,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
                 ctypes.sizeof(key_type),
             ),
+            CK_ATTRIBUTE(CKA_VALUE, ctypes.cast(value, CK_VOID_PTR), len(value)),
         )
         empty_label_object = CK_ULONG()
         self.assertEqual(
@@ -1555,6 +1560,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         token_false = CK_BYTE(0)
         private_true = CK_BYTE(1)
         private_false = CK_BYTE(0)
+        value = (CK_BYTE * 16)(*range(16))
         base_template = (
             CK_ATTRIBUTE(
                 CKA_CLASS,
@@ -1566,8 +1572,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
                 ctypes.sizeof(key_type),
             ),
+            CK_ATTRIBUTE(CKA_VALUE, ctypes.cast(value, CK_VOID_PTR), len(value)),
         )
-        token_object_template = (CK_ATTRIBUTE * 4)(
+        token_object_template = (CK_ATTRIBUTE * 5)(
             *base_template,
             CK_ATTRIBUTE(
                 CKA_TOKEN,
@@ -1590,7 +1597,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_SESSION_READ_ONLY,
         )
 
-        private_object_template = (CK_ATTRIBUTE * 4)(
+        private_object_template = (CK_ATTRIBUTE * 5)(
             *base_template,
             CK_ATTRIBUTE(
                 CKA_TOKEN,
@@ -1671,7 +1678,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_USER_NOT_LOGGED_IN,
         )
 
-        public_session_template = (CK_ATTRIBUTE * 2)(*base_template)
+        public_session_template = (CK_ATTRIBUTE * 3)(*base_template)
         self.assertEqual(
             self.lib.C_CreateObject(
                 session,
@@ -1798,6 +1805,21 @@ class Pkcs11AbiTests(unittest.TestCase):
                 len(short_signature),
             ),
             CKR_SIGNATURE_LEN_RANGE,
+        )
+        self.assertEqual(self.lib.C_VerifyInit(session, ctypes.byref(mechanism), 1), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Verify(
+                session,
+                None,
+                1,
+                signature,
+                signature_len.value,
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, data, len(data), signature, signature_len.value),
+            CKR_OPERATION_NOT_INITIALIZED,
         )
 
     def test_sign_terminal_errors_clear_the_operation(self) -> None:
@@ -1935,6 +1957,30 @@ class Pkcs11AbiTests(unittest.TestCase):
             (always_sensitive.value, never_extractable.value),
             (1, 1),
         )
+
+        unique_id = (CK_BYTE * 16)()
+        local = CK_BYTE()
+        key_gen_mechanism = CK_ULONG()
+        provenance = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(CKA_UNIQUE_ID, ctypes.cast(unique_id, CK_VOID_PTR), len(unique_id)),
+            CK_ATTRIBUTE(
+                CKA_LOCAL,
+                ctypes.cast(ctypes.byref(local), CK_VOID_PTR),
+                ctypes.sizeof(local),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_GEN_MECHANISM,
+                ctypes.cast(ctypes.byref(key_gen_mechanism), CK_VOID_PTR),
+                ctypes.sizeof(key_gen_mechanism),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(session, key.value, provenance, len(provenance)),
+            CKR_OK,
+        )
+        self.assertTrue(bytes(unique_id[: provenance[0].ulValueLen]))
+        self.assertEqual(local.value, 1)
+        self.assertEqual(key_gen_mechanism.value, CKM_GENERIC_SECRET_KEY_GEN)
 
         value_attribute = CK_ATTRIBUTE(CKA_VALUE, None, 0)
         self.assertEqual(
@@ -2269,7 +2315,8 @@ class Pkcs11AbiTests(unittest.TestCase):
         key_class = CK_ULONG(CKO_SECRET_KEY)
         key_type = CK_ULONG(CKK_GENERIC_SECRET)
         label = (CK_BYTE * len(b"ABI object"))(*b"ABI object")
-        template = (CK_ATTRIBUTE * 3)(
+        value = (CK_BYTE * 16)(*range(16))
+        template = (CK_ATTRIBUTE * 4)(
             CK_ATTRIBUTE(
                 CKA_CLASS,
                 ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
@@ -2285,6 +2332,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ctypes.cast(label, CK_VOID_PTR),
                 len(label),
             ),
+            CK_ATTRIBUTE(CKA_VALUE, ctypes.cast(value, CK_VOID_PTR), len(value)),
         )
         object_handle = CK_ULONG()
         self.assertEqual(
@@ -2363,6 +2411,41 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
 
+        original_unique_id = (CK_BYTE * 16)()
+        copied_unique_id = (CK_BYTE * 16)()
+        original_unique_attribute = CK_ATTRIBUTE(
+            CKA_UNIQUE_ID,
+            ctypes.cast(original_unique_id, CK_VOID_PTR),
+            len(original_unique_id),
+        )
+        copied_unique_attribute = CK_ATTRIBUTE(
+            CKA_UNIQUE_ID,
+            ctypes.cast(copied_unique_id, CK_VOID_PTR),
+            len(copied_unique_id),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                object_handle.value,
+                ctypes.byref(original_unique_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                copied_handle.value,
+                ctypes.byref(copied_unique_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertNotEqual(
+            bytes(original_unique_id[: original_unique_attribute.ulValueLen]),
+            bytes(copied_unique_id[: copied_unique_attribute.ulValueLen]),
+        )
+
         self.assertEqual(
             self.lib.C_FindObjectsInit(session, copy_template, len(copy_template)),
             CKR_OK,
@@ -2386,6 +2469,121 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_GetObjectSize(session, copied_handle.value, ctypes.byref(size)),
             CKR_OBJECT_HANDLE_INVALID,
+        )
+
+    def test_object_templates_reject_duplicates_and_updates_are_atomic(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        key_class = CK_ULONG(CKO_SECRET_KEY)
+        duplicate_class = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            ),
+        )
+        handle = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session.value,
+                duplicate_class,
+                len(duplicate_class),
+                ctypes.byref(handle),
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
+        )
+        key_type = CK_ULONG(CKK_GENERIC_SECRET)
+        incomplete = (CK_ATTRIBUTE * 2)(
+            duplicate_class[0],
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session.value,
+                incomplete,
+                len(incomplete),
+                ctypes.byref(handle),
+            ),
+            CKR_TEMPLATE_INCOMPLETE,
+        )
+
+        new_label = (CK_BYTE * len(b"not committed"))(*b"not committed")
+        update = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(CKA_LABEL, ctypes.cast(new_label, CK_VOID_PTR), len(new_label)),
+            duplicate_class[0],
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(session.value, 1, update, len(update)),
+            CKR_ATTRIBUTE_READ_ONLY,
+        )
+        original_label = (CK_BYTE * len(b"Test RSA public key"))()
+        label_attribute = CK_ATTRIBUTE(
+            CKA_LABEL,
+            ctypes.cast(original_label, CK_VOID_PTR),
+            len(original_label),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session.value,
+                1,
+                ctypes.byref(label_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(original_label), b"Test RSA public key")
+
+        duplicate_label = (CK_ATTRIBUTE * 2)(update[0], update[0])
+        self.assertEqual(
+            self.lib.C_CopyObject(
+                session.value,
+                1,
+                duplicate_label,
+                len(duplicate_label),
+                ctypes.byref(handle),
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
+        )
+
+        mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+        value_len = CK_ULONG(16)
+        generate_template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+            update[0],
+            update[0],
+        )
+        self.assertEqual(
+            self.lib.C_GenerateKey(
+                session.value,
+                ctypes.byref(mechanism),
+                generate_template,
+                len(generate_template),
+                ctypes.byref(handle),
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
         )
 
     def test_copy_object_can_change_token_and_private_attributes(self) -> None:

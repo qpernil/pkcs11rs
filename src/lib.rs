@@ -7,8 +7,9 @@ extern crate pcsc;
 extern crate rusb;
 
 use openssl::{
+    bn::BigNum,
     pkey::{Private, Public},
-    rsa::{Padding, Rsa},
+    rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
 };
 use rusb::UsbContext;
 use std::{
@@ -125,6 +126,10 @@ trait Slot {
     fn init_slot(&mut self) -> Result<(), Error>;
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error>;
+    fn refresh(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn clear_session(&mut self) {}
 
     fn flags(&self) -> CK_FLAGS {
         if self.is_present() {
@@ -210,6 +215,12 @@ impl Slot for YubiHsmSlot {
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        self.connector.refresh()
+    }
+    fn clear_session(&mut self) {
+        self.session = None;
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {
@@ -302,6 +313,12 @@ impl Slot for YubiKeySlot {
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        self.connector.refresh()
+    }
+    fn clear_session(&mut self) {
+        self.session = None;
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {
@@ -591,6 +608,9 @@ trait Connector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error>;
+    fn refresh(&self) -> Result<(), Error> {
+        Ok(())
+    }
 
     fn name(&self) -> String {
         format!(
@@ -661,7 +681,7 @@ impl Connector for UsbConnector {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
         eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
         ensure_complete_write(len, send_buffer.len())?;
-        if len % self.packet_size == 0 {
+        if needs_zero_length_packet(len, self.packet_size) {
             // Write a ZLP if last packet is full
             let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
             eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
@@ -680,6 +700,26 @@ fn ensure_complete_write(actual: usize, expected: usize) -> Result<(), Error> {
     }
 }
 
+fn needs_zero_length_packet(length: usize, packet_size: usize) -> bool {
+    packet_size != 0 && length.is_multiple_of(packet_size)
+}
+
+fn bulk_out_packet_size(device: &rusb::Device<rusb::Context>) -> Result<usize, Error> {
+    let config = device.active_config_descriptor()?;
+    for interface in config.interfaces() {
+        for descriptor in interface.descriptors() {
+            for endpoint in descriptor.endpoint_descriptors() {
+                if endpoint.address() == 0x01
+                    && endpoint.transfer_type() == rusb::TransferType::Bulk
+                {
+                    return Ok(endpoint.max_packet_size() as usize);
+                }
+            }
+        }
+    }
+    Err(rusb::Error::NotFound.into())
+}
+
 impl UsbConnector {
     fn connect(&mut self) -> Result<(), Error> {
         self.handle.claim_interface(0)?;
@@ -696,14 +736,14 @@ impl UsbConnector {
 struct PcscConnector {
     reader: std::ffi::CString,
     context: Rc<pcsc::Context>,
-    card: Option<pcsc::Card>,
+    card: RefCell<Option<pcsc::Card>>,
 }
 
 impl std::fmt::Debug for PcscConnector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("PcscConnector")
             .field("reader", &self.reader)
-            .field("card", &self.card.as_ref().map(|_| "Card"))
+            .field("card", &self.card.borrow().as_ref().map(|_| "Card"))
             .finish_non_exhaustive()
     }
 }
@@ -731,7 +771,7 @@ impl Connector for PcscConnector {
         0
     }
     fn is_present(&self) -> bool {
-        self.card.is_some()
+        self.card.borrow().is_some()
     }
     fn buffer_size(&self) -> usize {
         4096
@@ -742,7 +782,8 @@ impl Connector for PcscConnector {
         receive_buffer: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        match self.card.as_ref() {
+        let card = self.card.borrow();
+        match card.as_ref() {
             Some(card) => {
                 let received = card.transmit(send_buffer, receive_buffer)?;
                 eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, received);
@@ -751,19 +792,29 @@ impl Connector for PcscConnector {
             None => Err(Error::from(pcsc::Error::NoSmartcard)),
         }
     }
-}
-
-impl PcscConnector {
-    fn connect(&mut self) -> Result<(), Error> {
-        self.card = Some(self.context.connect(
+    fn refresh(&self) -> Result<(), Error> {
+        if self
+            .card
+            .borrow()
+            .as_ref()
+            .is_some_and(|card| card.status2_owned().is_ok())
+        {
+            return Ok(());
+        }
+        *self.card.borrow_mut() = None;
+        let card = self.context.connect(
             &self.reader,
             pcsc::ShareMode::Exclusive,
             pcsc::Protocols::T0 | pcsc::Protocols::T1,
-        )?);
+        )?;
+        *self.card.borrow_mut() = Some(card);
         Ok(())
     }
-    fn _reconnect(&mut self) -> Result<(), Error> {
-        match self.card.as_mut() {
+}
+
+impl PcscConnector {
+    fn _reconnect(&self) -> Result<(), Error> {
+        match self.card.borrow_mut().as_mut() {
             Some(card) => card
                 .reconnect(
                     pcsc::ShareMode::Exclusive,
@@ -774,8 +825,8 @@ impl PcscConnector {
             None => Err(Error::from(pcsc::Error::NoSmartcard)),
         }
     }
-    fn _disconnect(&mut self) -> Result<(), Error> {
-        self.card = None;
+    fn _disconnect(&self) -> Result<(), Error> {
+        *self.card.borrow_mut() = None;
         Ok(())
     }
 }
@@ -921,6 +972,7 @@ struct Context {
     libusb: Option<rusb::Context>,
     pcsc: Option<Rc<pcsc::Context>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
+    dynamic_slots: HashSet<CK_SLOT_ID>,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
     logged_in_slots: HashSet<CK_SLOT_ID>,
     objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
@@ -933,6 +985,7 @@ struct Context {
 #[derive(Debug, Clone)]
 struct TokenObject {
     slot_id: Option<CK_SLOT_ID>,
+    unique_id: Vec<u8>,
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
     label: Vec<u8>,
@@ -947,6 +1000,8 @@ struct TokenObject {
     extractable: bool,
     always_sensitive: bool,
     never_extractable: bool,
+    local: bool,
+    key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
     owner_session: Option<CK_SESSION_HANDLE>,
     material: KeyMaterial,
 }
@@ -1038,6 +1093,7 @@ impl Context {
                 }
             },
             slots,
+            dynamic_slots: HashSet::new(),
             sessions: HashMap::new(),
             logged_in_slots: HashSet::new(),
             objects,
@@ -1104,9 +1160,12 @@ impl Context {
         ))
     }
 
-    fn insert_object(&mut self, object: TokenObject) -> CK_OBJECT_HANDLE {
+    fn insert_object(&mut self, mut object: TokenObject) -> CK_OBJECT_HANDLE {
         let handle = self.next_object_handle;
         self.next_object_handle += 1;
+        if object.unique_id.is_empty() {
+            object.unique_id = handle.to_string().into_bytes();
+        }
         self.objects.insert(handle, object);
         handle
     }
@@ -1149,7 +1208,31 @@ impl Context {
         Ok(())
     }
 
+    fn close_slot_state(&mut self, slot_id: CK_SLOT_ID, remove_token_objects: bool) {
+        self.logged_in_slots.remove(&slot_id);
+        if let Some(slot) = self.slots.get_mut(&slot_id) {
+            slot.clear_session();
+        }
+        let sessions: HashSet<CK_SESSION_HANDLE> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.slotID() == slot_id)
+            .map(|(handle, _)| *handle)
+            .collect();
+        self.sessions.retain(|handle, _| !sessions.contains(handle));
+        self.find_operations
+            .retain(|handle, _| !sessions.contains(handle));
+        self.sign_operations
+            .retain(|handle, _| !sessions.contains(handle));
+        self.verify_operations
+            .retain(|handle, _| !sessions.contains(handle));
+        self.objects.retain(|_, object| {
+            object.slot_id != Some(slot_id) || (!remove_token_objects && object.token)
+        });
+    }
+
     fn init(&mut self) {
+        let mut seen_dynamic_slots = HashSet::new();
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
@@ -1159,7 +1242,13 @@ impl Context {
                             match device.open() {
                                 Ok(handle) => {
                                     let version = desc.device_version();
-                                    let packet_size = desc.max_packet_size() as usize;
+                                    let packet_size = match bulk_out_packet_size(&device) {
+                                        Ok(packet_size) => packet_size,
+                                        Err(error) => {
+                                            eprintln!("libusb bulk OUT endpoint: {:?}", error);
+                                            continue;
+                                        }
+                                    };
                                     let manufacturer = handle
                                         .read_manufacturer_string_ascii(&desc)
                                         .unwrap_or_default();
@@ -1180,16 +1269,29 @@ impl Context {
                                     //let mut connector = CurlConnector { serial, url: String::from("http://127.0.0.1:12345"), connected: false, curl: RefCell::new(curl::easy::Easy::new()) };
                                     let name = connector.name();
                                     eprintln!("{}", name);
-                                    if !self.slots.values().any(|s| s.name() == name) {
-                                        map(connector.connect());
-                                        let k = next_key(&self.slots, 0);
-                                        let mut v = Box::new(YubiHsmSlot {
-                                            connector: Rc::new(connector),
-                                            session: None,
-                                        });
-                                        map(v.init_slot());
-                                        self.slots.insert(k, v);
+                                    if let Some(slot_id) =
+                                        self.slots.iter().find_map(|(slot_id, slot)| {
+                                            (slot.name() == name).then_some(*slot_id)
+                                        })
+                                    {
+                                        if self.dynamic_slots.contains(&slot_id) {
+                                            seen_dynamic_slots.insert(slot_id);
+                                        }
+                                        continue;
                                     }
+                                    if let Err(error) = connector.connect() {
+                                        eprintln!("libusb.claim_interface: {:?}", error);
+                                        continue;
+                                    }
+                                    let slot_id = next_key(&self.slots, 0);
+                                    let mut slot = Box::new(YubiHsmSlot {
+                                        connector: Rc::new(connector),
+                                        session: None,
+                                    });
+                                    map(slot.init_slot());
+                                    self.slots.insert(slot_id, slot);
+                                    self.dynamic_slots.insert(slot_id);
+                                    seen_dynamic_slots.insert(slot_id);
                                 }
                                 Err(e) => {
                                     eprintln!("libusb.open: {}", e);
@@ -1200,28 +1302,63 @@ impl Context {
                 }
             }
         }
-        if let Some(context) = self.pcsc.as_ref() {
+        if let Some(context) = self.pcsc.clone() {
             if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
-                    let mut connector = PcscConnector {
+                    let connector = PcscConnector {
                         reader,
                         context: context.clone(),
-                        card: None,
+                        card: RefCell::new(None),
                     };
                     let name = connector.name();
                     eprintln!("{}", name);
-                    if !self.slots.values().any(|s| s.name() == name) {
-                        map(connector.connect());
-                        let k = next_key(&self.slots, 0);
-                        let mut v = Box::new(YubiKeySlot {
-                            connector: Rc::new(connector),
-                            session: None,
-                        });
-                        map(v.init_slot());
-                        self.slots.insert(k, v);
+                    if let Some(slot_id) = self
+                        .slots
+                        .iter()
+                        .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
+                    {
+                        if self.dynamic_slots.contains(&slot_id) {
+                            seen_dynamic_slots.insert(slot_id);
+                        }
+                        let (was_present, is_present) = {
+                            let slot = self.slots.get(&slot_id).unwrap();
+                            let was_present = slot.is_present();
+                            map(slot.refresh());
+                            (was_present, slot.is_present())
+                        };
+                        if was_present && !is_present {
+                            self.close_slot_state(slot_id, false);
+                        } else if !was_present && is_present {
+                            if let Some(slot) = self.slots.get_mut(&slot_id) {
+                                map(slot.init_slot());
+                            }
+                        }
+                        continue;
                     }
+                    map(connector.refresh());
+                    let slot_id = next_key(&self.slots, 0);
+                    let mut slot = Box::new(YubiKeySlot {
+                        connector: Rc::new(connector),
+                        session: None,
+                    });
+                    if slot.is_present() {
+                        map(slot.init_slot());
+                    }
+                    self.slots.insert(slot_id, slot);
+                    self.dynamic_slots.insert(slot_id);
+                    seen_dynamic_slots.insert(slot_id);
                 }
             }
+        }
+        let removed_slots: Vec<CK_SLOT_ID> = self
+            .dynamic_slots
+            .difference(&seen_dynamic_slots)
+            .copied()
+            .collect();
+        for slot_id in removed_slots {
+            self.close_slot_state(slot_id, true);
+            self.slots.remove(&slot_id);
+            self.dynamic_slots.remove(&slot_id);
         }
         eprintln!("Context.init {:?}", self);
     }
@@ -1242,6 +1379,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
             1,
             TokenObject {
                 slot_id: Some(ABI_TEST_SLOT_ID),
+                unique_id: b"1".to_vec(),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
                 label: b"Test RSA public key".to_vec(),
@@ -1256,6 +1394,8 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 extractable: true,
                 always_sensitive: false,
                 never_extractable: false,
+                local: true,
+                key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
                 owner_session: None,
                 material: KeyMaterial::RsaPublic(public_key),
             },
@@ -1264,6 +1404,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
             2,
             TokenObject {
                 slot_id: Some(ABI_TEST_SLOT_ID),
+                unique_id: b"2".to_vec(),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
                 label: b"Test RSA private key".to_vec(),
@@ -1278,6 +1419,8 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 extractable: false,
                 always_sensitive: true,
                 never_extractable: true,
+                local: true,
+                key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
                 owner_session: None,
                 material: KeyMaterial::RsaPrivate(private_key),
             },
@@ -1325,6 +1468,7 @@ impl TokenObject {
     fn size(&self) -> CK_ULONG {
         [
             CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
             CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
             CKA_LABEL as CK_ATTRIBUTE_TYPE,
             CKA_ID as CK_ATTRIBUTE_TYPE,
@@ -1339,6 +1483,8 @@ impl TokenObject {
             CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
             CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
             CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            CKA_LOCAL as CK_ATTRIBUTE_TYPE,
+            CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -1349,6 +1495,7 @@ impl TokenObject {
     fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
+            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Some(self.unique_id.clone()),
             x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.key_type)),
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.clone()),
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
@@ -1378,6 +1525,11 @@ impl TokenObject {
             {
                 Some(bool_attribute(self.never_extractable))
             }
+            x if x == CKA_LOCAL as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.local)),
+            x if x == CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(
+                self.key_gen_mechanism
+                    .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+            )),
             _ => None,
         }
     }
@@ -1517,6 +1669,7 @@ impl TokenObjectTemplate {
         let extractable = self.extractable.unwrap_or(true);
         Ok(TokenObject {
             slot_id: None,
+            unique_id: Vec::new(),
             class: self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             label: self.label,
@@ -1531,6 +1684,8 @@ impl TokenObjectTemplate {
             extractable,
             always_sensitive: sensitive,
             never_extractable: !extractable,
+            local: false,
+            key_gen_mechanism: None,
             owner_session: None,
             material: KeyMaterial::None,
         })
@@ -1619,13 +1774,19 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
             Some(ctx) => {
                 let logged_in_slots: Vec<CK_SLOT_ID> =
                     ctx.logged_in_slots.iter().copied().collect();
+                let mut logout_failed = false;
                 for slot_id in logged_in_slots {
-                    if let Err(error) = ctx.logout_slot(slot_id) {
-                        return error.into();
+                    if ctx.logout_slot(slot_id).is_err() {
+                        ctx.clear_login_state(slot_id);
+                        logout_failed = true;
                     }
                 }
                 *guard = None;
-                CKR_OK as CK_RV
+                if logout_failed {
+                    CKR_FUNCTION_FAILED as CK_RV
+                } else {
+                    CKR_OK as CK_RV
+                }
             }
             None => CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV,
         },
@@ -2180,13 +2341,153 @@ fn create_object(
 }
 
 fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    validate_unique_template(templ)?;
     let mut object_template = TokenObjectTemplate::default();
+    let mut key_components = HashMap::new();
     for attribute in templ {
+        if is_key_component_attribute(attribute.type_) {
+            key_components.insert(
+                attribute.type_,
+                Zeroizing::new(read_attribute_value(attribute).map_err(Error::from)?),
+            );
+            continue;
+        }
         object_template
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    object_template.into_object().map_err(Error::from)
+    let mut object = object_template.into_object().map_err(Error::from)?;
+    object.material = build_imported_key_material(&object, key_components)?;
+    Ok(object)
+}
+
+fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
+            || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn required_big_num(
+    components: &mut HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Result<BigNum, Error> {
+    let value = components
+        .remove(&attribute_type)
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    if value.is_empty() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    BigNum::from_slice(&value).map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID.into())
+}
+
+fn optional_big_num(
+    components: &mut HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<BigNum>, Error> {
+    components
+        .remove(&attribute_type)
+        .map(|value| {
+            if value.is_empty() {
+                Err(CKR_ATTRIBUTE_VALUE_INVALID.into())
+            } else {
+                BigNum::from_slice(&value)
+                    .map(Some)
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID.into())
+            }
+        })
+        .unwrap_or(Ok(None))
+}
+
+fn build_imported_key_material(
+    object: &TokenObject,
+    mut components: HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
+) -> Result<KeyMaterial, Error> {
+    let material = match (object.class, object.key_type) {
+        (class, key_type)
+            if class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE =>
+        {
+            let value = components
+                .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            if value.is_empty() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            KeyMaterial::Secret(value)
+        }
+        (class, key_type)
+            if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && key_type == CKK_RSA as CK_KEY_TYPE =>
+        {
+            let modulus = required_big_num(&mut components, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
+            let exponent =
+                required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
+            let key = Rsa::from_public_components(modulus, exponent)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            KeyMaterial::RsaPublic(key)
+        }
+        (class, key_type)
+            if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_RSA as CK_KEY_TYPE =>
+        {
+            let modulus = required_big_num(&mut components, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
+            let public_exponent =
+                required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
+            let private_exponent =
+                required_big_num(&mut components, CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE)?;
+            let mut builder = RsaPrivateKeyBuilder::new(modulus, public_exponent, private_exponent)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+
+            let prime_1 = optional_big_num(&mut components, CKA_PRIME_1 as CK_ATTRIBUTE_TYPE)?;
+            let prime_2 = optional_big_num(&mut components, CKA_PRIME_2 as CK_ATTRIBUTE_TYPE)?;
+            let has_factors = prime_1.is_some() || prime_2.is_some();
+            builder = match (prime_1, prime_2) {
+                (Some(prime_1), Some(prime_2)) => builder
+                    .set_factors(prime_1, prime_2)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                (None, None) => builder,
+                _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+            };
+
+            let exponent_1 =
+                optional_big_num(&mut components, CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE)?;
+            let exponent_2 =
+                optional_big_num(&mut components, CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE)?;
+            let coefficient =
+                optional_big_num(&mut components, CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE)?;
+            builder = match (exponent_1, exponent_2, coefficient) {
+                (Some(exponent_1), Some(exponent_2), Some(coefficient)) if has_factors => builder
+                    .set_crt_params(exponent_1, exponent_2, coefficient)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                (None, None, None) => builder,
+                _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+            };
+            KeyMaterial::RsaPrivate(builder.build())
+        }
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+    };
+    if components.is_empty() {
+        Ok(material)
+    } else {
+        Err(CKR_TEMPLATE_INCONSISTENT.into())
+    }
+}
+
+fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
+    let mut types = HashSet::new();
+    if templ.iter().all(|attribute| types.insert(attribute.type_)) {
+        Ok(())
+    } else {
+        Err(CKR_TEMPLATE_INCONSISTENT.into())
+    }
 }
 
 #[no_mangle]
@@ -2216,6 +2517,7 @@ fn copy_object(
 ) -> Result<(), Error> {
     let new_object_handle = as_mut(new_object)?;
     let templ = from_raw_parts(templ, count as usize)?;
+    validate_unique_template(templ)?;
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
@@ -2236,6 +2538,7 @@ fn copy_object(
         }
         validate_new_object_access(&copied_object, flags, logged_in)?;
         copied_object.set_owner(session_handle, slot_id);
+        copied_object.unique_id.clear();
 
         let handle = ctx.insert_object(copied_object);
         *new_object_handle = handle;
@@ -2493,6 +2796,7 @@ fn set_attribute_value(
     count: CK_ULONG,
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
+    validate_unique_template(templ)?;
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
@@ -2503,16 +2807,17 @@ fn set_attribute_value(
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
-        let object = ctx.objects.get_mut(&object).unwrap();
+        let mut updated_object = stored_object.clone();
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
-            if let Err(e) = object.set_attribute_value(attribute) {
+            if let Err(e) = updated_object.set_attribute_value(attribute) {
                 rv = combine_attribute_rv(rv, e);
             }
         }
 
         if rv == CKR_OK as CK_RV {
+            ctx.objects.insert(object, updated_object);
             Ok(())
         } else {
             Err(rv.into())
@@ -3037,12 +3342,10 @@ fn verify(
         ctx._get_session(session_handle)?;
         let operation = ctx
             .verify_operations
-            .get(&session_handle)
-            .cloned()
+            .remove(&session_handle)
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         let data = from_raw_parts(data, data_len as usize)?;
         let signature = from_raw_parts(signature, signature_len as usize)?;
-        ctx.verify_operations.remove(&session_handle);
         let public_key = match &operation.key {
             KeyMaterial::RsaPublic(key) => key,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
@@ -3196,6 +3499,7 @@ fn generate_key_object(
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
+    validate_unique_template(templ)?;
 
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
@@ -3234,6 +3538,8 @@ fn generate_key_object(
     let mut value = vec![0; value_len as usize];
     openssl::rand::rand_bytes(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
     key.material = KeyMaterial::Secret(Zeroizing::new(value));
+    key.local = true;
+    key.key_gen_mechanism = Some(mechanism.mechanism);
     Ok(key)
 }
 
