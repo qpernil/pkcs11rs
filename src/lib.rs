@@ -162,10 +162,10 @@ trait Slot {
         info.ulRwSessionCount = 0;
         info.ulMaxPinLen = 34;
         info.ulMinPinLen = 4;
-        info.ulTotalPublicMemory = 0;
-        info.ulFreePublicMemory = 0;
-        info.ulTotalPrivateMemory = 0;
-        info.ulFreePrivateMemory = 0;
+        info.ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+        info.ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+        info.ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+        info.ulFreePrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.hardwareVersion.major = self.major();
         info.hardwareVersion.minor = self.minor();
         info.firmwareVersion.major = self.major();
@@ -317,9 +317,7 @@ impl Slot for YubiKeySlot {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        if self.send_cmd(&send_buffer, timeout).is_err() {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
+        self.send_cmd(&send_buffer, timeout)?;
         let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         self.session = Some(Scp03Session {
@@ -662,6 +660,7 @@ impl Connector for UsbConnector {
     ) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
         eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
+        ensure_complete_write(len, send_buffer.len())?;
         if len % self.packet_size == 0 {
             // Write a ZLP if last packet is full
             let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
@@ -670,6 +669,14 @@ impl Connector for UsbConnector {
         let len = self.handle.read_bulk(0x81, receive_buffer, timeout)?;
         eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
         Ok(&receive_buffer[..len])
+    }
+}
+
+fn ensure_complete_write(actual: usize, expected: usize) -> Result<(), Error> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CKR_DEVICE_ERROR.into())
     }
 }
 
@@ -1413,6 +1420,20 @@ impl TokenObject {
         }
     }
 
+    fn set_copy_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        match attribute.type_ {
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => {
+                self.token = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => {
+                self.private = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            _ => self.set_attribute_value(attribute),
+        }
+    }
+
     fn matches_template(&self, templ: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
         templ.iter().all(|(type_, expected)| {
             self.attribute_value(*type_)
@@ -1535,11 +1556,8 @@ fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     eprintln!("C_Initialize called with {:?}", init_args);
-    if !init_args.is_null() {
-        let args = unsafe { &*(init_args as CK_C_INITIALIZE_ARGS_PTR) };
-        if !args.pReserved.is_null() {
-            return CKR_ARGUMENTS_BAD.into();
-        }
+    if let Err(rv) = validate_initialize_args(init_args) {
+        return rv;
     }
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
@@ -1554,6 +1572,40 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
         },
         Err(e) => e.into(),
     }
+}
+
+fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
+    if init_args.is_null() {
+        return Ok(());
+    }
+
+    let args = unsafe { &*(init_args as CK_C_INITIALIZE_ARGS_PTR) };
+    if !args.pReserved.is_null() {
+        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    }
+
+    let callbacks = [
+        args.CreateMutex.is_some(),
+        args.DestroyMutex.is_some(),
+        args.LockMutex.is_some(),
+        args.UnlockMutex.is_some(),
+    ];
+    let any_callbacks = callbacks.iter().any(|present| *present);
+    let all_callbacks = callbacks.iter().all(|present| *present);
+    if any_callbacks != all_callbacks {
+        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    }
+
+    let known_flags = (CKF_LIBRARY_CANT_CREATE_OS_THREADS | CKF_OS_LOCKING_OK) as CK_FLAGS;
+    if args.flags & !known_flags != 0 {
+        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    }
+
+    if all_callbacks && args.flags & CKF_OS_LOCKING_OK as CK_FLAGS == 0 {
+        return Err(CKR_CANT_LOCK as CK_RV);
+    }
+
+    Ok(())
 }
 
 #[no_mangle]
@@ -2175,7 +2227,7 @@ fn copy_object(
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
-            if let Err(e) = copied_object.set_attribute_value(attribute) {
+            if let Err(e) = copied_object.set_copy_attribute_value(attribute) {
                 rv = combine_attribute_rv(rv, e);
             }
         }
@@ -3289,18 +3341,26 @@ pub extern "C" fn C_GetInterfaceList(
             None => return CKR_ARGUMENTS_BAD.into(),
         };
 
+        const INTERFACE_COUNT: CK_ULONG = 4;
+
         if interfaces_list.is_null() {
-            *count = 1;
+            *count = INTERFACE_COUNT;
             return CKR_OK.into();
         }
 
-        if *count < 1 {
-            *count = 1;
+        if *count < INTERFACE_COUNT {
+            *count = INTERFACE_COUNT;
             return CKR_BUFFER_TOO_SMALL.into();
         }
 
-        *interfaces_list = G_INTERFACE_3_2;
-        *count = 1;
+        let interfaces = [
+            G_INTERFACE_2_40,
+            G_INTERFACE_3_0,
+            G_INTERFACE_3_1,
+            G_INTERFACE_3_2,
+        ];
+        ptr::copy_nonoverlapping(interfaces.as_ptr(), interfaces_list, interfaces.len());
+        *count = INTERFACE_COUNT;
         CKR_OK.into()
     }
 }
