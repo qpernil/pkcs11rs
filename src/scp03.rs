@@ -11,7 +11,14 @@ use openssl::{
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-pub(crate) const SECURITY_DOMAIN_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+pub(crate) const YUBIKEY_ISSUER_SECURITY_DOMAIN_AID: [u8; 8] =
+    [0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+pub(crate) const YUBIKEY_FACTORY_KEY_VERSION: u8 = 0xff;
+pub(crate) const YUBIKEY_FACTORY_KEY_ID: u8 = 0x00;
+pub(crate) const YUBIKEY_FACTORY_KEY: [u8; 16] = [
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+];
+pub(crate) const YUBIKEY_SECURITY_LEVEL: u8 = 0x33;
 
 const AES_BLOCK_SIZE: usize = 16;
 const MAC_LENGTH: usize = 8;
@@ -19,6 +26,10 @@ const MAX_SHORT_DATA_LENGTH: usize = u8::MAX as usize;
 const MAX_EXTENDED_DATA_LENGTH: usize = u16::MAX as usize;
 const MAX_SHORT_EXPECTED_LENGTH: u32 = 1 << 8;
 const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
+const MAX_CHAINED_RESPONSE_LENGTH: usize =
+    MAX_EXTENDED_EXPECTED_LENGTH as usize + AES_BLOCK_SIZE + MAC_LENGTH;
+const MAX_RESPONSE_CHAIN_SEGMENTS: usize = MAX_EXTENDED_EXPECTED_LENGTH as usize;
+const MORE_COMMANDS: u8 = 0x80;
 const DERIVATION_CARD_CRYPTOGRAM: u8 = 0x00;
 const DERIVATION_HOST_CRYPTOGRAM: u8 = 0x01;
 const DERIVATION_CARD_CHALLENGE: u8 = 0x02;
@@ -33,6 +44,11 @@ const IMPLEMENTATION_S16: u8 = 0x01;
 const IMPLEMENTATION_PSEUDO_RANDOM_CHALLENGE: u8 = 0x10;
 const IMPLEMENTATION_R_MAC: u8 = 0x20;
 const IMPLEMENTATION_R_ENCRYPTION: u8 = 0x40;
+const YUBICO_DIVERSIFICATION_ENC_LABEL: [u8; 4] = [0, 0, 0, 1];
+const YUBICO_DIVERSIFICATION_MAC_LABEL: [u8; 4] = [0, 0, 0, 2];
+const YUBICO_DIVERSIFICATION_DEK_LABEL: [u8; 4] = [0, 0, 0, 3];
+const YUBICO_DIVERSIFIED_KEY_BITS: u16 = 128;
+const YUBICO_BMK_LENGTH: usize = 32;
 const RESPONSE_OK: u16 = 0x9000;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -145,6 +161,7 @@ pub(crate) struct Scp03KeySet {
     enc: Zeroizing<Vec<u8>>,
     mac: Zeroizing<Vec<u8>>,
     dek: Option<Zeroizing<Vec<u8>>>,
+    diversification_bmk: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for Scp03KeySet {
@@ -152,12 +169,31 @@ impl std::fmt::Debug for Scp03KeySet {
         fmt.debug_struct("Scp03KeySet")
             .field("key_version", &self.key_version)
             .field("key_id", &self.key_id)
-            .field("key_size", &self.enc.len())
+            .field(
+                "key_size",
+                &self
+                    .diversification_bmk
+                    .as_ref()
+                    .map_or(self.enc.len(), |_| AES_BLOCK_SIZE),
+            )
+            .field("yubico_diversified", &self.diversification_bmk.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl Scp03KeySet {
+    fn yubikey_factory() -> Self {
+        let key = || Zeroizing::new(YUBIKEY_FACTORY_KEY.to_vec());
+        Self {
+            key_version: YUBIKEY_FACTORY_KEY_VERSION,
+            key_id: YUBIKEY_FACTORY_KEY_ID,
+            enc: key(),
+            mac: key(),
+            dek: Some(key()),
+            diversification_bmk: None,
+        }
+    }
+
     #[cfg(test)]
     fn new(
         key_version: u8,
@@ -172,29 +208,63 @@ impl Scp03KeySet {
             enc: Zeroizing::new(enc),
             mac: Zeroizing::new(mac),
             dek: Some(Zeroizing::new(dek)),
+            diversification_bmk: None,
         };
         keys.validate()?;
         Ok(keys)
     }
 
     pub(crate) fn from_environment() -> Result<Self, Error> {
-        let enc = environment_key("PKCS11RS_SCP03_ENC_KEY")?;
-        let mac = environment_key("PKCS11RS_SCP03_MAC_KEY")?;
-        let dek = environment_optional_key("PKCS11RS_SCP03_DEK_KEY")?;
-        let key_version = environment_byte("PKCS11RS_SCP03_KEY_VERSION", 0)?;
-        let key_id = environment_byte("PKCS11RS_SCP03_KEY_ID", 0)?;
+        let diversification_bmk = environment_optional_key("PKCS11RS_SCP03_BMK")?;
+        let direct_keys_configured = [
+            "PKCS11RS_SCP03_ENC_KEY",
+            "PKCS11RS_SCP03_MAC_KEY",
+            "PKCS11RS_SCP03_DEK_KEY",
+        ]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+        if diversification_bmk.is_some() && direct_keys_configured {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+
+        let (enc, mac, dek) = if diversification_bmk.is_some() {
+            (Zeroizing::new(Vec::new()), Zeroizing::new(Vec::new()), None)
+        } else if direct_keys_configured {
+            (
+                environment_key("PKCS11RS_SCP03_ENC_KEY")?,
+                environment_key("PKCS11RS_SCP03_MAC_KEY")?,
+                environment_optional_key("PKCS11RS_SCP03_DEK_KEY")?,
+            )
+        } else {
+            let defaults = Self::yubikey_factory();
+            (defaults.enc, defaults.mac, defaults.dek)
+        };
+        let key_version =
+            environment_byte("PKCS11RS_SCP03_KEY_VERSION", YUBIKEY_FACTORY_KEY_VERSION)?;
+        let key_id = environment_byte("PKCS11RS_SCP03_KEY_ID", YUBIKEY_FACTORY_KEY_ID)?;
         let keys = Self {
             key_version,
             key_id,
             enc,
             mac,
             dek,
+            diversification_bmk,
         };
         keys.validate()?;
         Ok(keys)
     }
 
     fn validate(&self) -> Result<(), Error> {
+        if let Some(bmk) = self.diversification_bmk.as_deref() {
+            if bmk.len() == YUBICO_BMK_LENGTH
+                && self.enc.is_empty()
+                && self.mac.is_empty()
+                && self.dek.is_none()
+            {
+                return Ok(());
+            }
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
         if !valid_aes_key(&self.enc)
             || !valid_aes_key(&self.mac)
             || self.dek.as_deref().is_some_and(|key| !valid_aes_key(key))
@@ -203,6 +273,40 @@ impl Scp03KeySet {
         }
         Ok(())
     }
+
+    fn resolve(&self, issuer_context: &[u8; 10]) -> Result<ResolvedKeySet, Error> {
+        if let Some(bmk) = self.diversification_bmk.as_deref() {
+            return Ok(ResolvedKeySet {
+                enc: Zeroizing::new(yubico_diversify_key(
+                    bmk,
+                    YUBICO_DIVERSIFICATION_ENC_LABEL,
+                    issuer_context,
+                )?),
+                mac: Zeroizing::new(yubico_diversify_key(
+                    bmk,
+                    YUBICO_DIVERSIFICATION_MAC_LABEL,
+                    issuer_context,
+                )?),
+                dek: Some(Zeroizing::new(yubico_diversify_key(
+                    bmk,
+                    YUBICO_DIVERSIFICATION_DEK_LABEL,
+                    issuer_context,
+                )?)),
+            });
+        }
+        Ok(ResolvedKeySet {
+            enc: Zeroizing::new(self.enc.to_vec()),
+            mac: Zeroizing::new(self.mac.to_vec()),
+            dek: self.dek.as_deref().map(|key| Zeroizing::new(key.to_vec())),
+        })
+    }
+}
+
+struct ResolvedKeySet {
+    enc: Zeroizing<Vec<u8>>,
+    mac: Zeroizing<Vec<u8>>,
+    #[allow(dead_code)]
+    dek: Option<Zeroizing<Vec<u8>>>,
 }
 
 fn valid_aes_key(key: &[u8]) -> bool {
@@ -263,6 +367,7 @@ fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
 
 #[derive(Debug)]
 struct InitializeUpdate {
+    issuer_context: [u8; 10],
     key_version: u8,
     scp_id: u8,
     implementation: u8,
@@ -282,6 +387,9 @@ impl InitializeUpdate {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(Self {
+            issuer_context: data[..10]
+                .try_into()
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
             key_version: data[10],
             scp_id: data[11],
             implementation,
@@ -325,12 +433,19 @@ impl Scp03Session {
         connector: &dyn Connector,
         keys: &Scp03KeySet,
         security_level: u8,
+        selected_aid: &[u8],
     ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
         let mut host_challenge = [0u8; 8];
         openssl::rand::rand_bytes(&mut host_challenge)
             .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-        Self::establish_with_challenge(connector, keys, security_level, host_challenge)
+        Self::establish_with_challenge(
+            connector,
+            keys,
+            security_level,
+            host_challenge,
+            selected_aid,
+        )
     }
 
     fn establish_with_challenge(
@@ -338,6 +453,7 @@ impl Scp03Session {
         keys: &Scp03KeySet,
         security_level: u8,
         host_challenge: [u8; 8],
+        selected_aid: &[u8],
     ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
         let initialize = CommandApdu {
@@ -357,12 +473,17 @@ impl Scp03Session {
             return Err(CKR_DEVICE_ERROR.into());
         }
         validate_card_capabilities(update.implementation, security_level)?;
+        let static_keys = keys.resolve(&update.issuer_context)?;
         if let Some(sequence_counter) = update.sequence_counter {
-            let mut challenge_context = Vec::with_capacity(3 + SECURITY_DOMAIN_AID.len());
+            let mut challenge_context = Vec::with_capacity(3 + selected_aid.len());
             challenge_context.extend_from_slice(&sequence_counter);
-            challenge_context.extend_from_slice(&SECURITY_DOMAIN_AID);
-            let expected_challenge =
-                derive(&keys.enc, DERIVATION_CARD_CHALLENGE, &challenge_context, 64)?;
+            challenge_context.extend_from_slice(selected_aid);
+            let expected_challenge = derive(
+                &static_keys.enc,
+                DERIVATION_CARD_CHALLENGE,
+                &challenge_context,
+                64,
+            )?;
             if !memcmp::eq(&expected_challenge, &update.card_challenge) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -371,11 +492,26 @@ impl Scp03Session {
         let mut context = [0u8; 16];
         context[..8].copy_from_slice(&host_challenge);
         context[8..].copy_from_slice(&update.card_challenge);
-        let enc_bits = (keys.enc.len() * 8) as u16;
-        let mac_bits = (keys.mac.len() * 8) as u16;
-        let s_enc = Zeroizing::new(derive(&keys.enc, DERIVATION_S_ENC, &context, enc_bits)?);
-        let s_mac = Zeroizing::new(derive(&keys.mac, DERIVATION_S_MAC, &context, mac_bits)?);
-        let s_rmac = Zeroizing::new(derive(&keys.mac, DERIVATION_S_RMAC, &context, mac_bits)?);
+        let enc_bits = (static_keys.enc.len() * 8) as u16;
+        let mac_bits = (static_keys.mac.len() * 8) as u16;
+        let s_enc = Zeroizing::new(derive(
+            &static_keys.enc,
+            DERIVATION_S_ENC,
+            &context,
+            enc_bits,
+        )?);
+        let s_mac = Zeroizing::new(derive(
+            &static_keys.mac,
+            DERIVATION_S_MAC,
+            &context,
+            mac_bits,
+        )?);
+        let s_rmac = Zeroizing::new(derive(
+            &static_keys.mac,
+            DERIVATION_S_RMAC,
+            &context,
+            mac_bits,
+        )?);
         let expected_card_cryptogram = derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64)?;
         if !memcmp::eq(&expected_card_cryptogram, &initialize_response.data[21..29]) {
             return Err(CKR_PIN_INCORRECT.into());
@@ -419,15 +555,108 @@ impl Scp03Session {
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn transmit(
         &mut self,
         connector: &dyn Connector,
         command: &CommandApdu,
     ) -> Result<ResponseApdu, Error> {
         let protected = self.protect_command(command)?;
-        let response = transmit(connector, &protected)?;
+        let response = Self::collect_response_chain(connector, transmit(connector, &protected)?)?;
         self.unprotect_response(response)
+    }
+
+    pub(crate) fn transmit_chained(
+        &mut self,
+        connector: &dyn Connector,
+        command: &CommandApdu,
+    ) -> Result<ResponseApdu, Error> {
+        if command.p1 & MORE_COMMANDS != 0
+            || command.le.is_some_and(|le| le > MAX_SHORT_EXPECTED_LENGTH)
+        {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+
+        let protected = self.protect_command(command)?;
+        if protected.data.len() <= MAX_SHORT_DATA_LENGTH {
+            let response =
+                Self::collect_response_chain(connector, transmit(connector, &protected)?)?;
+            return self.unprotect_response(response);
+        }
+
+        let segment_count = protected.data.len().div_ceil(MAX_SHORT_DATA_LENGTH);
+        for (index, data) in protected.data.chunks(MAX_SHORT_DATA_LENGTH).enumerate() {
+            let last = index + 1 == segment_count;
+            let segment = CommandApdu {
+                cla: protected.cla,
+                ins: protected.ins,
+                p1: if last {
+                    protected.p1
+                } else {
+                    protected.p1 | MORE_COMMANDS
+                },
+                p2: protected.p2,
+                data: data.to_vec(),
+                le: if last { protected.le } else { None },
+                extended: false,
+            };
+            let response = transmit(connector, &segment)?;
+            if last {
+                let response = Self::collect_response_chain(connector, response)?;
+                return self.unprotect_response(response);
+            }
+            if response.status != RESPONSE_OK || !response.data.is_empty() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+        }
+        Err(CKR_DEVICE_ERROR.into())
+    }
+
+    fn collect_response_chain(
+        connector: &dyn Connector,
+        mut response: ResponseApdu,
+    ) -> Result<ResponseApdu, Error> {
+        if response.data.len() > MAX_CHAINED_RESPONSE_LENGTH {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let mut data = Vec::new();
+        let mut segments = 0usize;
+        while response.status & 0xff00 == 0x6100 {
+            segments += 1;
+            if segments > MAX_RESPONSE_CHAIN_SEGMENTS {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            let combined_len = data
+                .len()
+                .checked_add(response.data.len())
+                .filter(|length| *length <= MAX_CHAINED_RESPONSE_LENGTH)
+                .ok_or(CKR_DEVICE_ERROR)?;
+            data.reserve(combined_len - data.len());
+            data.extend_from_slice(&response.data);
+
+            let available = (response.status & 0x00ff) as u32;
+            let get_response = CommandApdu {
+                cla: 0x00,
+                ins: 0xc0,
+                p1: 0,
+                p2: 0,
+                data: vec![],
+                le: Some(if available == 0 { 256 } else { available }),
+                extended: false,
+            };
+            response = transmit(connector, &get_response)?;
+        }
+
+        let combined_len = data
+            .len()
+            .checked_add(response.data.len())
+            .filter(|length| *length <= MAX_CHAINED_RESPONSE_LENGTH)
+            .ok_or(CKR_DEVICE_ERROR)?;
+        data.reserve(combined_len - data.len());
+        data.extend_from_slice(&response.data);
+        Ok(ResponseApdu {
+            data,
+            status: response.status,
+        })
     }
 
     fn protect_command(&mut self, command: &CommandApdu) -> Result<CommandApdu, Error> {
@@ -479,6 +708,15 @@ impl Scp03Session {
     }
 
     fn unprotect_response(&self, response: ResponseApdu) -> Result<ResponseApdu, Error> {
+        if response.status != RESPONSE_OK
+            && response.status & 0xff00 != 0x6200
+            && response.status & 0xff00 != 0x6300
+        {
+            if !response.data.is_empty() {
+                return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+            }
+            return Ok(response);
+        }
         let mut data = response.data;
         if self.security_level & SECURITY_R_MAC != 0 {
             if data.len() < MAC_LENGTH {
@@ -517,13 +755,16 @@ impl Scp03Session {
     }
 }
 
-pub(crate) fn select_security_domain(connector: &dyn Connector) -> Result<(), Error> {
+pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Result<(), Error> {
+    if !(5..=16).contains(&aid.len()) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     let select = CommandApdu {
         cla: 0x00,
         ins: 0xa4,
         p1: 0x04,
         p2: 0x00,
-        data: SECURITY_DOMAIN_AID.to_vec(),
+        data: aid.to_vec(),
         le: Some(256),
         extended: false,
     };
@@ -568,9 +809,40 @@ fn validate_card_capabilities(implementation: u8, security_level: u8) -> Result<
 }
 
 pub(crate) fn configured_security_level() -> Result<u8, Error> {
-    let security_level = environment_byte("PKCS11RS_SCP03_SECURITY_LEVEL", 0x03)?;
+    let security_level = environment_byte("PKCS11RS_SCP03_SECURITY_LEVEL", YUBIKEY_SECURITY_LEVEL)?;
     validate_security_level(security_level)?;
     Ok(security_level)
+}
+
+pub(crate) fn configured_application_aid() -> Result<Zeroizing<Vec<u8>>, Error> {
+    let aid = match std::env::var("PKCS11RS_SCP03_AID") {
+        Ok(value) => Zeroizing::new(parse_hex(&value)?),
+        Err(std::env::VarError::NotPresent) => {
+            Zeroizing::new(YUBIKEY_ISSUER_SECURITY_DOMAIN_AID.to_vec())
+        }
+        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+    if !(5..=16).contains(&aid.len()) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(aid)
+}
+
+fn yubico_diversify_key(
+    bmk: &[u8],
+    label: [u8; 4],
+    issuer_context: &[u8; 10],
+) -> Result<Vec<u8>, Error> {
+    if bmk.len() != YUBICO_BMK_LENGTH {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let mut input = Vec::with_capacity(18);
+    input.push(1);
+    input.extend_from_slice(&label);
+    input.push(0);
+    input.extend_from_slice(issuer_context);
+    input.extend_from_slice(&YUBICO_DIVERSIFIED_KEY_BITS.to_be_bytes());
+    Ok(aes_cmac(bmk, &input)?.to_vec())
 }
 
 fn derive(key: &[u8], constant: u8, context: &[u8], output_bits: u16) -> Result<Vec<u8>, Error> {
@@ -742,6 +1014,18 @@ mod tests {
         parse_hex(value).unwrap()
     }
 
+    fn test_session(security_level: u8) -> Scp03Session {
+        let key = hex("404142434445464748494a4b4c4d4e4f");
+        Scp03Session {
+            s_enc: Zeroizing::new(key.clone()),
+            s_mac: Zeroizing::new(key.clone()),
+            s_rmac: Zeroizing::new(key),
+            mac_chaining_value: [0; 16],
+            encryption_counter: 0,
+            security_level,
+        }
+    }
+
     #[test]
     fn encodes_short_apdu_cases() {
         assert_eq!(
@@ -764,7 +1048,7 @@ mod tests {
                 ins: 0xa4,
                 p1: 4,
                 p2: 0,
-                data: SECURITY_DOMAIN_AID.to_vec(),
+                data: YUBIKEY_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
                 le: Some(256),
                 extended: false,
             }
@@ -883,13 +1167,99 @@ mod tests {
     }
 
     #[test]
+    fn yubikey_factory_key_set_uses_documented_defaults() {
+        let keys = Scp03KeySet::yubikey_factory();
+        assert_eq!(keys.key_version, YUBIKEY_FACTORY_KEY_VERSION);
+        assert_eq!(keys.key_id, YUBIKEY_FACTORY_KEY_ID);
+        assert_eq!(keys.enc.as_slice(), YUBIKEY_FACTORY_KEY);
+        assert_eq!(keys.mac.as_slice(), YUBIKEY_FACTORY_KEY);
+        assert_eq!(
+            keys.dek.as_ref().map(|key| key.as_slice()),
+            Some(YUBIKEY_FACTORY_KEY.as_slice())
+        );
+        assert_eq!(YUBIKEY_SECURITY_LEVEL, 0x33);
+    }
+
+    #[test]
+    fn accepts_explicit_generic_scp03_key_sizes_and_security_levels() {
+        for key_size in [16, 24, 32] {
+            assert!(Scp03KeySet::new(
+                1,
+                0,
+                vec![1; key_size],
+                vec![2; key_size],
+                vec![3; key_size],
+            )
+            .is_ok());
+        }
+        for security_level in [0x00, 0x01, 0x03, 0x11, 0x13, 0x33] {
+            assert!(validate_security_level(security_level).is_ok());
+        }
+    }
+
+    #[test]
+    fn yubico_diversification_matches_sp800_108_cmac_vectors() {
+        let bmk = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        let issuer_context: [u8; 10] = hex("00010203040506070809").try_into().unwrap();
+        assert_eq!(
+            yubico_diversify_key(&bmk, YUBICO_DIVERSIFICATION_ENC_LABEL, &issuer_context).unwrap(),
+            hex("6D8EF504CDFCA3D667DE72F24C4C82AF")
+        );
+        assert_eq!(
+            yubico_diversify_key(&bmk, YUBICO_DIVERSIFICATION_MAC_LABEL, &issuer_context).unwrap(),
+            hex("90753AB6FD71D3BB9618DBEA179E0A56")
+        );
+        assert_eq!(
+            yubico_diversify_key(&bmk, YUBICO_DIVERSIFICATION_DEK_LABEL, &issuer_context).unwrap(),
+            hex("53A68B700A229B4314315BFCB162A650")
+        );
+        assert!(yubico_diversify_key(
+            &bmk[..AES_BLOCK_SIZE],
+            YUBICO_DIVERSIFICATION_ENC_LABEL,
+            &issuer_context,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn resolves_all_three_keys_from_the_initialize_update_context() {
+        let keys = Scp03KeySet {
+            key_version: 7,
+            key_id: 0,
+            enc: Zeroizing::new(Vec::new()),
+            mac: Zeroizing::new(Vec::new()),
+            dek: None,
+            diversification_bmk: Some(Zeroizing::new(hex(
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            ))),
+        };
+        keys.validate().unwrap();
+        let resolved = keys
+            .resolve(&hex("00010203040506070809").try_into().unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.enc.as_slice(),
+            hex("6D8EF504CDFCA3D667DE72F24C4C82AF")
+        );
+        assert_eq!(
+            resolved.mac.as_slice(),
+            hex("90753AB6FD71D3BB9618DBEA179E0A56")
+        );
+        assert_eq!(
+            resolved.dek.as_ref().map(|key| key.as_slice()),
+            Some(hex("53A68B700A229B4314315BFCB162A650").as_slice())
+        );
+    }
+
+    #[test]
     fn selects_configured_security_domain() {
         let connector = ScriptedConnector::new(vec![hex("6f 00 90 00")]);
-        select_security_domain(&connector).unwrap();
+        select_application(&connector, &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID).unwrap();
         assert_eq!(
             connector.commands.into_inner(),
             vec![hex("00 A4 04 00 08 A0 00 00 01 51 00 00 00 00")]
         );
+        assert!(select_application(&ScriptedConnector::new(Vec::new()), &[1, 2, 3, 4]).is_err());
     }
 
     #[test]
@@ -1008,6 +1378,349 @@ mod tests {
     }
 
     #[test]
+    fn chains_after_protecting_the_complete_command() {
+        let data: Vec<u8> = (0..300).map(|value| value as u8).collect();
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xe2,
+            p1: 0x02,
+            p2: 0x03,
+            data: data.clone(),
+            le: Some(256),
+            extended: false,
+        };
+        let connector = ScriptedConnector::new(vec![hex("90 00"), hex("90 00")]);
+        let response = test_session(0x01)
+            .transmit_chained(&connector, &command)
+            .unwrap();
+        assert_eq!(response.status, RESPONSE_OK);
+
+        let commands = connector.commands.into_inner();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(&commands[0][..5], &[0x84, 0xe2, 0x82, 0x03, 0xff]);
+        assert_eq!(&commands[1][..5], &[0x84, 0xe2, 0x02, 0x03, 0x35]);
+        assert_eq!(commands[1].last(), Some(&0));
+
+        let mut protected_data = commands[0][5..].to_vec();
+        protected_data.extend_from_slice(&commands[1][5..commands[1].len() - 1]);
+        assert_eq!(&protected_data[..data.len()], data);
+        assert_eq!(
+            &protected_data[data.len()..],
+            &hex("6F CD 3B 5E DE 1D 71 78")
+        );
+    }
+
+    #[test]
+    fn encrypts_the_complete_command_before_chaining() {
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xe2,
+            p1: 0,
+            p2: 0,
+            data: vec![0x5a; 300],
+            le: None,
+            extended: false,
+        };
+        let connector = ScriptedConnector::new(vec![hex("90 00"), hex("90 00")]);
+        test_session(0x03)
+            .transmit_chained(&connector, &command)
+            .unwrap();
+
+        let commands = connector.commands.into_inner();
+        let mut protected_data = commands[0][5..].to_vec();
+        protected_data.extend_from_slice(&commands[1][5..]);
+        assert_eq!(protected_data.len(), 312);
+        assert_eq!(
+            &protected_data[..16],
+            &hex("1E C7 81 53 83 11 08 31 66 3C CC E3 A5 DE 45 06")
+        );
+        assert_eq!(
+            &protected_data[protected_data.len() - MAC_LENGTH..],
+            &hex("EE CC BD 4C 2A 82 50 C9")
+        );
+    }
+
+    #[test]
+    fn chained_intermediate_responses_omit_rmac() {
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xe2,
+            p1: 0,
+            p2: 0,
+            data: vec![0x5a; 300],
+            le: None,
+            extended: false,
+        };
+        let mut preview = test_session(0x11);
+        preview.protect_command(&command).unwrap();
+        let mut rmac_input = preview.mac_chaining_value.to_vec();
+        rmac_input.extend_from_slice(&RESPONSE_OK.to_be_bytes());
+        let rmac = aes_cmac(&preview.s_rmac, &rmac_input).unwrap();
+        let mut final_response = rmac[..MAC_LENGTH].to_vec();
+        final_response.extend_from_slice(&RESPONSE_OK.to_be_bytes());
+        let connector = ScriptedConnector::new(vec![hex("90 00"), final_response]);
+
+        let response = test_session(0x11)
+            .transmit_chained(&connector, &command)
+            .unwrap();
+        assert_eq!(
+            response,
+            ResponseApdu {
+                data: vec![],
+                status: RESPONSE_OK,
+            }
+        );
+    }
+
+    #[test]
+    fn collects_iso_response_chains() {
+        let connector = ScriptedConnector::new(vec![hex("AA 61 02"), hex("BB CC 90 00")]);
+        let response = test_session(0x01)
+            .transmit(
+                &connector,
+                &CommandApdu {
+                    cla: 0x80,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0,
+                    data: vec![],
+                    le: Some(256),
+                    extended: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            response,
+            ResponseApdu {
+                data: hex("AA BB CC"),
+                status: RESPONSE_OK,
+            }
+        );
+        let commands = connector.commands.into_inner();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1], hex("00 C0 00 00 02"));
+    }
+
+    #[test]
+    fn response_chain_is_verified_and_decrypted_as_one_response() {
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xca,
+            p1: 0,
+            p2: 0,
+            data: vec![],
+            le: Some(256),
+            extended: false,
+        };
+        let mut preview = test_session(0x33);
+        preview.protect_command(&command).unwrap();
+        let plaintext: Vec<u8> = (0..300).map(|value| value as u8).collect();
+        let iv = preview.command_iv(true).unwrap();
+        let ciphertext = aes_cbc(&preview.s_enc, &iv, &pad(&plaintext), Mode::Encrypt).unwrap();
+        let mut rmac_input = preview.mac_chaining_value.to_vec();
+        rmac_input.extend_from_slice(&ciphertext);
+        rmac_input.extend_from_slice(&RESPONSE_OK.to_be_bytes());
+        let rmac = aes_cmac(&preview.s_rmac, &rmac_input).unwrap();
+        let mut protected_response = ciphertext;
+        protected_response.extend_from_slice(&rmac[..MAC_LENGTH]);
+
+        let mut first_response = protected_response[..256].to_vec();
+        first_response.extend([0x61, 0x00]);
+        let mut final_response = protected_response[256..].to_vec();
+        final_response.extend_from_slice(&RESPONSE_OK.to_be_bytes());
+        let connector = ScriptedConnector::new(vec![first_response, final_response]);
+
+        let response = test_session(0x33).transmit(&connector, &command).unwrap();
+        assert_eq!(
+            response,
+            ResponseApdu {
+                data: plaintext,
+                status: RESPONSE_OK,
+            }
+        );
+        assert_eq!(connector.commands.into_inner()[1], hex("00 C0 00 00 00"));
+    }
+
+    #[test]
+    fn chained_transfer_stops_on_invalid_intermediate_response() {
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xe2,
+            p1: 0,
+            p2: 0,
+            data: vec![0x5a; 300],
+            le: None,
+            extended: false,
+        };
+        for response in [hex("6A 80"), hex("01 90 00")] {
+            let connector = ScriptedConnector::new(vec![response]);
+            assert!(test_session(0x01)
+                .transmit_chained(&connector, &command)
+                .is_err());
+            assert_eq!(connector.commands.into_inner().len(), 1);
+        }
+    }
+
+    #[test]
+    fn chained_transfer_rejects_ambiguous_header_inputs() {
+        let connector = ScriptedConnector::new(vec![]);
+        for (p1, le) in [(MORE_COMMANDS, None), (0, Some(65_536))] {
+            let mut session = test_session(0x01);
+            let result = session.transmit_chained(
+                &connector,
+                &CommandApdu {
+                    cla: 0x80,
+                    ins: 0xe2,
+                    p1,
+                    p2: 0,
+                    data: vec![0; 300],
+                    le,
+                    extended: false,
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(session.encryption_counter, 0);
+        }
+    }
+
+    #[test]
+    fn error_responses_do_not_require_rmac() {
+        let connector = ScriptedConnector::new(vec![hex("6A 80")]);
+        let response = test_session(0x11)
+            .transmit(
+                &connector,
+                &CommandApdu {
+                    cla: 0x80,
+                    ins: 0xe2,
+                    p1: 0,
+                    p2: 0,
+                    data: vec![1],
+                    le: None,
+                    extended: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(response.status, 0x6a80);
+        assert!(response.data.is_empty());
+    }
+
+    #[test]
+    fn yubikey_sessions_share_and_require_the_authenticated_channel() {
+        let connector = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]));
+        let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
+        let session = crate::YubiKeySession {
+            slotID: 1,
+            flags: 0,
+            connector: connector.clone(),
+            session: shared.clone(),
+        };
+        let response = session
+            .send_apdu(
+                &CommandApdu {
+                    cla: 0x80,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(256),
+                    extended: false,
+                },
+                false,
+            )
+            .unwrap();
+        assert_eq!(response.status, RESPONSE_OK);
+        assert_eq!(connector.commands.borrow().len(), 1);
+        assert_eq!(connector.commands.borrow()[0][0], 0x84);
+        assert_eq!(shared.borrow().as_ref().unwrap().encryption_counter, 1);
+
+        *shared.borrow_mut() = None;
+        assert!(session
+            .send_apdu(
+                &CommandApdu {
+                    cla: 0,
+                    ins: 0x84,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(8),
+                    extended: false,
+                },
+                false,
+            )
+            .is_err());
+        assert_eq!(connector.commands.borrow().len(), 1);
+    }
+
+    #[test]
+    fn yubikey_sessions_discard_desynchronized_channels() {
+        let connector = std::rc::Rc::new(ScriptedConnector::new(vec![]));
+        let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
+        let session = crate::YubiKeySession {
+            slotID: 1,
+            flags: 0,
+            connector,
+            session: shared.clone(),
+        };
+        assert!(session
+            .send_apdu(
+                &CommandApdu {
+                    cla: 0,
+                    ins: 0x84,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(8),
+                    extended: false,
+                },
+                false,
+            )
+            .is_err());
+        assert!(shared.borrow().is_none());
+    }
+
+    #[test]
+    fn authenticates_with_yubico_diversified_transport_keys() {
+        let keys = Scp03KeySet {
+            key_version: 7,
+            key_id: 0,
+            enc: Zeroizing::new(Vec::new()),
+            mac: Zeroizing::new(Vec::new()),
+            dek: None,
+            diversification_bmk: Some(Zeroizing::new(hex(
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            ))),
+        };
+        keys.validate().unwrap();
+        let issuer_context: [u8; 10] = hex("00010203040506070809").try_into().unwrap();
+        let resolved = keys.resolve(&issuer_context).unwrap();
+        let host: [u8; 8] = hex("0102030405060708").try_into().unwrap();
+        let card = hex("1112131415161718");
+        let mut session_context = host.to_vec();
+        session_context.extend_from_slice(&card);
+        let s_mac = derive(&resolved.mac, DERIVATION_S_MAC, &session_context, 128).unwrap();
+        let card_cryptogram =
+            derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &session_context, 64).unwrap();
+        let mut initialize_response = issuer_context.to_vec();
+        initialize_response.extend([7, 3, 0x60]);
+        initialize_response.extend_from_slice(&card);
+        initialize_response.extend_from_slice(&card_cryptogram);
+        initialize_response.extend([0x90, 0x00]);
+        let connector = ScriptedConnector::new(vec![initialize_response, hex("90 00")]);
+
+        Scp03Session::establish_with_challenge(
+            &connector,
+            &keys,
+            YUBIKEY_SECURITY_LEVEL,
+            host,
+            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        )
+        .unwrap();
+        let commands = connector.commands.into_inner();
+        assert_eq!(&commands[0][..5], &hex("80 50 07 00 08"));
+        assert_eq!(&commands[1][..5], &hex("84 82 33 00 10"));
+    }
+
+    #[test]
     fn authenticates_with_deterministic_challenges() {
         let keys = Scp03KeySet::new(
             0,
@@ -1030,7 +1743,14 @@ mod tests {
         initialize_response.extend([0x90, 0x00]);
         let connector = ScriptedConnector::new(vec![initialize_response, hex("90 00")]);
 
-        Scp03Session::establish_with_challenge(&connector, &keys, 0x03, host).unwrap();
+        Scp03Session::establish_with_challenge(
+            &connector,
+            &keys,
+            0x03,
+            host,
+            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        )
+        .unwrap();
         let commands = connector.commands.into_inner();
         assert_eq!(
             commands[0],
@@ -1055,7 +1775,7 @@ mod tests {
         let host: [u8; 8] = hex("0102030405060708").try_into().unwrap();
         let sequence = hex("000001");
         let mut challenge_context = sequence.clone();
-        challenge_context.extend_from_slice(&SECURITY_DOMAIN_AID);
+        challenge_context.extend_from_slice(&YUBIKEY_ISSUER_SECURITY_DOMAIN_AID);
         let card = derive(&keys.enc, DERIVATION_CARD_CHALLENGE, &challenge_context, 64).unwrap();
         assert_eq!(card, hex("86 C8 BD 65 FA 10 44 EE"));
         let mut session_context = host.to_vec();
@@ -1071,7 +1791,14 @@ mod tests {
         initialize_response.extend([0x90, 0x00]);
         let connector = ScriptedConnector::new(vec![initialize_response, hex("90 00")]);
 
-        Scp03Session::establish_with_challenge(&connector, &keys, 0x03, host).unwrap();
+        Scp03Session::establish_with_challenge(
+            &connector,
+            &keys,
+            0x03,
+            host,
+            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        )
+        .unwrap();
     }
 
     #[test]

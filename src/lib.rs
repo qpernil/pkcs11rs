@@ -29,7 +29,10 @@ pub mod error;
 use error::*;
 
 mod scp03;
-use scp03::{configured_security_level, select_security_domain, Scp03KeySet, Scp03Session};
+use scp03::{
+    configured_application_aid, configured_security_level, select_application, CommandApdu,
+    ResponseApdu, Scp03KeySet, Scp03Session,
+};
 
 pub mod pkcs11 {
     #![allow(
@@ -277,7 +280,7 @@ impl YubiHsmSlot {
 #[derive(Debug)]
 struct YubiKeySlot {
     connector: Rc<dyn Connector>,
-    session: Option<Scp03Session>,
+    session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
 impl Slot for YubiKeySlot {
@@ -309,32 +312,38 @@ impl Slot for YubiKeySlot {
         self.connector.refresh()
     }
     fn clear_session(&mut self) {
-        self.session = None;
+        *self.session.borrow_mut() = None;
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {
             slotID,
             flags,
             connector: self.connector.clone(),
+            session: self.session.clone(),
         })
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        select_security_domain(self.connector.as_ref())?;
+        *self.session.try_borrow_mut()? = None;
+        let selected_aid = configured_application_aid()?;
+        select_application(self.connector.as_ref(), &selected_aid)?;
         let keys = Scp03KeySet::from_environment()?;
         let security_level = configured_security_level()?;
-        self.session = Some(Scp03Session::authenticate_selected(
+        let session = Scp03Session::authenticate_selected(
             self.connector.as_ref(),
             &keys,
             security_level,
-        )?);
+            &selected_aid,
+        )?;
+        *self.session.try_borrow_mut()? = Some(session);
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
-        self.session = None;
+        *self.session.try_borrow_mut()? = None;
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        select_security_domain(self.connector.as_ref())
+        let selected_aid = configured_application_aid()?;
+        select_application(self.connector.as_ref(), &selected_aid)
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
@@ -513,6 +522,7 @@ struct YubiKeySession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
+    session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
 impl Session for YubiKeySession {
@@ -526,28 +536,40 @@ impl Session for YubiKeySession {
         self.flags
     }
     fn get_session_info(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout).map(|_| ())
+        Ok(())
     }
     fn generate(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout).map(|_| ())
+        self.send_apdu(
+            &CommandApdu {
+                cla: 0x00,
+                ins: 0x84,
+                p1: 0x00,
+                p2: 0x00,
+                data: Vec::new(),
+                le: Some(8),
+                extended: false,
+            },
+            false,
+        )
+        .map(|_| ())
     }
 }
 
 impl YubiKeySession {
-    fn send_cmd(&self, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector.send(data, timeout)
+    fn send_apdu(&self, command: &CommandApdu, chained: bool) -> Result<ResponseApdu, Error> {
+        let mut session_guard = self.session.try_borrow_mut()?;
+        let result = {
+            let session = session_guard.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+            if chained {
+                session.transmit_chained(self.connector.as_ref(), command)
+            } else {
+                session.transmit(self.connector.as_ref(), command)
+            }
+        };
+        if result.is_err() {
+            *session_guard = None;
+        }
+        result
     }
 }
 
@@ -1259,7 +1281,7 @@ impl Context {
                     let slot_id = next_key(&self.slots, 0);
                     let mut slot = Box::new(YubiKeySlot {
                         connector: Rc::new(connector),
-                        session: None,
+                        session: Rc::new(RefCell::new(None)),
                     });
                     if slot.is_present() {
                         map(slot.init_slot());
