@@ -1721,6 +1721,291 @@ mod tests {
     }
 
     #[test]
+    fn matches_kaoh_globalplatform_scp03_authentication_vector() {
+        // Published by the GlobalPlatform open-source implementation:
+        // https://github.com/kaoh/globalplatform/blob/master/globalplatform/src/scp03Test.c
+        let keys = Scp03KeySet::new(
+            0,
+            0,
+            hex("F995D0A069335C7DF42E590317FFEA6D"),
+            hex("58563362EC5A4541ABCD32B34B1EAE7D"),
+            hex("0A02A6D687406DCFA09DC70B3EDB7E38"),
+        )
+        .unwrap();
+        let host: [u8; 8] = hex("9BD6BF878FB8E991").try_into().unwrap();
+        let connector = ScriptedConnector::new(vec![
+            hex("00000000000000000000 300370 3C80C2CC87EB3A35 \
+                 E4EDBA35E629C336 00001E 9000"),
+            hex("9000"),
+        ]);
+
+        let session = Scp03Session::establish_with_challenge(
+            &connector,
+            &keys,
+            0x03,
+            host,
+            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.s_enc.as_slice(),
+            hex("D83EE38C9954C8078987A5E9EE6AB13C")
+        );
+        assert_eq!(
+            session.s_mac.as_slice(),
+            hex("6FF37716E0413065E8DFD08BF1E9EC5E")
+        );
+        assert_eq!(
+            session.s_rmac.as_slice(),
+            hex("0254C786E57ACA8982670C1C1A05FF12")
+        );
+        assert_eq!(
+            connector.commands.into_inner(),
+            vec![
+                hex("8050000008 9BD6BF878FB8E991 00"),
+                hex("8482030010 23EBFEDC579D22CD CDB6A25A5FF7891F"),
+            ]
+        );
+    }
+
+    #[test]
+    fn matches_samsung_openscp_s8_exchange_vectors() {
+        // Samsung OpenSCP publishes complete S8 exchanges for all AES key sizes:
+        // https://github.com/Samsung/OpenSCP-Java/tree/main/src/test/java/com/samsung/openscp/testdata
+        struct Vector<'a> {
+            enc: &'a str,
+            mac: &'a str,
+            dek: &'a str,
+            initialize_response: &'a str,
+            external_authenticate: &'a str,
+            protected_commands: [&'a str; 3],
+            protected_responses: [&'a str; 3],
+        }
+
+        let vectors = [
+            Vector {
+                enc: "1D72CD9283FD55162722C6BEAA4DC187",
+                mac: "F4932BA02FFC3098D172790099D28382",
+                dek: "B4BDC610C3F6793708FF1132E2C5BF60",
+                initialize_response: concat!(
+                    "A1A01243058551312085 300370 9CE033FA78E6B10D ",
+                    "DC2DBE8974C8B0DE 00082A 9000"
+                ),
+                external_authenticate: "8482330010 B08D6CE26B6CB3CC B411CF0296EB7B1D",
+                protected_commands: [
+                    "84F2200018 5230BA64388B4A40E0B4DA5CC1DF51C2 85E4020D99D5AED1",
+                    "84F2400018 1819D47B42BBE6B9449BBC2BD43A090D AC1F2F0A52D9F34B",
+                    "84F2800018 09F07C3DF47956B1052951FA28211BA7 BABC05C321D9B3BF",
+                ],
+                protected_responses: [
+                    concat!(
+                        "BD3292BFB1A23C4478E37292BA1EDF43",
+                        "8770CE472FB7611FBDBD1C981A27FA47",
+                        "80A81A95D93C05F9C4C94839DED0363C",
+                        "FEA57CE2ECFB572B26F3474DAEEBBABC",
+                        "202942381F9755F5 9000"
+                    ),
+                    concat!(
+                        "BB82442BB5CC8C839620615D1F163D3D",
+                        "DBC9357D68EF4BAD997CFBB79A24C224",
+                        "A89488C44B25C3B23D489E4E58A309D4",
+                        "38FDD6E453D0E07216541FB142B977A3",
+                        "A7D4C4048BBE2BA068F04A0A4A9C50B",
+                        "AD232F8CA8EA1F40E 9000"
+                    ),
+                    concat!(
+                        "31EB08363026463BAD10AF29F24301F1",
+                        "D9B8532067F9313D97FDA39BBE6B6099",
+                        "BEFD623E1F79FB5D 9000"
+                    ),
+                ],
+            },
+            Vector {
+                enc: "1D72CD9283FD55162722C6BEAA4DC1877F4C0CD0ECC15E05",
+                mac: "F4932BA02FFC3098D172790099D2838236F2E61068D56F44",
+                dek: "B4BDC610C3F6793708FF1132E2C5BF60523AEAC06B32F204",
+                initialize_response: concat!(
+                    "A1A01243058551312085 300370 9CE033FA78E6B10D ",
+                    "6E7C64F962A822A4 00082A 9000"
+                ),
+                external_authenticate: "8482330010 63B6CEFAC0EC0983 33860788C65220BA",
+                protected_commands: [
+                    "84F2200018 D9EDCBCB7F69CB1EF0508E6EDE933A6D 80091E7D99CB3E51",
+                    "84F2400018 CDC4B0480CF151C1132655133115A8CA 1A89964F2554551C",
+                    "84F2800018 96800333FA638A32DBCCBF4C7E52FBD5 DA469A954E1D58F6",
+                ],
+                protected_responses: [
+                    concat!(
+                        "99077B167D43A4F313B59B63CC23EFD3",
+                        "B5158BDEF8F24D85E250570A4AAB8186",
+                        "9A92307350267F0FBC2278FA3D34D2FD",
+                        "5D2B4E8C0362C01D082C76A17B80AEA4",
+                        "BA5FB9D7DA3BB368 9000"
+                    ),
+                    concat!(
+                        "AB7A97B6C673DF3D95378D06B7B42E25",
+                        "D7C3B22D6D1A42299FFED17F5973950E",
+                        "C68C77700FC01947067470178A1D0615",
+                        "2ED648E95E8C3510B61CF0036DFD8C9F",
+                        "6FA167D32FDEB3F81A0E6B2BB35BCD4C",
+                        "D104692D131D7776 9000"
+                    ),
+                    concat!(
+                        "E5E5761FEFF5C0C078ADBC4E77B72900",
+                        "94C99183AC73CAB99A7412D0194DEFFD",
+                        "D0895DCCE662D945 9000"
+                    ),
+                ],
+            },
+            Vector {
+                enc: concat!(
+                    "1D72CD9283FD55162722C6BEAA4DC187",
+                    "7F4C0CD0ECC15E052AAC39A99AF9AD72"
+                ),
+                mac: concat!(
+                    "F4932BA02FFC3098D172790099D28382",
+                    "36F2E61068D56F4401CC0374C25AF8CB"
+                ),
+                dek: concat!(
+                    "B4BDC610C3F6793708FF1132E2C5BF60",
+                    "523AEAC06B32F204B851B6CC007C8D3C"
+                ),
+                initialize_response: concat!(
+                    "A1A01243058551312085 300370 9CE033FA78E6B10D ",
+                    "8AFA7267CB63740E 00082A 9000"
+                ),
+                external_authenticate: "8482330010 50E003735F922282 69A094FFC07429FD",
+                protected_commands: [
+                    "84F2200018 BD57D1382AE8F66F7EB5F5991B92D139 9044157C7DFD2761",
+                    "84F2400018 45D2B475C3EFF8BBB254D0B6A8E6CA97 CF5265D907A76070",
+                    "84F2800018 7083CA3ADA0F76CF7B3FFAC60ABE1359 9D521EE7B9224C49",
+                ],
+                protected_responses: [
+                    concat!(
+                        "47D81041004B7E9208E3BEF1372E7CDE",
+                        "8CD995AEF207F138C80D45156F2D36F2",
+                        "B15BDC9C4D6FDB9774344495CCC83AE7",
+                        "BA0B39C734BF9CEBD07204AA5A67DF2D",
+                        "7E663D55FC4944C0 9000"
+                    ),
+                    concat!(
+                        "59E8DCFDC22D436336552128F790E1B3",
+                        "83D6942ED4025F30FE8D95541E634E23",
+                        "8BFD963D88DF822D8EBCC1272A9D56C7",
+                        "D1CBC306039647FC4977EFF562C0B8C0",
+                        "1314B1C8B2D168A581A98C65B676B3EE",
+                        "4032E91A9C0858EC 9000"
+                    ),
+                    concat!("E58CB33A46F76909ADDDFF0C2821F4F2", "5F22B5553C534DC6 9000"),
+                ],
+            },
+        ];
+        let host: [u8; 8] = hex("06F85B77251BF794").try_into().unwrap();
+        let plain_responses = [
+            concat!(
+                "08A00000015141434C010010A00000022020030101010000000000060100",
+                "10A0000002202003010101000000000011010005A0000002480100"
+            ),
+            concat!(
+                "0AA9A8A7A6A5A4A3A2A1A00F800AA0A1A2A3A4A5A6A7A8A9070009",
+                "A00000015141434C00070010A00000022020030103010000000000110700",
+                "07A00000024804000700"
+            ),
+            "08A0000001510000000F9E",
+        ];
+
+        for vector in vectors {
+            // These traces reuse one externally supplied card challenge for all key sizes even
+            // though i=70 marks it as pseudo-random. The kaoh vector above covers verification
+            // of a key-derived challenge; these vectors start at card-cryptogram verification.
+            let mut responses = vec![hex("9000")];
+            responses.extend(vector.protected_responses.map(hex));
+            let connector = ScriptedConnector::new(responses);
+            let keys = Scp03KeySet::new(0x30, 0, hex(vector.enc), hex(vector.mac), hex(vector.dek))
+                .unwrap();
+            let initialize_response =
+                ResponseApdu::parse(&hex(vector.initialize_response)).unwrap();
+            let update = InitializeUpdate::parse(&initialize_response.data).unwrap();
+            let mut context = host.to_vec();
+            context.extend_from_slice(&update.card_challenge);
+            let s_enc = Zeroizing::new(
+                derive(
+                    &keys.enc,
+                    DERIVATION_S_ENC,
+                    &context,
+                    (keys.enc.len() * 8) as u16,
+                )
+                .unwrap(),
+            );
+            let s_mac = Zeroizing::new(
+                derive(
+                    &keys.mac,
+                    DERIVATION_S_MAC,
+                    &context,
+                    (keys.mac.len() * 8) as u16,
+                )
+                .unwrap(),
+            );
+            let s_rmac = Zeroizing::new(
+                derive(
+                    &keys.mac,
+                    DERIVATION_S_RMAC,
+                    &context,
+                    (keys.mac.len() * 8) as u16,
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64).unwrap(),
+                initialize_response.data[21..29]
+            );
+            let host_cryptogram = derive(&s_mac, DERIVATION_HOST_CRYPTOGRAM, &context, 64).unwrap();
+            let mut session = Scp03Session {
+                s_enc,
+                s_mac,
+                s_rmac,
+                mac_chaining_value: [0; AES_BLOCK_SIZE],
+                encryption_counter: 0,
+                security_level: 0x33,
+            };
+            let authenticate = session.external_authenticate(&host_cryptogram).unwrap();
+            transmit(&connector, &authenticate)
+                .unwrap()
+                .require_success()
+                .unwrap();
+
+            for (p1, expected) in [0x20, 0x40, 0x80].into_iter().zip(plain_responses) {
+                let response = session
+                    .transmit(
+                        &connector,
+                        &CommandApdu {
+                            cla: 0x80,
+                            ins: 0xf2,
+                            p1,
+                            p2: 0,
+                            data: hex("4F00"),
+                            le: None,
+                            extended: false,
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    response,
+                    ResponseApdu {
+                        data: hex(expected),
+                        status: RESPONSE_OK
+                    }
+                );
+            }
+
+            let mut expected_commands = vec![hex(vector.external_authenticate)];
+            expected_commands.extend(vector.protected_commands.map(hex));
+            assert_eq!(connector.commands.into_inner(), expected_commands);
+        }
+    }
+
+    #[test]
     fn authenticates_with_deterministic_challenges() {
         let keys = Scp03KeySet::new(
             0,
