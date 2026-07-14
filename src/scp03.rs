@@ -273,6 +273,11 @@ impl Scp03KeySet {
         if !valid_aes_key(&self.enc)
             || !valid_aes_key(&self.mac)
             || self.dek.as_deref().is_some_and(|key| !valid_aes_key(key))
+            || self.enc.len() != self.mac.len()
+            || self
+                .dek
+                .as_deref()
+                .is_some_and(|key| key.len() != self.enc.len())
         {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
@@ -367,10 +372,12 @@ fn environment_byte(name: &str, default: u8) -> Result<u8, Error> {
 }
 
 fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
-    let compact: String = value
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace() && *character != ':')
-        .collect();
+    let compact = Zeroizing::new(
+        value
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace() && *character != ':')
+            .collect::<String>(),
+    );
     if !compact.len().is_multiple_of(2) || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
@@ -662,6 +669,9 @@ impl Scp03Session {
         while response.status & 0xff00 == 0x6100 {
             segments += 1;
             if segments > MAX_RESPONSE_CHAIN_SEGMENTS {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            if segments > 1 && response.data.is_empty() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             let combined_len = data
@@ -1244,6 +1254,8 @@ mod tests {
             )
             .is_ok());
         }
+        assert!(Scp03KeySet::new(1, 0, vec![1; 16], vec![2; 24], vec![3; 16]).is_err());
+        assert!(Scp03KeySet::new(1, 0, vec![1; 16], vec![2; 16], vec![3; 32]).is_err());
         for security_level in [0x00, 0x01, 0x03, 0x11, 0x13, 0x33] {
             assert!(validate_security_level(security_level).is_ok());
         }
@@ -1551,6 +1563,32 @@ mod tests {
         let commands = connector.commands.into_inner();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[1], hex("00 C0 00 00 02"));
+    }
+
+    #[test]
+    fn response_chain_requires_progress_after_initial_continuation() {
+        let command = CommandApdu {
+            cla: 0x80,
+            ins: 0xca,
+            p1: 0,
+            p2: 0,
+            data: vec![],
+            le: Some(256),
+            extended: false,
+        };
+
+        let connector = ScriptedConnector::new(vec![hex("61 01"), hex("61 01")]);
+        assert!(test_session(0x01).transmit(&connector, &command).is_err());
+        assert_eq!(connector.commands.into_inner().len(), 2);
+
+        let connector = ScriptedConnector::new(vec![hex("61 01"), hex("AA 90 00")]);
+        assert_eq!(
+            test_session(0x01)
+                .transmit(&connector, &command)
+                .unwrap()
+                .data,
+            hex("AA")
+        );
     }
 
     #[test]
