@@ -17,6 +17,7 @@ CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
 CKR_ATTRIBUTE_READ_ONLY = 0x10
 CKR_ATTRIBUTE_SENSITIVE = 0x11
+CKR_DATA_LEN_RANGE = 0x21
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
@@ -39,6 +40,7 @@ CKR_SESSION_ASYNC_NOT_SUPPORTED = 0x205
 CKF_RW_SESSION = 0x00000002
 CKF_SERIAL_SESSION = 0x00000004
 CKF_ASYNC_SESSION = 0x00000008
+CKF_INTERFACE_FORK_SAFE = 0x00000001
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
@@ -434,6 +436,11 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_SESSION_INFO),
         ]
         cls.lib.C_GetSessionInfo.restype = CK_RV
+        cls.lib.C_GetTokenInfo.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_TOKEN_INFO),
+        ]
+        cls.lib.C_GetTokenInfo.restype = CK_RV
         cls.lib.C_Login.argtypes = [
             CK_ULONG,
             CK_ULONG,
@@ -999,6 +1006,78 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_SESSION_HANDLE_INVALID,
         )
 
+    def test_find_objects_matches_empty_attributes_exactly(self) -> None:
+        session = self.initialize_and_open_session()
+        key_class = CK_ULONG(CKO_SECRET_KEY)
+        key_type = CK_ULONG(CKK_GENERIC_SECRET)
+        create_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(key_class), CK_VOID_PTR),
+                ctypes.sizeof(key_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+        )
+        empty_label_object = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CreateObject(
+                session,
+                create_template,
+                len(create_template),
+                ctypes.byref(empty_label_object),
+            ),
+            CKR_OK,
+        )
+
+        empty_label_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_LABEL, None, 0)
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                session,
+                empty_label_template,
+                len(empty_label_template),
+            ),
+            CKR_OK,
+        )
+        objects = (CK_ULONG * 3)()
+        count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                objects,
+                len(objects),
+                ctypes.byref(count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(count.value, 1)
+        self.assertEqual(objects[0], empty_label_object.value)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        empty_label_template[0].ulValueLen = 1
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                session,
+                empty_label_template,
+                len(empty_label_template),
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session,
+                objects,
+                len(objects),
+                ctypes.byref(count),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
     def test_login_controls_private_object_visibility_and_signing(self) -> None:
         pin = (CK_BYTE * 4)(*b"1234")
         self.assertEqual(
@@ -1297,6 +1376,114 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
 
+    def test_authentication_survives_initiating_session_until_last_close(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        first_session = CK_ULONG()
+        second_session = CK_ULONG()
+        for session in (first_session, second_session):
+            self.assertEqual(
+                self.lib.C_OpenSession(
+                    ABI_TEST_SLOT_ID,
+                    CKF_SERIAL_SESSION,
+                    None,
+                    None,
+                    ctypes.byref(session),
+                ),
+                CKR_OK,
+            )
+
+        pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_Login(first_session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_CloseSession(first_session.value), CKR_OK)
+
+        info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(second_session.value, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.state, CKS_RO_USER_FUNCTIONS)
+        self.assertEqual(self.lib.C_CloseSession(second_session.value), CKR_OK)
+
+        close_all_session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(close_all_session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Login(close_all_session.value, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_CloseAllSessions(ABI_TEST_SLOT_ID), CKR_OK)
+
+        public_session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(public_session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(public_session.value, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.state, CKS_RO_PUBLIC_SESSION)
+
+    def test_token_info_reports_current_session_counts(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        read_only_session = CK_ULONG()
+        read_write_session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(read_only_session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(read_write_session),
+            ),
+            CKR_OK,
+        )
+
+        info = CK_TOKEN_INFO()
+        self.assertEqual(
+            self.lib.C_GetTokenInfo(ABI_TEST_SLOT_ID, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.ulMaxSessionCount, 0)
+        self.assertEqual(info.ulSessionCount, 2)
+        self.assertEqual(info.ulMaxRwSessionCount, 0)
+        self.assertEqual(info.ulRwSessionCount, 1)
+
+        self.assertEqual(self.lib.C_CloseSession(read_write_session.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_GetTokenInfo(ABI_TEST_SLOT_ID, ctypes.byref(info)),
+            CKR_OK,
+        )
+        self.assertEqual(info.ulSessionCount, 1)
+        self.assertEqual(info.ulRwSessionCount, 0)
+
     def test_read_only_sessions_cannot_mutate_token_or_private_objects(self) -> None:
         session = self.initialize_and_open_session()
         label = (CK_BYTE * len(b"read only"))(*b"read only")
@@ -1574,6 +1761,58 @@ class Pkcs11AbiTests(unittest.TestCase):
                 len(short_signature),
             ),
             CKR_SIGNATURE_LEN_RANGE,
+        )
+
+    def test_sign_terminal_errors_clear_the_operation(self) -> None:
+        session = self.initialize_and_open_session()
+        self.login_session(session)
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        oversized_data = (CK_BYTE * 246)()
+        signature_len = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), 2),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                oversized_data,
+                len(oversized_data),
+                None,
+                ctypes.byref(signature_len),
+            ),
+            CKR_DATA_LEN_RANGE,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                oversized_data,
+                len(oversized_data),
+                None,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+        data = (CK_BYTE * 1)(1)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), 2),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(session, data, len(data), None, None),
+            CKR_ARGUMENTS_BAD,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                data,
+                len(data),
+                None,
+                ctypes.byref(signature_len),
+            ),
+            CKR_OPERATION_NOT_INITIALIZED,
         )
 
     def test_generic_secret_key_is_rejected_for_rsa_signing(self) -> None:
@@ -2317,8 +2556,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         version = CK_VERSION(3, 2)
         interface = ctypes.POINTER(CK_INTERFACE)()
 
+        for name in (b"NOT PKCS", b"X"):
+            self.assertEqual(
+                self.lib.C_GetInterface(
+                    name,
+                    ctypes.byref(version),
+                    ctypes.byref(interface),
+                    0,
+                ),
+                CKR_ARGUMENTS_BAD,
+            )
+
         self.assertEqual(
-            self.lib.C_GetInterface(b"NOT PKCS", ctypes.byref(version), ctypes.byref(interface), 0),
+            self.lib.C_GetInterface(
+                b"PKCS 11",
+                ctypes.byref(version),
+                ctypes.byref(interface),
+                CKF_INTERFACE_FORK_SAFE,
+            ),
             CKR_ARGUMENTS_BAD,
         )
 
