@@ -13,6 +13,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent
 CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
+CKR_CANT_LOCK = 0xA
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
 CKR_ATTRIBUTE_READ_ONLY = 0x10
@@ -40,6 +41,7 @@ CKR_SESSION_ASYNC_NOT_SUPPORTED = 0x205
 CKF_RW_SESSION = 0x00000002
 CKF_SERIAL_SESSION = 0x00000004
 CKF_ASYNC_SESSION = 0x00000008
+CKF_OS_LOCKING_OK = 0x00000002
 CKF_INTERFACE_FORK_SAFE = 0x00000001
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
@@ -69,6 +71,7 @@ CKS_RO_USER_FUNCTIONS = 1
 CKS_RW_PUBLIC_SESSION = 2
 CKS_RW_USER_FUNCTIONS = 3
 ABI_TEST_SLOT_ID = 77
+CK_UNAVAILABLE_INFORMATION = (1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1
 
 
 def library_path() -> pathlib.Path:
@@ -873,6 +876,36 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_ARGUMENTS_BAD)
         self.assertEqual(self.lib.C_Finalize(ctypes.c_void_p(1)), CKR_ARGUMENTS_BAD)
 
+    def test_initialize_validates_mutex_callback_configuration(self) -> None:
+        partial_callbacks = CK_C_INITIALIZE_ARGS()
+        partial_callbacks.CreateMutex = ctypes.c_void_p(1)
+        self.assertEqual(
+            self.lib.C_Initialize(ctypes.byref(partial_callbacks)),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        os_locking = CK_C_INITIALIZE_ARGS()
+        os_locking.flags = CKF_OS_LOCKING_OK
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(os_locking)), CKR_OK)
+        self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+        callbacks = CK_C_INITIALIZE_ARGS()
+        callbacks.CreateMutex = ctypes.c_void_p(1)
+        callbacks.DestroyMutex = ctypes.c_void_p(1)
+        callbacks.LockMutex = ctypes.c_void_p(1)
+        callbacks.UnlockMutex = ctypes.c_void_p(1)
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(callbacks)), CKR_CANT_LOCK)
+
+        callbacks.flags = CKF_OS_LOCKING_OK
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(callbacks)), CKR_OK)
+        self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+        callbacks.flags = 1 << 31
+        self.assertEqual(
+            self.lib.C_Initialize(ctypes.byref(callbacks)),
+            CKR_ARGUMENTS_BAD,
+        )
+
     def test_slot_and_mechanism_calls_validate_slot_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         count = CK_ULONG()
@@ -1475,6 +1508,10 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(info.ulSessionCount, 2)
         self.assertEqual(info.ulMaxRwSessionCount, 0)
         self.assertEqual(info.ulRwSessionCount, 1)
+        self.assertEqual(info.ulTotalPublicMemory, CK_UNAVAILABLE_INFORMATION)
+        self.assertEqual(info.ulFreePublicMemory, CK_UNAVAILABLE_INFORMATION)
+        self.assertEqual(info.ulTotalPrivateMemory, CK_UNAVAILABLE_INFORMATION)
+        self.assertEqual(info.ulFreePrivateMemory, CK_UNAVAILABLE_INFORMATION)
 
         self.assertEqual(self.lib.C_CloseSession(read_write_session.value), CKR_OK)
         self.assertEqual(
@@ -2351,6 +2388,73 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OBJECT_HANDLE_INVALID,
         )
 
+    def test_copy_object_can_change_token_and_private_attributes(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        self.login_session(session.value)
+
+        token = CK_BYTE(0)
+        private = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                ctypes.sizeof(token),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(private), CK_VOID_PTR),
+                ctypes.sizeof(private),
+            ),
+        )
+        copied = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CopyObject(
+                session.value,
+                1,
+                template,
+                len(template),
+                ctypes.byref(copied),
+            ),
+            CKR_OK,
+        )
+
+        copied_token = CK_BYTE(1)
+        copied_private = CK_BYTE(0)
+        attributes = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(copied_token), CK_VOID_PTR),
+                ctypes.sizeof(copied_token),
+            ),
+            CK_ATTRIBUTE(
+                CKA_PRIVATE,
+                ctypes.cast(ctypes.byref(copied_private), CK_VOID_PTR),
+                ctypes.sizeof(copied_private),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session.value,
+                copied.value,
+                attributes,
+                len(attributes),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(copied_token.value, 0)
+        self.assertEqual(copied_private.value, 1)
+
     def test_copy_object_validates_state_and_arguments(self) -> None:
         object_handle = CK_ULONG()
 
@@ -2429,22 +2533,30 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_ARGUMENTS_BAD,
         )
 
-    def test_interface_list_reports_one_pkcs11_interface(self) -> None:
+    def test_interface_list_reports_all_supported_interfaces(self) -> None:
         count = CK_ULONG()
 
         self.assertEqual(self.lib.C_GetInterfaceList(None, ctypes.byref(count)), CKR_OK)
-        self.assertEqual(count.value, 1)
+        self.assertEqual(count.value, 4)
 
-        interface = CK_INTERFACE()
+        interfaces = (CK_INTERFACE * count.value)()
         self.assertEqual(
-            self.lib.C_GetInterfaceList(ctypes.byref(interface), ctypes.byref(count)),
+            self.lib.C_GetInterfaceList(interfaces, ctypes.byref(count)),
             CKR_OK,
         )
 
-        self.assertEqual(count.value, 1)
-        self.assertEqual(ctypes.string_at(interface.pInterfaceName), b"PKCS 11")
-        self.assertTrue(interface.pFunctionList)
-        self.assertEqual(interface.flags, 0)
+        self.assertEqual(count.value, 4)
+        versions = []
+        for interface in interfaces:
+            self.assertEqual(ctypes.string_at(interface.pInterfaceName), b"PKCS 11")
+            self.assertTrue(interface.pFunctionList)
+            self.assertEqual(interface.flags, 0)
+            version = ctypes.cast(
+                interface.pFunctionList,
+                ctypes.POINTER(CK_VERSION),
+            ).contents
+            versions.append((version.major, version.minor))
+        self.assertEqual(versions, [(2, 40), (3, 0), (3, 1), (3, 2)])
 
     def test_interface_list_checks_buffer_size(self) -> None:
         count = CK_ULONG(0)
@@ -2454,7 +2566,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_GetInterfaceList(ctypes.byref(interface), ctypes.byref(count)),
             CKR_BUFFER_TOO_SMALL,
         )
-        self.assertEqual(count.value, 1)
+        self.assertEqual(count.value, 4)
 
     def test_get_interface_returns_3_2_function_table(self) -> None:
         version = CK_VERSION(3, 2)

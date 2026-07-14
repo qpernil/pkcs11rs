@@ -27,6 +27,68 @@ struct TestSession {
     flags: CK_FLAGS,
 }
 
+#[derive(Debug)]
+struct FailingConnector;
+
+impl crate::Connector for FailingConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+
+    fn product(&self) -> &str {
+        "Failing connector"
+    }
+
+    fn serial(&self) -> &str {
+        "FAIL0001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        false
+    }
+
+    fn buffer_size(&self) -> usize {
+        16
+    }
+
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        _receive_buffer: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::error::Error> {
+        Err(rusb::Error::NoDevice.into())
+    }
+}
+
+unsafe extern "C" fn test_create_mutex(_mutex: CK_VOID_PTR_PTR) -> CK_RV {
+    CKR_OK as CK_RV
+}
+
+unsafe extern "C" fn test_destroy_mutex(_mutex: CK_VOID_PTR) -> CK_RV {
+    CKR_OK as CK_RV
+}
+
+unsafe extern "C" fn test_lock_mutex(_mutex: CK_VOID_PTR) -> CK_RV {
+    CKR_OK as CK_RV
+}
+
+unsafe extern "C" fn test_unlock_mutex(_mutex: CK_VOID_PTR) -> CK_RV {
+    CKR_OK as CK_RV
+}
+
 impl crate::Session for TestSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -830,29 +892,40 @@ pub fn all_legacy_function_list_entries_are_stubbed() {
 }
 
 #[test]
-pub fn cryptoki_3_2_interface_is_discoverable() {
+pub fn all_supported_interfaces_are_discoverable() {
     let _guard = TEST_LOCK.lock().unwrap();
     let mut count = 0;
     assert_eq!(
         crate::C_GetInterfaceList(::std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
-    assert_eq!(count, 1);
+    assert_eq!(count, 4);
 
-    let mut interface = CK_INTERFACE {
+    let empty_interface = CK_INTERFACE {
         pInterfaceName: ::std::ptr::null_mut(),
         pFunctionList: ::std::ptr::null_mut(),
         flags: 0,
     };
+    let mut interfaces = [empty_interface; 4];
     assert_eq!(
-        crate::C_GetInterfaceList(&mut interface, &mut count),
+        crate::C_GetInterfaceList(interfaces.as_mut_ptr(), &mut count),
         CKR_OK as CK_RV
     );
-    assert_eq!(count, 1);
-    assert!(!interface.pInterfaceName.is_null());
-    assert!(!interface.pFunctionList.is_null());
+    assert_eq!(count, 4);
+    for interface in &interfaces {
+        assert!(!interface.pInterfaceName.is_null());
+        assert!(!interface.pFunctionList.is_null());
+    }
+    let versions: Vec<(u8, u8)> = interfaces
+        .iter()
+        .map(|interface| {
+            let version = unsafe { &*(interface.pFunctionList as *const CK_VERSION) };
+            (version.major, version.minor)
+        })
+        .collect();
+    assert_eq!(versions, [(2, 40), (3, 0), (3, 1), (3, 2)]);
 
-    let function_list = interface.pFunctionList as CK_FUNCTION_LIST_3_2_PTR;
+    let function_list = interfaces[3].pFunctionList as CK_FUNCTION_LIST_3_2_PTR;
     assert_eq!(unsafe { (*function_list).version.major }, 3);
     assert_eq!(unsafe { (*function_list).version.minor }, 2);
     assert!(unsafe { (*function_list).C_GetInterface.is_some() });
@@ -904,6 +977,83 @@ pub fn initialize_and_finalize_reject_reserved_args() {
         crate::C_Finalize(1 as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
     );
+}
+
+#[test]
+pub fn initialize_validates_mutex_callback_configuration() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    let mut partial_callbacks = CK_C_INITIALIZE_ARGS {
+        CreateMutex: Some(test_create_mutex),
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: 0,
+        pReserved: ::std::ptr::null_mut(),
+    };
+    assert_eq!(
+        crate::C_Initialize(&mut partial_callbacks as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+
+    let mut os_locking = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_OS_LOCKING_OK as CK_FLAGS,
+        pReserved: ::std::ptr::null_mut(),
+    };
+    assert_eq!(
+        crate::C_Initialize(&mut os_locking as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let mut callbacks = CK_C_INITIALIZE_ARGS {
+        CreateMutex: Some(test_create_mutex),
+        DestroyMutex: Some(test_destroy_mutex),
+        LockMutex: Some(test_lock_mutex),
+        UnlockMutex: Some(test_unlock_mutex),
+        flags: 0,
+        pReserved: ::std::ptr::null_mut(),
+    };
+    assert_eq!(
+        crate::C_Initialize(&mut callbacks as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
+        CKR_CANT_LOCK as CK_RV
+    );
+
+    callbacks.flags = CKF_OS_LOCKING_OK as CK_FLAGS;
+    assert_eq!(
+        crate::C_Initialize(&mut callbacks as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    callbacks.flags = 1 << 31;
+    assert_eq!(
+        crate::C_Initialize(&mut callbacks as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
+#[test]
+pub fn short_usb_writes_are_device_errors() {
+    assert!(crate::ensure_complete_write(64, 64).is_ok());
+    let rv: CK_RV = crate::ensure_complete_write(63, 64).unwrap_err().into();
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
+}
+
+#[test]
+pub fn yubikey_login_preserves_connector_errors() {
+    let mut slot = crate::YubiKeySlot {
+        connector: std::rc::Rc::new(FailingConnector),
+        session: None,
+    };
+
+    let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
+    assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
 }
 
 #[test]
@@ -1415,6 +1565,22 @@ pub fn token_info_reports_current_session_counts() {
         CK_EFFECTIVELY_INFINITE as CK_ULONG
     );
     assert_eq!(info.ulRwSessionCount, 1);
+    assert_eq!(
+        info.ulTotalPublicMemory,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
+    assert_eq!(
+        info.ulFreePublicMemory,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
+    assert_eq!(
+        info.ulTotalPrivateMemory,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
+    assert_eq!(
+        info.ulFreePrivateMemory,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
+    );
 
     assert_eq!(crate::C_CloseSession(read_write_session), CKR_OK as CK_RV);
     assert_eq!(
@@ -3172,6 +3338,8 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
 
     let mut label = *b"Copied public key";
     let mut id = [8u8, 6, 4, 2];
+    let mut token = CK_FALSE as CK_BBOOL;
+    let mut private = CK_TRUE as CK_BBOOL;
     let mut templ = [
         CK_ATTRIBUTE {
             type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
@@ -3182,6 +3350,16 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
             type_: CKA_ID as CK_ATTRIBUTE_TYPE,
             pValue: id.as_mut_ptr() as CK_VOID_PTR,
             ulValueLen: id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut private as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
     ];
     let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -3203,6 +3381,8 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let mut copied_label = [0u8; 17];
     let mut copied_id = [0u8; 4];
     let mut copied_verify = CK_FALSE as CK_BBOOL;
+    let mut copied_token = CK_TRUE as CK_BBOOL;
+    let mut copied_private = CK_FALSE as CK_BBOOL;
     let mut copied_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -3229,6 +3409,16 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
             pValue: &mut copied_verify as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut copied_token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut copied_private as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
     ];
     assert_eq!(
         crate::C_GetAttributeValue(
@@ -3244,6 +3434,8 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     assert_eq!(&copied_label, b"Copied public key");
     assert_eq!(copied_id, id);
     assert_eq!(copied_verify, CK_TRUE as CK_BBOOL);
+    assert_eq!(copied_token, CK_FALSE as CK_BBOOL);
+    assert_eq!(copied_private, CK_TRUE as CK_BBOOL);
 
     let mut original_label = [0u8; 19];
     let mut original_attr = CK_ATTRIBUTE {
@@ -4367,7 +4559,7 @@ pub fn interface_list_checks_buffer_size() {
         crate::C_GetInterfaceList(&mut interface, &mut count),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
-    assert_eq!(count, 1);
+    assert_eq!(count, 4);
 }
 
 fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
