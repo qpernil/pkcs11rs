@@ -49,6 +49,8 @@ The APDU codec supports short and extended Case 2, 3, and 4 commands. It
 automatically uses extended encoding when command data exceeds 255 bytes or
 when SCP03 encryption, padding, and C-MAC increase the protected data beyond
 that boundary. Extended responses use the PC/SC extended receive-buffer size.
+Secure messaging currently operates on basic logical channel 0; commands for
+other logical channels are rejected.
 
 GlobalPlatform command chaining is also supported for commands whose
 protected data exceeds the short APDU limit. Encryption and C-MAC are applied
@@ -61,4 +63,6 @@ Specification.
 
 ISO response chaining via `61xx` is collected with unprotected GET RESPONSE
 commands. SCP03 response decryption and R-MAC verification are then performed
-once over the reassembled non-segmented response.
+once over the reassembled non-segmented response. A chain is limited to 256
+continuation segments, and every continuation after the initial `61xx` must
+contribute response data.

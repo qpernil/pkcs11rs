@@ -28,7 +28,8 @@ const MAX_SHORT_EXPECTED_LENGTH: u32 = 1 << 8;
 const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
 const MAX_CHAINED_RESPONSE_LENGTH: usize =
     MAX_EXTENDED_EXPECTED_LENGTH as usize + AES_BLOCK_SIZE + MAC_LENGTH;
-const MAX_RESPONSE_CHAIN_SEGMENTS: usize = MAX_EXTENDED_EXPECTED_LENGTH as usize;
+const MAX_RESPONSE_CHAIN_SEGMENTS: usize =
+    MAX_EXTENDED_EXPECTED_LENGTH as usize / MAX_SHORT_EXPECTED_LENGTH as usize;
 const MORE_COMMANDS: u8 = 0x80;
 const DERIVATION_CARD_CRYPTOGRAM: u8 = 0x00;
 const DERIVATION_HOST_CRYPTOGRAM: u8 = 0x01;
@@ -709,6 +710,11 @@ impl Scp03Session {
     }
 
     fn protect_command(&mut self, command: &CommandApdu) -> Result<CommandApdu, Error> {
+        let cla = if self.security_level == 0 {
+            command.cla
+        } else {
+            normalize_scp03_cla(command.cla)?
+        };
         self.encryption_counter = self
             .encryption_counter
             .checked_add(1)
@@ -716,9 +722,6 @@ impl Scp03Session {
 
         if self.security_level == 0 {
             return Ok(command.clone());
-        }
-        if command.cla & 0x03 != 0 {
-            return Err(CKR_ARGUMENTS_BAD.into());
         }
 
         command.uses_extended_length(command.data.len())?;
@@ -729,7 +732,6 @@ impl Scp03Session {
             data = aes_cbc(&self.s_enc, &iv, &padded, Mode::Encrypt)?;
         }
 
-        let cla = command.cla | 0x04;
         let mut protected = CommandApdu {
             cla,
             ins: command.ins,
@@ -802,6 +804,13 @@ impl Scp03Session {
         }
         aes_block(&self.s_enc, &counter)
     }
+}
+
+fn normalize_scp03_cla(cla: u8) -> Result<u8, Error> {
+    if cla & 0x40 != 0 || cla & 0x03 != 0 {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok((cla & !0x0c) | 0x04)
 }
 
 pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Result<(), Error> {
@@ -1442,6 +1451,40 @@ mod tests {
     }
 
     #[test]
+    fn secure_messaging_normalizes_cla_and_rejects_other_logical_channels() {
+        for (cla, expected) in [(0x08, 0x04), (0x88, 0x84)] {
+            let protected = test_session(0x01)
+                .protect_command(&CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0,
+                    data: vec![],
+                    le: Some(256),
+                    extended: false,
+                })
+                .unwrap();
+            assert_eq!(protected.cla, expected);
+        }
+
+        for cla in [0x01, 0x40, 0x81, 0xc0] {
+            let mut session = test_session(0x01);
+            assert!(session
+                .protect_command(&CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0,
+                    data: vec![],
+                    le: Some(256),
+                    extended: false,
+                })
+                .is_err());
+            assert_eq!(session.encryption_counter, 0);
+        }
+    }
+
+    #[test]
     fn chains_after_protecting_the_complete_command() {
         let data: Vec<u8> = (0..300).map(|value| value as u8).collect();
         let command = CommandApdu {
@@ -1588,6 +1631,14 @@ mod tests {
                 .unwrap()
                 .data,
             hex("AA")
+        );
+
+        let connector =
+            ScriptedConnector::new(vec![hex("AA 61 01"); MAX_RESPONSE_CHAIN_SEGMENTS + 1]);
+        assert!(test_session(0x01).transmit(&connector, &command).is_err());
+        assert_eq!(
+            connector.commands.into_inner().len(),
+            MAX_RESPONSE_CHAIN_SEGMENTS + 1
         );
     }
 
