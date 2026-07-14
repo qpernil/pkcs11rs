@@ -8,6 +8,8 @@ static TEST_SLOT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static TEST_SLOT_LOGOUT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static TEST_SLOT_FAIL_LOGOUT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 const LEGACY_FUNCTION_COUNT: usize = 68;
 const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
 const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
@@ -161,8 +163,11 @@ impl crate::Slot for TestSlot {
     }
 
     fn logout(&mut self) -> Result<(), crate::error::Error> {
-        TEST_SLOT_LOGGED_IN.store(false, std::sync::atomic::Ordering::SeqCst);
         TEST_SLOT_LOGOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if TEST_SLOT_FAIL_LOGOUT.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        TEST_SLOT_LOGGED_IN.store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -980,6 +985,24 @@ pub fn initialize_and_finalize_reject_reserved_args() {
 }
 
 #[test]
+pub fn finalize_clears_context_after_device_logout_failure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    TEST_SLOT_FAIL_LOGOUT.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        crate::C_Finalize(::std::ptr::null_mut()),
+        CKR_FUNCTION_FAILED as CK_RV
+    );
+    TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn initialize_validates_mutex_callback_configuration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1043,6 +1066,14 @@ pub fn short_usb_writes_are_device_errors() {
     assert!(crate::ensure_complete_write(64, 64).is_ok());
     let rv: CK_RV = crate::ensure_complete_write(63, 64).unwrap_err().into();
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
+}
+
+#[test]
+pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
+    assert!(crate::needs_zero_length_packet(64, 64));
+    assert!(crate::needs_zero_length_packet(128, 64));
+    assert!(!crate::needs_zero_length_packet(63, 64));
+    assert!(!crate::needs_zero_length_packet(0, 0));
 }
 
 #[test]
@@ -1745,6 +1776,7 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
     let mut token_false = CK_FALSE as CK_BBOOL;
     let mut private_true = CK_TRUE as CK_BBOOL;
     let mut private_false = CK_FALSE as CK_BBOOL;
+    let mut value = [0x22u8; 16];
     let mut base_template = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -1756,10 +1788,16 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
             pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
+        },
     ];
     let mut token_object_template = [
         base_template[0],
         base_template[1],
+        base_template[2],
         CK_ATTRIBUTE {
             type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             pValue: &mut token_true as *mut CK_BBOOL as CK_VOID_PTR,
@@ -1785,6 +1823,7 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
     let mut private_object_template = [
         base_template[0],
         base_template[1],
+        base_template[2],
         CK_ATTRIBUTE {
             type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             pValue: &mut token_false as *mut CK_BBOOL as CK_VOID_PTR,
@@ -1819,8 +1858,8 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
     };
     let mut token_key_template = [
         value_len_attribute,
-        token_object_template[2],
         token_object_template[3],
+        token_object_template[4],
     ];
     assert_eq!(
         crate::C_GenerateKey(
@@ -1839,8 +1878,8 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
             pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
         },
-        private_object_template[2],
         private_object_template[3],
+        private_object_template[4],
     ];
     assert_eq!(
         crate::C_GenerateKey(
@@ -2377,6 +2416,30 @@ pub fn verify_accepts_matching_rsa_signature() {
         ),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            ::std::ptr::null_mut(),
+            1,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
@@ -2601,6 +2664,7 @@ pub fn find_objects_matches_empty_attributes_exactly() {
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut value = [0x33u8; 16];
     let mut create_template = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -2611,6 +2675,11 @@ pub fn find_objects_matches_empty_attributes_exactly() {
             type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
             pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
         },
     ];
     let mut empty_label_object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -2811,10 +2880,11 @@ pub fn create_object_adds_readable_findable_object() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
     let mut label = *b"Created public key";
     let mut id = [4u8, 5, 6];
+    let mut value = [0xabu8; 16];
     let mut verify = CK_TRUE as CK_BBOOL;
     let mut templ = [
         CK_ATTRIBUTE {
@@ -2841,6 +2911,11 @@ pub fn create_object_adds_readable_findable_object() {
             type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             pValue: &mut verify as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
         },
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -2928,8 +3003,8 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
     let mut label = *b"Created private key";
     let mut id = [7u8, 8, 9, 10];
     let mut token = CK_TRUE as CK_BBOOL;
@@ -2938,6 +3013,7 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     let mut decrypt = CK_TRUE as CK_BBOOL;
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut verify = CK_FALSE as CK_BBOOL;
+    let mut value = [0xcdu8; 16];
     let mut templ = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -2988,6 +3064,11 @@ pub fn create_object_preserves_all_supported_template_attributes() {
             type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             pValue: &mut verify as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
         },
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -3074,8 +3155,8 @@ pub fn create_object_preserves_all_supported_template_attributes() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(read_class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
-    assert_eq!(read_key_type, CKK_RSA as CK_KEY_TYPE);
+    assert_eq!(read_class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert_eq!(read_key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
     assert_eq!(&read_label, b"Created private key");
     assert_eq!(read_id, id);
     assert_eq!(read_token, CK_TRUE as CK_BBOOL);
@@ -3095,8 +3176,9 @@ pub fn create_object_defaults_optional_attributes() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut value = [0x11u8; 16];
     let mut templ = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -3107,6 +3189,11 @@ pub fn create_object_defaults_optional_attributes() {
             type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
             pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
         },
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
@@ -3330,6 +3417,181 @@ pub fn create_object_reports_template_errors() {
 }
 
 #[test]
+pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut duplicate_class = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+    ];
+    let mut handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            duplicate_class.as_mut_ptr(),
+            duplicate_class.len() as CK_ULONG,
+            &mut handle
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    let mut label = *b"not committed";
+    let mut update = [
+        CK_ATTRIBUTE {
+            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            pValue: label.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: label.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            update.as_mut_ptr(),
+            update.len() as CK_ULONG
+        ),
+        CKR_ATTRIBUTE_READ_ONLY as CK_RV
+    );
+    let mut original_label = [0u8; 19];
+    let mut read_label = CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: original_label.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: original_label.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut read_label, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&original_label, b"Test RSA public key");
+
+    let duplicate_label = [update[0], update[0]];
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            1,
+            duplicate_label.as_ptr() as CK_ATTRIBUTE_PTR,
+            duplicate_label.len() as CK_ULONG,
+            &mut handle
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut value_len = 16 as CK_ULONG;
+    let mut generate_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
+        update[0],
+        update[0],
+    ];
+    assert_eq!(
+        crate::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            generate_template.as_mut_ptr(),
+            generate_template.len() as CK_ULONG,
+            &mut handle
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn create_object_requires_and_imports_real_key_material() {
+    let rsa = openssl::rsa::Rsa::generate(1024).unwrap();
+    let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut private_class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut modulus = rsa.n().to_vec();
+    let mut public_exponent = rsa.e().to_vec();
+    let mut private_exponent = rsa.d().to_vec();
+    let class_attribute = |class: &mut CK_OBJECT_CLASS| CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    };
+    let key_type_attribute = CK_ATTRIBUTE {
+        type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+        pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+    };
+    let modulus_attribute = CK_ATTRIBUTE {
+        type_: CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+        pValue: modulus.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: modulus.len() as CK_ULONG,
+    };
+    let public_exponent_attribute = CK_ATTRIBUTE {
+        type_: CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+        pValue: public_exponent.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: public_exponent.len() as CK_ULONG,
+    };
+
+    let public_template = [
+        class_attribute(&mut public_class),
+        key_type_attribute,
+        modulus_attribute,
+        public_exponent_attribute,
+    ];
+    assert!(matches!(
+        crate::parse_create_object_template(&public_template)
+            .unwrap()
+            .material,
+        crate::KeyMaterial::RsaPublic(_)
+    ));
+
+    let incomplete = [class_attribute(&mut public_class), key_type_attribute];
+    assert!(matches!(
+        crate::parse_create_object_template(&incomplete),
+        Err(crate::error::Error::Generic(rv)) if rv == CKR_TEMPLATE_INCOMPLETE as CK_RV
+    ));
+
+    let private_template = [
+        class_attribute(&mut private_class),
+        key_type_attribute,
+        modulus_attribute,
+        public_exponent_attribute,
+        CK_ATTRIBUTE {
+            type_: CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE,
+            pValue: private_exponent.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: private_exponent.len() as CK_ULONG,
+        },
+    ];
+    let imported = crate::parse_create_object_template(&private_template).unwrap();
+    assert!(matches!(
+        imported.material,
+        crate::KeyMaterial::RsaPrivate(_)
+    ));
+    assert!(!imported.local);
+    assert_eq!(imported.key_gen_mechanism, None);
+}
+
+#[test]
 pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -3383,6 +3645,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let mut copied_verify = CK_FALSE as CK_BBOOL;
     let mut copied_token = CK_TRUE as CK_BBOOL;
     let mut copied_private = CK_FALSE as CK_BBOOL;
+    let mut copied_unique_id = [0u8; 8];
     let mut copied_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -3419,6 +3682,11 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
             pValue: &mut copied_private as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+            pValue: copied_unique_id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: copied_unique_id.len() as CK_ULONG,
+        },
     ];
     assert_eq!(
         crate::C_GetAttributeValue(
@@ -3436,6 +3704,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     assert_eq!(copied_verify, CK_TRUE as CK_BBOOL);
     assert_eq!(copied_token, CK_FALSE as CK_BBOOL);
     assert_eq!(copied_private, CK_TRUE as CK_BBOOL);
+    let copied_unique_id_len = copied_attrs[7].ulValueLen as usize;
 
     let mut original_label = [0u8; 19];
     let mut original_attr = CK_ATTRIBUTE {
@@ -3448,6 +3717,20 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
         CKR_OK as CK_RV
     );
     assert_eq!(&original_label, b"Test RSA public key");
+    let mut original_unique_id = [0u8; 8];
+    let mut original_unique_id_attr = CK_ATTRIBUTE {
+        type_: CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+        pValue: original_unique_id.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: original_unique_id.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_unique_id_attr, 1),
+        CKR_OK as CK_RV
+    );
+    assert_ne!(
+        &copied_unique_id[..copied_unique_id_len],
+        &original_unique_id[..original_unique_id_attr.ulValueLen as usize]
+    );
 
     let mut search_label = *b"Copied public key";
     let mut search_templ = [CK_ATTRIBUTE {
@@ -3583,7 +3866,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (2 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 1 + 6) as CK_ULONG
+        (3 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7) as CK_ULONG
     );
 
     let mut label = *b"Short";
@@ -3615,7 +3898,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (2 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 6) as CK_ULONG
+        (3 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7) as CK_ULONG
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -3628,10 +3911,11 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
     let mut label = *b"Sized key";
     let mut id = [1u8, 2, 3, 4, 5];
+    let mut value = [0x44u8; 16];
     let mut templ = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -3653,6 +3937,11 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
             pValue: id.as_mut_ptr() as CK_VOID_PTR,
             ulValueLen: id.len() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
+        },
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
@@ -3672,7 +3961,7 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     );
     assert_eq!(
         size,
-        (2 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 6) as CK_ULONG
+        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11) as CK_ULONG
     );
     assert_eq!(
         crate::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
@@ -3985,6 +4274,9 @@ pub fn generate_key_creates_secret_key_object() {
     let mut read_extractable = CK_TRUE as CK_BBOOL;
     let mut read_always_sensitive = CK_FALSE as CK_BBOOL;
     let mut read_never_extractable = CK_FALSE as CK_BBOOL;
+    let mut read_unique_id = [0u8; 8];
+    let mut read_local = CK_FALSE as CK_BBOOL;
+    let mut read_key_gen_mechanism = CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE;
     let mut read_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -4041,6 +4333,21 @@ pub fn generate_key_creates_secret_key_object() {
             pValue: &mut read_never_extractable as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
+        CK_ATTRIBUTE {
+            type_: CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+            pValue: read_unique_id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: read_unique_id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_LOCAL as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_local as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
+            pValue: &mut read_key_gen_mechanism as *mut CK_MECHANISM_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_MECHANISM_TYPE>() as CK_ULONG,
+        },
     ];
     assert_eq!(
         crate::C_GetAttributeValue(
@@ -4062,6 +4369,12 @@ pub fn generate_key_creates_secret_key_object() {
     assert_eq!(read_extractable, CK_FALSE as CK_BBOOL);
     assert_eq!(read_always_sensitive, CK_TRUE as CK_BBOOL);
     assert_eq!(read_never_extractable, CK_TRUE as CK_BBOOL);
+    assert_eq!(&read_unique_id[..read_attrs[11].ulValueLen as usize], b"3");
+    assert_eq!(read_local, CK_TRUE as CK_BBOOL);
+    assert_eq!(
+        read_key_gen_mechanism,
+        CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
+    );
     {
         let context = crate::lock_context().unwrap();
         let object = context.as_ref().unwrap().objects.get(&key).unwrap();
@@ -4326,6 +4639,43 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
     assert!(!context.as_ref().unwrap().objects.contains_key(&key));
     drop(context);
 
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context.dynamic_slots.insert(TEST_SLOT_ID);
+        let mut session_object = context.objects.get(&1).unwrap().clone();
+        session_object.unique_id.clear();
+        session_object.token = false;
+        session_object.owner_session = Some(TEST_SESSION_HANDLE);
+        let object_handle = context.insert_object(session_object);
+        context.find_operations.insert(
+            TEST_SESSION_HANDLE,
+            crate::FindOperation {
+                objects: vec![object_handle],
+                next: 0,
+            },
+        );
+
+        context.close_slot_state(TEST_SLOT_ID, true);
+        context.slots.remove(&TEST_SLOT_ID);
+        context.dynamic_slots.remove(&TEST_SLOT_ID);
+        assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
+        assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
+        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(context
+            .objects
+            .values()
+            .all(|object| object.slot_id != Some(TEST_SLOT_ID)));
+    }
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 
