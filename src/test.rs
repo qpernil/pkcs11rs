@@ -1080,7 +1080,7 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 pub fn yubikey_login_preserves_connector_errors() {
     let mut slot = crate::YubiKeySlot {
         connector: std::rc::Rc::new(FailingConnector),
-        session: None,
+        session: std::rc::Rc::new(std::cell::RefCell::new(None)),
     };
 
     let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
