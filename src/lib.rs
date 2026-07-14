@@ -28,6 +28,9 @@ use zeroize::Zeroizing;
 pub mod error;
 use error::*;
 
+mod scp03;
+use scp03::{configured_security_level, select_security_domain, Scp03KeySet, Scp03Session};
+
 pub mod pkcs11 {
     #![allow(
         dead_code,
@@ -188,7 +191,6 @@ impl std::fmt::Debug for dyn Slot + '_ {
 #[derive(Debug)]
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
-    session: Option<Scp03Session>,
 }
 
 impl Slot for YubiHsmSlot {
@@ -219,9 +221,6 @@ impl Slot for YubiHsmSlot {
     fn refresh(&self) -> Result<(), Error> {
         self.connector.refresh()
     }
-    fn clear_session(&mut self) {
-        self.session = None;
-    }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiHsmSession {
             slotID,
@@ -232,19 +231,11 @@ impl Slot for YubiHsmSlot {
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_cmd(1, &[5; 100], timeout)?;
-        let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-        self.session = Some(Scp03Session {
-            cipher: openssl::symm::Cipher::aes_128_cbc(),
-            key,
-            iv,
-        });
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
         let timeout = Duration::from_millis(100);
         let _vec = self.send_secure_cmd(1, &[6; 32], timeout)?;
-        self.session = None;
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
@@ -328,63 +319,30 @@ impl Slot for YubiKeySlot {
         })
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout)?;
-        let key = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-        let iv = Some(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-        self.session = Some(Scp03Session {
-            cipher: openssl::symm::Cipher::aes_128_cbc(),
-            key,
-            iv,
-        });
+        select_security_domain(self.connector.as_ref())?;
+        let keys = Scp03KeySet::from_environment()?;
+        let security_level = configured_security_level()?;
+        self.session = Some(Scp03Session::authenticate_selected(
+            self.connector.as_ref(),
+            &keys,
+            security_level,
+        )?);
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout)?;
         self.session = None;
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout)?;
-        Ok(())
+        select_security_domain(self.connector.as_ref())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let send_buffer = [
-            1u8, 0u8, 61u8, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        self.send_cmd(&send_buffer, timeout)?;
         self.format_token_info(info);
         Ok(())
-    }
-}
-
-impl YubiKeySlot {
-    fn send_cmd(&self, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector.send(data, timeout)
     }
 }
 
@@ -774,7 +732,7 @@ impl Connector for PcscConnector {
         self.card.borrow().is_some()
     }
     fn buffer_size(&self) -> usize {
-        4096
+        pcsc::MAX_BUFFER_SIZE_EXTENDED
     }
     fn transmit<'a>(
         &self,
@@ -786,7 +744,11 @@ impl Connector for PcscConnector {
         match card.as_ref() {
             Some(card) => {
                 let received = card.transmit(send_buffer, receive_buffer)?;
-                eprintln!("pcsc.transmit({:?}) -> {:?}", send_buffer, received);
+                eprintln!(
+                    "pcsc.transmit({} bytes) -> {} bytes",
+                    send_buffer.len(),
+                    received.len()
+                );
                 Ok(received)
             }
             None => Err(Error::from(pcsc::Error::NoSmartcard)),
@@ -924,47 +886,6 @@ impl CurlConnector {
         curl.post(true)?;
         self.connected = true;
         Ok(())
-    }
-}
-
-struct Scp03Session {
-    cipher: openssl::symm::Cipher,
-    #[allow(dead_code)]
-    key: Vec<u8>,
-    #[allow(dead_code)]
-    iv: Option<Vec<u8>>,
-}
-
-impl std::fmt::Debug for Scp03Session {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.debug_struct("Scp03Session")
-            .field("cipher", &self.cipher.nid().short_name()?)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Scp03Session {
-    fn _encrypt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let iv = self.iv.as_ref().map(|v| &v[..]);
-        let mut c =
-            openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Encrypt, &self.key, iv)?;
-        //c.pad(false);
-        let mut out = vec![0; data.len() + self.cipher.block_size()];
-        let count = c.update(data, &mut out)?;
-        let rest = c.finalize(&mut out[count..])?;
-        out.truncate(count + rest);
-        Ok(out)
-    }
-    fn _decrypt(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let iv = self.iv.as_ref().map(|v| &v[..]);
-        let mut c =
-            openssl::symm::Crypter::new(self.cipher, openssl::symm::Mode::Decrypt, &self.key, iv)?;
-        //c.pad(false);
-        let mut out = vec![0; data.len() + self.cipher.block_size()];
-        let count = c.update(data, &mut out)?;
-        let rest = c.finalize(&mut out[count..])?;
-        out.truncate(count + rest);
-        Ok(out)
     }
 }
 
@@ -1286,7 +1207,6 @@ impl Context {
                                     let slot_id = next_key(&self.slots, 0);
                                     let mut slot = Box::new(YubiHsmSlot {
                                         connector: Rc::new(connector),
-                                        session: None,
                                     });
                                     map(slot.init_slot());
                                     self.slots.insert(slot_id, slot);
