@@ -2,6 +2,12 @@
 use crate::pkcs11::*;
 
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TEST_SLOT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static TEST_SLOT_LOGOUT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 const LEGACY_FUNCTION_COUNT: usize = 68;
 const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
 const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
@@ -32,17 +38,6 @@ impl crate::Session for TestSession {
 
     fn flags(&self) -> CK_FLAGS {
         self.flags
-    }
-
-    fn login(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
-        if pin != b"1234" {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
-        Ok(())
-    }
-
-    fn logout(&mut self) -> Result<(), crate::error::Error> {
-        Ok(())
     }
 
     fn get_session_info(&self) -> Result<(), crate::error::Error> {
@@ -92,6 +87,21 @@ impl crate::Slot for TestSlot {
             slot_id: slotID,
             flags,
         })
+    }
+
+    fn login(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
+        if pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        TEST_SLOT_LOGGED_IN.store(true, std::sync::atomic::Ordering::SeqCst);
+        TEST_SLOT_LOGIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn logout(&mut self) -> Result<(), crate::error::Error> {
+        TEST_SLOT_LOGGED_IN.store(false, std::sync::atomic::Ordering::SeqCst);
+        TEST_SLOT_LOGOUT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     fn init_slot(&mut self) -> Result<(), crate::error::Error> {
@@ -1248,6 +1258,176 @@ pub fn login_is_shared_and_logout_invalidates_private_objects() {
 }
 
 #[test]
+pub fn token_authentication_survives_initiating_session_and_logs_out_on_last_close() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    TEST_SLOT_LOGGED_IN.store(false, std::sync::atomic::Ordering::SeqCst);
+    TEST_SLOT_LOGIN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    TEST_SLOT_LOGOUT_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+    let mut first_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    let mut second_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    for session in [&mut first_session, &mut second_session] {
+        assert_eq!(
+            crate::C_OpenSession(
+                TEST_SLOT_ID,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                ::std::ptr::null_mut(),
+                None,
+                session
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            first_session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert!(TEST_SLOT_LOGGED_IN.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        TEST_SLOT_LOGIN_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    assert_eq!(crate::C_CloseSession(first_session), CKR_OK as CK_RV);
+    assert!(TEST_SLOT_LOGGED_IN.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        TEST_SLOT_LOGOUT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::C_GetSessionInfo(second_session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RO_USER_FUNCTIONS as CK_STATE);
+
+    assert_eq!(crate::C_CloseSession(second_session), CKR_OK as CK_RV);
+    assert!(!TEST_SLOT_LOGGED_IN.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        TEST_SLOT_LOGOUT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    let mut close_all_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut close_all_session
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            close_all_session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_CloseAllSessions(TEST_SLOT_ID), CKR_OK as CK_RV);
+    assert!(!TEST_SLOT_LOGGED_IN.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        TEST_SLOT_LOGOUT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+
+    let mut final_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut final_session
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            final_session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert!(!TEST_SLOT_LOGGED_IN.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        TEST_SLOT_LOGOUT_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+}
+
+#[test]
+pub fn token_info_reports_current_session_counts() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+
+    let mut read_only_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    let mut read_write_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut read_only_session
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut read_write_session
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    assert_eq!(
+        crate::C_GetTokenInfo(TEST_SLOT_ID, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.ulMaxSessionCount, CK_EFFECTIVELY_INFINITE as CK_ULONG);
+    assert_eq!(info.ulSessionCount, 2);
+    assert_eq!(
+        info.ulMaxRwSessionCount,
+        CK_EFFECTIVELY_INFINITE as CK_ULONG
+    );
+    assert_eq!(info.ulRwSessionCount, 1);
+
+    assert_eq!(crate::C_CloseSession(read_write_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::C_GetTokenInfo(TEST_SLOT_ID, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.ulSessionCount, 1);
+    assert_eq!(info.ulRwSessionCount, 0);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn session_stub_entry_points_validate_initialization_and_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1797,6 +1977,74 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
 }
 
 #[test]
+pub fn sign_terminal_errors_clear_the_operation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut oversized_data = [0u8; 246];
+    let mut signature_len = 0;
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            oversized_data.as_mut_ptr(),
+            oversized_data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_DATA_LEN_RANGE as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            oversized_data.as_mut_ptr(),
+            oversized_data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    let mut data = [1u8];
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            ::std::ptr::null_mut()
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn sign_init_reports_key_and_mechanism_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -2173,6 +2421,91 @@ pub fn find_objects_filters_by_attribute_template() {
     assert_eq!(
         crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn find_objects_matches_empty_attributes_exactly() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut create_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+    ];
+    let mut empty_label_object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            create_template.as_mut_ptr(),
+            create_template.len() as CK_ULONG,
+            &mut empty_label_object
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut empty_label_template = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    }];
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            empty_label_template.as_mut_ptr(),
+            empty_label_template.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 3];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    assert_eq!(objects[0], empty_label_object);
+    assert_eq!(
+        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+
+    empty_label_template[0].ulValueLen = 1;
+    assert_eq!(
+        crate::C_FindObjectsInit(
+            TEST_SESSION_HANDLE,
+            empty_label_template.as_mut_ptr(),
+            empty_label_template.len() as CK_ULONG
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_FindObjects(
+            TEST_SESSION_HANDLE,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -4109,6 +4442,7 @@ pub fn get_interface_rejects_wrong_version_and_name() {
     let _guard = TEST_LOCK.lock().unwrap();
     let name = b"PKCS 11\0";
     let wrong_name = b"NOT PKCS\0";
+    let short_name = b"X\0";
 
     for rejected_version in [
         CK_VERSION {
@@ -4139,6 +4473,24 @@ pub fn get_interface_rejects_wrong_version_and_name() {
             &mut version,
             &mut interface,
             0
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetInterface(
+            short_name.as_ptr() as *mut CK_BYTE,
+            &mut version,
+            &mut interface,
+            0
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetInterface(
+            name.as_ptr() as *mut CK_BYTE,
+            &mut version,
+            &mut interface,
+            CKF_INTERFACE_FORK_SAFE as CK_FLAGS
         ),
         CKR_ARGUMENTS_BAD as CK_RV
     );
