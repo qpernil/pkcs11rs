@@ -20,6 +20,351 @@ fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
 }
 
+#[test]
+fn yubihsm_abi_operations_emit_authenticated_device_commands() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, corrupt_response_mac) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut public_info = CK_SESSION_INFO {
+        slotID: 0,
+        state: 0,
+        flags: 0,
+        ulDeviceError: 0,
+    };
+    assert_eq!(
+        crate::C_GetSessionInfo(session, &mut public_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(public_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert!(commands.borrow().is_empty());
+    let mut mechanism_count = 0;
+    assert_eq!(
+        crate::C_GetMechanismList(SLOT_ID, ::std::ptr::null_mut(), &mut mechanism_count),
+        CKR_OK as CK_RV
+    );
+    let mut mechanisms = vec![0; mechanism_count as usize];
+    assert_eq!(
+        crate::C_GetMechanismList(SLOT_ID, mechanisms.as_mut_ptr(), &mut mechanism_count),
+        CKR_OK as CK_RV
+    );
+    assert!(mechanisms.contains(&(CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE)));
+    assert!(mechanisms.contains(&(CKM_AES_CBC as CK_MECHANISM_TYPE)));
+    let mut mechanism_info = CK_MECHANISM_INFO {
+        ulMinKeySize: 0,
+        ulMaxKeySize: 0,
+        flags: 0,
+    };
+    assert_eq!(
+        crate::C_GetMechanismInfo(
+            SLOT_ID,
+            CKM_AES_CBC as CK_MECHANISM_TYPE,
+            &mut mechanism_info
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        (mechanism_info.ulMinKeySize, mechanism_info.ulMaxKeySize),
+        (16, 32)
+    );
+    assert_ne!(mechanism_info.flags & CKF_HW as CK_FLAGS, 0);
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut find_template = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut class as *mut CK_OBJECT_CLASS).cast(),
+        ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_FindObjectsInit(session, find_template.as_mut_ptr(), 1),
+        CKR_OK as CK_RV
+    );
+    let mut private_key = 0;
+    let mut found = 0;
+    assert_eq!(
+        crate::C_FindObjects(session, &mut private_key, 1, &mut found),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(found, 1);
+    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+
+    let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    find_template[0].pValue = (&mut public_class as *mut CK_OBJECT_CLASS).cast();
+    assert_eq!(
+        crate::C_FindObjectsInit(session, find_template.as_mut_ptr(), 1),
+        CKR_OK as CK_RV
+    );
+    let mut public_key = 0;
+    assert_eq!(
+        crate::C_FindObjects(session, &mut public_key, 1, &mut found),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(found, 1);
+    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+
+    let mut rsa_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut plaintext = *b"secret";
+    let mut ciphertext = [0u8; 256];
+    let mut ciphertext_len = ciphertext.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut rsa_mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Encrypt(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(ciphertext_len, 256);
+    let mut decrypted = [0u8; 32];
+    let mut decrypted_len = decrypted.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut rsa_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ciphertext_len,
+            decrypted.as_mut_ptr(),
+            &mut decrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&decrypted[..decrypted_len as usize], b"plaintext");
+
+    let mut sign_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(session, &mut sign_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    let mut message = *b"message";
+    let mut signature = [0u8; 256];
+    let mut signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_Sign(
+            session,
+            message.as_mut_ptr(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(signature_len, 256);
+    assert!(signature.iter().all(|byte| *byte == 0x5a));
+
+    let mut modulus_bits = 2048 as CK_ULONG;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut modulus_bits as *mut CK_ULONG).cast(),
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut verify as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut private_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut sign as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut sensitive as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    let mut generate_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut generated_public = 0;
+    let mut generated_private = 0;
+    assert_eq!(
+        crate::C_GenerateKeyPair(
+            session,
+            &mut generate_mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut generated_public,
+            &mut generated_private,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_ne!(generated_public, generated_private);
+    assert_eq!(
+        crate::C_DestroyObject(session, generated_private),
+        CKR_OK as CK_RV
+    );
+
+    let mut info = CK_SESSION_INFO {
+        slotID: 0,
+        state: 0,
+        flags: 0,
+        ulDeviceError: 0,
+    };
+    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    let command_codes: Vec<u8> = commands
+        .borrow()
+        .iter()
+        .map(|(command, _)| *command)
+        .collect();
+    for command in [
+        crate::yubihsm::CommandCode::ListObjects as u8,
+        crate::yubihsm::CommandCode::GetObjectInfo as u8,
+        crate::yubihsm::CommandCode::GetPublicKey as u8,
+        crate::yubihsm::CommandCode::SignPkcs1 as u8,
+        crate::yubihsm::CommandCode::DecryptPkcs1 as u8,
+        crate::yubihsm::CommandCode::GenerateAsymmetricKey as u8,
+        crate::yubihsm::CommandCode::DeleteObject as u8,
+        crate::yubihsm::CommandCode::GetStorageInfo as u8,
+    ] {
+        assert!(
+            command_codes.contains(&command),
+            "missing command {command:#04x}"
+        );
+    }
+
+    corrupt_response_mac.set(true);
+    assert_eq!(
+        crate::C_GetSessionInfo(session, &mut info),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    assert_eq!(crate::C_Logout(session), CKR_USER_NOT_LOGGED_IN as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
+fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
+    let mut label = [0u8; 40];
+    label[..8].copy_from_slice(b"p521-key");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x07]),
+        id: 0x1234,
+        length: 66,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_EC_P521,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_EC_P521,
+        key: vec![0x5a; 132],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let public = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23])
+    );
+    let point = public
+        .attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert_eq!(&point[..4], &[0x04, 0x81, 0x85, 0x04]);
+    assert_eq!(point.len(), 136);
+}
+
+#[test]
+fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
+    let mechanisms = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_AES128,
+        crate::YUBIHSM_ALGO_HMAC_SHA1,
+        crate::YUBIHSM_ALGO_HMAC_SHA512,
+        53,
+    ]);
+    let mechanism = |type_| {
+        mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == type_)
+            .copied()
+    };
+    let rsa = mechanism(CKM_RSA_PKCS as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((rsa.min_key_size, rsa.max_key_size), (2048, 2048));
+    assert_ne!(rsa.flags & CKF_ENCRYPT as CK_FLAGS, 0);
+    assert_eq!(rsa.flags & (CKF_SIGN | CKF_DECRYPT) as CK_FLAGS, 0);
+    let aes = mechanism(CKM_AES_ECB as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((aes.min_key_size, aes.max_key_size), (16, 16));
+    let hmac = mechanism(CKM_SHA_1_HMAC as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 64));
+    let hmac = mechanism(CKM_SHA512_HMAC as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 128));
+    let generated = mechanism(CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((generated.min_key_size, generated.max_key_size), (20, 64));
+    assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
+    assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
+}
+
 #[derive(Debug)]
 struct TestSlot {
     present: std::cell::Cell<bool>,
