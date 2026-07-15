@@ -1,8 +1,8 @@
 # YubiKey PIV client
 
 The default PC/SC YubiKey backend is `piv`. Set
-`PKCS11RS_YUBIKEY_BACKEND=scp03` to retain the Secure Domain provisioning
-backend documented in `docs/scp03.md`.
+`PKCS11RS_YUBIKEY_BACKEND=scp03` or `PKCS11RS_YUBIKEY_BACKEND=scp11` to use the
+secure-channel backends documented in `docs/scp03.md` and `docs/scp11.md`.
 
 The PIV client selects application AID `A0 00 00 03 08` and reads the firmware
 version and serial number from the applet. PKCS #11 `C_Login` verifies the PIV
