@@ -136,6 +136,9 @@ trait Slot {
         Ok(())
     }
     fn clear_session(&mut self) {}
+    fn login_is_active(&self) -> bool {
+        true
+    }
 
     fn flags(&self) -> CK_FLAGS {
         if self.is_present() {
@@ -313,6 +316,9 @@ impl Slot for YubiKeySlot {
     }
     fn clear_session(&mut self) {
         *self.session.borrow_mut() = None;
+    }
+    fn login_is_active(&self) -> bool {
+        self.session.borrow().is_some()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(YubiKeySession {
@@ -1067,6 +1073,14 @@ impl Context {
             None => Err(CKR_SLOT_ID_INVALID.into()),
         }
     }
+    fn get_present_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
+        let slot = self.get_slot(slot_id)?;
+        if slot.is_present() {
+            Ok(slot)
+        } else {
+            Err(CKR_TOKEN_NOT_PRESENT.into())
+        }
+    }
     fn _get_slot_mut(&mut self, slot_id: CK_SLOT_ID) -> Result<&mut (dyn Slot + '_), Error> {
         match self.slots.get_mut(&slot_id) {
             Some(slot) => Ok(slot.as_mut()),
@@ -1096,11 +1110,21 @@ impl Context {
     ) -> Result<(CK_SLOT_ID, CK_FLAGS, bool), Error> {
         let session = self._get_session(session_handle)?.1;
         let slot_id = session.slotID();
-        Ok((
-            slot_id,
-            session.flags(),
-            self.logged_in_slots.contains(&slot_id),
-        ))
+        Ok((slot_id, session.flags(), self.is_slot_logged_in(slot_id)))
+    }
+
+    fn is_slot_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
+        self.logged_in_slots.contains(&slot_id)
+            && self
+                .slots
+                .get(&slot_id)
+                .is_some_and(|slot| slot.login_is_active())
+    }
+
+    fn reconcile_login_state(&mut self, slot_id: CK_SLOT_ID) {
+        if self.logged_in_slots.contains(&slot_id) && !self.is_slot_logged_in(slot_id) {
+            self.clear_login_state(slot_id);
+        }
     }
 
     fn insert_object(&mut self, mut object: TokenObject) -> CK_OBJECT_HANDLE {
@@ -1833,8 +1857,9 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO)
 
 fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context(|ctx| {
-        ctx.get_slot(slotID)?.get_token_info(info)?;
+    with_context_mut(|ctx| {
+        ctx.init();
+        ctx.get_present_slot(slotID)?.get_token_info(info)?;
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = ctx
             .sessions
@@ -1939,7 +1964,7 @@ fn get_mechanism_list(
     let count = as_mut(count)?;
     with_context_mut(|ctx| {
         ctx.init();
-        ctx.get_slot(slotID)?;
+        ctx.get_present_slot(slotID)?;
 
         let required = MECHANISMS.len() as CK_ULONG;
         if mechanism_list.is_null() {
@@ -1983,7 +2008,7 @@ fn get_mechanism_info(
     let info = as_mut(info_ptr)?;
     with_context_mut(|ctx| {
         ctx.init();
-        ctx.get_slot(slotID)?;
+        ctx.get_present_slot(slotID)?;
 
         let mechanism = mechanism_details(type_)?;
         info.ulMinKeySize = mechanism.min_key_size;
@@ -2084,7 +2109,8 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             .sessions
             .iter()
             .any(|(handle, session)| *handle != session_handle && session.slotID() == slot_id);
-        if is_last_session && ctx.logged_in_slots.contains(&slot_id) {
+        ctx.reconcile_login_state(slot_id);
+        if is_last_session && ctx.is_slot_logged_in(slot_id) {
             ctx.logout_slot(slot_id)?;
         }
         let session = ctx.sessions.remove(&session_handle).unwrap();
@@ -2117,7 +2143,8 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .filter(|(_k, v)| v.slotID() == slotID)
             .map(|(k, _v)| *k)
             .collect();
-        if ctx.logged_in_slots.contains(&slotID) {
+        ctx.reconcile_login_state(slotID);
+        if ctx.is_slot_logged_in(slotID) {
             ctx.logout_slot(slotID)?;
         }
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
@@ -2157,7 +2184,7 @@ pub extern "C" fn C_GetSessionInfo(
                         info.slotID = session.1.slotID();
                         info.state = session_state(
                             session.1.flags(),
-                            ctx.logged_in_slots.contains(&session.1.slotID()),
+                            ctx.is_slot_logged_in(session.1.slotID()),
                         );
                         info.flags = session.1.flags();
                         info.ulDeviceError = 0;
@@ -2206,7 +2233,8 @@ fn login(
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        if ctx.logged_in_slots.contains(&slot_id) {
+        ctx.reconcile_login_state(slot_id);
+        if ctx.is_slot_logged_in(slot_id) {
             return Err(CKR_USER_ALREADY_LOGGED_IN.into());
         }
         let pin = from_raw_parts(pin, pin_len as usize)?;
@@ -2233,7 +2261,8 @@ pub extern "C" fn C_Login(
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_context_mut(|ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
-        if !ctx.logged_in_slots.contains(&slot_id) {
+        ctx.reconcile_login_state(slot_id);
+        if !ctx.is_slot_logged_in(slot_id) {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         ctx.logout_slot(slot_id)
