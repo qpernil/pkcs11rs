@@ -811,10 +811,11 @@ impl Session for YubiHsmSession {
 impl YubiHsmSession {
     fn send_secure_cmd(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
-        let result = session_guard
+        let session = session_guard
             .as_mut()
-            .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?
-            .send_command(self.connector.as_ref(), command);
+            .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?;
+        YubiHsmSecureSession::validate_command(self.connector.as_ref(), command)?;
+        let result = session.send_command(self.connector.as_ref(), command);
         if result.is_err() {
             *session_guard = None;
         }

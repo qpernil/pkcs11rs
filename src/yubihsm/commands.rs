@@ -1,9 +1,14 @@
-use crate::{error::Error, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE};
+use crate::{error::Error, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE};
 use zeroize::Zeroizing;
 
 const LABEL_LENGTH: usize = 40;
 const CAPABILITIES_LENGTH: usize = 8;
 const MAX_COMMAND_DATA_LENGTH: usize = 3133;
+const ALGORITHM_AES128_YUBICO_OTP: u8 = 37;
+const ALGORITHM_AES128_YUBICO_AUTHENTICATION: u8 = 38;
+const ALGORITHM_AES192_YUBICO_OTP: u8 = 39;
+const ALGORITHM_AES256_YUBICO_OTP: u8 = 40;
+const ALGORITHM_EC_P256_YUBICO_AUTHENTICATION: u8 = 49;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -531,8 +536,14 @@ impl Command {
         )?;
         let mut data = parameters.encode()?;
         data.extend_from_slice(&nonce_id.to_le_bytes());
+        let expected_key_length = match parameters.algorithm {
+            ALGORITHM_AES128_YUBICO_OTP => 16,
+            ALGORITHM_AES192_YUBICO_OTP => 24,
+            ALGORITHM_AES256_YUBICO_OTP => 32,
+            _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        };
         match code {
-            CommandCode::PutOtpAeadKey if !matches!(key.len(), 16 | 24 | 32) => {
+            CommandCode::PutOtpAeadKey if key.len() != expected_key_length => {
                 return Err(CKR_DATA_LEN_RANGE.into());
             }
             CommandCode::GenerateOtpAeadKey if !key.is_empty() => {
@@ -563,7 +574,12 @@ impl Command {
         algorithm: u8,
         key: &[u8],
     ) -> Result<Self, Error> {
-        if !matches!(key.len(), 32 | 64) {
+        let expected_key_length = match algorithm {
+            ALGORITHM_AES128_YUBICO_AUTHENTICATION => 32,
+            ALGORITHM_EC_P256_YUBICO_AUTHENTICATION => 64,
+            _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        };
+        if key.len() != expected_key_length {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         let mut data = prefixed_u16(id, &[algorithm]);
@@ -979,6 +995,13 @@ mod tests {
         }
     }
 
+    fn object_with_algorithm<'a>(label: &'a [u8], algorithm: u8) -> ObjectParameters<'a> {
+        ObjectParameters {
+            algorithm,
+            ..object(label)
+        }
+    }
+
     fn delegated<'a>(label: &'a [u8]) -> DelegatedObjectParameters<'a> {
         DelegatedObjectParameters {
             object: object(label),
@@ -1057,10 +1080,20 @@ mod tests {
             Command::randomize_otp_aead(1),
             Command::rewrap_otp_aead(1, 2, &aead),
             Command::sign_attestation_certificate(1, 2),
-            Command::otp_aead_key(CommandCode::PutOtpAeadKey, &object(b"otp"), 4, &[0; 16])
-                .unwrap(),
-            Command::otp_aead_key(CommandCode::GenerateOtpAeadKey, &object(b"otp-gen"), 4, &[])
-                .unwrap(),
+            Command::otp_aead_key(
+                CommandCode::PutOtpAeadKey,
+                &object_with_algorithm(b"otp", ALGORITHM_AES128_YUBICO_OTP),
+                4,
+                &[0; 16],
+            )
+            .unwrap(),
+            Command::otp_aead_key(
+                CommandCode::GenerateOtpAeadKey,
+                &object_with_algorithm(b"otp-gen", ALGORITHM_AES128_YUBICO_OTP),
+                4,
+                &[],
+            )
+            .unwrap(),
             Command::set_log_index(1),
             Command::key_data(CommandCode::WrapData, 1, b"data").unwrap(),
             Command::key_data(CommandCode::UnwrapData, 1, b"wrapped").unwrap(),
@@ -1220,13 +1253,56 @@ mod tests {
     fn otp_and_rsa_wrap_commands_match_wire_vectors() {
         let otp = Command::otp_aead_key(
             CommandCode::PutOtpAeadKey,
-            &object(b"otp"),
+            &object_with_algorithm(b"otp", ALGORITHM_AES128_YUBICO_OTP),
             0x0102_0304,
             &[0x55; 16],
         )
         .unwrap();
         assert_eq!(&otp.data()[53..57], &[0x04, 0x03, 0x02, 0x01]);
         assert_eq!(&otp.data()[57..], &[0x55; 16]);
+
+        for (algorithm, key_length) in [
+            (ALGORITHM_AES128_YUBICO_OTP, 16),
+            (ALGORITHM_AES192_YUBICO_OTP, 24),
+            (ALGORITHM_AES256_YUBICO_OTP, 32),
+        ] {
+            let parameters = object_with_algorithm(b"otp", algorithm);
+            assert!(Command::otp_aead_key(
+                CommandCode::PutOtpAeadKey,
+                &parameters,
+                0,
+                &vec![0; key_length],
+            )
+            .is_ok());
+            assert!(Command::otp_aead_key(
+                CommandCode::PutOtpAeadKey,
+                &parameters,
+                0,
+                &vec![0; key_length + 1],
+            )
+            .is_err());
+        }
+        assert!(Command::otp_aead_key(
+            CommandCode::GenerateOtpAeadKey,
+            &object_with_algorithm(b"otp", 0xff),
+            0,
+            &[],
+        )
+        .is_err());
+
+        assert!(Command::change_authentication_key(
+            1,
+            ALGORITHM_AES128_YUBICO_AUTHENTICATION,
+            &[0; 64],
+        )
+        .is_err());
+        assert!(Command::change_authentication_key(
+            1,
+            ALGORITHM_EC_P256_YUBICO_AUTHENTICATION,
+            &[0; 64],
+        )
+        .is_ok());
+        assert!(Command::change_authentication_key(1, 0xff, &[0; 32]).is_err());
 
         let rsa = Command::rsa_wrap(
             CommandCode::ExportRsaWrapped,

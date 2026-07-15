@@ -222,14 +222,26 @@ impl SecureSession {
                 false,
             )
             .map_err(map_authentication_error)?;
-        response
+        increment_counter(&mut session.counter);
+        let authentication_result = response
             .require_response(COMMAND_AUTHENTICATE_SESSION)
-            .map_err(map_authentication_error)?;
+            .and_then(|data| {
+                if data.is_empty() {
+                    Ok(())
+                } else {
+                    Err(CKR_DEVICE_ERROR.into())
+                }
+            })
+            .map_err(map_authentication_error);
+        if let Err(error) = authentication_result {
+            let _ = session.send_command(connector, &Command::close_session());
+            return Err(error);
+        }
 
         if !memcmp::eq(&expected_card, &card_cryptogram) {
-            return Err(CKR_PIN_INCORRECT.into());
+            let _ = session.send_command(connector, &Command::close_session());
+            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
         }
-        increment_counter(&mut session.counter);
         Ok(session)
     }
 
@@ -238,29 +250,9 @@ impl SecureSession {
         connector: &dyn Connector,
         command: &Command,
     ) -> Result<Vec<u8>, Error> {
+        Self::validate_command(connector, command)?;
         let code = command.code() as u8;
         let data = command.data();
-        if command.code().is_session_protocol()
-            || matches!(
-                command.code(),
-                CommandCode::GetDeviceInfo | CommandCode::GetDevicePublicKey
-            )
-        {
-            return Err(CKR_DATA_INVALID.into());
-        }
-        let maximum_message_size = maximum_message_size(connector.major(), connector.minor());
-        if secure_message_length(data.len()) > maximum_message_size {
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        if command.code() == CommandCode::GetPseudoRandom {
-            let requested = data
-                .try_into()
-                .map(u16::from_be_bytes)
-                .map_err(|_| CKR_DATA_INVALID)? as usize;
-            if secure_message_length(requested) > maximum_message_size {
-                return Err(CKR_DATA_LEN_RANGE.into());
-            }
-        }
         let inner = Frame::new(code, data.to_vec())?.encode();
         let iv = aes_block(&self.s_enc[..], &self.counter)?;
         let ciphertext = aes_cbc(&self.s_enc[..], &iv, &pad(&inner), Mode::Encrypt)?;
@@ -280,6 +272,35 @@ impl SecureSession {
         let response = Frame::parse(&unpad(clear)?)?;
         increment_counter(&mut self.counter);
         response.require_response(code)
+    }
+
+    pub(crate) fn validate_command(
+        connector: &dyn Connector,
+        command: &Command,
+    ) -> Result<(), Error> {
+        if command.code().is_session_protocol()
+            || matches!(
+                command.code(),
+                CommandCode::GetDeviceInfo | CommandCode::GetDevicePublicKey
+            )
+        {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let maximum_message_size = maximum_message_size(connector.major(), connector.minor());
+        if secure_message_length(command.data().len()) > maximum_message_size {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        if command.code() == CommandCode::GetPseudoRandom {
+            let requested = command
+                .data()
+                .try_into()
+                .map(u16::from_be_bytes)
+                .map_err(|_| CKR_DATA_INVALID)? as usize;
+            if secure_message_length(requested) > maximum_message_size {
+                return Err(CKR_DATA_LEN_RANGE.into());
+            }
+        }
+        Ok(())
     }
 
     fn send_authenticated(
@@ -305,11 +326,14 @@ impl SecureSession {
 
         let encoded_response = connector.send(&request, DEFAULT_TIMEOUT)?;
         let response = Frame::parse(&encoded_response)?;
+        if !require_response_mac && response.command == command | RESPONSE_BIT {
+            return Ok(response);
+        }
         if response.data.len() < MAC_LENGTH {
-            if !require_response_mac && response.command == command | RESPONSE_BIT {
-                return Ok(response);
-            }
             if response.command == COMMAND_ERROR && response.data.len() == 1 {
+                if command == COMMAND_AUTHENTICATE_SESSION && response.data == [0x04] {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
                 return Err(map_device_error(response.data.first().copied()));
             }
             return Err(CKR_DEVICE_ERROR.into());
@@ -451,11 +475,7 @@ fn map_device_error(error: Option<u8>) -> Error {
 
 fn map_authentication_error(error: Error) -> Error {
     match error {
-        Error::Generic(rv)
-            if rv == CKR_DEVICE_ERROR as _ || rv == CKR_OBJECT_HANDLE_INVALID as _ =>
-        {
-            CKR_PIN_INCORRECT.into()
-        }
+        Error::Generic(rv) if rv == CKR_OBJECT_HANDLE_INVALID as _ => CKR_PIN_INCORRECT.into(),
         other => other,
     }
 }
@@ -486,6 +506,8 @@ mod tests {
         commands: RefCell<Vec<Vec<u8>>>,
         corrupt_card_cryptogram: bool,
         corrupt_response_mac: Cell<bool>,
+        authenticate_payload: Vec<u8>,
+        closed_sessions: Cell<usize>,
     }
 
     impl ProtocolPeer {
@@ -495,12 +517,21 @@ mod tests {
                 commands: RefCell::new(Vec::new()),
                 corrupt_card_cryptogram: false,
                 corrupt_response_mac: Cell::new(false),
+                authenticate_payload: Vec::new(),
+                closed_sessions: Cell::new(0),
             }
         }
 
         fn with_bad_card_cryptogram() -> Self {
             Self {
                 corrupt_card_cryptogram: true,
+                ..Self::new()
+            }
+        }
+
+        fn with_authenticate_payload(payload: Vec<u8>) -> Self {
+            Self {
+                authenticate_payload: payload,
                 ..Self::new()
             }
         }
@@ -580,14 +611,17 @@ mod tests {
             }
             session.mac_chaining_value = command_mac;
             increment_counter(&mut session.counter);
-            Frame::new(COMMAND_AUTHENTICATE_SESSION | RESPONSE_BIT, vec![])
-                .map(|frame| frame.encode())
+            Frame::new(
+                COMMAND_AUTHENTICATE_SESSION | RESPONSE_BIT,
+                self.authenticate_payload.clone(),
+            )
+            .map(|frame| frame.encode())
         }
 
         fn session_message(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
             let frame = Frame::parse(request)?;
-            let mut session = self.session.borrow_mut();
-            let session = session.as_mut().ok_or(CKR_DEVICE_ERROR)?;
+            let mut session_slot = self.session.borrow_mut();
+            let session = session_slot.as_mut().ok_or(CKR_DEVICE_ERROR)?;
             if frame.data.len() < 1 + AES_BLOCK_SIZE + MAC_LENGTH {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -611,6 +645,7 @@ mod tests {
                 Mode::Decrypt,
             )?;
             let inner = Frame::parse(&unpad(clear)?)?;
+            let closes_session = inner.command == CommandCode::CloseSession as u8;
             let (response_command, response_data) = match inner.command {
                 value if value == CommandCode::GetStorageInfo as u8 => {
                     (inner.command | RESPONSE_BIT, vec![0xaa, 0xbb, 0xcc])
@@ -649,6 +684,10 @@ mod tests {
             }
             response.extend_from_slice(&response_mac[..MAC_LENGTH]);
             increment_counter(&mut session.counter);
+            if closes_session {
+                *session_slot = None;
+                self.closed_sessions.set(self.closed_sessions.get() + 1);
+            }
             Ok(response)
         }
     }
@@ -769,11 +808,28 @@ mod tests {
     #[test]
     fn rejects_card_cryptogram_after_cleaning_up_device_session() {
         let peer = ProtocolPeer::with_bad_card_cryptogram();
-        assert!(
-            SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE).is_err()
-        );
-        assert_eq!(peer.commands.borrow().len(), 2);
+        assert!(matches!(
+            SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE),
+            Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as _
+        ));
+        assert_eq!(peer.commands.borrow().len(), 3);
         assert_eq!(peer.commands.borrow()[1][0], COMMAND_AUTHENTICATE_SESSION);
+        assert_eq!(peer.commands.borrow()[2][0], COMMAND_SESSION_MESSAGE);
+        assert_eq!(peer.closed_sessions.get(), 1);
+        assert!(peer.session.borrow().is_none());
+    }
+
+    #[test]
+    fn rejects_authentication_success_responses_with_payload() {
+        for payload_length in [1, MAC_LENGTH, MAC_LENGTH + 1] {
+            let peer = ProtocolPeer::with_authenticate_payload(vec![0xaa; payload_length]);
+            assert!(matches!(
+                SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE),
+                Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as _
+            ));
+            assert_eq!(peer.commands.borrow().len(), 3);
+            assert_eq!(peer.closed_sessions.get(), 1);
+        }
     }
 
     #[test]
