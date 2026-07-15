@@ -13,7 +13,7 @@ use openssl::{
 };
 use rusb::UsbContext;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ffi::CStr,
     io::Write,
@@ -33,6 +33,9 @@ use scp03::{
     configured_application_aid, configured_security_level, select_application, CommandApdu,
     ResponseApdu, Scp03KeySet, Scp03Session,
 };
+
+mod piv;
+use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo};
 
 mod yubihsm;
 use yubihsm::{
@@ -143,6 +146,9 @@ trait Slot {
         Ok(())
     }
     fn clear_session(&mut self) {}
+    fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        Ok(Vec::new())
+    }
     fn login_is_active(&self) -> bool {
         true
     }
@@ -205,6 +211,234 @@ impl std::fmt::Debug for dyn Slot + '_ {
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+}
+
+#[derive(Debug)]
+struct PivSlot {
+    connector: Rc<dyn Connector>,
+    authenticated: Rc<Cell<bool>>,
+    version: piv::Version,
+    serial: String,
+    keys: Vec<PivKey>,
+}
+
+#[derive(Clone, Debug)]
+struct PivKey {
+    slot: piv::Slot,
+    algorithm: piv::Algorithm,
+    public_key: Rsa<Public>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YubiKeyBackend {
+    Piv,
+    Scp03,
+}
+
+fn configured_yubikey_backend() -> Result<YubiKeyBackend, Error> {
+    match std::env::var("PKCS11RS_YUBIKEY_BACKEND") {
+        Ok(value) if value.eq_ignore_ascii_case("piv") => Ok(YubiKeyBackend::Piv),
+        Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(YubiKeyBackend::Scp03),
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
+        Err(std::env::VarError::NotPresent) => Ok(YubiKeyBackend::Piv),
+    }
+}
+
+impl PivSlot {
+    fn new(connector: Rc<dyn Connector>) -> Self {
+        Self {
+            connector,
+            authenticated: Rc::new(Cell::new(false)),
+            version: piv::Version {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+            serial: String::from("0"),
+            keys: Vec::new(),
+        }
+    }
+
+    fn update_device_info(&mut self, info: PivDeviceInfo) {
+        self.version = info.version;
+        self.serial = info.serial.unwrap_or_default().to_string();
+    }
+}
+
+impl Slot for PivSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn name(&self) -> String {
+        self.connector.name()
+    }
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+    fn product(&self) -> &str {
+        "YubiKey PIV"
+    }
+    fn serial(&self) -> &str {
+        &self.serial
+    }
+    fn major(&self) -> u8 {
+        self.version.major
+    }
+    fn minor(&self) -> u8 {
+        self.version.minor
+    }
+    fn is_present(&self) -> bool {
+        self.connector.is_present()
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        if let Err(error) = self.connector.refresh() {
+            self.authenticated.set(false);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(PivSession {
+            slotID,
+            flags,
+            connector: self.connector.clone(),
+            authenticated: self.authenticated.clone(),
+        })
+    }
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        self.authenticated.set(false);
+        let info = PivClient.select(self.connector.as_ref())?;
+        self.update_device_info(info);
+        PivClient.verify_pin(self.connector.as_ref(), pin)?;
+        self.authenticated.set(true);
+        Ok(())
+    }
+    fn logout(&mut self) -> Result<(), Error> {
+        self.authenticated.set(false);
+        let result = PivClient.select(self.connector.as_ref());
+        if let Ok(info) = result.as_ref() {
+            self.version = info.version;
+            self.serial = info.serial.unwrap_or_default().to_string();
+        }
+        result.map(|_| ())
+    }
+    fn init_slot(&mut self) -> Result<(), Error> {
+        self.authenticated.set(false);
+        let info = PivClient.select(self.connector.as_ref())?;
+        self.update_device_info(info);
+        self.keys.clear();
+        for slot in [
+            piv::Slot::Authentication,
+            piv::Slot::Signature,
+            piv::Slot::KeyManagement,
+            piv::Slot::CardAuthentication,
+        ] {
+            let Ok(metadata) = PivClient.metadata(self.connector.as_ref(), slot) else {
+                continue;
+            };
+            let Some(algorithm) = metadata.algorithm.and_then(piv::Algorithm::from_id) else {
+                continue;
+            };
+            if algorithm.rsa_input_length().is_none() {
+                continue;
+            }
+            let Ok(certificate) = PivClient.certificate(self.connector.as_ref(), slot) else {
+                continue;
+            };
+            let Ok(certificate) = openssl::x509::X509::from_der(&certificate) else {
+                continue;
+            };
+            let Ok(public_key) = certificate.public_key().and_then(|key| key.rsa()) else {
+                continue;
+            };
+            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            self.keys.push(PivKey {
+                slot,
+                algorithm,
+                public_key,
+            });
+        }
+        Ok(())
+    }
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        info.firmwareVersion.major = self.version.major;
+        info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
+        Ok(())
+    }
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        info.ulMaxPinLen = 8;
+        info.ulMinPinLen = 6;
+        info.firmwareVersion.major = self.version.major;
+        info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
+        Ok(())
+    }
+    fn clear_session(&mut self) {
+        self.authenticated.set(false);
+    }
+    fn login_is_active(&self) -> bool {
+        self.authenticated.get()
+    }
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let mut objects = Vec::with_capacity(self.keys.len() * 2);
+        for key in &self.keys {
+            let id = vec![key.slot as u8];
+            let label = format!("PIV slot {:02X}", key.slot as u8).into_bytes();
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("piv-{:02x}-public", key.slot as u8).into_bytes(),
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                label: label.clone(),
+                id: id.clone(),
+                token: true,
+                private: false,
+                encrypt: true,
+                decrypt: false,
+                sign: false,
+                verify: true,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: true,
+                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                owner_session: None,
+                material: KeyMaterial::RsaPublic(key.public_key.clone()),
+            });
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("piv-{:02x}-private", key.slot as u8).into_bytes(),
+                class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                label,
+                id,
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: key.slot == piv::Slot::KeyManagement,
+                sign: true,
+                verify: false,
+                sensitive: true,
+                extractable: false,
+                always_sensitive: true,
+                never_extractable: true,
+                local: true,
+                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                owner_session: None,
+                material: KeyMaterial::PivPrivate {
+                    slot: key.slot,
+                    algorithm: key.algorithm,
+                    modulus: key.public_key.n().to_vec(),
+                    public_exponent: key.public_key.e().to_vec(),
+                },
+            });
+        }
+        Ok(objects)
+    }
 }
 
 impl Slot for YubiHsmSlot {
@@ -375,6 +609,14 @@ trait Session {
     fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
         openssl::rand::rand_bytes(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
     }
+    fn piv_sign(
+        &self,
+        _slot: piv::Slot,
+        _algorithm: piv::Algorithm,
+        _input: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
 }
 
 fn session_state(flags: CK_FLAGS, logged_in: bool) -> CK_STATE {
@@ -486,6 +728,49 @@ impl Session for AbiTestSession {
 
     fn get_session_info(&self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PivSession {
+    slotID: CK_SLOT_ID,
+    flags: CK_FLAGS,
+    connector: Rc<dyn Connector>,
+    authenticated: Rc<Cell<bool>>,
+}
+
+impl Session for PivSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slotID
+    }
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+    fn get_session_info(&self) -> Result<(), Error> {
+        let retries = PivClient.pin_retries(self.connector.as_ref())?;
+        if self.authenticated.get() && retries != u8::MAX {
+            self.authenticated.set(false);
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        Ok(())
+    }
+    fn piv_sign(
+        &self,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        input: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        if !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+            self.authenticated.set(false);
+        }
+        result
     }
 }
 
@@ -985,6 +1270,12 @@ enum KeyMaterial {
     None,
     RsaPrivate(Rsa<Private>),
     RsaPublic(Rsa<Public>),
+    PivPrivate {
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        modulus: Vec<u8>,
+        public_exponent: Vec<u8>,
+    },
     Secret(Zeroizing<Vec<u8>>),
 }
 
@@ -994,6 +1285,17 @@ impl std::fmt::Debug for KeyMaterial {
             Self::None => fmt.write_str("None"),
             Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
             Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
+            Self::PivPrivate {
+                slot,
+                algorithm,
+                modulus,
+                public_exponent: _,
+            } => fmt
+                .debug_struct("PivPrivate")
+                .field("slot", slot)
+                .field("algorithm", algorithm)
+                .field("size", &modulus.len())
+                .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
         }
     }
@@ -1163,6 +1465,20 @@ impl Context {
         handle
     }
 
+    fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
+        let objects = self
+            .slots
+            .get(&slot_id)
+            .ok_or(CKR_SLOT_ID_INVALID)?
+            .token_objects(slot_id)?;
+        self.objects
+            .retain(|_, object| object.slot_id != Some(slot_id) || !object.token);
+        for object in objects {
+            self.insert_object(object);
+        }
+        Ok(())
+    }
+
     fn clear_login_state(&mut self, slot_id: CK_SLOT_ID) {
         self.logged_in_slots.remove(&slot_id);
         let slot_sessions: HashSet<CK_SESSION_HANDLE> = self
@@ -1325,22 +1641,50 @@ impl Context {
                         if was_present && !is_present {
                             self.close_slot_state(slot_id, false);
                         } else if !was_present && is_present {
-                            if let Some(slot) = self.slots.get_mut(&slot_id) {
-                                map(slot.init_slot());
+                            let initialized = self
+                                .slots
+                                .get_mut(&slot_id)
+                                .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
+                                .and_then(|slot| slot.init_slot());
+                            if let Err(error) = initialized {
+                                eprintln!("YubiKey backend initialization: {:?}", error);
+                            } else {
+                                map(self.refresh_slot_token_objects(slot_id));
                             }
                         }
                         continue;
                     }
                     map(connector.refresh());
                     let slot_id = next_key(&self.slots, 0);
-                    let mut slot = Box::new(YubiKeySlot {
-                        connector: Rc::new(connector),
-                        session: Rc::new(RefCell::new(None)),
-                    });
+                    let connector: Rc<dyn Connector> = Rc::new(connector);
+                    let mut slot: Box<dyn Slot> = match configured_yubikey_backend() {
+                        Ok(YubiKeyBackend::Piv) => Box::new(PivSlot::new(connector)),
+                        Ok(YubiKeyBackend::Scp03) => Box::new(YubiKeySlot {
+                            connector,
+                            session: Rc::new(RefCell::new(None)),
+                        }),
+                        Err(error) => {
+                            eprintln!("PKCS11RS_YUBIKEY_BACKEND: {:?}", error);
+                            continue;
+                        }
+                    };
                     if slot.is_present() {
-                        map(slot.init_slot());
+                        if let Err(error) = slot.init_slot() {
+                            eprintln!("YubiKey backend initialization: {:?}", error);
+                            continue;
+                        }
                     }
+                    let token_objects = match slot.token_objects(slot_id) {
+                        Ok(objects) => objects,
+                        Err(error) => {
+                            eprintln!("YubiKey object discovery: {:?}", error);
+                            Vec::new()
+                        }
+                    };
                     self.slots.insert(slot_id, slot);
+                    for object in token_objects {
+                        self.insert_object(object);
+                    }
                     self.dynamic_slots.insert(slot_id);
                     seen_dynamic_slots.insert(slot_id);
                 }
@@ -1481,6 +1825,8 @@ impl TokenObject {
             CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
             CKA_LOCAL as CK_ATTRIBUTE_TYPE,
             CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
+            CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -1526,6 +1872,20 @@ impl TokenObject {
                 self.key_gen_mechanism
                     .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
             )),
+            x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(key.n().to_vec()),
+                KeyMaterial::RsaPublic(key) => Some(key.n().to_vec()),
+                KeyMaterial::PivPrivate { modulus, .. } => Some(modulus.clone()),
+                _ => None,
+            },
+            x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(key.e().to_vec()),
+                KeyMaterial::RsaPublic(key) => Some(key.e().to_vec()),
+                KeyMaterial::PivPrivate {
+                    public_exponent, ..
+                } => Some(public_exponent.clone()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -3136,7 +3496,10 @@ fn sign_init(
         }
         if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || object.key_type != CKK_RSA as CK_KEY_TYPE
-            || !matches!(object.material, KeyMaterial::RsaPrivate(_))
+            || !matches!(
+                object.material,
+                KeyMaterial::RsaPrivate(_) | KeyMaterial::PivPrivate { .. }
+            )
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -3210,46 +3573,77 @@ fn sign(
                 return Err(error);
             }
         };
-        let private_key = match &operation.key {
-            KeyMaterial::RsaPrivate(key) => key,
-            _ => {
-                ctx.sign_operations.remove(&session_handle);
-                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-            }
+        let required = match &operation.key {
+            KeyMaterial::RsaPrivate(key) => key.size() as usize,
+            KeyMaterial::PivPrivate { modulus, .. } => modulus.len(),
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        let required = private_key.size() as CK_ULONG;
-        if data.len() > private_key.size() as usize - 11 {
+        if data.len() > required.saturating_sub(11) {
             ctx.sign_operations.remove(&session_handle);
             return Err(CKR_DATA_LEN_RANGE.into());
         }
 
         if signature.is_null() {
-            *signature_len = required;
+            *signature_len = required as CK_ULONG;
             return Ok(());
         }
-        if *signature_len < required {
-            *signature_len = required;
+        if *signature_len < required as CK_ULONG {
+            *signature_len = required as CK_ULONG;
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
 
-        let mut signature_bytes = vec![0; private_key.size() as usize];
-        let written = match private_key.private_encrypt(data, &mut signature_bytes, Padding::PKCS1)
-        {
-            Ok(written) => written,
+        let signature_result = match &operation.key {
+            KeyMaterial::RsaPrivate(private_key) => {
+                let mut signature = vec![0; required];
+                private_key
+                    .private_encrypt(data, &mut signature, Padding::PKCS1)
+                    .map(|written| {
+                        signature.truncate(written);
+                        signature
+                    })
+                    .map_err(Error::from)
+            }
+            KeyMaterial::PivPrivate {
+                slot, algorithm, ..
+            } => {
+                let encoded = encode_pkcs1_v1_5_signature_input(data, required)?;
+                ctx._get_session(session_handle)?
+                    .1
+                    .piv_sign(*slot, *algorithm, &encoded)
+            }
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        let signature_bytes = match signature_result {
+            Ok(signature) if signature.len() == required => signature,
+            Ok(_) => {
+                ctx.sign_operations.remove(&session_handle);
+                return Err(CKR_DEVICE_ERROR.into());
+            }
             Err(error) => {
                 ctx.sign_operations.remove(&session_handle);
-                return Err(error.into());
+                return Err(error);
             }
         };
-        signature_bytes.truncate(written);
 
         unsafe {
             ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
         }
-        *signature_len = required;
+        *signature_len = required as CK_ULONG;
         ctx.sign_operations.remove(&session_handle);
         Ok(())
     })
+}
+
+fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result<Vec<u8>, Error> {
+    if data.len() > modulus_size.saturating_sub(11) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut encoded = Vec::with_capacity(modulus_size);
+    encoded.extend([0, 1]);
+    encoded.resize(modulus_size - data.len() - 1, 0xff);
+    encoded.push(0);
+    encoded.extend_from_slice(data);
+    Ok(encoded)
 }
 
 #[no_mangle]

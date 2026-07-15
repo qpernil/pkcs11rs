@@ -1,5 +1,10 @@
 # SCP03 configuration
 
+Set `PKCS11RS_YUBIKEY_BACKEND=scp03` to use this backend for PC/SC YubiKeys.
+The default PC/SC backend is `piv`; see `docs/piv.md`. Selecting one backend is
+necessary because selecting another card application invalidates the current
+application's authentication and secure-channel state.
+
 The PC/SC YubiKey path selects an application and establishes an SCP03 channel
 during `C_Login`. The selected AID defaults to the Issuer Security Domain
 `A0 00 00 01 51 00 00 00`. Set `PKCS11RS_SCP03_AID` to the hexadecimal AID of

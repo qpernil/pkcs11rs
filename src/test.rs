@@ -34,6 +34,12 @@ struct TestSession {
 }
 
 #[derive(Debug)]
+struct PivSigningTestSession {
+    slot_id: CK_SLOT_ID,
+    captured: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+}
+
+#[derive(Debug)]
 struct FailingConnector;
 
 impl crate::Connector for FailingConnector {
@@ -110,6 +116,36 @@ impl crate::Session for TestSession {
 
     fn get_session_info(&self) -> Result<(), crate::error::Error> {
         Ok(())
+    }
+}
+
+impl crate::Session for PivSigningTestSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        CKF_SERIAL_SESSION as CK_FLAGS
+    }
+
+    fn get_session_info(&self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn piv_sign(
+        &self,
+        slot: crate::piv::Slot,
+        algorithm: crate::piv::Algorithm,
+        input: &[u8],
+    ) -> Result<Vec<u8>, crate::error::Error> {
+        assert_eq!(slot, crate::piv::Slot::Signature);
+        assert_eq!(algorithm, crate::piv::Algorithm::Rsa1024);
+        *self.captured.borrow_mut() = input.to_vec();
+        Ok(vec![0x5a; 128])
     }
 }
 
@@ -2443,6 +2479,100 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
 }
 
 #[test]
+pub fn piv_rsa_signing_encodes_ckm_rsa_pkcs_input() {
+    let encoded = crate::encode_pkcs1_v1_5_signature_input(b"abc", 16).unwrap();
+    assert_eq!(
+        encoded,
+        [0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, b'a', b'b', b'c']
+    );
+    assert!(crate::encode_pkcs1_v1_5_signature_input(&[0; 6], 16).is_err());
+}
+
+#[test]
+pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context
+            .slots
+            .insert(TEST_SLOT_ID, Box::new(test_slot(true)));
+        context.sessions.insert(
+            TEST_SESSION_HANDLE,
+            Box::new(PivSigningTestSession {
+                slot_id: TEST_SLOT_ID,
+                captured: captured.clone(),
+            }),
+        );
+        context.logged_in_slots.insert(TEST_SLOT_ID);
+        context.objects.insert(
+            42,
+            crate::TokenObject {
+                slot_id: Some(TEST_SLOT_ID),
+                unique_id: b"piv-9c-private".to_vec(),
+                class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                label: b"PIV slot 9C".to_vec(),
+                id: vec![0x9c],
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: false,
+                sign: true,
+                verify: false,
+                sensitive: true,
+                extractable: false,
+                always_sensitive: true,
+                never_extractable: true,
+                local: true,
+                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                owner_session: None,
+                material: crate::KeyMaterial::PivPrivate {
+                    slot: crate::piv::Slot::Signature,
+                    algorithm: crate::piv::Algorithm::Rsa1024,
+                    modulus: vec![0x80; 128],
+                    public_exponent: vec![1, 0, 1],
+                },
+            },
+        );
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        CKR_OK as CK_RV
+    );
+    let mut data = *b"abc";
+    let mut signature = [0u8; 128];
+    let mut signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(signature, [0x5a; 128]);
+    assert_eq!(
+        *captured.borrow(),
+        crate::encode_pkcs1_v1_5_signature_input(b"abc", 128).unwrap()
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn sign_terminal_errors_clear_the_operation() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -4127,7 +4257,8 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (3 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7) as CK_ULONG
+        (3 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7 + 256 + 3)
+            as CK_ULONG
     );
 
     let mut label = *b"Short";
@@ -4159,7 +4290,8 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (3 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7) as CK_ULONG
+        (3 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3)
+            as CK_ULONG
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
