@@ -34,6 +34,13 @@ use scp03::{
     ResponseApdu, Scp03KeySet, Scp03Session,
 };
 
+mod yubihsm;
+use yubihsm::{
+    get_device_info as get_yubihsm_device_info, parse_pin as parse_yubihsm_pin,
+    SecureSession as YubiHsmSecureSession, COMMAND_CLOSE_SESSION, COMMAND_GET_PSEUDO_RANDOM,
+    COMMAND_GET_STORAGE_INFO,
+};
+
 pub mod pkcs11 {
     #![allow(
         dead_code,
@@ -197,6 +204,7 @@ impl std::fmt::Debug for dyn Slot + '_ {
 #[derive(Debug)]
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
+    session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
 }
 
 impl Slot for YubiHsmSlot {
@@ -232,51 +240,48 @@ impl Slot for YubiHsmSlot {
             slotID,
             flags,
             connector: self.connector.clone(),
+            session: self.session.clone(),
         })
     }
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_cmd(1, &[5; 100], timeout)?;
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        *self.session.try_borrow_mut()? = None;
+        let (authkey_id, password) = parse_yubihsm_pin(pin)?;
+        let session =
+            YubiHsmSecureSession::authenticate(self.connector.as_ref(), authkey_id, password)?;
+        *self.session.try_borrow_mut()? = Some(session);
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_secure_cmd(1, &[6; 32], timeout)?;
-        Ok(())
+        let mut session = self.session.try_borrow_mut()?.take();
+        match session.as_mut() {
+            Some(session) => session
+                .send_command(self.connector.as_ref(), COMMAND_CLOSE_SESSION, &[])
+                .map(|_| ()),
+            None => Err(CKR_USER_NOT_LOGGED_IN.into()),
+        }
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_cmd(6, &[], timeout)?;
-        Ok(())
+        get_yubihsm_device_info(self.connector.as_ref()).map(|_| ())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_cmd(6, &[], timeout)?;
+        let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.format_token_info(info);
+        str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
+        info.ulMaxPinLen = 64;
+        info.ulMinPinLen = 8;
+        info.firmwareVersion.major = device_info.major;
+        info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
         Ok(())
     }
-}
-
-impl YubiHsmSlot {
-    fn compose_cmd(cmd: u8, data: &[u8]) -> Vec<u8> {
-        let len = data.len() as u16;
-        let mut vec = Vec::with_capacity(2048);
-        vec.extend([cmd]);
-        vec.extend(len.to_be_bytes());
-        vec.extend(data);
-        vec
+    fn clear_session(&mut self) {
+        *self.session.borrow_mut() = None;
     }
-    fn send_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector
-            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
-    }
-    fn send_secure_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector
-            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+    fn login_is_active(&self) -> bool {
+        self.session.borrow().is_some()
     }
 }
 
@@ -367,8 +372,9 @@ trait Session {
     fn flags(&self) -> CK_FLAGS;
     #[allow(dead_code)]
     fn get_session_info(&self) -> Result<(), Error>;
-    #[allow(dead_code)]
-    fn generate(&self) -> Result<(), Error>;
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        openssl::rand::rand_bytes(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
+    }
 }
 
 fn session_state(flags: CK_FLAGS, logged_in: bool) -> CK_STATE {
@@ -481,10 +487,6 @@ impl Session for AbiTestSession {
     fn get_session_info(&self) -> Result<(), Error> {
         Ok(())
     }
-
-    fn generate(&self) -> Result<(), Error> {
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -492,6 +494,7 @@ struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
+    session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
 }
 
 impl Session for YubiHsmSession {
@@ -505,21 +508,35 @@ impl Session for YubiHsmSession {
         self.flags
     }
     fn get_session_info(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_secure_cmd(1, &[7; 99], timeout)?;
-        Ok(())
+        self.send_secure_cmd(COMMAND_GET_STORAGE_INFO, &[])
+            .map(|_| ())
     }
-    fn generate(&self) -> Result<(), Error> {
-        let timeout = Duration::from_millis(100);
-        let _vec = self.send_secure_cmd(1, &[8; 72], timeout)?;
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        for chunk in output.chunks_mut(1024) {
+            let random = self.send_secure_cmd(
+                COMMAND_GET_PSEUDO_RANDOM,
+                &(chunk.len() as u16).to_be_bytes(),
+            )?;
+            if random.len() != chunk.len() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            chunk.copy_from_slice(&random);
+        }
         Ok(())
     }
 }
 
 impl YubiHsmSession {
-    fn send_secure_cmd(&self, cmd: u8, data: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
-        self.connector
-            .send(&YubiHsmSlot::compose_cmd(cmd, data), timeout)
+    fn send_secure_cmd(&self, cmd: u8, data: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut session_guard = self.session.try_borrow_mut()?;
+        let result = session_guard
+            .as_mut()
+            .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?
+            .send_command(self.connector.as_ref(), cmd, data);
+        if result.is_err() {
+            *session_guard = None;
+        }
+        result
     }
 }
 
@@ -544,20 +561,27 @@ impl Session for YubiKeySession {
     fn get_session_info(&self) -> Result<(), Error> {
         Ok(())
     }
-    fn generate(&self) -> Result<(), Error> {
-        self.send_apdu(
-            &CommandApdu {
-                cla: 0x00,
-                ins: 0x84,
-                p1: 0x00,
-                p2: 0x00,
-                data: Vec::new(),
-                le: Some(8),
-                extended: false,
-            },
-            false,
-        )
-        .map(|_| ())
+
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        for chunk in output.chunks_mut(256) {
+            let response = self.send_apdu(
+                &CommandApdu {
+                    cla: 0x00,
+                    ins: 0x84,
+                    p1: 0x00,
+                    p2: 0x00,
+                    data: Vec::new(),
+                    le: Some(chunk.len() as u32),
+                    extended: false,
+                },
+                false,
+            )?;
+            if response.data.len() != chunk.len() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            chunk.copy_from_slice(&response.data);
+        }
+        Ok(())
     }
 }
 
@@ -656,7 +680,7 @@ impl Connector for UsbConnector {
         self.claimed
     }
     fn buffer_size(&self) -> usize {
-        2048 + self.packet_size
+        3136 + self.packet_size
     }
     fn transmit<'a>(
         &self,
@@ -1255,8 +1279,12 @@ impl Context {
                                     let slot_id = next_key(&self.slots, 0);
                                     let mut slot = Box::new(YubiHsmSlot {
                                         connector: Rc::new(connector),
+                                        session: Rc::new(RefCell::new(None)),
                                     });
-                                    map(slot.init_slot());
+                                    if let Err(error) = slot.init_slot() {
+                                        eprintln!("YubiHSM GET DEVICE INFO: {:?}", error);
+                                        continue;
+                                    }
                                     self.slots.insert(slot_id, slot);
                                     self.dynamic_slots.insert(slot_id);
                                     seen_dynamic_slots.insert(slot_id);
@@ -3629,10 +3657,8 @@ pub extern "C" fn C_GenerateRandom(
 ) -> CK_RV {
     eprintln!("C_GenerateRandom called");
     let result: Result<(), Error> = with_context(|ctx| {
-        ctx._get_session(session)?;
         let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
-        openssl::rand::rand_bytes(random_data).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-        Ok(())
+        ctx._get_session(session)?.1.generate_random(random_data)
     });
     map(result)
 }
