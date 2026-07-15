@@ -111,10 +111,6 @@ impl crate::Session for TestSession {
     fn get_session_info(&self) -> Result<(), crate::error::Error> {
         Ok(())
     }
-
-    fn generate(&self) -> Result<(), crate::error::Error> {
-        Ok(())
-    }
 }
 
 impl crate::Slot for TestSlot {
