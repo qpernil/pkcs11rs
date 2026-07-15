@@ -37,7 +37,7 @@ use scp03::{
 };
 
 mod scp11;
-use scp11::Scp11bKeySet;
+use scp11::{Scp11KeySet, Scp11Variant};
 
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo};
@@ -507,6 +507,7 @@ struct PivKey {
 enum YubiKeyBackend {
     Piv,
     Scp03,
+    Scp11a,
     Scp11b,
 }
 
@@ -514,6 +515,7 @@ fn configured_yubikey_backend() -> Result<YubiKeyBackend, Error> {
     match std::env::var("PKCS11RS_YUBIKEY_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("piv") => Ok(YubiKeyBackend::Piv),
         Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(YubiKeyBackend::Scp03),
+        Ok(value) if value.eq_ignore_ascii_case("scp11a") => Ok(YubiKeyBackend::Scp11a),
         Ok(value)
             if value.eq_ignore_ascii_case("scp11") || value.eq_ignore_ascii_case("scp11b") =>
         {
@@ -849,6 +851,7 @@ struct YubiKeySlot {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum YubiKeySecureChannel {
     Scp03,
+    Scp11a,
     Scp11b,
 }
 
@@ -856,7 +859,7 @@ impl YubiKeySecureChannel {
     fn application_aid(self) -> Result<Zeroizing<Vec<u8>>, Error> {
         match self {
             Self::Scp03 => configured_application_aid(),
-            Self::Scp11b => scp11::configured_application_aid(),
+            Self::Scp11a | Self::Scp11b => scp11::configured_application_aid(),
         }
     }
 }
@@ -918,9 +921,10 @@ impl Slot for YubiKeySlot {
                     &selected_aid,
                 )?
             }
-            YubiKeySecureChannel::Scp11b => {
-                Scp11bKeySet::from_environment()?.authenticate_selected(self.connector.as_ref())?
-            }
+            YubiKeySecureChannel::Scp11a => Scp11KeySet::from_environment(Scp11Variant::A)?
+                .authenticate_selected(self.connector.as_ref())?,
+            YubiKeySecureChannel::Scp11b => Scp11KeySet::from_environment(Scp11Variant::B)?
+                .authenticate_selected(self.connector.as_ref())?,
         };
         *self.session.try_borrow_mut()? = Some(session);
         Ok(())
@@ -2057,6 +2061,11 @@ impl Context {
                             connector,
                             session: Rc::new(RefCell::new(None)),
                             protocol: YubiKeySecureChannel::Scp03,
+                        }),
+                        Ok(YubiKeyBackend::Scp11a) => Box::new(YubiKeySlot {
+                            connector,
+                            session: Rc::new(RefCell::new(None)),
+                            protocol: YubiKeySecureChannel::Scp11a,
                         }),
                         Ok(YubiKeyBackend::Scp11b) => Box::new(YubiKeySlot {
                             connector,
