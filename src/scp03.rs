@@ -65,7 +65,7 @@ pub(crate) struct CommandApdu {
 }
 
 impl CommandApdu {
-    fn encode(&self) -> Result<Vec<u8>, Error> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
         let extended = self.uses_extended_length(self.data.len())?;
         let mut encoded = self.encode_header_and_data(self.data.len())?;
         if let Some(le) = self.le {
@@ -137,7 +137,7 @@ pub(crate) struct ResponseApdu {
 }
 
 impl ResponseApdu {
-    fn parse(encoded: &[u8]) -> Result<Self, Error> {
+    pub(crate) fn parse(encoded: &[u8]) -> Result<Self, Error> {
         if encoded.len() < 2 {
             return Err(CKR_DEVICE_ERROR.into());
         }
