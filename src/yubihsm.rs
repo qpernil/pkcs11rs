@@ -17,7 +17,10 @@ use zeroize::Zeroizing;
 
 #[allow(dead_code)]
 mod commands;
-pub(crate) use commands::{Command, CommandCode};
+pub(crate) use commands::{
+    parse_object_id, parse_object_list, Command, CommandCode, ObjectInfo, ObjectParameters,
+    PublicKey,
+};
 
 const COMMAND_CREATE_SESSION: u8 = CommandCode::CreateSession as u8;
 const COMMAND_AUTHENTICATE_SESSION: u8 = CommandCode::AuthenticateSession as u8;
@@ -496,13 +499,14 @@ fn map_authentication_error(error: Error) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
 
     const PASSWORD: &[u8] = b"password";
     const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    type InnerCommands = std::rc::Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
 
     #[derive(Debug)]
     struct PeerSession {
@@ -519,8 +523,10 @@ mod tests {
     struct ProtocolPeer {
         session: RefCell<Option<PeerSession>>,
         commands: RefCell<Vec<Vec<u8>>>,
+        inner_commands: InnerCommands,
+        objects: RefCell<Vec<u16>>,
         corrupt_card_cryptogram: bool,
-        corrupt_response_mac: Cell<bool>,
+        corrupt_response_mac: std::rc::Rc<Cell<bool>>,
         authenticate_payload: Vec<u8>,
         closed_sessions: Cell<usize>,
     }
@@ -530,8 +536,10 @@ mod tests {
             Self {
                 session: RefCell::new(None),
                 commands: RefCell::new(Vec::new()),
+                inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
+                objects: RefCell::new(vec![1]),
                 corrupt_card_cryptogram: false,
-                corrupt_response_mac: Cell::new(false),
+                corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
                 authenticate_payload: Vec::new(),
                 closed_sessions: Cell::new(0),
             }
@@ -660,6 +668,9 @@ mod tests {
                 Mode::Decrypt,
             )?;
             let inner = Frame::parse(&unpad(clear)?)?;
+            self.inner_commands
+                .borrow_mut()
+                .push((inner.command, inner.data.clone()));
             let closes_session = inner.command == CommandCode::CloseSession as u8;
             let (response_command, response_data) = match inner.command {
                 value if value == CommandCode::GetStorageInfo as u8 => {
@@ -676,6 +687,60 @@ mod tests {
                 }
                 value if value == CommandCode::CloseSession as u8 => {
                     (inner.command | RESPONSE_BIT, vec![])
+                }
+                value if value == CommandCode::ListObjects as u8 => {
+                    let mut objects = Vec::new();
+                    for id in self.objects.borrow().iter() {
+                        objects.extend_from_slice(&id.to_be_bytes());
+                        objects.extend_from_slice(&[3, 1]);
+                    }
+                    (inner.command | RESPONSE_BIT, objects)
+                }
+                value if value == CommandCode::GetObjectInfo as u8 => {
+                    if inner.data.len() != 3 || inner.data[2] != 3 {
+                        return Err(CKR_DEVICE_ERROR.into());
+                    }
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let mut info = vec![0; 66];
+                    for bit in [0x05usize, 0x06, 0x09, 0x0a] {
+                        info[7 - bit / 8] |= 1 << (bit % 8);
+                    }
+                    info[8..10].copy_from_slice(&id.to_be_bytes());
+                    info[10..12].copy_from_slice(&256u16.to_be_bytes());
+                    info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
+                    info[14..18].copy_from_slice(&[3, 9, 1, 1]);
+                    info[18..26].copy_from_slice(b"test-rsa");
+                    (inner.command | RESPONSE_BIT, info)
+                }
+                value if value == CommandCode::GetPublicKey as u8 => {
+                    let mut key = vec![9, 0xc5];
+                    key.resize(257, 0xa5);
+                    key[256] |= 1;
+                    (inner.command | RESPONSE_BIT, key)
+                }
+                value
+                    if value == CommandCode::GenerateAsymmetricKey as u8
+                        || value == CommandCode::PutAsymmetricKey as u8 =>
+                {
+                    let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let id = if requested == 0 { 2 } else { requested };
+                    if !self.objects.borrow().contains(&id) {
+                        self.objects.borrow_mut().push(id);
+                    }
+                    (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
+                }
+                value if value == CommandCode::DeleteObject as u8 => {
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    self.objects
+                        .borrow_mut()
+                        .retain(|candidate| *candidate != id);
+                    (inner.command | RESPONSE_BIT, vec![])
+                }
+                value if value == CommandCode::SignPkcs1 as u8 => {
+                    (inner.command | RESPONSE_BIT, vec![0x5a; 256])
+                }
+                value if value == CommandCode::DecryptPkcs1 as u8 => {
+                    (inner.command | RESPONSE_BIT, b"plaintext".to_vec())
                 }
                 value if value == CommandCode::ResetDevice as u8 && inner.data == [0xde] => {
                     (COMMAND_ERROR, vec![0x0b])
@@ -705,6 +770,22 @@ mod tests {
             }
             Ok(response)
         }
+    }
+
+    pub(crate) fn make_yubihsm_test_slot(
+    ) -> (Box<dyn crate::Slot>, InnerCommands, std::rc::Rc<Cell<bool>>) {
+        let peer = std::rc::Rc::new(ProtocolPeer::new());
+        let commands = peer.inner_commands.clone();
+        let corrupt_response_mac = peer.corrupt_response_mac.clone();
+        (
+            Box::new(crate::YubiHsmSlot {
+                connector: peer,
+                session: std::rc::Rc::new(RefCell::new(None)),
+                algorithms: vec![1, 5, 9, 12, 19, 20, 21, 22, 25, 48, 50, 51, 52, 53, 54],
+            }),
+            commands,
+            corrupt_response_mac,
+        )
     }
 
     impl Connector for ProtocolPeer {
@@ -928,6 +1009,14 @@ mod tests {
                     CommandCode::CloseSession
                         | CommandCode::GetStorageInfo
                         | CommandCode::GetPseudoRandom
+                        | CommandCode::ListObjects
+                        | CommandCode::GetObjectInfo
+                        | CommandCode::GetPublicKey
+                        | CommandCode::GenerateAsymmetricKey
+                        | CommandCode::PutAsymmetricKey
+                        | CommandCode::DeleteObject
+                        | CommandCode::SignPkcs1
+                        | CommandCode::DecryptPkcs1
                 )
         }) {
             let data = [code as u8, 0xa5];
