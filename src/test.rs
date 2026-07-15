@@ -21,7 +21,9 @@ fn finalize_for_test() {
 }
 
 #[derive(Debug)]
-struct TestSlot;
+struct TestSlot {
+    present: bool,
+}
 
 #[derive(Debug)]
 struct TestSession {
@@ -143,7 +145,7 @@ impl crate::Slot for TestSlot {
     }
 
     fn is_present(&self) -> bool {
-        true
+        self.present
     }
 
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
@@ -192,7 +194,7 @@ fn install_test_slot(slot_id: CK_SLOT_ID) {
         .as_mut()
         .unwrap()
         .slots
-        .insert(slot_id, Box::new(TestSlot));
+        .insert(slot_id, Box::new(TestSlot { present: true }));
 }
 
 fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
@@ -221,7 +223,9 @@ fn install_test_session_with_state(
 ) {
     let mut context = crate::lock_context().unwrap();
     let context = context.as_mut().unwrap();
-    context.slots.insert(slot_id, Box::new(TestSlot));
+    context
+        .slots
+        .insert(slot_id, Box::new(TestSlot { present: true }));
     context
         .sessions
         .insert(session_handle, Box::new(TestSession { slot_id, flags }));
@@ -1088,6 +1092,64 @@ pub fn yubikey_login_preserves_connector_errors() {
 }
 
 #[test]
+pub fn missing_scp_session_invalidates_pkcs11_login_state() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let scp_session = std::rc::Rc::new(std::cell::RefCell::new(None));
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context.slots.insert(
+            TEST_SLOT_ID,
+            Box::new(crate::YubiKeySlot {
+                connector: connector.clone(),
+                session: scp_session.clone(),
+            }),
+        );
+        context.sessions.insert(
+            TEST_SESSION_HANDLE,
+            Box::new(crate::YubiKeySession {
+                slotID: TEST_SLOT_ID,
+                flags: CKF_SERIAL_SESSION as CK_FLAGS,
+                connector,
+                session: scp_session,
+            }),
+        );
+        context.logged_in_slots.insert(TEST_SLOT_ID);
+    }
+
+    let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::C_GetSessionInfo(TEST_SESSION_HANDLE, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
+
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    let context = crate::lock_context().unwrap();
+    assert!(!context
+        .as_ref()
+        .unwrap()
+        .logged_in_slots
+        .contains(&TEST_SLOT_ID));
+    drop(context);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn login_controls_private_object_visibility_and_signing() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1673,6 +1735,43 @@ pub fn slot_and_mechanism_calls_validate_slot_ids() {
     assert_eq!(
         crate::C_GetMechanismInfo(999, CKM_RSA_PKCS as CK_MECHANISM_TYPE, &mut mechanism_info),
         CKR_SLOT_ID_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn token_and_mechanism_queries_require_a_present_token() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    {
+        let mut context = crate::lock_context().unwrap();
+        context
+            .as_mut()
+            .unwrap()
+            .slots
+            .insert(TEST_SLOT_ID, Box::new(TestSlot { present: false }));
+    }
+
+    let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    let mut count = 0;
+    let mut mechanism_info = unsafe { ::std::mem::zeroed::<CK_MECHANISM_INFO>() };
+    assert_eq!(
+        crate::C_GetTokenInfo(TEST_SLOT_ID, &mut token_info),
+        CKR_TOKEN_NOT_PRESENT as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, ::std::ptr::null_mut(), &mut count),
+        CKR_TOKEN_NOT_PRESENT as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetMechanismInfo(
+            TEST_SLOT_ID,
+            CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            &mut mechanism_info
+        ),
+        CKR_TOKEN_NOT_PRESENT as CK_RV
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
