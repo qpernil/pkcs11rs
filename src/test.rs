@@ -22,7 +22,9 @@ fn finalize_for_test() {
 
 #[derive(Debug)]
 struct TestSlot {
-    present: bool,
+    present: std::cell::Cell<bool>,
+    remove_on_refresh: bool,
+    login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
 }
 
 #[derive(Debug)]
@@ -145,7 +147,18 @@ impl crate::Slot for TestSlot {
     }
 
     fn is_present(&self) -> bool {
-        self.present
+        self.present.get()
+    }
+
+    fn refresh(&self) -> Result<(), crate::error::Error> {
+        if self.remove_on_refresh {
+            self.present.set(false);
+        }
+        Ok(())
+    }
+
+    fn login_is_active(&self) -> bool {
+        self.login_active.as_ref().is_none_or(|active| active.get())
     }
 
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
@@ -188,13 +201,21 @@ impl crate::Slot for TestSlot {
     }
 }
 
+fn test_slot(present: bool) -> TestSlot {
+    TestSlot {
+        present: std::cell::Cell::new(present),
+        remove_on_refresh: false,
+        login_active: None,
+    }
+}
+
 fn install_test_slot(slot_id: CK_SLOT_ID) {
     let mut context = crate::lock_context().unwrap();
     context
         .as_mut()
         .unwrap()
         .slots
-        .insert(slot_id, Box::new(TestSlot { present: true }));
+        .insert(slot_id, Box::new(test_slot(true)));
 }
 
 fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
@@ -223,9 +244,7 @@ fn install_test_session_with_state(
 ) {
     let mut context = crate::lock_context().unwrap();
     let context = context.as_mut().unwrap();
-    context
-        .slots
-        .insert(slot_id, Box::new(TestSlot { present: true }));
+    context.slots.insert(slot_id, Box::new(test_slot(true)));
     context
         .sessions
         .insert(session_handle, Box::new(TestSession { slot_id, flags }));
@@ -1150,6 +1169,71 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
 }
 
 #[test]
+pub fn authentication_loss_cancels_active_private_signing() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let login_active = std::rc::Rc::new(std::cell::Cell::new(true));
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context.slots.insert(
+            TEST_SLOT_ID,
+            Box::new(TestSlot {
+                present: std::cell::Cell::new(true),
+                remove_on_refresh: false,
+                login_active: Some(login_active.clone()),
+            }),
+        );
+        context.sessions.insert(
+            TEST_SESSION_HANDLE,
+            Box::new(TestSession {
+                slot_id: TEST_SLOT_ID,
+                flags: CKF_SERIAL_SESSION as CK_FLAGS,
+            }),
+        );
+        context.logged_in_slots.insert(TEST_SLOT_ID);
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+
+    login_active.set(false);
+    let mut data = *b"test";
+    let mut signature_len = 0;
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            ::std::ptr::null_mut(),
+            &mut signature_len
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn login_controls_private_object_visibility_and_signing() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1751,7 +1835,7 @@ pub fn token_and_mechanism_queries_require_a_present_token() {
             .as_mut()
             .unwrap()
             .slots
-            .insert(TEST_SLOT_ID, Box::new(TestSlot { present: false }));
+            .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
     }
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
@@ -1827,6 +1911,88 @@ pub fn open_session_validates_session_flags() {
         session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     }
 
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn open_session_refreshes_token_presence() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(
+            TEST_SLOT_ID,
+            Box::new(TestSlot {
+                present: std::cell::Cell::new(true),
+                remove_on_refresh: true,
+                login_active: None,
+            }),
+        );
+    }
+
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session
+        ),
+        CKR_TOKEN_NOT_PRESENT as CK_RV
+    );
+    assert_eq!(session, CK_INVALID_HANDLE as CK_SESSION_HANDLE);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn close_cleans_local_state_after_logout_failure() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    TEST_SLOT_FAIL_LOGOUT.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        crate::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    assert_eq!(
+        crate::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+    {
+        let context = crate::lock_context().unwrap();
+        let context = context.as_ref().unwrap();
+        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
+    }
+
+    TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE + 1);
+    TEST_SLOT_FAIL_LOGOUT.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        crate::C_CloseAllSessions(TEST_SLOT_ID),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+    {
+        let context = crate::lock_context().unwrap();
+        let context = context.as_ref().unwrap();
+        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(context
+            .sessions
+            .values()
+            .all(|session| session.slotID() != TEST_SLOT_ID));
+    }
+
+    TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 
