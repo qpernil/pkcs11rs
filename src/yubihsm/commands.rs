@@ -3,6 +3,7 @@ use zeroize::Zeroizing;
 
 const LABEL_LENGTH: usize = 40;
 const CAPABILITIES_LENGTH: usize = 8;
+const MAX_COMMAND_DATA_LENGTH: usize = 3133;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -183,12 +184,16 @@ impl std::fmt::Debug for Command {
 
 impl Command {
     pub(crate) fn raw(code: CommandCode, data: &[u8]) -> Result<Self, Error> {
-        if data.len() > u16::MAX as usize {
+        Self::from_vec(code, data.to_vec())
+    }
+
+    fn from_vec(code: CommandCode, data: Vec<u8>) -> Result<Self, Error> {
+        if data.len() > MAX_COMMAND_DATA_LENGTH {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         Ok(Self {
             code,
-            data: Zeroizing::new(data.to_vec()),
+            data: Zeroizing::new(data),
         })
     }
 
@@ -255,7 +260,7 @@ impl Command {
         )?;
         let mut data = parameters.encode()?;
         data.extend_from_slice(value);
-        Self::raw(code, &data)
+        Self::from_vec(code, data)
     }
 
     pub(crate) fn generate_object(
@@ -270,7 +275,7 @@ impl Command {
                 CommandCode::GenerateSymmetricKey,
             ],
         )?;
-        Self::raw(code, &parameters.encode()?)
+        Self::from_vec(code, parameters.encode()?)
     }
 
     pub(crate) fn put_delegated_object(
@@ -288,11 +293,11 @@ impl Command {
         )?;
         let mut data = parameters.encode()?;
         data.extend_from_slice(value);
-        Self::raw(code, &data)
+        Self::from_vec(code, data)
     }
 
     pub(crate) fn generate_wrap_key(parameters: &DelegatedObjectParameters) -> Result<Self, Error> {
-        Self::raw(CommandCode::GenerateWrapKey, &parameters.encode()?)
+        Self::from_vec(CommandCode::GenerateWrapKey, parameters.encode()?)
     }
 
     pub(crate) fn get_object(code: CommandCode, id: u16) -> Result<Self, Error> {
@@ -321,7 +326,7 @@ impl Command {
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        Self::raw(code, &prefixed_u16(key_id, value))
+        Self::from_vec(code, prefixed_u16(key_id, value))
     }
 
     pub(crate) fn crypt_cbc(
@@ -336,7 +341,7 @@ impl Command {
         }
         let mut data = prefixed_u16(key_id, iv);
         data.extend_from_slice(value);
-        Self::raw(code, &data)
+        Self::from_vec(code, data)
     }
 
     pub(crate) fn sign_pss(
@@ -349,7 +354,7 @@ impl Command {
         let mut data = prefixed_u16(key_id, &[mgf1_algorithm]);
         data.extend_from_slice(&salt_length.to_be_bytes());
         data.extend_from_slice(digest);
-        Self::raw(CommandCode::SignPss, &data)
+        Self::from_vec(CommandCode::SignPss, data)
     }
 
     pub(crate) fn decrypt_oaep(
@@ -365,14 +370,14 @@ impl Command {
         let mut data = prefixed_u16(key_id, &[mgf1_algorithm]);
         data.extend_from_slice(ciphertext);
         data.extend_from_slice(label_digest);
-        Self::raw(CommandCode::DecryptOaep, &data)
+        Self::from_vec(CommandCode::DecryptOaep, data)
     }
 
     pub(crate) fn verify_hmac(key_id: u16, signature: &[u8], data: &[u8]) -> Result<Self, Error> {
         require_digest_length(signature)?;
         let mut encoded = prefixed_u16(key_id, signature);
         encoded.extend_from_slice(data);
-        Self::raw(CommandCode::VerifyHmac, &encoded)
+        Self::from_vec(CommandCode::VerifyHmac, encoded)
     }
 
     pub(crate) fn list_objects(filters: &[ObjectFilter<'_>]) -> Result<Self, Error> {
@@ -380,7 +385,7 @@ impl Command {
         for filter in filters {
             filter.encode(&mut data)?;
         }
-        Self::raw(CommandCode::ListObjects, &data)
+        Self::from_vec(CommandCode::ListObjects, data)
     }
 
     pub(crate) fn get_object_info(id: u16, object_type: u8) -> Self {
@@ -394,7 +399,12 @@ impl Command {
 
     pub(crate) fn get_public_key(id: u16, object_type: Option<u8>) -> Self {
         let mut data = id.to_be_bytes().to_vec();
-        data.extend(object_type);
+        if let Some(object_type) = object_type
+            .map(|value| value & !0x80)
+            .filter(|value| *value != 3)
+        {
+            data.push(object_type);
+        }
         Self {
             code: CommandCode::GetPublicKey,
             data: Zeroizing::new(data),
@@ -414,7 +424,9 @@ impl Command {
         let mut data = wrapping_key_id.to_be_bytes().to_vec();
         data.push(object_type);
         data.extend_from_slice(&object_id.to_be_bytes());
-        data.extend(format);
+        if let Some(format) = format.filter(|value| *value != 0) {
+            data.push(format);
+        }
         Self {
             code: CommandCode::ExportWrapped,
             data: Zeroizing::new(data),
@@ -422,9 +434,9 @@ impl Command {
     }
 
     pub(crate) fn import_wrapped(wrapping_key_id: u16, wrapped: &[u8]) -> Result<Self, Error> {
-        Self::raw(
+        Self::from_vec(
             CommandCode::ImportWrapped,
-            &prefixed_u16(wrapping_key_id, wrapped),
+            prefixed_u16(wrapping_key_id, wrapped),
         )
     }
 
@@ -433,7 +445,7 @@ impl Command {
         let mut data = vec![option];
         data.extend_from_slice(&length.to_be_bytes());
         data.extend_from_slice(value);
-        Self::raw(CommandCode::SetOption, &data)
+        Self::from_vec(CommandCode::SetOption, data)
     }
 
     pub(crate) fn get_option(option: u8) -> Self {
@@ -460,7 +472,7 @@ impl Command {
         data.extend_from_slice(&template_id.to_be_bytes());
         data.push(algorithm);
         data.extend_from_slice(request);
-        Self::raw(CommandCode::SignSshCertificate, &data)
+        Self::from_vec(CommandCode::SignSshCertificate, data)
     }
 
     pub(crate) fn decrypt_otp(key_id: u16, aead: &[u8; 36], otp: &[u8; 16]) -> Self {
@@ -529,7 +541,7 @@ impl Command {
             _ => {}
         }
         data.extend_from_slice(key);
-        Self::raw(code, &data)
+        Self::from_vec(code, data)
     }
 
     pub(crate) fn set_log_index(index: u16) -> Self {
@@ -556,7 +568,7 @@ impl Command {
         }
         let mut data = prefixed_u16(id, &[algorithm]);
         data.extend_from_slice(key);
-        Self::raw(CommandCode::ChangeAuthenticationKey, &data)
+        Self::from_vec(CommandCode::ChangeAuthenticationKey, data)
     }
 
     pub(crate) fn rsa_wrap(
@@ -577,7 +589,7 @@ impl Command {
             parameters.mgf1_algorithm,
         ]);
         data.extend_from_slice(parameters.label_digest);
-        Self::raw(code, &data)
+        Self::from_vec(code, data)
     }
 
     pub(crate) fn put_rsa_wrapped_key(
@@ -596,7 +608,7 @@ impl Command {
         data.extend_from_slice(&[hash_algorithm, mgf1_algorithm]);
         data.extend_from_slice(wrapped);
         data.extend_from_slice(label_digest);
-        Self::raw(CommandCode::PutRsaWrappedKey, &data)
+        Self::from_vec(CommandCode::PutRsaWrappedKey, data)
     }
 
     pub(crate) fn import_rsa_wrapped(
@@ -611,7 +623,7 @@ impl Command {
         data.extend_from_slice(&[hash_algorithm, mgf1_algorithm]);
         data.extend_from_slice(wrapped);
         data.extend_from_slice(label_digest);
-        Self::raw(CommandCode::ImportRsaWrapped, &data)
+        Self::from_vec(CommandCode::ImportRsaWrapped, data)
     }
 
     fn with_code(mut self, code: CommandCode) -> Self {
@@ -1146,6 +1158,143 @@ mod tests {
     }
 
     #[test]
+    fn optional_fields_use_the_canonical_wire_layout() {
+        for object_type in [None, Some(0x03), Some(0x83)] {
+            assert_eq!(
+                Command::get_public_key(0x1234, object_type).data(),
+                [0x12, 0x34]
+            );
+        }
+        assert_eq!(
+            Command::get_public_key(0x1234, Some(0x04)).data(),
+            [0x12, 0x34, 0x04]
+        );
+
+        for format in [None, Some(0)] {
+            assert_eq!(
+                Command::export_wrapped(0x1234, 3, 0x5678, format).data(),
+                [0x12, 0x34, 3, 0x56, 0x78]
+            );
+        }
+        assert_eq!(
+            Command::export_wrapped(0x1234, 3, 0x5678, Some(1)).data(),
+            [0x12, 0x34, 3, 0x56, 0x78, 1]
+        );
+    }
+
+    #[test]
+    fn crypto_and_management_commands_match_wire_vectors() {
+        assert_eq!(
+            Command::key_data(CommandCode::SignPkcs1, 0x1234, &[0xaa, 0xbb])
+                .unwrap()
+                .data(),
+            [0x12, 0x34, 0xaa, 0xbb]
+        );
+        assert_eq!(
+            Command::sign_pss(0x1234, 0x21, 32, &[0xaa; 20])
+                .unwrap()
+                .data(),
+            [&[0x12, 0x34, 0x21, 0x00, 0x20][..], &[0xaa; 20]].concat()
+        );
+        assert_eq!(
+            Command::crypt_cbc(CommandCode::EncryptCbc, 0x1234, &[0x11; 16], &[0x22; 16])
+                .unwrap()
+                .data(),
+            [&[0x12, 0x34][..], &[0x11; 16], &[0x22; 16],].concat()
+        );
+        assert_eq!(
+            Command::set_option(3, &[0x47, 1, 0x48, 0]).unwrap().data(),
+            [3, 0, 4, 0x47, 1, 0x48, 0]
+        );
+        assert_eq!(
+            Command::sign_ssh_certificate(0x1234, 0x5678, 0x09, &[0xaa, 0xbb])
+                .unwrap()
+                .data(),
+            [0x12, 0x34, 0x56, 0x78, 0x09, 0xaa, 0xbb]
+        );
+        assert!(Command::key_data(CommandCode::EncryptEcb, 1, &[0; 15]).is_err());
+        assert!(Command::crypt_cbc(CommandCode::DecryptCbc, 1, &[0; 16], &[0; 15]).is_err());
+    }
+
+    #[test]
+    fn otp_and_rsa_wrap_commands_match_wire_vectors() {
+        let otp = Command::otp_aead_key(
+            CommandCode::PutOtpAeadKey,
+            &object(b"otp"),
+            0x0102_0304,
+            &[0x55; 16],
+        )
+        .unwrap();
+        assert_eq!(&otp.data()[53..57], &[0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(&otp.data()[57..], &[0x55; 16]);
+
+        let rsa = Command::rsa_wrap(
+            CommandCode::ExportRsaWrapped,
+            &RsaWrapParameters {
+                wrapping_key_id: 0x1234,
+                object_type: 3,
+                object_id: 0x5678,
+                aes_algorithm: 50,
+                hash_algorithm: 26,
+                mgf1_algorithm: 33,
+                label_digest: &[0xaa; 20],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rsa.data(),
+            [&[0x12, 0x34, 3, 0x56, 0x78, 50, 26, 33][..], &[0xaa; 20],].concat()
+        );
+        assert!(Command::rsa_wrap(
+            CommandCode::ExportRsaWrapped,
+            &RsaWrapParameters {
+                wrapping_key_id: 1,
+                object_type: 3,
+                object_id: 2,
+                aes_algorithm: 50,
+                hash_algorithm: 26,
+                mgf1_algorithm: 33,
+                label_digest: &[0; 31],
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn list_filters_and_delegated_objects_match_wire_vectors() {
+        let filters = Command::list_objects(&[
+            ObjectFilter::Id(0x1234),
+            ObjectFilter::Type(3),
+            ObjectFilter::Domains(0x5678),
+            ObjectFilter::Algorithm(12),
+            ObjectFilter::Capabilities([0xaa; 8]),
+        ])
+        .unwrap();
+        assert_eq!(
+            filters.data(),
+            [
+                1, 0x12, 0x34, 2, 3, 3, 0x56, 0x78, 5, 12, 4, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+                0xaa, 0xaa,
+            ]
+        );
+
+        let encoded = delegated(b"key").encode().unwrap();
+        assert_eq!(encoded.len(), 61);
+        assert_eq!(&encoded[..53], object(b"key").encode().unwrap());
+        assert_eq!(&encoded[53..], &[0x33; 8]);
+    }
+
+    #[test]
+    fn command_data_is_bounded_and_debug_output_is_redacted() {
+        assert!(Command::raw(CommandCode::Echo, &[0; MAX_COMMAND_DATA_LENGTH]).is_ok());
+        assert!(Command::raw(CommandCode::Echo, &[0; MAX_COMMAND_DATA_LENGTH + 1]).is_err());
+        let command = Command::raw(CommandCode::PutSymmetricKey, b"secret-key-material").unwrap();
+        let debug = format!("{command:?}");
+        assert!(debug.contains("data_length"));
+        assert!(!debug.contains("secret-key-material"));
+    }
+
+    #[test]
     fn structured_response_parsers_reject_bad_lengths() {
         assert_eq!(
             StorageInfo::parse(&[0, 1, 0, 2, 0, 3, 0, 4, 0, 5]).unwrap(),
@@ -1162,5 +1311,67 @@ mod tests {
         assert!(parse_object_list(&[0; 3]).is_err());
         assert!(LogEntries::parse(&[0, 0, 0, 0, 1]).is_err());
         assert!(require_empty(&[1]).is_err());
+    }
+
+    #[test]
+    fn structured_response_parsers_decode_success_vectors() {
+        let mut object = vec![0x11; 8];
+        object.extend_from_slice(&[0x12, 0x34, 0x00, 0x20, 0x56, 0x78, 3, 12, 4, 2]);
+        object.extend_from_slice(&[0x41; 40]);
+        object.extend_from_slice(&[0x22; 8]);
+        let parsed = ObjectInfo::parse(&object).unwrap();
+        assert_eq!(parsed.id, 0x1234);
+        assert_eq!(parsed.length, 32);
+        assert_eq!(parsed.domains, 0x5678);
+        assert_eq!(parsed.label, [0x41; 40]);
+
+        assert_eq!(
+            parse_object_list(&[0x12, 0x34, 3, 4, 0x56, 0x78, 5, 6]).unwrap(),
+            [
+                ObjectEntry {
+                    id: 0x1234,
+                    object_type: 3,
+                    sequence: 4,
+                },
+                ObjectEntry {
+                    id: 0x5678,
+                    object_type: 5,
+                    sequence: 6,
+                },
+            ]
+        );
+        assert_eq!(
+            ImportedObject::parse(&[3, 0x12, 0x34]).unwrap(),
+            ImportedObject {
+                object_type: 3,
+                id: 0x1234,
+            }
+        );
+        assert_eq!(
+            PublicKey::parse(&[12, 1, 2, 3]).unwrap(),
+            PublicKey {
+                algorithm: 12,
+                key: vec![1, 2, 3],
+            }
+        );
+        assert_eq!(
+            OtpDecryption::parse(&[0x34, 0x12, 5, 6, 0x78, 0x56]).unwrap(),
+            OtpDecryption {
+                use_counter: 0x1234,
+                session_counter: 5,
+                timestamp_high: 6,
+                timestamp_low: 0x5678,
+            }
+        );
+
+        let mut logs = vec![0, 1, 0, 2, 1, 0, 3, 0x47, 0, 4, 0, 5, 0, 6, 0, 7, 0x00];
+        logs.extend_from_slice(&0x0102_0304u32.to_be_bytes());
+        logs.extend_from_slice(&[0xaa; 16]);
+        let logs = LogEntries::parse(&logs).unwrap();
+        assert_eq!(logs.unlogged_boot, 1);
+        assert_eq!(logs.unlogged_authentication, 2);
+        assert_eq!(logs.entries[0].number, 3);
+        assert_eq!(logs.entries[0].command, 0x47);
+        assert_eq!(logs.entries[0].systick, 0x0102_0304);
     }
 }
