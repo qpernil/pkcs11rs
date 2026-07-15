@@ -4,6 +4,8 @@ use zeroize::Zeroizing;
 const LABEL_LENGTH: usize = 40;
 const CAPABILITIES_LENGTH: usize = 8;
 const MAX_COMMAND_DATA_LENGTH: usize = 3133;
+const MAX_OBJECT_COUNT: usize = 256;
+const MAX_LOG_ENTRY_COUNT: usize = 64;
 const ALGORITHM_AES128_YUBICO_OTP: u8 = 37;
 const ALGORITHM_AES128_YUBICO_AUTHENTICATION: u8 = 38;
 const ALGORITHM_AES192_YUBICO_OTP: u8 = 39;
@@ -827,7 +829,7 @@ pub(crate) struct ObjectEntry {
 }
 
 pub(crate) fn parse_object_list(data: &[u8]) -> Result<Vec<ObjectEntry>, Error> {
-    if !data.len().is_multiple_of(4) {
+    if !data.len().is_multiple_of(4) || data.len() / 4 > MAX_OBJECT_COUNT {
         return Err(CKR_DATA_INVALID.into());
     }
     data.chunks_exact(4)
@@ -866,6 +868,7 @@ impl LogEntries {
         const HEADER_LENGTH: usize = 5;
         const ENTRY_LENGTH: usize = 32;
         if data.len() < HEADER_LENGTH
+            || data[4] as usize > MAX_LOG_ENTRY_COUNT
             || data.len() - HEADER_LENGTH != data[4] as usize * ENTRY_LENGTH
         {
             return Err(CKR_DATA_INVALID.into());
@@ -1385,7 +1388,11 @@ mod tests {
         assert!(StorageInfo::parse(&[0; 9]).is_err());
         assert_eq!(parse_object_id(&[0x12, 0x34]).unwrap(), 0x1234);
         assert!(parse_object_list(&[0; 3]).is_err());
+        assert!(parse_object_list(&vec![0; (MAX_OBJECT_COUNT + 1) * 4]).is_err());
         assert!(LogEntries::parse(&[0, 0, 0, 0, 1]).is_err());
+        let mut excess_logs = vec![0; 5 + (MAX_LOG_ENTRY_COUNT + 1) * 32];
+        excess_logs[4] = (MAX_LOG_ENTRY_COUNT + 1) as u8;
+        assert!(LogEntries::parse(&excess_logs).is_err());
         assert!(require_empty(&[1]).is_err());
     }
 

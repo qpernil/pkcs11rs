@@ -143,6 +143,7 @@ pub(crate) struct SecureSession {
     s_rmac: Zeroizing<[u8; AES_BLOCK_SIZE]>,
     counter: [u8; AES_BLOCK_SIZE],
     mac_chaining_value: [u8; AES_BLOCK_SIZE],
+    valid: bool,
 }
 
 impl std::fmt::Debug for SecureSession {
@@ -210,6 +211,7 @@ impl SecureSession {
             s_rmac,
             counter: [0; AES_BLOCK_SIZE],
             mac_chaining_value: [0; AES_BLOCK_SIZE],
+            valid: true,
         };
         let mut authenticate_data = Vec::with_capacity(1 + MAC_LENGTH);
         authenticate_data.push(sid);
@@ -250,6 +252,9 @@ impl SecureSession {
         connector: &dyn Connector,
         command: &Command,
     ) -> Result<Vec<u8>, Error> {
+        if !self.valid {
+            return Err(CKR_SESSION_CLOSED.into());
+        }
         Self::validate_command(connector, command)?;
         let code = command.code() as u8;
         let data = command.data();
@@ -259,6 +264,7 @@ impl SecureSession {
         let mut outer_data = Vec::with_capacity(1 + ciphertext.len());
         outer_data.push(self.sid);
         outer_data.extend_from_slice(&ciphertext);
+        self.valid = false;
         let outer =
             self.send_authenticated(connector, COMMAND_SESSION_MESSAGE, &outer_data, true)?;
         let encrypted = outer.require_response(COMMAND_SESSION_MESSAGE)?;
@@ -271,7 +277,16 @@ impl SecureSession {
         let clear = aes_cbc(&self.s_enc[..], &iv, &encrypted[1..], Mode::Decrypt)?;
         let response = Frame::parse(&unpad(clear)?)?;
         increment_counter(&mut self.counter);
-        response.require_response(code)
+        self.valid = true;
+        let result = response.require_response(code);
+        if command.code() == CommandCode::CloseSession && result.is_ok() {
+            self.valid = false;
+        }
+        result
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.valid
     }
 
     pub(crate) fn validate_command(
@@ -869,6 +884,7 @@ mod tests {
         assert_eq!(session.counter, counter);
         assert_eq!(session.mac_chaining_value, chaining_value);
         assert_eq!(peer.commands.borrow().len(), 2);
+        assert!(session.is_valid());
 
         let random = Command::get_pseudo_random(3_117);
         assert!(matches!(
@@ -878,6 +894,7 @@ mod tests {
         assert_eq!(session.counter, counter);
         assert_eq!(session.mac_chaining_value, chaining_value);
         assert_eq!(peer.commands.borrow().len(), 2);
+        assert!(session.is_valid());
     }
 
     #[test]
@@ -889,6 +906,13 @@ mod tests {
         assert!(session
             .send_command(&peer, &Command::get_storage_info())
             .is_err());
+        assert!(!session.is_valid());
+        let command_count = peer.commands.borrow().len();
+        assert!(matches!(
+            session.send_command(&peer, &Command::get_storage_info()),
+            Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as _
+        ));
+        assert_eq!(peer.commands.borrow().len(), command_count);
     }
 
     #[test]
@@ -922,6 +946,7 @@ mod tests {
             session.send_command(&peer, &failing),
             Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as _
         ));
+        assert!(session.is_valid());
         let next = Command::raw(CommandCode::BlinkDevice, &[1]).unwrap();
         assert_eq!(session.send_command(&peer, &next).unwrap(), [1]);
     }
