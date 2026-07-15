@@ -1000,6 +1000,8 @@ struct FindOperation {
 #[derive(Debug, Clone)]
 struct SignatureOperation {
     key: KeyMaterial,
+    slot_id: CK_SLOT_ID,
+    requires_login: bool,
 }
 
 impl std::fmt::Debug for Context {
@@ -2072,8 +2074,10 @@ pub extern "C" fn C_OpenSession(
                 return Ok(CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV);
             }
 
+            ctx.init();
             match ctx.slots.get_mut(&slotID) {
                 Some(slot) => {
+                    let _ = slot.refresh();
                     eprintln!("{:?}", slot);
                     if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
                         let k = next_key(&ctx.sessions, 1);
@@ -2110,9 +2114,20 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             .iter()
             .any(|(handle, session)| *handle != session_handle && session.slotID() == slot_id);
         ctx.reconcile_login_state(slot_id);
-        if is_last_session && ctx.is_slot_logged_in(slot_id) {
-            ctx.logout_slot(slot_id)?;
-        }
+        let logout_error = if is_last_session && ctx.is_slot_logged_in(slot_id) {
+            match ctx.logout_slot(slot_id) {
+                Ok(()) => None,
+                Err(error) => {
+                    ctx.clear_login_state(slot_id);
+                    if let Some(slot) = ctx.slots.get_mut(&slot_id) {
+                        slot.clear_session();
+                    }
+                    Some(error)
+                }
+            }
+        } else {
+            None
+        };
         let session = ctx.sessions.remove(&session_handle).unwrap();
         ctx.find_operations.remove(&session_handle);
         ctx.sign_operations.remove(&session_handle);
@@ -2121,7 +2136,10 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             .retain(|_, object| object.owner_session != Some(session_handle));
         eprintln!("C_CloseSession removed {:?}", (session_handle, session));
         eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
-        Ok(CKR_OK as CK_RV)
+        match logout_error {
+            Some(error) => Err(error),
+            None => Ok(CKR_OK as CK_RV),
+        }
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
@@ -2144,9 +2162,20 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .map(|(k, _v)| *k)
             .collect();
         ctx.reconcile_login_state(slotID);
-        if ctx.is_slot_logged_in(slotID) {
-            ctx.logout_slot(slotID)?;
-        }
+        let logout_error = if ctx.is_slot_logged_in(slotID) {
+            match ctx.logout_slot(slotID) {
+                Ok(()) => None,
+                Err(error) => {
+                    ctx.clear_login_state(slotID);
+                    if let Some(slot) = ctx.slots.get_mut(&slotID) {
+                        slot.clear_session();
+                    }
+                    Some(error)
+                }
+            }
+        } else {
+            None
+        };
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
         ctx.find_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
@@ -2161,7 +2190,10 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
                 .unwrap_or(true)
         });
         eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
-        Ok(CKR_OK as CK_RV)
+        match logout_error {
+            Some(error) => Err(error),
+            None => Ok(CKR_OK as CK_RV),
+        }
     }) {
         Ok(rv) => rv,
         Err(e) => e.into(),
@@ -3085,6 +3117,8 @@ fn sign_init(
             session_handle,
             SignatureOperation {
                 key: object.material.clone(),
+                slot_id,
+                requires_login: object.private,
             },
         );
         Ok(())
@@ -3136,6 +3170,11 @@ fn sign(
             .get(&session_handle)
             .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.requires_login && !ctx.is_slot_logged_in(operation.slot_id) {
+            ctx.reconcile_login_state(operation.slot_id);
+            ctx.sign_operations.remove(&session_handle);
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         let data = match from_raw_parts(data, data_len as usize) {
             Ok(data) => data,
             Err(error) => {
@@ -3275,6 +3314,8 @@ fn verify_init(
             session_handle,
             SignatureOperation {
                 key: object.material.clone(),
+                slot_id,
+                requires_login: false,
             },
         );
         Ok(())
