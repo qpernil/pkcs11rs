@@ -148,7 +148,7 @@ impl ResponseApdu {
         })
     }
 
-    fn require_success(self) -> Result<Self, Error> {
+    pub(crate) fn require_success(self) -> Result<Self, Error> {
         if self.status != RESPONSE_OK {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -357,7 +357,7 @@ fn environment_optional_key(name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, Er
     }
 }
 
-fn environment_byte(name: &str, default: u8) -> Result<u8, Error> {
+pub(crate) fn environment_byte(name: &str, default: u8) -> Result<u8, Error> {
     let Some(value) = std::env::var_os(name) else {
         return Ok(default);
     };
@@ -372,7 +372,7 @@ fn environment_byte(name: &str, default: u8) -> Result<u8, Error> {
     }
 }
 
-fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
     let compact = Zeroizing::new(
         value
             .chars()
@@ -456,6 +456,27 @@ impl std::fmt::Debug for Scp03Session {
 }
 
 impl Scp03Session {
+    pub(crate) fn from_session_keys(
+        s_enc: Vec<u8>,
+        s_mac: Vec<u8>,
+        s_rmac: Vec<u8>,
+        mac_chaining_value: [u8; AES_BLOCK_SIZE],
+        security_level: u8,
+    ) -> Result<Self, Error> {
+        validate_security_level(security_level)?;
+        if !valid_aes_key(&s_enc) || s_enc.len() != s_mac.len() || s_enc.len() != s_rmac.len() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Self {
+            s_enc: Zeroizing::new(s_enc),
+            s_mac: Zeroizing::new(s_mac),
+            s_rmac: Zeroizing::new(s_rmac),
+            mac_chaining_value,
+            encryption_counter: 0,
+            security_level,
+        })
+    }
+
     pub(crate) fn authenticate_selected(
         connector: &dyn Connector,
         keys: &Scp03KeySet,
@@ -830,7 +851,10 @@ pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Resul
     Ok(())
 }
 
-fn transmit(connector: &dyn Connector, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+pub(crate) fn transmit(
+    connector: &dyn Connector,
+    command: &CommandApdu,
+) -> Result<ResponseApdu, Error> {
     ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)
 }
 
@@ -946,7 +970,7 @@ enum AesMode {
     Ecb,
 }
 
-fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
+pub(crate) fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
     let cipher = aes_cipher(key.len(), AesMode::Cbc)?;
     let pkey = PKey::cmac(&cipher, key)?;
     let mut signer = Signer::new_without_digest(&pkey)?;

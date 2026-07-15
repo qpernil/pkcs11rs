@@ -1481,6 +1481,7 @@ pub fn yubikey_login_preserves_connector_errors() {
     let mut slot = crate::YubiKeySlot {
         connector: std::rc::Rc::new(FailingConnector),
         session: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        protocol: crate::YubiKeySecureChannel::Scp03,
     };
 
     let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
@@ -1503,6 +1504,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
             Box::new(crate::YubiKeySlot {
                 connector: connector.clone(),
                 session: scp_session.clone(),
+                protocol: crate::YubiKeySecureChannel::Scp03,
             }),
         );
         context.sessions.insert(

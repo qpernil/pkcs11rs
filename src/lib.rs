@@ -36,6 +36,9 @@ use scp03::{
     ResponseApdu, Scp03KeySet, Scp03Session,
 };
 
+mod scp11;
+use scp11::Scp11bKeySet;
+
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo};
 
@@ -504,12 +507,18 @@ struct PivKey {
 enum YubiKeyBackend {
     Piv,
     Scp03,
+    Scp11b,
 }
 
 fn configured_yubikey_backend() -> Result<YubiKeyBackend, Error> {
     match std::env::var("PKCS11RS_YUBIKEY_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("piv") => Ok(YubiKeyBackend::Piv),
         Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(YubiKeyBackend::Scp03),
+        Ok(value)
+            if value.eq_ignore_ascii_case("scp11") || value.eq_ignore_ascii_case("scp11b") =>
+        {
+            Ok(YubiKeyBackend::Scp11b)
+        }
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
         Err(std::env::VarError::NotPresent) => Ok(YubiKeyBackend::Piv),
     }
@@ -834,6 +843,22 @@ impl Slot for YubiHsmSlot {
 struct YubiKeySlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<Scp03Session>>>,
+    protocol: YubiKeySecureChannel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YubiKeySecureChannel {
+    Scp03,
+    Scp11b,
+}
+
+impl YubiKeySecureChannel {
+    fn application_aid(self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        match self {
+            Self::Scp03 => configured_application_aid(),
+            Self::Scp11b => scp11::configured_application_aid(),
+        }
+    }
 }
 
 impl Slot for YubiKeySlot {
@@ -880,16 +905,23 @@ impl Slot for YubiKeySlot {
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
-        let selected_aid = configured_application_aid()?;
+        let selected_aid = self.protocol.application_aid()?;
         select_application(self.connector.as_ref(), &selected_aid)?;
-        let keys = Scp03KeySet::from_environment()?;
-        let security_level = configured_security_level()?;
-        let session = Scp03Session::authenticate_selected(
-            self.connector.as_ref(),
-            &keys,
-            security_level,
-            &selected_aid,
-        )?;
+        let session = match self.protocol {
+            YubiKeySecureChannel::Scp03 => {
+                let keys = Scp03KeySet::from_environment()?;
+                let security_level = configured_security_level()?;
+                Scp03Session::authenticate_selected(
+                    self.connector.as_ref(),
+                    &keys,
+                    security_level,
+                    &selected_aid,
+                )?
+            }
+            YubiKeySecureChannel::Scp11b => {
+                Scp11bKeySet::from_environment()?.authenticate_selected(self.connector.as_ref())?
+            }
+        };
         *self.session.try_borrow_mut()? = Some(session);
         Ok(())
     }
@@ -898,7 +930,7 @@ impl Slot for YubiKeySlot {
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let selected_aid = configured_application_aid()?;
+        let selected_aid = self.protocol.application_aid()?;
         select_application(self.connector.as_ref(), &selected_aid)
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
@@ -2024,6 +2056,12 @@ impl Context {
                         Ok(YubiKeyBackend::Scp03) => Box::new(YubiKeySlot {
                             connector,
                             session: Rc::new(RefCell::new(None)),
+                            protocol: YubiKeySecureChannel::Scp03,
+                        }),
+                        Ok(YubiKeyBackend::Scp11b) => Box::new(YubiKeySlot {
+                            connector,
+                            session: Rc::new(RefCell::new(None)),
+                            protocol: YubiKeySecureChannel::Scp11b,
                         }),
                         Err(error) => {
                             eprintln!("PKCS11RS_YUBIKEY_BACKEND: {:?}", error);
