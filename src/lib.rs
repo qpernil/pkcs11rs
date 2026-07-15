@@ -816,7 +816,8 @@ impl YubiHsmSession {
             .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?;
         YubiHsmSecureSession::validate_command(self.connector.as_ref(), command)?;
         let result = session.send_command(self.connector.as_ref(), command);
-        if result.is_err() {
+        let channel_invalid = !session.is_valid();
+        if channel_invalid {
             *session_guard = None;
         }
         result
@@ -1016,6 +1017,13 @@ fn bulk_out_packet_size(device: &rusb::Device<rusb::Context>) -> Result<usize, E
 impl UsbConnector {
     fn connect(&mut self) -> Result<(), Error> {
         self.handle.claim_interface(0)?;
+        let mut stale = vec![0; self.buffer_size()];
+        if let Ok(length) = self
+            .handle
+            .read_bulk(0x81, &mut stale, Duration::from_millis(1))
+        {
+            eprintln!("libusb drained {length} stale bytes");
+        }
         self.claimed = true;
         Ok(())
     }
