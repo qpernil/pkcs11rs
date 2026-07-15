@@ -19,31 +19,71 @@ use zeroize::Zeroizing;
 
 pub(crate) const YUBIKEY_SECURITY_DOMAIN_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 
+const SCP11A_KEY_ID: u8 = 0x11;
 const SCP11B_KEY_ID: u8 = 0x13;
 const SCP11_SECURITY_LEVEL: u8 = 0x33;
-const SCP11_PROTOCOL: [u8; 2] = [0x11, 0x00];
 const KEY_USAGE: u8 = 0x3c;
 const KEY_TYPE_AES: u8 = 0x88;
 const KEY_LENGTH_AES_128: u8 = 16;
 const SESSION_KEY_LENGTH: usize = 16;
 const DERIVED_KEY_COUNT: usize = 5;
 
-pub(crate) struct Scp11bKeySet {
-    key_version: u8,
-    card_public_key: EcKey<Public>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Scp11Variant {
+    A,
+    B,
 }
 
-impl std::fmt::Debug for Scp11bKeySet {
+impl Scp11Variant {
+    fn parameter(self) -> u8 {
+        match self {
+            Self::A => 0x01,
+            Self::B => 0x00,
+        }
+    }
+
+    fn key_id(self) -> u8 {
+        match self {
+            Self::A => SCP11A_KEY_ID,
+            Self::B => SCP11B_KEY_ID,
+        }
+    }
+
+    fn instruction(self) -> u8 {
+        match self {
+            Self::A => 0x82,
+            Self::B => 0x88,
+        }
+    }
+}
+
+struct Scp11aHostCredentials {
+    key_version: u8,
+    key_id: u8,
+    private_key: EcKey<Private>,
+    certificates: Vec<Vec<u8>>,
+}
+
+pub(crate) struct Scp11KeySet {
+    variant: Scp11Variant,
+    key_version: u8,
+    card_public_key: EcKey<Public>,
+    host: Option<Scp11aHostCredentials>,
+}
+
+impl std::fmt::Debug for Scp11KeySet {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.debug_struct("Scp11bKeySet")
+        fmt.debug_struct("Scp11KeySet")
+            .field("variant", &self.variant)
             .field("key_version", &self.key_version)
             .field("curve", &"P-256")
+            .field("oce_authenticated", &self.host.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl Scp11bKeySet {
-    pub(crate) fn from_environment() -> Result<Self, Error> {
+impl Scp11KeySet {
+    pub(crate) fn from_environment(variant: Scp11Variant) -> Result<Self, Error> {
         let point = env::var("PKCS11RS_SCP11_SD_PUBLIC_KEY");
         let certificate = env::var("PKCS11RS_SCP11_SD_CERTIFICATE");
         let card_public_key = match (point, certificate) {
@@ -60,9 +100,15 @@ impl Scp11bKeySet {
         if key_version & 0x80 != 0 {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
+        let host = match variant {
+            Scp11Variant::A => Some(Scp11aHostCredentials::from_environment()?),
+            Scp11Variant::B => None,
+        };
         Ok(Self {
+            variant,
             key_version,
             card_public_key,
+            host,
         })
     }
 
@@ -81,15 +127,16 @@ impl Scp11bKeySet {
         ephemeral: EcKey<Private>,
     ) -> Result<Scp03Session, Error> {
         validate_p256_private_key(&ephemeral)?;
+        self.upload_host_certificates(connector)?;
         let host_ephemeral_point = encode_public_point(&ephemeral)?;
-        let request_data = authentication_data(&host_ephemeral_point)?;
+        let request_data = authentication_data(&host_ephemeral_point, self.variant.parameter())?;
         let response = transmit(
             connector,
             &CommandApdu {
                 cla: 0x80,
-                ins: 0x88,
+                ins: self.variant.instruction(),
                 p1: self.key_version,
-                p2: SCP11B_KEY_ID,
+                p2: self.variant.key_id(),
                 data: request_data.clone(),
                 le: Some(256),
                 extended: false,
@@ -100,7 +147,12 @@ impl Scp11bKeySet {
         let card_ephemeral_key = parse_public_point(authentication.card_ephemeral_point)?;
 
         let ka1 = Zeroizing::new(ecdh(&ephemeral, &card_ephemeral_key)?);
-        let ka2 = Zeroizing::new(ecdh(&ephemeral, &self.card_public_key)?);
+        let static_or_ephemeral = self
+            .host
+            .as_ref()
+            .map(|host| &host.private_key)
+            .unwrap_or(&ephemeral);
+        let ka2 = Zeroizing::new(ecdh(static_or_ephemeral, &self.card_public_key)?);
         if ka1.len() != 32 || ka2.len() != 32 {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -126,6 +178,95 @@ impl Scp11bKeySet {
             SCP11_SECURITY_LEVEL,
         )
     }
+
+    fn upload_host_certificates(&self, connector: &dyn Connector) -> Result<(), Error> {
+        let Some(host) = self.host.as_ref() else {
+            return Ok(());
+        };
+        for (index, certificate) in host.certificates.iter().enumerate() {
+            let more = index + 1 < host.certificates.len();
+            transmit(
+                connector,
+                &CommandApdu {
+                    cla: 0x80,
+                    ins: 0x2a,
+                    p1: host.key_version,
+                    p2: host.key_id | if more { 0x80 } else { 0 },
+                    data: certificate.clone(),
+                    le: None,
+                    extended: certificate.len() > u8::MAX as usize,
+                },
+            )?
+            .require_success()?;
+        }
+        Ok(())
+    }
+}
+
+impl Scp11aHostCredentials {
+    fn from_environment() -> Result<Self, Error> {
+        let key_path = env::var("PKCS11RS_SCP11_OCE_PRIVATE_KEY")
+            .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
+        let encoded_key = fs::read(key_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let private_key = PKey::private_key_from_pem(&encoded_key)
+            .or_else(|_| PKey::private_key_from_der(&encoded_key))
+            .and_then(|key| key.ec_key())
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        validate_p256_private_key(&private_key)?;
+
+        let certificate_paths = env::var("PKCS11RS_SCP11_OCE_CERTIFICATES")
+            .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
+        let certificates = load_certificates(&certificate_paths)?;
+        let leaf =
+            X509::from_der(certificates.last().ok_or(CKR_ARGUMENTS_BAD)?).map_err(Error::from)?;
+        let leaf_key = leaf
+            .public_key()
+            .and_then(|key| key.ec_key())
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        if encode_public_point(&private_key)? != encode_public_point(&leaf_key)? {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+
+        let key_version = environment_byte("PKCS11RS_SCP11_OCE_KEY_VERSION", 0)?;
+        let key_id = environment_byte("PKCS11RS_SCP11_OCE_KEY_ID", 0)?;
+        if key_version & 0x80 != 0 || key_id & 0x80 != 0 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Self {
+            key_version,
+            key_id,
+            private_key,
+            certificates,
+        })
+    }
+}
+
+fn load_certificates(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
+    let mut certificates = Vec::new();
+    for path in env::split_paths(paths) {
+        let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let parsed = X509::stack_from_pem(&encoded)
+            .or_else(|_| X509::from_der(&encoded).map(|certificate| vec![certificate]))
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        for certificate in parsed {
+            certificates.push(certificate.to_der().map_err(Error::from)?);
+        }
+    }
+    if certificates.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+
+    let parsed: Vec<X509> = certificates
+        .iter()
+        .map(|certificate| X509::from_der(certificate).map_err(Error::from))
+        .collect::<Result<_, _>>()?;
+    for pair in parsed.windows(2) {
+        let issuer = pair[0].public_key().map_err(Error::from)?;
+        if !pair[1].verify(&issuer).map_err(Error::from)? {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+    }
+    Ok(certificates)
 }
 
 pub(crate) fn configured_application_aid() -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -203,14 +344,14 @@ fn ecdh(private: &EcKey<Private>, peer: &EcKey<Public>) -> Result<Vec<u8>, Error
     deriver.derive_to_vec().map_err(Error::from)
 }
 
-fn authentication_data(host_ephemeral_point: &[u8]) -> Result<Vec<u8>, Error> {
+fn authentication_data(host_ephemeral_point: &[u8], parameter: u8) -> Result<Vec<u8>, Error> {
     if host_ephemeral_point.len() != 65 || host_ephemeral_point.first() != Some(&0x04) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let parameters = encode_tlv(
         &[0xa6],
         &[
-            encode_tlv(&[0x90], &SCP11_PROTOCOL)?,
+            encode_tlv(&[0x90], &[0x11, parameter])?,
             encode_tlv(&[0x95], &[KEY_USAGE])?,
             encode_tlv(&[0x80], &[KEY_TYPE_AES])?,
             encode_tlv(&[0x81], &[KEY_LENGTH_AES_128])?,
@@ -385,7 +526,7 @@ mod tests {
     fn encodes_scp11b_authentication_parameters() {
         let mut point = vec![0x04];
         point.extend(1u8..=64);
-        let data = authentication_data(&point).unwrap();
+        let data = authentication_data(&point, 0).unwrap();
         assert_eq!(
             &data[..15],
             &[
@@ -435,9 +576,11 @@ mod tests {
             response: response.clone(),
             commands: RefCell::new(Vec::new()),
         };
-        let keys = Scp11bKeySet {
+        let keys = Scp11KeySet {
+            variant: Scp11Variant::B,
             key_version: 1,
             card_public_key: parse_public_point(&static_public).unwrap(),
+            host: None,
         };
         keys.establish_with_ephemeral(&connector, private_key(1))
             .unwrap();
@@ -464,6 +607,56 @@ mod tests {
             keys.establish_with_ephemeral(&connector, private_key(1)),
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
         ));
+    }
+
+    #[test]
+    fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
+        let static_public = parse_hex(
+            "047cf27b188d034f7e8a52380304b51a \
+             c3c08969e277f21b35a60b48fc476699 \
+             7807775510db8ed040293d9ac69f7430 \
+             dbba7dade63ce982299e04b79d227873d1",
+        )
+        .unwrap();
+        let response = parse_hex(
+            "5f4941045ecbe4d1a6330a44c8f7ef951d4bf165 \
+             e6c6b721efada985fb41661bc6e7fd6c8734640 \
+             c4998ff7e374b06ce1a64a2ecd82ab036384fb83 \
+             d9a79b127a27d503286105d612b371134aeda05d \
+             d9e9b933fa4449000",
+        )
+        .unwrap();
+        let connector = ScriptedConnector {
+            response,
+            commands: RefCell::new(Vec::new()),
+        };
+        let keys = Scp11KeySet {
+            variant: Scp11Variant::A,
+            key_version: 1,
+            card_public_key: parse_public_point(&static_public).unwrap(),
+            host: Some(Scp11aHostCredentials {
+                key_version: 0,
+                key_id: 0,
+                private_key: private_key(4),
+                certificates: vec![vec![0x30, 0x01, 0x00]],
+            }),
+        };
+        keys.establish_with_ephemeral(&connector, private_key(1))
+            .unwrap();
+        assert_eq!(
+            connector.commands.borrow().as_slice(),
+            &[
+                parse_hex("802a000003300100").unwrap(),
+                parse_hex(
+                    "8082011153a60d9002110195013c8001888101105f \
+                     4941046b17d1f2e12c4247f8bce6e563a440f277 \
+                     037d812deb33a0f4a13945d898c2964fe342e2fe1 \
+                     a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb \
+                     6406837bf51f500"
+                )
+                .unwrap(),
+            ]
+        );
     }
 
     #[test]
