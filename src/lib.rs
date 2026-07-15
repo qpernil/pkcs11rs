@@ -40,8 +40,7 @@ use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo};
 mod yubihsm;
 use yubihsm::{
     get_device_info as get_yubihsm_device_info, parse_pin as parse_yubihsm_pin,
-    SecureSession as YubiHsmSecureSession, COMMAND_CLOSE_SESSION, COMMAND_GET_PSEUDO_RANDOM,
-    COMMAND_GET_STORAGE_INFO,
+    Command as YubiHsmCommand, SecureSession as YubiHsmSecureSession,
 };
 
 pub mod pkcs11 {
@@ -489,7 +488,7 @@ impl Slot for YubiHsmSlot {
         let mut session = self.session.try_borrow_mut()?.take();
         match session.as_mut() {
             Some(session) => session
-                .send_command(self.connector.as_ref(), COMMAND_CLOSE_SESSION, &[])
+                .send_command(self.connector.as_ref(), &YubiHsmCommand::close_session())
                 .map(|_| ()),
             None => Err(CKR_USER_NOT_LOGGED_IN.into()),
         }
@@ -793,15 +792,13 @@ impl Session for YubiHsmSession {
         self.flags
     }
     fn get_session_info(&self) -> Result<(), Error> {
-        self.send_secure_cmd(COMMAND_GET_STORAGE_INFO, &[])
+        self.send_secure_cmd(&YubiHsmCommand::get_storage_info())
             .map(|_| ())
     }
     fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
         for chunk in output.chunks_mut(1024) {
-            let random = self.send_secure_cmd(
-                COMMAND_GET_PSEUDO_RANDOM,
-                &(chunk.len() as u16).to_be_bytes(),
-            )?;
+            let random =
+                self.send_secure_cmd(&YubiHsmCommand::get_pseudo_random(chunk.len() as u16))?;
             if random.len() != chunk.len() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -812,12 +809,12 @@ impl Session for YubiHsmSession {
 }
 
 impl YubiHsmSession {
-    fn send_secure_cmd(&self, cmd: u8, data: &[u8]) -> Result<Vec<u8>, Error> {
+    fn send_secure_cmd(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
         let result = session_guard
             .as_mut()
             .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?
-            .send_command(self.connector.as_ref(), cmd, data);
+            .send_command(self.connector.as_ref(), command);
         if result.is_err() {
             *session_guard = None;
         }
