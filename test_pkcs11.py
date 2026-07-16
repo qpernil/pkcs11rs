@@ -534,6 +534,18 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_Sign.restype = CK_RV
+        cls.lib.C_SignUpdate.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_SignUpdate.restype = CK_RV
+        cls.lib.C_SignFinal.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_SignFinal.restype = CK_RV
         cls.lib.C_VerifyInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -548,6 +560,18 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_ULONG,
         ]
         cls.lib.C_Verify.restype = CK_RV
+        cls.lib.C_VerifyUpdate.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_VerifyUpdate.restype = CK_RV
+        cls.lib.C_VerifyFinal.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_VerifyFinal.restype = CK_RV
         cls.lib.C_GenerateKey.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -1820,6 +1844,33 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_Verify(session, data, len(data), signature, signature_len.value),
             CKR_OPERATION_NOT_INITIALIZED,
+        )
+
+    def test_sign_and_verify_update_final_round_trip(self) -> None:
+        session = self.initialize_and_open_session()
+        self.login_session(session)
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        first = (CK_BYTE * 2)(*b"ab")
+        second = (CK_BYTE * 2)(*b"cd")
+        signature_len = CK_ULONG()
+
+        self.assertEqual(self.lib.C_SignInit(session, ctypes.byref(mechanism), 2), CKR_OK)
+        self.assertEqual(self.lib.C_SignUpdate(session, first, 2), CKR_OK)
+        self.assertEqual(self.lib.C_SignUpdate(session, second, 2), CKR_OK)
+        self.assertEqual(self.lib.C_SignFinal(session, None, ctypes.byref(signature_len)), CKR_OK)
+        signature = (CK_BYTE * signature_len.value)()
+
+        self.assertEqual(
+            self.lib.C_SignFinal(session, signature, ctypes.byref(signature_len)),
+            CKR_OK,
+        )
+
+        self.assertEqual(self.lib.C_VerifyInit(session, ctypes.byref(mechanism), 1), CKR_OK)
+        self.assertEqual(self.lib.C_VerifyUpdate(session, first, 2), CKR_OK)
+        self.assertEqual(self.lib.C_VerifyUpdate(session, second, 2), CKR_OK)
+        self.assertEqual(
+            self.lib.C_VerifyFinal(session, signature, signature_len.value),
+            CKR_OK,
         )
 
     def test_sign_terminal_errors_clear_the_operation(self) -> None:

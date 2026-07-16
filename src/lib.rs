@@ -9,8 +9,10 @@ extern crate rusb;
 use openssl::{
     bn::BigNum,
     ec::PointConversionForm,
+    ec::{EcGroup, EcKey, EcPoint},
     ecdsa::EcdsaSig,
     hash::{hash, MessageDigest},
+    nid::Nid,
     pkey::{Id, Private, Public},
     rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
 };
@@ -454,6 +456,7 @@ fn yubihsm_token_objects(
         decrypt,
         sign,
         verify: false,
+        derive: false,
         sensitive: private,
         extractable: yubihsm_capability(&info.capabilities, 0x10),
         always_sensitive: private,
@@ -502,6 +505,7 @@ fn yubihsm_token_objects(
             decrypt: false,
             sign: false,
             verify: sign,
+            derive: false,
             sensitive: false,
             extractable: true,
             always_sensitive: false,
@@ -519,9 +523,11 @@ fn yubihsm_token_objects(
 struct PivSlot {
     connector: Rc<dyn Connector>,
     authenticated: Rc<Cell<bool>>,
+    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: piv::Version,
     serial: String,
     keys: Vec<PivKey>,
+    certificates: Vec<PivCertificate>,
 }
 
 #[derive(Clone, Debug)]
@@ -529,6 +535,17 @@ struct PivKey {
     slot: piv::Slot,
     algorithm: piv::Algorithm,
     public_key: PivPublicKey,
+    pin_policy: u8,
+    touch_policy: u8,
+    origin: u8,
+}
+
+#[derive(Clone, Debug)]
+struct PivCertificate {
+    slot: piv::Slot,
+    algorithm: piv::Algorithm,
+    value: Vec<u8>,
+    attestation: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -576,6 +593,32 @@ fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> 
             | piv::Algorithm::Ed25519
             | piv::Algorithm::X25519
     ) || (version.major, version.minor) >= (5, 7)
+}
+
+fn piv_effective_pin_policy(slot: piv::Slot, policy: u8) -> u8 {
+    if policy != 0 {
+        return policy;
+    }
+    match slot {
+        piv::Slot::Signature => 3,
+        piv::Slot::CardAuthentication => 1,
+        _ => 2,
+    }
+}
+
+fn piv_policy_requires_login(slot: piv::Slot, policy: u8) -> bool {
+    piv_effective_pin_policy(slot, policy) != 1
+}
+
+fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> Vec<u8> {
+    let kind = if attestation {
+        "Attestation certificate"
+    } else if certificate {
+        "Certificate"
+    } else {
+        "PIV slot"
+    };
+    format!("{kind} {:02X}", slot as u8).into_bytes()
 }
 
 fn piv_public_key_from_metadata(
@@ -665,6 +708,31 @@ fn piv_public_key_from_certificate(
     }
 }
 
+fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> {
+    let certificate = openssl::x509::X509::from_der(certificate).ok()?;
+    let key = certificate.public_key().ok()?;
+    match key.id() {
+        Id::RSA => match key.rsa().ok()?.size() {
+            128 => Some(piv::Algorithm::Rsa1024),
+            256 => Some(piv::Algorithm::Rsa2048),
+            384 => Some(piv::Algorithm::Rsa3072),
+            512 => Some(piv::Algorithm::Rsa4096),
+            _ => None,
+        },
+        Id::EC => {
+            let curve = key.ec_key().ok()?.group().curve_name()?;
+            match curve {
+                Nid::X9_62_PRIME256V1 => Some(piv::Algorithm::EccP256),
+                Nid::SECP384R1 => Some(piv::Algorithm::EccP384),
+                _ => None,
+            }
+        }
+        Id::ED25519 => Some(piv::Algorithm::Ed25519),
+        Id::X25519 => Some(piv::Algorithm::X25519),
+        _ => None,
+    }
+}
+
 fn piv_ec_coordinate_length(algorithm: piv::Algorithm) -> Option<usize> {
     match algorithm {
         piv::Algorithm::EccP256 => Some(32),
@@ -678,13 +746,374 @@ fn piv_sign_mechanism_supported(algorithm: piv::Algorithm, mechanism: CK_MECHANI
         piv::Algorithm::Rsa1024
         | piv::Algorithm::Rsa2048
         | piv::Algorithm::Rsa3072
-        | piv::Algorithm::Rsa4096 => mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        | piv::Algorithm::Rsa4096 => matches!(
+            mechanism,
+            x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+                || x == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        ),
         piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
-            mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
+            matches!(
+                mechanism,
+                x if x == CKM_ECDSA as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
+            )
         }
         piv::Algorithm::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
         piv::Algorithm::X25519 => false,
     }
+}
+
+fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<MessageDigest> {
+    match mechanism {
+        x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha1())
+        }
+        x if x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha224())
+        }
+        x if x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha256())
+        }
+        x if x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha384())
+        }
+        x if x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha512())
+        }
+        x if x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha3_224())
+        }
+        x if x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha3_256())
+        }
+        x if x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha3_384())
+        }
+        x if x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+            || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE =>
+        {
+            Some(MessageDigest::sha3_512())
+        }
+        _ => None,
+    }
+}
+
+fn piv_is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
+    mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+        || mechanism == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
+}
+
+fn piv_is_hashed_rsa_pkcs(mechanism: CK_MECHANISM_TYPE) -> bool {
+    piv_hash_mechanism(mechanism).is_some()
+        && !piv_is_pss_mechanism(mechanism)
+        && mechanism != CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
+        && mechanism != CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
+        && mechanism != CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
+        && mechanism != CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
+        && mechanism != CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
+        && mechanism < CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
+}
+
+fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
+    mechanism == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
+        || mechanism == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
+}
+
+fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8>> {
+    let prefix: &[u8] = match mechanism {
+        x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x04, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x01, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x02, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x03, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x07, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x08, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x09, 0x05, 0x00,
+        ],
+        x if x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE => &[
+            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
+            0x0a, 0x05, 0x00,
+        ],
+        _ => return None,
+    };
+    let mut result = prefix.to_vec();
+    result.extend_from_slice(digest);
+    Some(result)
+}
+
+fn digest_for_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
+    match mechanism {
+        x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha1()),
+        x if x == CKM_SHA224 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha224()),
+        x if x == CKM_SHA256 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha256()),
+        x if x == CKM_SHA384 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha384()),
+        x if x == CKM_SHA512 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha512()),
+        x if x == CKM_SHA3_224 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha3_224()),
+        x if x == CKM_SHA3_256 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha3_256()),
+        x if x == CKM_SHA3_384 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha3_384()),
+        x if x == CKM_SHA3_512 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha3_512()),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+}
+
+fn pss_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<CK_MECHANISM_TYPE, Error> {
+    match mechanism {
+        x if x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE => Ok(CKM_SHA_1 as CK_MECHANISM_TYPE),
+        x if x == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA224 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA256 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA384 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA512 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA3_224 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA3_256 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA3_384 as CK_MECHANISM_TYPE)
+        }
+        x if x == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
+            Ok(CKM_SHA3_512 as CK_MECHANISM_TYPE)
+        }
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+}
+
+fn mgf_digest(mgf: u8, hash: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
+    match mgf {
+        0 => digest_for_hash_mechanism(hash),
+        32 => Ok(MessageDigest::sha1()),
+        33 => Ok(MessageDigest::sha256()),
+        34 => Ok(MessageDigest::sha384()),
+        35 => Ok(MessageDigest::sha512()),
+        36 => Ok(MessageDigest::sha224()),
+        37 => Ok(MessageDigest::sha3_224()),
+        38 => Ok(MessageDigest::sha3_256()),
+        39 => Ok(MessageDigest::sha3_384()),
+        40 => Ok(MessageDigest::sha3_512()),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+}
+
+fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
+    let mut output = Vec::with_capacity(length);
+    let mut counter = 0u32;
+    while output.len() < length {
+        let mut input = seed.to_vec();
+        input.extend_from_slice(&counter.to_be_bytes());
+        output.extend_from_slice(hash(digest, &input)?.as_ref());
+        counter = counter.checked_add(1).ok_or(CKR_DATA_LEN_RANGE)?;
+    }
+    output.truncate(length);
+    Ok(output)
+}
+
+fn encode_rsa_pss(
+    digest: &[u8],
+    modulus_size: usize,
+    hash_mechanism: CK_MECHANISM_TYPE,
+    mgf_code: u8,
+    salt_length: usize,
+) -> Result<Vec<u8>, Error> {
+    let hash_digest = digest_for_hash_mechanism(hash_mechanism)?;
+    if digest.len() != hash_digest.size() || salt_length > modulus_size {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let em_bits = modulus_size
+        .checked_mul(8)
+        .and_then(|bits| bits.checked_sub(1))
+        .ok_or(CKR_KEY_SIZE_RANGE)?;
+    let em_len = em_bits.div_ceil(8);
+    if em_len < hash_digest.size() + salt_length + 2 {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut salt = vec![0; salt_length];
+    openssl::rand::rand_bytes(&mut salt).map_err(|_| CKR_RANDOM_NO_RNG)?;
+    let mut m_prime = vec![0; 8];
+    m_prime.extend_from_slice(digest);
+    m_prime.extend_from_slice(&salt);
+    let h = hash(hash_digest, &m_prime)?;
+    let mut db = vec![0; em_len - salt_length - h.len() - 2];
+    db.push(1);
+    db.extend_from_slice(&salt);
+    let mask = mgf1(
+        h.as_ref(),
+        em_len - h.len() - 1,
+        mgf_digest(mgf_code, hash_mechanism)?,
+    )?;
+    for (value, mask) in db.iter_mut().zip(mask) {
+        *value ^= mask;
+    }
+    db[0] &= 0xff >> (8 * em_len - em_bits);
+    let mut encoded = db;
+    encoded.extend_from_slice(h.as_ref());
+    encoded.push(0xbc);
+    if encoded.len() < modulus_size {
+        let mut padded = vec![0; modulus_size - encoded.len()];
+        padded.extend_from_slice(&encoded);
+        encoded = padded;
+    }
+    Ok(encoded)
+}
+
+fn piv_ec_public_key(algorithm: piv::Algorithm, point: &[u8]) -> Result<EcKey<Public>, Error> {
+    let nid = match algorithm {
+        piv::Algorithm::EccP256 => Nid::X9_62_PRIME256V1,
+        piv::Algorithm::EccP384 => Nid::SECP384R1,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    let group = EcGroup::from_curve_name(nid).map_err(Error::from)?;
+    let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
+    let point = EcPoint::from_bytes(&group, &point_with_prefix(point), &mut context)
+        .map_err(Error::from)?;
+    EcKey::from_public_key(&group, &point).map_err(Error::from)
+}
+
+fn point_with_prefix(point: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(point.len() + 1);
+    encoded.push(0x04);
+    encoded.extend_from_slice(point);
+    encoded
+}
+
+fn verify_rsa_pss(
+    encoded: &[u8],
+    digest: &[u8],
+    hash_mechanism: CK_MECHANISM_TYPE,
+    mgf_code: u8,
+    salt_length: usize,
+) -> Result<bool, Error> {
+    let hash_digest = digest_for_hash_mechanism(hash_mechanism)?;
+    if digest.len() != hash_digest.size() || encoded.len() < hash_digest.size() + salt_length + 2 {
+        return Ok(false);
+    }
+    let em_bits = encoded.len() * 8 - 1;
+    let em_len = em_bits.div_ceil(8);
+    let encoded = if encoded.len() > em_len {
+        &encoded[encoded.len() - em_len..]
+    } else {
+        encoded
+    };
+    if encoded.last() != Some(&0xbc) {
+        return Ok(false);
+    }
+    let h_offset = encoded.len() - hash_digest.size() - 1;
+    let masked_db = &encoded[..h_offset];
+    let h = &encoded[h_offset..h_offset + hash_digest.size()];
+    if masked_db.first().is_some_and(|value| *value & 0x80 != 0) {
+        return Ok(false);
+    }
+    let mask = mgf1(h, masked_db.len(), mgf_digest(mgf_code, hash_mechanism)?)?;
+    let mut db = masked_db.to_vec();
+    for (value, mask) in db.iter_mut().zip(mask) {
+        *value ^= mask;
+    }
+    db[0] &= 0x7f;
+    let separator = db.len() - salt_length - 1;
+    if db.get(separator) != Some(&1) || db[..separator].iter().any(|value| *value != 0) {
+        return Ok(false);
+    }
+    let mut m_prime = vec![0; 8];
+    m_prime.extend_from_slice(digest);
+    m_prime.extend_from_slice(&db[separator + 1..]);
+    Ok(hash(hash_digest, &m_prime)?.as_ref() == h)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -715,6 +1144,7 @@ impl PivSlot {
         Self {
             connector,
             authenticated: Rc::new(Cell::new(false)),
+            cached_pin: Rc::new(RefCell::new(None)),
             version: piv::Version {
                 major: 0,
                 minor: 0,
@@ -722,6 +1152,7 @@ impl PivSlot {
             },
             serial: String::from("0"),
             keys: Vec::new(),
+            certificates: Vec::new(),
         }
     }
 
@@ -769,18 +1200,31 @@ impl Slot for PivSlot {
             flags,
             connector: self.connector.clone(),
             authenticated: self.authenticated.clone(),
+            cached_pin: self.cached_pin.clone(),
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
+        *self.cached_pin.borrow_mut() = None;
         let info = PivClient.select(self.connector.as_ref())?;
         self.update_device_info(info);
-        PivClient.verify_pin(self.connector.as_ref(), pin)?;
+        let only_never = !self.keys.is_empty()
+            && self
+                .keys
+                .iter()
+                .all(|key| !piv_policy_requires_login(key.slot, key.pin_policy));
+        if pin.is_empty() && only_never {
+            self.authenticated.set(true);
+        } else {
+            PivClient.verify_pin(self.connector.as_ref(), pin)?;
+            *self.cached_pin.borrow_mut() = Some(pin.to_vec());
+        }
         self.authenticated.set(true);
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
+        *self.cached_pin.borrow_mut() = None;
         let result = PivClient.select(self.connector.as_ref());
         if let Ok(info) = result.as_ref() {
             self.version = info.version;
@@ -793,33 +1237,43 @@ impl Slot for PivSlot {
         let info = PivClient.select(self.connector.as_ref())?;
         self.update_device_info(info);
         self.keys.clear();
-        for slot in [
-            piv::Slot::Authentication,
-            piv::Slot::Signature,
-            piv::Slot::KeyManagement,
-            piv::Slot::CardAuthentication,
-        ] {
-            let Ok(metadata) = PivClient.metadata(self.connector.as_ref(), slot) else {
-                continue;
-            };
-            let Some(algorithm) = metadata.algorithm.and_then(piv::Algorithm::from_id) else {
+        self.certificates.clear();
+        for slot in piv::Slot::all().iter().copied() {
+            let metadata = PivClient.metadata(self.connector.as_ref(), slot).ok();
+            let certificate = PivClient.certificate(self.connector.as_ref(), slot).ok();
+            let certificate_algorithm = certificate
+                .as_deref()
+                .and_then(piv_algorithm_from_certificate);
+            if let (Some(algorithm), Some(value)) = (certificate_algorithm, certificate.clone()) {
+                if piv_algorithm_supported(self.version, algorithm) {
+                    self.certificates.push(PivCertificate {
+                        slot,
+                        algorithm,
+                        value,
+                        attestation: slot == piv::Slot::Attestation,
+                    });
+                }
+            }
+            let algorithm = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.algorithm)
+                .and_then(piv::Algorithm::from_id)
+                .or(certificate_algorithm);
+            let Some(algorithm) = algorithm else {
                 continue;
             };
             if !piv_algorithm_supported(self.version, algorithm) {
                 continue;
             }
             let public_key = metadata
-                .public_key
-                .as_deref()
+                .as_ref()
+                .and_then(|metadata| metadata.public_key.as_deref())
                 .and_then(|encoded| piv::parse_metadata_public_key(algorithm, encoded).ok())
                 .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok())
                 .or_else(|| {
-                    PivClient
-                        .certificate(self.connector.as_ref(), slot)
-                        .ok()
-                        .and_then(|certificate| {
-                            piv_public_key_from_certificate(algorithm, &certificate).ok()
-                        })
+                    certificate.as_deref().and_then(|certificate| {
+                        piv_public_key_from_certificate(algorithm, certificate).ok()
+                    })
                 });
             let Some(public_key) = public_key else {
                 continue;
@@ -828,6 +1282,18 @@ impl Slot for PivSlot {
                 slot,
                 algorithm,
                 public_key,
+                pin_policy: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.pin_policy)
+                    .unwrap_or(0),
+                touch_policy: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.touch_policy)
+                    .unwrap_or(0),
+                origin: metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.origin)
+                    .unwrap_or(0),
             });
         }
         Ok(())
@@ -847,7 +1313,76 @@ impl Slot for PivSlot {
         Ok(())
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
-        let mut mechanisms = MECHANISMS.to_vec();
+        let mut mechanisms = Vec::new();
+        let rsa_sizes = [1024, 2048, 3072, 4096];
+        let ec_sizes = [256, 384];
+        let mut add = |type_, min_key_size, max_key_size, flags| {
+            mechanisms.push(MechanismDetails {
+                type_,
+                min_key_size,
+                max_key_size,
+                flags,
+            });
+        };
+        for type_ in [
+            CKM_RSA_X_509,
+            CKM_RSA_PKCS,
+            CKM_RSA_PKCS_OAEP,
+            CKM_RSA_PKCS_PSS,
+            CKM_SHA1_RSA_PKCS,
+            CKM_SHA224_RSA_PKCS,
+            CKM_SHA256_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+            CKM_SHA3_224_RSA_PKCS,
+            CKM_SHA3_256_RSA_PKCS,
+            CKM_SHA3_384_RSA_PKCS,
+            CKM_SHA3_512_RSA_PKCS,
+            CKM_SHA1_RSA_PKCS_PSS,
+            CKM_SHA224_RSA_PKCS_PSS,
+            CKM_SHA256_RSA_PKCS_PSS,
+            CKM_SHA384_RSA_PKCS_PSS,
+            CKM_SHA512_RSA_PKCS_PSS,
+            CKM_SHA3_224_RSA_PKCS_PSS,
+            CKM_SHA3_256_RSA_PKCS_PSS,
+            CKM_SHA3_384_RSA_PKCS_PSS,
+            CKM_SHA3_512_RSA_PKCS_PSS,
+        ] {
+            let flags = if type_ == CKM_RSA_PKCS {
+                (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+            } else if type_ == CKM_RSA_PKCS_OAEP {
+                (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+            } else if type_ == CKM_RSA_X_509 {
+                (CKF_ENCRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+            } else {
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+            };
+            add(
+                type_ as CK_MECHANISM_TYPE,
+                rsa_sizes[0],
+                rsa_sizes[3],
+                flags,
+            );
+        }
+        for type_ in [
+            CKM_ECDSA,
+            CKM_ECDSA_SHA1,
+            CKM_ECDSA_SHA224,
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA384,
+            CKM_ECDSA_SHA512,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+            CKM_ECDSA_SHA3_384,
+            CKM_ECDSA_SHA3_512,
+        ] {
+            add(
+                type_ as CK_MECHANISM_TYPE,
+                ec_sizes[0],
+                ec_sizes[1],
+                CKF_SIGN as CK_FLAGS,
+            );
+        }
         mechanisms.push(MechanismDetails {
             type_: CKM_EDDSA as CK_MECHANISM_TYPE,
             min_key_size: 256,
@@ -870,18 +1405,45 @@ impl Slot for PivSlot {
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
+        *self.cached_pin.borrow_mut() = None;
     }
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = Vec::with_capacity(self.keys.len() * 2);
+        let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {
             let id = vec![key.slot as u8];
             let label = format!("PIV slot {:02X}", key.slot as u8).into_bytes();
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
             let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);
+            let private = piv_policy_requires_login(key.slot, key.pin_policy);
+            let can_decrypt = is_rsa
+                && matches!(
+                    key.slot,
+                    piv::Slot::KeyManagement
+                        | piv::Slot::Retired1
+                        | piv::Slot::Retired2
+                        | piv::Slot::Retired3
+                        | piv::Slot::Retired4
+                        | piv::Slot::Retired5
+                        | piv::Slot::Retired6
+                        | piv::Slot::Retired7
+                        | piv::Slot::Retired8
+                        | piv::Slot::Retired9
+                        | piv::Slot::Retired10
+                        | piv::Slot::Retired11
+                        | piv::Slot::Retired12
+                        | piv::Slot::Retired13
+                        | piv::Slot::Retired14
+                        | piv::Slot::Retired15
+                        | piv::Slot::Retired16
+                        | piv::Slot::Retired17
+                        | piv::Slot::Retired18
+                        | piv::Slot::Retired19
+                        | piv::Slot::Retired20
+                );
             let public_material = match &key.public_key {
                 PivPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
                 PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
@@ -908,6 +1470,7 @@ impl Slot for PivSlot {
                 decrypt: false,
                 sign: false,
                 verify: true,
+                derive: false,
                 sensitive: false,
                 extractable: true,
                 always_sensitive: false,
@@ -925,11 +1488,15 @@ impl Slot for PivSlot {
                 label,
                 id,
                 token: true,
-                private: true,
+                private,
                 encrypt: false,
-                decrypt: false,
+                decrypt: can_decrypt,
                 sign: can_sign,
                 verify: false,
+                derive: matches!(
+                    key.algorithm,
+                    piv::Algorithm::EccP256 | piv::Algorithm::EccP384 | piv::Algorithm::X25519
+                ),
                 sensitive: true,
                 extractable: false,
                 always_sensitive: true,
@@ -942,6 +1509,91 @@ impl Slot for PivSlot {
                     algorithm: key.algorithm,
                     modulus,
                     public_exponent,
+                    pin_policy: key.pin_policy,
+                    touch_policy: key.touch_policy,
+                },
+            });
+        }
+        for certificate in &self.certificates {
+            let key_type = match certificate.algorithm {
+                piv::Algorithm::Rsa1024
+                | piv::Algorithm::Rsa2048
+                | piv::Algorithm::Rsa3072
+                | piv::Algorithm::Rsa4096 => CKK_RSA as CK_KEY_TYPE,
+                piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => CKK_EC as CK_KEY_TYPE,
+                piv::Algorithm::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+                piv::Algorithm::X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            };
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!(
+                    "piv-{:02x}-{}certificate",
+                    certificate.slot as u8,
+                    if certificate.attestation {
+                        "attestation-"
+                    } else {
+                        ""
+                    }
+                )
+                .into_bytes(),
+                class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                key_type,
+                label: piv_slot_label(certificate.slot, true, certificate.attestation),
+                id: vec![certificate.slot as u8],
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::PivCertificate {
+                    algorithm: certificate.algorithm,
+                    value: certificate.value.clone(),
+                    attestation: certificate.attestation,
+                },
+            });
+        }
+        for key in &self.keys {
+            if key.origin != 1 {
+                continue;
+            }
+            let Ok(value) = PivClient.attestation(self.connector.as_ref(), key.slot) else {
+                continue;
+            };
+            let key_type = key.public_key.key_type(key.algorithm);
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("piv-{:02x}-attestation", key.slot as u8).into_bytes(),
+                class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                key_type,
+                label: piv_slot_label(key.slot, true, true),
+                id: vec![key.slot as u8],
+                token: false,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: true,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::PivCertificate {
+                    algorithm: key.algorithm,
+                    value,
+                    attestation: true,
                 },
             });
         }
@@ -1187,6 +1839,7 @@ trait Session {
         _slot: piv::Slot,
         _algorithm: piv::Algorithm,
         _input: &[u8],
+        _pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -1195,6 +1848,7 @@ trait Session {
         _slot: piv::Slot,
         _algorithm: piv::Algorithm,
         _input: &[u8],
+        _pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -1321,6 +1975,7 @@ struct PivSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     authenticated: Rc<Cell<bool>>,
+    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 impl Session for PivSession {
@@ -1346,11 +2001,26 @@ impl Session for PivSession {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
         input: &[u8],
+        pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        if !self.authenticated.get() {
+        let effective_policy = piv_effective_pin_policy(slot, pin_policy);
+        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
+        if effective_policy == 3 {
+            let pin = self
+                .cached_pin
+                .borrow()
+                .clone()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+            self.authenticated.set(false);
+            PivClient.verify_pin(self.connector.as_ref(), &pin)?;
+            self.authenticated.set(true);
+        }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
+        if effective_policy == 3 {
+            self.authenticated.set(false);
+        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -1361,11 +2031,26 @@ impl Session for PivSession {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
         input: &[u8],
+        pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        if !self.authenticated.get() {
+        let effective_policy = piv_effective_pin_policy(slot, pin_policy);
+        if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
+        if effective_policy == 3 {
+            let pin = self
+                .cached_pin
+                .borrow()
+                .clone()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+            self.authenticated.set(false);
+            PivClient.verify_pin(self.connector.as_ref(), &pin)?;
+            self.authenticated.set(true);
+        }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
+        if effective_policy == 3 {
+            self.authenticated.set(false);
+        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -1855,6 +2540,7 @@ struct TokenObject {
     decrypt: bool,
     sign: bool,
     verify: bool,
+    derive: bool,
     sensitive: bool,
     extractable: bool,
     always_sensitive: bool,
@@ -1876,10 +2562,17 @@ enum KeyMaterial {
         algorithm: piv::Algorithm,
         modulus: Vec<u8>,
         public_exponent: Vec<u8>,
+        pin_policy: u8,
+        touch_policy: u8,
     },
     PivPublic {
         algorithm: piv::Algorithm,
         public_key: Vec<u8>,
+    },
+    PivCertificate {
+        algorithm: piv::Algorithm,
+        value: Vec<u8>,
+        attestation: bool,
     },
     YubiHsm {
         id: u16,
@@ -1903,11 +2596,14 @@ impl std::fmt::Debug for KeyMaterial {
                 algorithm,
                 modulus,
                 public_exponent: _,
+                touch_policy,
+                ..
             } => fmt
                 .debug_struct("PivPrivate")
                 .field("slot", slot)
                 .field("algorithm", algorithm)
                 .field("size", &modulus.len())
+                .field("touch_policy", touch_policy)
                 .finish(),
             Self::PivPublic {
                 algorithm,
@@ -1931,6 +2627,16 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("length", length)
                 .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
+            Self::PivCertificate {
+                value,
+                algorithm,
+                attestation,
+            } => fmt
+                .debug_struct("PivCertificate")
+                .field("algorithm", algorithm)
+                .field("attestation", attestation)
+                .field("size", &value.len())
+                .finish(),
         }
     }
 }
@@ -1947,6 +2653,7 @@ struct TokenObjectTemplate {
     decrypt: bool,
     sign: bool,
     verify: bool,
+    derive: bool,
     sensitive: Option<bool>,
     extractable: Option<bool>,
 }
@@ -1964,6 +2671,8 @@ struct SignatureOperation {
     requires_login: bool,
     mechanism: CK_MECHANISM_TYPE,
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    piv_pin_policy: Option<u8>,
+    buffer: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -1973,7 +2682,8 @@ struct CryptOperation {
     requires_login: bool,
     mechanism: CK_MECHANISM_TYPE,
     iv: Option<[u8; 16]>,
-    oaep: Option<(u8, Vec<u8>)>,
+    oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
+    piv_pin_policy: Option<u8>,
 }
 
 impl std::fmt::Debug for Context {
@@ -2400,6 +3110,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 decrypt: false,
                 sign: false,
                 verify: true,
+                derive: false,
                 sensitive: false,
                 extractable: true,
                 always_sensitive: false,
@@ -2425,6 +3136,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 decrypt: true,
                 sign: true,
                 verify: false,
+                derive: false,
                 sensitive: true,
                 extractable: false,
                 always_sensitive: true,
@@ -2448,6 +3160,42 @@ fn bool_attribute(value: bool) -> Vec<u8> {
     } else {
         CK_FALSE as CK_BBOOL
     }]
+}
+
+fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+    match attribute_type {
+        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => Some(value.to_vec()),
+        x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE => {
+            Some(ulong_attribute(CKC_X_509 as CK_ULONG))
+        }
+        x if x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(0)),
+        x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE => {
+            Some(hash(MessageDigest::sha1(), value).ok()?.as_ref()[..3].to_vec())
+        }
+        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .subject_name()
+            .to_der()
+            .ok(),
+        x if x == CKA_ISSUER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .issuer_name()
+            .to_der()
+            .ok(),
+        x if x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .serial_number()
+            .to_bn()
+            .ok()
+            .map(|serial| serial.to_vec()),
+        x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .public_key()
+            .ok()?
+            .public_key_to_der()
+            .ok(),
+        _ => None,
+    }
 }
 
 impl TokenObject {
@@ -2484,10 +3232,12 @@ impl TokenObject {
             CKA_ID as CK_ATTRIBUTE_TYPE,
             CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
             CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
             CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
             CKA_SIGN as CK_ATTRIBUTE_TYPE,
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_DERIVE as CK_ATTRIBUTE_TYPE,
             CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
             CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
             CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
@@ -2497,8 +3247,17 @@ impl TokenObject {
             CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
             CKA_MODULUS as CK_ATTRIBUTE_TYPE,
             CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
             CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
             CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE,
+            CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE,
+            CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE,
+            CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
+            CKA_ISSUER as CK_ATTRIBUTE_TYPE,
+            CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
+            CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -2515,10 +3274,54 @@ impl TokenObject {
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
+            x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::PivPrivate {
+                    slot, pin_policy, ..
+                } if piv_effective_pin_policy(*slot, *pin_policy) == 3 => {
+                    Some(bool_attribute(true))
+                }
+                _ => None,
+            },
             x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.encrypt)),
             x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.decrypt)),
             x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.sign)),
             x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.verify)),
+            x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.derive)),
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                && matches!(
+                    &self.material,
+                    KeyMaterial::PivPrivate { .. }
+                        | KeyMaterial::PivPublic { .. }
+                        | KeyMaterial::PivCertificate { .. }
+                ) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                && matches!(
+                    &self.material,
+                    KeyMaterial::PivPrivate { .. }
+                        | KeyMaterial::PivPublic { .. }
+                        | KeyMaterial::PivCertificate { .. }
+                ) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+                && matches!(
+                    &self.material,
+                    KeyMaterial::PivPrivate { .. }
+                        | KeyMaterial::PivPublic { .. }
+                        | KeyMaterial::PivCertificate { .. }
+                ) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
+                && matches!(&self.material, KeyMaterial::PivCertificate { .. }) =>
+            {
+                Some(bool_attribute(false))
+            }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::Secret(value) => Some(ulong_attribute(value.len() as CK_ULONG)),
                 KeyMaterial::YubiHsm { length, .. }
@@ -2575,6 +3378,21 @@ impl TokenObject {
                 }
                 _ => None,
             },
+            x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
+                KeyMaterial::RsaPublic(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
+                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+                }
+                KeyMaterial::YubiHsm {
+                    algorithm,
+                    public_key,
+                    ..
+                } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+                    Some(ulong_attribute((public_key.len() * 8) as CK_ULONG))
+                }
+                _ => None,
+            },
             x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { algorithm, .. } => {
                     yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
@@ -2619,6 +3437,22 @@ impl TokenObject {
                             public_key.clone()
                         };
                         der_octet_string(&point)
+                    }
+                    _ => None,
+                }
+            }
+            x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                || x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE
+                || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
+                || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+                || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+                || x == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+                || x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
+            {
+                match &self.material {
+                    KeyMaterial::PivCertificate { value, .. } => {
+                        piv_certificate_attribute(value, x)
                     }
                     _ => None,
                 }
@@ -2745,6 +3579,10 @@ impl TokenObjectTemplate {
                 self.verify = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE => {
+                self.derive = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
             x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
                 self.sensitive = Some(read_bool_template_attribute(attribute)?);
                 Ok(())
@@ -2773,6 +3611,7 @@ impl TokenObjectTemplate {
             decrypt: self.decrypt,
             sign: self.sign,
             verify: self.verify,
+            derive: self.derive,
             sensitive,
             extractable,
             always_sensitive: sensitive,
@@ -4565,6 +5404,7 @@ fn crypt_init(
         let mechanism = _as_ref(mechanism)?;
         let (iv, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                 || x == CKM_AES_ECB as CK_MECHANISM_TYPE =>
             {
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
@@ -4582,7 +5422,7 @@ fn crypt_init(
                     None,
                 )
             }
-            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE && !encrypting => {
+            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
                 if mechanism.ulParameterLen as usize
                     != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
                 {
@@ -4592,38 +5432,27 @@ fn crypt_init(
                 if parameters.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                let (digest, mgf) = match (parameters.hashAlg, parameters.mgf) {
-                    (hash, mgf)
-                        if hash == CKM_SHA_1 as CK_MECHANISM_TYPE
-                            && mgf == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE =>
-                    {
-                        (MessageDigest::sha1(), 32)
-                    }
-                    (hash, mgf)
-                        if hash == CKM_SHA256 as CK_MECHANISM_TYPE
-                            && mgf == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE =>
-                    {
-                        (MessageDigest::sha256(), 33)
-                    }
-                    (hash, mgf)
-                        if hash == CKM_SHA384 as CK_MECHANISM_TYPE
-                            && mgf == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE =>
-                    {
-                        (MessageDigest::sha384(), 34)
-                    }
-                    (hash, mgf)
-                        if hash == CKM_SHA512 as CK_MECHANISM_TYPE
-                            && mgf == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE =>
-                    {
-                        (MessageDigest::sha512(), 35)
-                    }
+                let digest = digest_for_hash_mechanism(parameters.hashAlg)?;
+                let mgf = match parameters.mgf {
+                    x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
+                    x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
+                    x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
+                    x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+                    x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+                    x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+                    x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+                    x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+                    x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
                     _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
                 };
                 let label = from_raw_parts(
                     parameters.pSourceData as *const u8,
                     parameters.ulSourceDataLen as usize,
                 )?;
-                (None, Some((mgf, hash(digest, label)?.to_vec())))
+                (
+                    None,
+                    Some((mgf, parameters.hashAlg, hash(digest, label)?.to_vec())),
+                )
             }
             _ => return Err(CKR_MECHANISM_INVALID.into()),
         };
@@ -4654,13 +5483,17 @@ fn crypt_init(
         }
         let valid_key = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                 || x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE =>
             {
                 object.key_type == CKK_RSA as CK_KEY_TYPE
                     && if encrypting {
                         matches!(object.material, KeyMaterial::RsaPublic(_))
                     } else {
-                        matches!(object.material, KeyMaterial::YubiHsm { .. })
+                        matches!(
+                            object.material,
+                            KeyMaterial::YubiHsm { .. } | KeyMaterial::PivPrivate { .. }
+                        )
                     }
             }
             _ => {
@@ -4678,6 +5511,10 @@ fn crypt_init(
             mechanism: mechanism.mechanism,
             iv,
             oaep,
+            piv_pin_policy: match &object.material {
+                KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
+                _ => None,
+            },
         };
         if encrypting {
             ctx.encrypt_operations.insert(session_handle, operation);
@@ -4739,6 +5576,7 @@ fn crypt(
         };
         let required = match &operation.key {
             KeyMaterial::RsaPublic(key) => key.size() as usize,
+            KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                 match yubihsm_rsa_length(*algorithm) {
                     Ok(length) => length,
@@ -4766,13 +5604,76 @@ fn crypt(
                     encrypted.truncate(written);
                     Ok(encrypted)
                 }
+                KeyMaterial::RsaPublic(key)
+                    if encrypting && operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE =>
+                {
+                    if input.len() != key.size() as usize {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let mut encrypted = vec![0; key.size() as usize];
+                    let written = key.public_encrypt(input, &mut encrypted, Padding::NONE)?;
+                    encrypted.truncate(written);
+                    Ok(encrypted)
+                }
+                KeyMaterial::RsaPublic(key)
+                    if encrypting
+                        && operation.mechanism == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE =>
+                {
+                    let (mgf, hash_mechanism, label_digest) =
+                        operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                    let encoded = rsa_oaep_pad(
+                        input,
+                        key.size() as usize,
+                        *mgf,
+                        *hash_mechanism,
+                        label_digest,
+                    )?;
+                    let mut encrypted = vec![0; key.size() as usize];
+                    let written = key.public_encrypt(&encoded, &mut encrypted, Padding::NONE)?;
+                    encrypted.truncate(written);
+                    Ok(encrypted)
+                }
+                KeyMaterial::PivPrivate {
+                    slot, algorithm, ..
+                } if !encrypting => {
+                    let raw = ctx._get_session(session_handle)?.1.piv_decipher(
+                        *slot,
+                        *algorithm,
+                        input,
+                        operation.piv_pin_policy.unwrap_or_default(),
+                    )?;
+                    let raw = if let Some(expected) = algorithm.rsa_input_length() {
+                        if raw.len() > expected {
+                            return Err(CKR_DEVICE_ERROR.into());
+                        }
+                        if raw.len() < expected {
+                            let mut padded = vec![0; expected - raw.len()];
+                            padded.extend_from_slice(&raw);
+                            padded
+                        } else {
+                            raw
+                        }
+                    } else {
+                        raw
+                    };
+                    match operation.mechanism {
+                        x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE => Ok(raw),
+                        x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => rsa_pkcs1_v1_5_unpad(&raw),
+                        x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
+                            let (mgf, hash_mechanism, label_digest) =
+                                operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                            rsa_oaep_unpad(&raw, *mgf, *hash_mechanism, label_digest)
+                        }
+                        _ => Err(CKR_MECHANISM_INVALID.into()),
+                    }
+                }
                 KeyMaterial::YubiHsm { id, .. } => {
                     let command = match operation.mechanism {
                         x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE && !encrypting => {
                             YubiHsmCommand::key_data(YubiHsmCommandCode::DecryptPkcs1, *id, input)?
                         }
                         x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE && !encrypting => {
-                            let (mgf, label_digest) =
+                            let (mgf, _hash_mechanism, label_digest) =
                                 operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
                             YubiHsmCommand::decrypt_oaep(*id, *mgf, input, label_digest)?
                         }
@@ -4922,16 +5823,48 @@ fn sign_init(
                 x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
                 x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
                 x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+                x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+                x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+                x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+                x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+                x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
                 _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
             };
             let salt_length = u16::try_from(parameters.sLen)
                 .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
             Some((mgf, salt_length, parameters.hashAlg))
+        } else if piv_is_pss_mechanism(mechanism.mechanism) {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let digest =
+                piv_hash_mechanism(mechanism.mechanism).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let hash = pss_hash_mechanism(mechanism.mechanism)?;
+            Some((0, digest.size() as u16, hash))
         } else {
             if !matches!(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                    || x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
+                    || x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
                     || x == CKM_ECDSA as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
@@ -4957,8 +5890,13 @@ fn sign_init(
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
         let required_capability = match mechanism.mechanism {
-            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => 0x05,
-            x if x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE => 0x06,
+            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || piv_is_hashed_rsa_pkcs(x) =>
+            {
+                0x05
+            }
+            x if piv_is_pss_mechanism(x) => 0x06,
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE => 0x07,
             _ => 0x16,
         };
@@ -4966,7 +5904,9 @@ fn sign_init(
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
         let expected_key_type = match mechanism.mechanism {
-            x if x == CKM_ECDSA as CK_MECHANISM_TYPE => CKK_EC as CK_KEY_TYPE,
+            x if x == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(x) => {
+                CKK_EC as CK_KEY_TYPE
+            }
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
             x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => CKK_SHA_1_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
@@ -4992,7 +5932,18 @@ fn sign_init(
         );
         if !matches!(object.material, KeyMaterial::YubiHsm { .. })
             && !piv_mechanism_supported
-            && mechanism.mechanism != CKM_RSA_PKCS as CK_MECHANISM_TYPE
+            && !matches!(
+                &object.material,
+                KeyMaterial::RsaPrivate(_) if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+            )
+        {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        if matches!(object.material, KeyMaterial::YubiHsm { .. })
+            && (piv_is_hashed_rsa_pkcs(mechanism.mechanism)
+                || piv_is_hashed_ecdsa(mechanism.mechanism)
+                || (piv_is_pss_mechanism(mechanism.mechanism)
+                    && mechanism.mechanism != CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE))
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
@@ -5005,6 +5956,11 @@ fn sign_init(
                 requires_login: object.private,
                 mechanism: mechanism.mechanism,
                 pss,
+                piv_pin_policy: match &object.material {
+                    KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
+                    _ => None,
+                },
+                buffer: Vec::new(),
             },
         );
         Ok(())
@@ -5068,6 +6024,9 @@ fn sign(
                 return Err(error);
             }
         };
+        let mut buffered_data = operation.buffer;
+        buffered_data.extend_from_slice(data);
+        let data = buffered_data.as_slice();
         let required = match &operation.key {
             KeyMaterial::RsaPrivate(key) => key.size() as usize,
             KeyMaterial::PivPrivate {
@@ -5102,23 +6061,20 @@ fn sign(
             },
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+        if (operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+            || operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+            || piv_is_hashed_rsa_pkcs(operation.mechanism))
             && data.len() > required.saturating_sub(11)
         {
             ctx.sign_operations.remove(&session_handle);
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        if let Some((_mgf, _salt, hash)) = operation.pss {
-            let expected = match hash {
-                x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => 20,
-                x if x == CKM_SHA256 as CK_MECHANISM_TYPE => 32,
-                x if x == CKM_SHA384 as CK_MECHANISM_TYPE => 48,
-                x if x == CKM_SHA512 as CK_MECHANISM_TYPE => 64,
-                _ => {
-                    ctx.sign_operations.remove(&session_handle);
-                    return Err(CKR_MECHANISM_PARAM_INVALID.into());
-                }
+        if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+            let Some((_mgf, _salt, hash)) = operation.pss else {
+                ctx.sign_operations.remove(&session_handle);
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
             };
+            let expected = digest_for_hash_mechanism(hash)?.size();
             if data.len() != expected {
                 ctx.sign_operations.remove(&session_handle);
                 return Err(CKR_DATA_LEN_RANGE.into());
@@ -5149,15 +6105,40 @@ fn sign(
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {
-                    let input = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+                    let digest = piv_hash_mechanism(operation.mechanism)
+                        .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                        .transpose()
+                        .map_err(Error::from)?;
+                    let input = if piv_is_pss_mechanism(operation.mechanism) {
+                        let (mgf, salt_length, hash_mechanism) =
+                            operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                        let digest = digest.as_deref().unwrap_or(data);
+                        encode_rsa_pss(digest, required, hash_mechanism, mgf, salt_length as usize)?
+                    } else if piv_is_hashed_rsa_pkcs(operation.mechanism) {
+                        let digest = digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                        encode_pkcs1_v1_5_signature_input(
+                            &piv_digest_info(operation.mechanism, digest)
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            required,
+                        )?
+                    } else if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
                         encode_pkcs1_v1_5_signature_input(data, required)?
+                    } else if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+                        if data.len() != required {
+                            return Err(CKR_DATA_LEN_RANGE.into());
+                        }
+                        data.to_vec()
+                    } else if piv_is_hashed_ecdsa(operation.mechanism) {
+                        digest.ok_or(CKR_MECHANISM_PARAM_INVALID)?
                     } else {
                         data.to_vec()
                     };
-                    let response = ctx
-                        ._get_session(session_handle)?
-                        .1
-                        .piv_sign(*slot, *algorithm, &input)?;
+                    let response = ctx._get_session(session_handle)?.1.piv_sign(
+                        *slot,
+                        *algorithm,
+                        &input,
+                        operation.piv_pin_policy.unwrap_or(0),
+                    )?;
                     match algorithm {
                         piv::Algorithm::EccP256 => piv_ecdsa_signature(&response, 32),
                         piv::Algorithm::EccP384 => piv_ecdsa_signature(&response, 48),
@@ -5256,22 +6237,124 @@ fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result
     Ok(encoded)
 }
 
+fn rsa_pkcs1_v1_5_unpad(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    if encoded.len() < 11 || encoded.get(0..2) != Some(&[0, 2]) {
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    let separator = encoded[2..]
+        .iter()
+        .position(|value| *value == 0)
+        .map(|position| position + 2)
+        .ok_or(CKR_ENCRYPTED_DATA_INVALID)?;
+    if separator < 10 || encoded[2..separator].contains(&0) {
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    Ok(encoded[separator + 1..].to_vec())
+}
+
+fn rsa_oaep_unpad(
+    encoded: &[u8],
+    mgf_code: u8,
+    hash_mechanism: CK_MECHANISM_TYPE,
+    label_digest: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let digest = digest_for_hash_mechanism(hash_mechanism)?;
+    let mgf_digest = mgf_digest(mgf_code, hash_mechanism)?;
+    let hash_len = digest.size();
+    if encoded.len() < 2 * hash_len + 2 || encoded[0] != 0 {
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    let masked_seed = &encoded[1..hash_len + 1];
+    let masked_db = &encoded[hash_len + 1..];
+    let seed_mask = mgf1(masked_db, hash_len, mgf_digest)?;
+    let mut seed = masked_seed.to_vec();
+    for (value, mask) in seed.iter_mut().zip(seed_mask) {
+        *value ^= mask;
+    }
+    let db_mask = mgf1(&seed, masked_db.len(), mgf_digest)?;
+    let mut db = masked_db.to_vec();
+    for (value, mask) in db.iter_mut().zip(db_mask) {
+        *value ^= mask;
+    }
+    if db.get(..hash_len) != Some(label_digest) {
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    let separator = db[hash_len..]
+        .iter()
+        .position(|value| *value == 1)
+        .map(|position| position + hash_len)
+        .ok_or(CKR_ENCRYPTED_DATA_INVALID)?;
+    if db[hash_len..separator].iter().any(|value| *value != 0) {
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    Ok(db[separator + 1..].to_vec())
+}
+
+fn rsa_oaep_pad(
+    input: &[u8],
+    modulus_size: usize,
+    mgf_code: u8,
+    hash_mechanism: CK_MECHANISM_TYPE,
+    label_digest: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let digest = digest_for_hash_mechanism(hash_mechanism)?;
+    let mgf_digest = mgf_digest(mgf_code, hash_mechanism)?;
+    let hash_len = digest.size();
+    if input.len() > modulus_size.saturating_sub(2 * hash_len + 2) || label_digest.len() != hash_len
+    {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut seed = vec![0; hash_len];
+    openssl::rand::rand_bytes(&mut seed).map_err(|_| CKR_RANDOM_NO_RNG)?;
+    let mut db = label_digest.to_vec();
+    db.extend(std::iter::repeat_n(
+        0,
+        modulus_size - input.len() - 2 * hash_len - 2,
+    ));
+    db.push(1);
+    db.extend_from_slice(input);
+    let db_mask = mgf1(&seed, db.len(), mgf_digest)?;
+    for (value, mask) in db.iter_mut().zip(db_mask) {
+        *value ^= mask;
+    }
+    let seed_mask = mgf1(&db, hash_len, mgf_digest)?;
+    let mut encoded = vec![0];
+    encoded.extend(seed.iter().zip(seed_mask).map(|(value, mask)| value ^ mask));
+    encoded.extend_from_slice(&db);
+    Ok(encoded)
+}
+
 #[no_mangle]
 pub extern "C" fn C_SignUpdate(
     session_handle: CK_SESSION_HANDLE,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let part = from_raw_parts(part, part_len as usize)?.to_vec();
+        let operation = ctx
+            .sign_operations
+            .get_mut(&session_handle)
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        operation.buffer.extend_from_slice(&part);
+        Ok(())
+    }))
 }
 
 #[no_mangle]
 pub extern "C" fn C_SignFinal(
     session_handle: CK_SESSION_HANDLE,
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: *mut ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(sign(
+        session_handle,
+        ptr::null(),
+        0,
+        signature,
+        signature_len,
+    ))
 }
 
 #[no_mangle]
@@ -5320,11 +6403,51 @@ fn verify_init(
         }
 
         let mechanism = _as_ref(mechanism)?;
-        if mechanism.mechanism != CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+        let pss = if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+            if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let parameters = _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR)?;
+            let mgf = match parameters.mgf {
+                x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
+                x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
+                x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
+                x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+                x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+                x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+                x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+                x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+                x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
+                _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+            };
+            Some((
+                mgf,
+                u16::try_from(parameters.sLen)
+                    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?,
+                parameters.hashAlg,
+            ))
+        } else if piv_is_pss_mechanism(mechanism.mechanism) {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let digest =
+                piv_hash_mechanism(mechanism.mechanism).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let hash = pss_hash_mechanism(mechanism.mechanism)?;
+            Some((0, digest.size() as u16, hash))
+        } else {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            None
+        };
+        let rsa_mechanism = mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+            || mechanism.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+            || piv_is_hashed_rsa_pkcs(mechanism.mechanism)
+            || piv_is_pss_mechanism(mechanism.mechanism);
+        let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
+            || piv_is_hashed_ecdsa(mechanism.mechanism);
+        if !rsa_mechanism && !ecdsa_mechanism {
             return Err(CKR_MECHANISM_INVALID.into());
-        }
-        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
-            return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
 
         let object = ctx
@@ -5336,8 +6459,12 @@ fn verify_init(
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
         if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-            || object.key_type != CKK_RSA as CK_KEY_TYPE
-            || !matches!(object.material, KeyMaterial::RsaPublic(_))
+            || (rsa_mechanism
+                && (object.key_type != CKK_RSA as CK_KEY_TYPE
+                    || !matches!(object.material, KeyMaterial::RsaPublic(_))))
+            || (ecdsa_mechanism
+                && (object.key_type != CKK_EC as CK_KEY_TYPE
+                    || !matches!(object.material, KeyMaterial::PivPublic { .. })))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -5349,7 +6476,9 @@ fn verify_init(
                 slot_id,
                 requires_login: false,
                 mechanism: mechanism.mechanism,
-                pss: None,
+                pss,
+                piv_pin_policy: None,
+                buffer: Vec::new(),
             },
         );
         Ok(())
@@ -5391,44 +6520,128 @@ fn verify(
             .remove(&session_handle)
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         let data = from_raw_parts(data, data_len as usize)?;
+        let mut buffered_data = operation.buffer;
+        buffered_data.extend_from_slice(data);
+        let data = buffered_data.as_slice();
         let signature = from_raw_parts(signature, signature_len as usize)?;
-        let public_key = match &operation.key {
-            KeyMaterial::RsaPublic(key) => key,
-            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        };
-        if signature.len() != public_key.size() as usize {
-            return Err(CKR_SIGNATURE_LEN_RANGE.into());
+        match &operation.key {
+            KeyMaterial::RsaPublic(public_key) => {
+                if signature.len() != public_key.size() as usize {
+                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
+                }
+                let mut recovered = vec![0; public_key.size() as usize];
+                let padding = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+                    Padding::NONE
+                } else {
+                    Padding::PKCS1
+                };
+                let recovered_len = public_key
+                    .public_decrypt(signature, &mut recovered, padding)
+                    .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
+                recovered.truncate(recovered_len);
+                let expected = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+                    data.to_vec()
+                } else if piv_is_hashed_rsa_pkcs(operation.mechanism) {
+                    let digest = hash(
+                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                        data,
+                    )?;
+                    piv_digest_info(operation.mechanism, digest.as_ref())
+                        .ok_or(CKR_MECHANISM_INVALID)?
+                } else if piv_is_pss_mechanism(operation.mechanism) {
+                    let (mgf, salt_length, hash_mechanism) =
+                        operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                    let digest = if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+                        data.to_vec()
+                    } else {
+                        hash(
+                            piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                            data,
+                        )?
+                        .to_vec()
+                    };
+                    if !verify_rsa_pss(
+                        &recovered,
+                        &digest,
+                        hash_mechanism,
+                        mgf,
+                        salt_length as usize,
+                    )? {
+                        return Err(CKR_SIGNATURE_INVALID.into());
+                    }
+                    return Ok(());
+                } else {
+                    return Err(CKR_MECHANISM_INVALID.into());
+                };
+                if recovered != expected {
+                    return Err(CKR_SIGNATURE_INVALID.into());
+                }
+                Ok(())
+            }
+            KeyMaterial::PivPublic {
+                algorithm,
+                public_key,
+            } => {
+                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
+                    data.to_vec()
+                } else {
+                    hash(
+                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                        data,
+                    )?
+                    .to_vec()
+                };
+                let coordinate_length =
+                    piv_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if signature.len() != coordinate_length * 2 {
+                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
+                }
+                let r = BigNum::from_slice(&signature[..coordinate_length])?;
+                let s = BigNum::from_slice(&signature[coordinate_length..])?;
+                let signature = EcdsaSig::from_private_components(r, s)?;
+                let key = piv_ec_public_key(*algorithm, public_key)?;
+                if signature.verify(&digest, &key)? {
+                    Ok(())
+                } else {
+                    Err(CKR_SIGNATURE_INVALID.into())
+                }
+            }
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }
-        let mut recovered = vec![0; public_key.size() as usize];
-        let recovered_len =
-            match public_key.public_decrypt(signature, &mut recovered, Padding::PKCS1) {
-                Ok(len) => len,
-                Err(_) => return Err(CKR_SIGNATURE_INVALID.into()),
-            };
-        recovered.truncate(recovered_len);
-        if recovered != data {
-            return Err(CKR_SIGNATURE_INVALID.into());
-        }
-        Ok(())
     })
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyUpdate(
     session_handle: CK_SESSION_HANDLE,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let part = from_raw_parts(part, part_len as usize)?.to_vec();
+        let operation = ctx
+            .verify_operations
+            .get_mut(&session_handle)
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        operation.buffer.extend_from_slice(&part);
+        Ok(())
+    }))
 }
 
 #[no_mangle]
 pub extern "C" fn C_VerifyFinal(
     session_handle: CK_SESSION_HANDLE,
-    _signature: *mut ::std::os::raw::c_uchar,
-    _signature_len: ::std::os::raw::c_ulong,
+    signature: *mut ::std::os::raw::c_uchar,
+    signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(verify(
+        session_handle,
+        ptr::null(),
+        0,
+        signature,
+        signature_len,
+    ))
 }
 
 #[no_mangle]
@@ -5974,18 +7187,24 @@ fn derive_key(
             .get(&base_key)
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
-        if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || !object.private {
+        if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
-        if !logged_in {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        if !object.derive {
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let (piv_slot, algorithm) = match &object.material {
+        let (piv_slot, algorithm, pin_policy) = match &object.material {
             KeyMaterial::PivPrivate {
-                slot, algorithm, ..
-            } => (*slot, *algorithm),
+                slot,
+                algorithm,
+                pin_policy,
+                ..
+            } => (*slot, *algorithm, *pin_policy),
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
+        if piv_policy_requires_login(piv_slot, pin_policy) && !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         let expected_length = match algorithm {
             piv::Algorithm::EccP256 | piv::Algorithm::X25519 => 32,
             piv::Algorithm::EccP384 => 48,
@@ -6003,10 +7222,12 @@ fn derive_key(
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let derived =
-            ctx._get_session(session_handle)?
-                .1
-                .piv_decipher(piv_slot, algorithm, public_data)?;
+        let derived = ctx._get_session(session_handle)?.1.piv_decipher(
+            piv_slot,
+            algorithm,
+            public_data,
+            pin_policy,
+        )?;
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }

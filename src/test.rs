@@ -349,6 +349,7 @@ fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
         decrypt: false,
         sign: false,
         verify: true,
+        derive: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -389,6 +390,14 @@ fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
         crate::piv_ec_parameters(crate::piv::Algorithm::X25519),
         Some([0x13, 0x0b, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39].as_slice())
     );
+    assert_eq!(
+        crate::piv_effective_pin_policy(crate::piv::Slot::CardAuthentication, 0),
+        1
+    );
+    for slot in crate::piv::Slot::all() {
+        assert!(!crate::piv_policy_requires_login(*slot, 1));
+        assert!(crate::piv_policy_requires_login(*slot, 2));
+    }
 }
 
 #[test]
@@ -552,6 +561,7 @@ impl crate::Session for PivSigningTestSession {
         slot: crate::piv::Slot,
         algorithm: crate::piv::Algorithm,
         input: &[u8],
+        _pin_policy: u8,
     ) -> Result<Vec<u8>, crate::error::Error> {
         assert_eq!(slot, crate::piv::Slot::Signature);
         assert_eq!(algorithm, crate::piv::Algorithm::Rsa1024);
@@ -870,14 +880,6 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
         )
     );
     assert_stub!(
-        "C_SignUpdate",
-        crate::C_SignUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
-    );
-    assert_stub!(
-        "C_SignFinal",
-        crate::C_SignFinal(session, data.as_mut_ptr(), &mut data_len)
-    );
-    assert_stub!(
         "C_SignRecoverInit",
         crate::C_SignRecoverInit(session, ::std::ptr::null_mut(), 0)
     );
@@ -904,14 +906,6 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
             data.as_mut_ptr(),
             data.len() as CK_ULONG
         )
-    );
-    assert_stub!(
-        "C_VerifyUpdate",
-        crate::C_VerifyUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
-    );
-    assert_stub!(
-        "C_VerifyFinal",
-        crate::C_VerifyFinal(session, data.as_mut_ptr(), data.len() as CK_ULONG)
     );
     assert_stub!(
         "C_VerifyRecoverInit",
@@ -2893,6 +2887,88 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
 }
 
 #[test]
+pub fn sign_and_verify_update_final_buffer_multipart_data() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut first = *b"ab";
+    let mut second = *b"cd";
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_SignUpdate(
+            TEST_SESSION_HANDLE,
+            first.as_mut_ptr(),
+            first.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_SignUpdate(
+            TEST_SESSION_HANDLE,
+            second.as_mut_ptr(),
+            second.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature_len = 0;
+    assert_eq!(
+        crate::C_SignFinal(
+            TEST_SESSION_HANDLE,
+            ::std::ptr::null_mut(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0; signature_len as usize];
+    signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_SignFinal(
+            TEST_SESSION_HANDLE,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyUpdate(
+            TEST_SESSION_HANDLE,
+            first.as_mut_ptr(),
+            first.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyUpdate(
+            TEST_SESSION_HANDLE,
+            second.as_mut_ptr(),
+            second.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), signature_len,),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn piv_rsa_signing_encodes_ckm_rsa_pkcs_input() {
     let encoded = crate::encode_pkcs1_v1_5_signature_input(b"abc", 16).unwrap();
     assert_eq!(
@@ -2900,6 +2976,104 @@ pub fn piv_rsa_signing_encodes_ckm_rsa_pkcs_input() {
         [0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, b'a', b'b', b'c']
     );
     assert!(crate::encode_pkcs1_v1_5_signature_input(&[0; 6], 16).is_err());
+}
+
+#[test]
+pub fn piv_rsa_pss_hash_mapping_preserves_sha3_variants() {
+    assert_eq!(
+        crate::pss_hash_mechanism(CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE).unwrap(),
+        CKM_SHA224 as CK_MECHANISM_TYPE
+    );
+    assert_eq!(
+        crate::pss_hash_mechanism(CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE).unwrap(),
+        CKM_SHA3_224 as CK_MECHANISM_TYPE
+    );
+    assert_eq!(
+        crate::pss_hash_mechanism(CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE).unwrap(),
+        CKM_SHA3_512 as CK_MECHANISM_TYPE
+    );
+}
+
+#[test]
+pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
+    let private = openssl::rsa::Rsa::generate(2048).unwrap();
+    let public = openssl::rsa::Rsa::from_public_components(
+        private.n().to_owned().unwrap(),
+        private.e().to_owned().unwrap(),
+    )
+    .unwrap();
+    let data = b"padding test";
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data).unwrap();
+    let pss = crate::encode_rsa_pss(
+        digest.as_ref(),
+        private.size() as usize,
+        CKM_SHA256 as CK_MECHANISM_TYPE,
+        33,
+        32,
+    )
+    .unwrap();
+    let mut signature = vec![0; private.size() as usize];
+    let written = private
+        .private_encrypt(&pss, &mut signature, openssl::rsa::Padding::NONE)
+        .unwrap();
+    signature.truncate(written);
+    let mut recovered = vec![0; public.size() as usize];
+    let recovered_len = public
+        .public_decrypt(&signature, &mut recovered, openssl::rsa::Padding::NONE)
+        .unwrap();
+    assert!(crate::verify_rsa_pss(
+        &recovered[..recovered_len],
+        digest.as_ref(),
+        CKM_SHA256 as CK_MECHANISM_TYPE,
+        33,
+        32,
+    )
+    .unwrap());
+
+    let label = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), b"").unwrap();
+    let encoded = crate::rsa_oaep_pad(
+        data,
+        private.size() as usize,
+        33,
+        CKM_SHA256 as CK_MECHANISM_TYPE,
+        label.as_ref(),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::rsa_oaep_unpad(
+            &encoded,
+            33,
+            CKM_SHA256 as CK_MECHANISM_TYPE,
+            label.as_ref(),
+        )
+        .unwrap(),
+        data
+    );
+    let mut ciphertext = vec![0; public.size() as usize];
+    let written = public
+        .public_encrypt(&encoded, &mut ciphertext, openssl::rsa::Padding::NONE)
+        .unwrap();
+    ciphertext.truncate(written);
+    let mut plaintext = vec![0; private.size() as usize];
+    let written = private
+        .private_decrypt(&ciphertext, &mut plaintext, openssl::rsa::Padding::NONE)
+        .unwrap();
+    plaintext.truncate(written);
+    if plaintext.len() < private.size() as usize {
+        let mut padded = vec![0; private.size() as usize - plaintext.len()];
+        padded.extend_from_slice(&plaintext);
+        plaintext = padded;
+    }
+    assert_eq!(
+        crate::rsa_oaep_unpad(
+            &plaintext,
+            33,
+            CKM_SHA256 as CK_MECHANISM_TYPE,
+            label.as_ref(),
+        )
+        .unwrap(),
+        data
+    );
 }
 
 #[test]
@@ -2938,6 +3112,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 decrypt: false,
                 sign: true,
                 verify: false,
+                derive: false,
                 sensitive: true,
                 extractable: false,
                 always_sensitive: true,
@@ -2950,6 +3125,8 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                     algorithm: crate::piv::Algorithm::Rsa1024,
                     modulus: vec![0x80; 128],
                     public_exponent: vec![1, 0, 1],
+                    pin_policy: 0,
+                    touch_policy: 0,
                 },
             },
         );
@@ -4671,7 +4848,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (3 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7 + 256 + 3)
+        (4 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7 + 256 + 3 + 1)
             as CK_ULONG
     );
 
@@ -4704,7 +4881,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (3 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3)
+        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3 + 1)
             as CK_ULONG
     );
 
@@ -4768,7 +4945,7 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11) as CK_ULONG
+        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11 + 1) as CK_ULONG
     );
     assert_eq!(
         crate::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),

@@ -21,25 +21,29 @@ The protocol layer implements:
 - PIV `GET DATA` certificate retrieval;
 - `GENERAL AUTHENTICATE` signing, RSA deciphering, and EC/X25519 key agreement.
 
-The client supports standard slots `9A`, `9C`, `9D`, and `9E`, RSA-1024 through
-RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers. Firmware and
-FIPS restrictions still apply.
+The client supports the four standard slots (`9A`, `9C`, `9D`, `9E`), retired
+key slots (`82` through `95`), and the attestation slot (`F9`). RSA-1024
+through RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers are
+recognized. Firmware and FIPS restrictions still apply.
 
-The four standard slots are exposed as PKCS #11 public and private key objects.
-Public-key attributes are read from the PIV metadata public-key field when
-available, with the X.509 certificate used as a fallback. This matches the
-metadata-before-certificate portion of the YubiKey reference fallback order
-and avoids trusting a certificate whose key does not match the private key.
-Attestation-certificate discovery is not yet used. EC named-curve and point attributes are
-exposed for P-256, P-384, Ed25519, and X25519. Private key material remains on
-the card. RSA-3072, RSA-4096, Ed25519, and X25519 are only exposed on firmware
-5.7 and later.
+Every discovered slot is exposed as PKCS #11 public/private key objects when
+metadata or a certificate supplies a usable public key. Certificates are
+exposed as `CKO_CERTIFICATE` objects with DER value, X.509 subject, issuer, and
+serial-number attributes. Generated keys also produce dynamic, session-scoped
+attestation certificates; the static `F9` attestation certificate is exposed
+as a token object. Public-key attributes are read from metadata first, with
+the X.509 certificate used as a fallback. EC named-curve and point attributes
+are exposed for P-256, P-384, Ed25519, and X25519. Private key material remains
+on the card. RSA-3072, RSA-4096, Ed25519, and X25519 are only exposed on
+firmware 5.7 and later.
 
-`CKM_RSA_PKCS` signing uses a hardware-backed key representation: the host
-creates the type-1 PKCS #1 v1.5 encoded block and the YubiKey performs the
-private RSA operation. `CKM_ECDSA` converts the card's DER signature to the
-PKCS #11 fixed-width `r || s` format, while `CKM_EDDSA` returns the card's
-Ed25519 signature. `CKM_ECDH1_DERIVE` and
+RSA raw, PKCS #1 v1.5, OAEP, PSS, and hashed RSA mechanisms are supported for
+the applicable slots. The host performs padding and digest encoding while the
+YubiKey performs the private RSA operation. `CKM_ECDSA` and its hashed variants
+convert the card's DER signature to the PKCS #11 fixed-width `r || s` format,
+while `CKM_EDDSA` returns the card's Ed25519 signature. Multipart sign and
+verify operations buffer their input and use the same mechanism implementations.
+`CKM_ECDH1_DERIVE` and
 `CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;
 the derived secret is returned as a sensitive generic secret object. This
 derive surface is an extension to the current YKCS11 mechanism list.
