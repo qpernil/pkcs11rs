@@ -2,8 +2,8 @@
 
 use crate::{
     error::Error, CommandApdu, Connector, ResponseApdu, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
-    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_PIN_INCORRECT,
+    CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use std::time::Duration;
 
@@ -17,6 +17,7 @@ const INS_GET_RESPONSE: u8 = 0xc0;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
+const INS_ATTEST: u8 = 0xf9;
 const STATUS_SUCCESS: u16 = 0x9000;
 const MAX_COMMAND_CHUNK: usize = 0xff;
 const MAX_RESPONSE_SEGMENTS: usize = 256;
@@ -90,15 +91,93 @@ pub(crate) enum Slot {
     Signature = 0x9c,
     KeyManagement = 0x9d,
     CardAuthentication = 0x9e,
+    Retired1 = 0x82,
+    Retired2 = 0x83,
+    Retired3 = 0x84,
+    Retired4 = 0x85,
+    Retired5 = 0x86,
+    Retired6 = 0x87,
+    Retired7 = 0x88,
+    Retired8 = 0x89,
+    Retired9 = 0x8a,
+    Retired10 = 0x8b,
+    Retired11 = 0x8c,
+    Retired12 = 0x8d,
+    Retired13 = 0x8e,
+    Retired14 = 0x8f,
+    Retired15 = 0x90,
+    Retired16 = 0x91,
+    Retired17 = 0x92,
+    Retired18 = 0x93,
+    Retired19 = 0x94,
+    Retired20 = 0x95,
+    Attestation = 0xf9,
 }
 
 impl Slot {
+    pub(crate) const ALL: [Self; 25] = [
+        Self::Authentication,
+        Self::Signature,
+        Self::KeyManagement,
+        Self::CardAuthentication,
+        Self::Retired1,
+        Self::Retired2,
+        Self::Retired3,
+        Self::Retired4,
+        Self::Retired5,
+        Self::Retired6,
+        Self::Retired7,
+        Self::Retired8,
+        Self::Retired9,
+        Self::Retired10,
+        Self::Retired11,
+        Self::Retired12,
+        Self::Retired13,
+        Self::Retired14,
+        Self::Retired15,
+        Self::Retired16,
+        Self::Retired17,
+        Self::Retired18,
+        Self::Retired19,
+        Self::Retired20,
+        Self::Attestation,
+    ];
+
+    pub(crate) fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub(crate) fn is_retired(self) -> bool {
+        (Self::Retired1 as u8..=Self::Retired20 as u8).contains(&(self as u8))
+    }
+
     pub(crate) fn certificate_object(self) -> u32 {
         match self {
             Self::Authentication => 0x5f_c105,
             Self::Signature => 0x5f_c10a,
             Self::KeyManagement => 0x5f_c10b,
             Self::CardAuthentication => 0x5f_c101,
+            Self::Retired1
+            | Self::Retired2
+            | Self::Retired3
+            | Self::Retired4
+            | Self::Retired5
+            | Self::Retired6
+            | Self::Retired7
+            | Self::Retired8
+            | Self::Retired9
+            | Self::Retired10
+            | Self::Retired11
+            | Self::Retired12
+            | Self::Retired13
+            | Self::Retired14
+            | Self::Retired15
+            | Self::Retired16
+            | Self::Retired17
+            | Self::Retired18
+            | Self::Retired19
+            | Self::Retired20 => 0x5f_c10d + (self as u32 - Self::Retired1 as u32),
+            Self::Attestation => 0x5f_ff01,
         }
     }
 }
@@ -250,6 +329,14 @@ impl Client {
         field(&fields, 0x70)
             .map(<[u8]>::to_vec)
             .ok_or_else(|| CKR_DATA_INVALID.into())
+    }
+
+    pub(crate) fn attestation(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+    ) -> Result<Vec<u8>, Error> {
+        self.command(connector, INS_ATTEST, slot as u8, 0, &[])
     }
 
     pub(crate) fn get_data(
@@ -468,6 +555,7 @@ fn map_status(status: u16) -> Error {
         status if status & 0xfff0 == 0x63c0 => CKR_PIN_INCORRECT.into(),
         0x6982 => CKR_USER_NOT_LOGGED_IN.into(),
         0x6983 => CKR_PIN_LOCKED.into(),
+        0x6985 => CKR_FUNCTION_REJECTED.into(),
         0x6d00 => CKR_FUNCTION_NOT_SUPPORTED.into(),
         _ => CKR_DEVICE_ERROR.into(),
     }
@@ -757,6 +845,50 @@ mod tests {
             parse_metadata_public_key(Algorithm::X25519, &[0x86, 0x02, 1, 2]).unwrap(),
             MetadataPublicKey::Raw(vec![1, 2])
         );
+    }
+
+    #[test]
+    fn enumerates_all_piv_slots_and_certificate_objects() {
+        assert_eq!(Slot::all().len(), 25);
+        assert_eq!(Slot::Authentication.certificate_object(), 0x5f_c105);
+        assert_eq!(Slot::Retired1.certificate_object(), 0x5f_c10d);
+        assert_eq!(Slot::Retired20.certificate_object(), 0x5f_c120);
+        assert_eq!(Slot::Attestation.certificate_object(), 0x5f_ff01);
+        assert!(Slot::Retired10.is_retired());
+        assert!(!Slot::Attestation.is_retired());
+    }
+
+    #[test]
+    fn requests_dynamic_attestation_certificate() {
+        let connector = ScriptedConnector::new(vec![response(&[0x30, 0x00], STATUS_SUCCESS)]);
+        assert_eq!(
+            Client.attestation(&connector, Slot::Signature).unwrap(),
+            [0x30, 0x00]
+        );
+        assert_eq!(
+            connector.commands.borrow()[0],
+            [0, INS_ATTEST, Slot::Signature as u8, 0, 0]
+        );
+    }
+
+    #[test]
+    fn performs_x25519_key_agreement_with_general_authenticate() {
+        let response_data = encode_tlv(0x7c, &encode_tlv(0x82, &[0xa5; 32]).unwrap()).unwrap();
+        let connector = ScriptedConnector::new(vec![response(&response_data, STATUS_SUCCESS)]);
+        assert_eq!(
+            Client
+                .decipher(
+                    &connector,
+                    Slot::CardAuthentication,
+                    Algorithm::X25519,
+                    &[0x11; 32],
+                )
+                .unwrap(),
+            [0xa5; 32]
+        );
+        let command = &connector.commands.borrow()[0];
+        assert_eq!(&command[..4], &[0, INS_AUTHENTICATE, 0xe1, 0x9e]);
+        assert!(command.windows(2).any(|window| window == [0x85, 0x20]));
     }
 
     #[test]
