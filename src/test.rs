@@ -335,6 +335,72 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
 }
 
 #[test]
+fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
+    let object = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: b"piv-9c-public".to_vec(),
+        class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_EC as CK_KEY_TYPE,
+        label: b"PIV slot 9C".to_vec(),
+        id: vec![0x9c],
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: true,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+        owner_session: None,
+        material: crate::KeyMaterial::PivPublic {
+            algorithm: crate::piv::Algorithm::EccP256,
+            public_key: vec![0x11; 64],
+        },
+    };
+    assert_eq!(
+        object.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+        Some(vec![
+            0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
+        ])
+    );
+    let point = object
+        .attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert_eq!(point[0], 0x04);
+    assert_eq!(point[1], 65);
+    assert_eq!(point[2], 0x04);
+    assert_eq!(point.len(), 67);
+}
+
+#[test]
+fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
+    assert_eq!(
+        crate::piv_ec_parameters(crate::piv::Algorithm::Ed25519),
+        Some(
+            [0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39,]
+                .as_slice()
+        )
+    );
+    assert_eq!(
+        crate::piv_ec_parameters(crate::piv::Algorithm::X25519),
+        Some([0x13, 0x0b, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39].as_slice())
+    );
+}
+
+#[test]
+fn piv_ecdsa_signatures_are_converted_to_fixed_width_values() {
+    let der = [0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02];
+    let signature = crate::piv_ecdsa_signature(&der, 32).unwrap();
+    assert_eq!(signature.len(), 64);
+    assert_eq!(&signature[31..32], &[1]);
+    assert_eq!(&signature[63..64], &[2]);
+}
+
+#[test]
 fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     let mechanisms = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_2048,
@@ -938,8 +1004,7 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
             &mut object
         )
     );
-    assert_stub!(
-        "C_DeriveKey",
+    assert_eq!(
         crate::C_DeriveKey(
             session,
             ::std::ptr::null_mut(),
@@ -947,7 +1012,9 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
             ::std::ptr::null_mut(),
             0,
             &mut object
-        )
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV,
+        "C_DeriveKey validates its mechanism arguments"
     );
     assert_stub!("C_GetFunctionStatus", crate::C_GetFunctionStatus(session));
     assert_stub!("C_CancelFunction", crate::C_CancelFunction(session));

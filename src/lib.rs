@@ -8,9 +8,10 @@ extern crate rusb;
 
 use openssl::{
     bn::BigNum,
+    ec::PointConversionForm,
     ecdsa::EcdsaSig,
     hash::{hash, MessageDigest},
-    pkey::{Private, Public},
+    pkey::{Id, Private, Public},
     rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
 };
 use rusb::UsbContext;
@@ -40,7 +41,7 @@ mod scp11;
 use scp11::{Scp11KeySet, Scp11Variant};
 
 mod piv;
-use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo};
+use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 
 mod yubihsm;
 use yubihsm::{
@@ -149,6 +150,33 @@ fn der_octet_string(value: &[u8]) -> Option<Vec<u8>> {
     }
     encoded.extend_from_slice(value);
     Some(encoded)
+}
+
+fn der_octet_string_value(value: &[u8]) -> Option<&[u8]> {
+    if value.first().copied()? != 0x04 {
+        return None;
+    }
+    let (length, offset) = match value.get(1).copied()? {
+        length @ 0..=127 => (length as usize, 2usize),
+        0x81 => (value.get(2).copied()? as usize, 3usize),
+        _ => return None,
+    };
+    value
+        .get(offset..offset.checked_add(length)?)
+        .filter(|_| offset + length == value.len())
+}
+
+fn piv_ecdsa_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
+    let signature = EcdsaSig::from_der(signature).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut output = vec![0; coordinate_length * 2];
+    let r = signature.r().to_vec();
+    let s = signature.s().to_vec();
+    if r.len() > coordinate_length || s.len() > coordinate_length {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    output[coordinate_length - r.len()..coordinate_length].copy_from_slice(&r);
+    output[2 * coordinate_length - s.len()..].copy_from_slice(&s);
+    Ok(output)
 }
 
 pub mod pkcs11 {
@@ -500,7 +528,163 @@ struct PivSlot {
 struct PivKey {
     slot: piv::Slot,
     algorithm: piv::Algorithm,
-    public_key: Rsa<Public>,
+    public_key: PivPublicKey,
+}
+
+#[derive(Clone, Debug)]
+enum PivPublicKey {
+    Rsa(Rsa<Public>),
+    Ec(Vec<u8>),
+    Raw(Vec<u8>),
+}
+
+impl PivPublicKey {
+    fn key_type(&self, algorithm: piv::Algorithm) -> CK_KEY_TYPE {
+        match algorithm {
+            piv::Algorithm::Rsa1024
+            | piv::Algorithm::Rsa2048
+            | piv::Algorithm::Rsa3072
+            | piv::Algorithm::Rsa4096 => CKK_RSA as CK_KEY_TYPE,
+            piv::Algorithm::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+            piv::Algorithm::X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => CKK_EC as CK_KEY_TYPE,
+        }
+    }
+}
+
+fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
+    match algorithm {
+        piv::Algorithm::EccP256 => {
+            Some(&[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07])
+        }
+        piv::Algorithm::EccP384 => Some(&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
+        piv::Algorithm::Ed25519 => Some(&[
+            0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ]),
+        piv::Algorithm::X25519 => Some(&[
+            0x13, 0x0b, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ]),
+        _ => None,
+    }
+}
+
+fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> bool {
+    !matches!(
+        algorithm,
+        piv::Algorithm::Rsa3072
+            | piv::Algorithm::Rsa4096
+            | piv::Algorithm::Ed25519
+            | piv::Algorithm::X25519
+    ) || (version.major, version.minor) >= (5, 7)
+}
+
+fn piv_public_key_from_metadata(
+    algorithm: piv::Algorithm,
+    metadata: MetadataPublicKey,
+) -> Result<PivPublicKey, Error> {
+    match (algorithm, metadata) {
+        (
+            piv::Algorithm::Rsa1024
+            | piv::Algorithm::Rsa2048
+            | piv::Algorithm::Rsa3072
+            | piv::Algorithm::Rsa4096,
+            MetadataPublicKey::Rsa { modulus, exponent },
+        ) => {
+            let modulus = BigNum::from_slice(&modulus).map_err(Error::from)?;
+            let exponent = BigNum::from_slice(&exponent).map_err(Error::from)?;
+            let public_key = Rsa::from_public_components(modulus, exponent).map_err(Error::from)?;
+            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Rsa(public_key))
+        }
+        (piv::Algorithm::EccP256 | piv::Algorithm::EccP384, MetadataPublicKey::Ec(point)) => {
+            let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
+            if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PivPublicKey::Ec(point[1..].to_vec()))
+        }
+        (piv::Algorithm::Ed25519 | piv::Algorithm::X25519, MetadataPublicKey::Raw(key)) => {
+            if key.len() != 32 {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PivPublicKey::Raw(key))
+        }
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
+}
+
+fn piv_public_key_from_certificate(
+    algorithm: piv::Algorithm,
+    certificate: &[u8],
+) -> Result<PivPublicKey, Error> {
+    let certificate = openssl::x509::X509::from_der(certificate).map_err(Error::from)?;
+    let certificate_key = certificate.public_key().map_err(Error::from)?;
+    match algorithm {
+        piv::Algorithm::Rsa1024
+        | piv::Algorithm::Rsa2048
+        | piv::Algorithm::Rsa3072
+        | piv::Algorithm::Rsa4096 => {
+            let public_key = certificate_key.rsa().map_err(Error::from)?;
+            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Rsa(public_key))
+        }
+        piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
+            let public_key = certificate_key.ec_key().map_err(Error::from)?;
+            let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
+            let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
+            let point = public_key
+                .public_key()
+                .to_bytes(
+                    public_key.group(),
+                    PointConversionForm::UNCOMPRESSED,
+                    &mut context,
+                )
+                .map_err(Error::from)?;
+            if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Ec(point[1..].to_vec()))
+        }
+        piv::Algorithm::Ed25519 | piv::Algorithm::X25519 => {
+            if !matches!(
+                (algorithm, certificate_key.id()),
+                (piv::Algorithm::Ed25519, Id::ED25519) | (piv::Algorithm::X25519, Id::X25519)
+            ) {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            let public_key = certificate_key.raw_public_key().map_err(Error::from)?;
+            if public_key.len() != 32 {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Raw(public_key))
+        }
+    }
+}
+
+fn piv_ec_coordinate_length(algorithm: piv::Algorithm) -> Option<usize> {
+    match algorithm {
+        piv::Algorithm::EccP256 => Some(32),
+        piv::Algorithm::EccP384 => Some(48),
+        _ => None,
+    }
+}
+
+fn piv_sign_mechanism_supported(algorithm: piv::Algorithm, mechanism: CK_MECHANISM_TYPE) -> bool {
+    match algorithm {
+        piv::Algorithm::Rsa1024
+        | piv::Algorithm::Rsa2048
+        | piv::Algorithm::Rsa3072
+        | piv::Algorithm::Rsa4096 => mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
+            mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
+        }
+        piv::Algorithm::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+        piv::Algorithm::X25519 => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -621,21 +805,25 @@ impl Slot for PivSlot {
             let Some(algorithm) = metadata.algorithm.and_then(piv::Algorithm::from_id) else {
                 continue;
             };
-            if algorithm.rsa_input_length().is_none() {
+            if !piv_algorithm_supported(self.version, algorithm) {
                 continue;
             }
-            let Ok(certificate) = PivClient.certificate(self.connector.as_ref(), slot) else {
+            let public_key = metadata
+                .public_key
+                .as_deref()
+                .and_then(|encoded| piv::parse_metadata_public_key(algorithm, encoded).ok())
+                .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok())
+                .or_else(|| {
+                    PivClient
+                        .certificate(self.connector.as_ref(), slot)
+                        .ok()
+                        .and_then(|certificate| {
+                            piv_public_key_from_certificate(algorithm, &certificate).ok()
+                        })
+                });
+            let Some(public_key) = public_key else {
                 continue;
             };
-            let Ok(certificate) = openssl::x509::X509::from_der(&certificate) else {
-                continue;
-            };
-            let Ok(public_key) = certificate.public_key().and_then(|key| key.rsa()) else {
-                continue;
-            };
-            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
             self.keys.push(PivKey {
                 slot,
                 algorithm,
@@ -658,6 +846,28 @@ impl Slot for PivSlot {
         info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
         Ok(())
     }
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        let mut mechanisms = MECHANISMS.to_vec();
+        mechanisms.push(MechanismDetails {
+            type_: CKM_EDDSA as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 256,
+            flags: CKF_SIGN as CK_FLAGS,
+        });
+        mechanisms.push(MechanismDetails {
+            type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: CKF_DERIVE as CK_FLAGS,
+        });
+        mechanisms.push(MechanismDetails {
+            type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: CKF_DERIVE as CK_FLAGS,
+        });
+        mechanisms
+    }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
     }
@@ -669,16 +879,32 @@ impl Slot for PivSlot {
         for key in &self.keys {
             let id = vec![key.slot as u8];
             let label = format!("PIV slot {:02X}", key.slot as u8).into_bytes();
+            let key_type = key.public_key.key_type(key.algorithm);
+            let is_rsa = key.algorithm.rsa_input_length().is_some();
+            let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);
+            let public_material = match &key.public_key {
+                PivPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
+                PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
+                    KeyMaterial::PivPublic {
+                        algorithm: key.algorithm,
+                        public_key: public_key.clone(),
+                    }
+                }
+            };
+            let (modulus, public_exponent) = match &key.public_key {
+                PivPublicKey::Rsa(public_key) => (public_key.n().to_vec(), public_key.e().to_vec()),
+                _ => (Vec::new(), Vec::new()),
+            };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-{:02x}-public", key.slot as u8).into_bytes(),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-                key_type: CKK_RSA as CK_KEY_TYPE,
+                key_type,
                 label: label.clone(),
                 id: id.clone(),
                 token: true,
                 private: false,
-                encrypt: true,
+                encrypt: is_rsa,
                 decrypt: false,
                 sign: false,
                 verify: true,
@@ -689,20 +915,20 @@ impl Slot for PivSlot {
                 local: true,
                 key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 owner_session: None,
-                material: KeyMaterial::RsaPublic(key.public_key.clone()),
+                material: public_material,
             });
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-{:02x}-private", key.slot as u8).into_bytes(),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-                key_type: CKK_RSA as CK_KEY_TYPE,
+                key_type,
                 label,
                 id,
                 token: true,
                 private: true,
                 encrypt: false,
-                decrypt: key.slot == piv::Slot::KeyManagement,
-                sign: true,
+                decrypt: false,
+                sign: can_sign,
                 verify: false,
                 sensitive: true,
                 extractable: false,
@@ -714,8 +940,8 @@ impl Slot for PivSlot {
                 material: KeyMaterial::PivPrivate {
                     slot: key.slot,
                     algorithm: key.algorithm,
-                    modulus: key.public_key.n().to_vec(),
-                    public_exponent: key.public_key.e().to_vec(),
+                    modulus,
+                    public_exponent,
                 },
             });
         }
@@ -964,6 +1190,14 @@ trait Session {
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn piv_decipher(
+        &self,
+        _slot: piv::Slot,
+        _algorithm: piv::Algorithm,
+        _input: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -1117,6 +1351,21 @@ impl Session for PivSession {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+            self.authenticated.set(false);
+        }
+        result
+    }
+    fn piv_decipher(
+        &self,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        input: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        if !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -1628,6 +1877,10 @@ enum KeyMaterial {
         modulus: Vec<u8>,
         public_exponent: Vec<u8>,
     },
+    PivPublic {
+        algorithm: piv::Algorithm,
+        public_key: Vec<u8>,
+    },
     YubiHsm {
         id: u16,
         object_type: u8,
@@ -1655,6 +1908,14 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("slot", slot)
                 .field("algorithm", algorithm)
                 .field("size", &modulus.len())
+                .finish(),
+            Self::PivPublic {
+                algorithm,
+                public_key,
+            } => fmt
+                .debug_struct("PivPublic")
+                .field("algorithm", algorithm)
+                .field("size", &public_key.len())
                 .finish(),
             Self::YubiHsm {
                 id,
@@ -2291,7 +2552,9 @@ impl TokenObject {
             x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::RsaPrivate(key) => Some(key.n().to_vec()),
                 KeyMaterial::RsaPublic(key) => Some(key.n().to_vec()),
-                KeyMaterial::PivPrivate { modulus, .. } => Some(modulus.clone()),
+                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(modulus.clone())
+                }
                 KeyMaterial::YubiHsm {
                     algorithm,
                     public_key,
@@ -2306,7 +2569,7 @@ impl TokenObject {
                 KeyMaterial::RsaPublic(key) => Some(key.e().to_vec()),
                 KeyMaterial::PivPrivate {
                     public_exponent, ..
-                } => Some(public_exponent.clone()),
+                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                     Some(vec![0x01, 0x00, 0x01])
                 }
@@ -2315,6 +2578,10 @@ impl TokenObject {
             x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { algorithm, .. } => {
                     yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
+                }
+                KeyMaterial::PivPrivate { algorithm, .. }
+                | KeyMaterial::PivPublic { algorithm, .. } => {
+                    piv_ec_parameters(*algorithm).map(<[u8]>::to_vec)
                 }
                 _ => None,
             },
@@ -2338,6 +2605,20 @@ impl TokenObject {
                         ..
                     } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
                         der_octet_string(public_key)
+                    }
+                    KeyMaterial::PivPublic {
+                        algorithm,
+                        public_key,
+                    } if !public_key.is_empty() => {
+                        let point = if piv_ec_coordinate_length(*algorithm).is_some() {
+                            let mut point = Vec::with_capacity(public_key.len() + 1);
+                            point.push(0x04);
+                            point.extend_from_slice(public_key);
+                            point
+                        } else {
+                            public_key.clone()
+                        };
+                        der_octet_string(&point)
                     }
                     _ => None,
                 }
@@ -4651,6 +4932,7 @@ fn sign_init(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                     || x == CKM_ECDSA as CK_MECHANISM_TYPE
+                    || x == CKM_EDDSA as CK_MECHANISM_TYPE
                     || x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
@@ -4685,6 +4967,7 @@ fn sign_init(
         }
         let expected_key_type = match mechanism.mechanism {
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE => CKK_EC as CK_KEY_TYPE,
+            x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
             x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => CKK_SHA_1_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => CKK_SHA384_HMAC as CK_KEY_TYPE,
@@ -4702,7 +4985,13 @@ fn sign_init(
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
+        let piv_mechanism_supported = matches!(
+            &object.material,
+            KeyMaterial::PivPrivate { algorithm, .. }
+                if piv_sign_mechanism_supported(*algorithm, mechanism.mechanism)
+        );
         if !matches!(object.material, KeyMaterial::YubiHsm { .. })
+            && !piv_mechanism_supported
             && mechanism.mechanism != CKM_RSA_PKCS as CK_MECHANISM_TYPE
         {
             return Err(CKR_MECHANISM_INVALID.into());
@@ -4781,7 +5070,18 @@ fn sign(
         };
         let required = match &operation.key {
             KeyMaterial::RsaPrivate(key) => key.size() as usize,
-            KeyMaterial::PivPrivate { modulus, .. } => modulus.len(),
+            KeyMaterial::PivPrivate {
+                algorithm, modulus, ..
+            } => match algorithm {
+                piv::Algorithm::Rsa1024
+                | piv::Algorithm::Rsa2048
+                | piv::Algorithm::Rsa3072
+                | piv::Algorithm::Rsa4096 => modulus.len(),
+                piv::Algorithm::EccP256 => 64,
+                piv::Algorithm::EccP384 => 96,
+                piv::Algorithm::Ed25519 => 64,
+                piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                 match *algorithm {
                     YUBIHSM_ALGO_RSA_2048 => 256,
@@ -4849,10 +5149,20 @@ fn sign(
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {
-                    let encoded = encode_pkcs1_v1_5_signature_input(data, required)?;
-                    ctx._get_session(session_handle)?
+                    let input = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+                        encode_pkcs1_v1_5_signature_input(data, required)?
+                    } else {
+                        data.to_vec()
+                    };
+                    let response = ctx
+                        ._get_session(session_handle)?
                         .1
-                        .piv_sign(*slot, *algorithm, &encoded)
+                        .piv_sign(*slot, *algorithm, &input)?;
+                    match algorithm {
+                        piv::Algorithm::EccP256 => piv_ecdsa_signature(&response, 32),
+                        piv::Algorithm::EccP384 => piv_ecdsa_signature(&response, 48),
+                        _ => Ok(response),
+                    }
                 }
                 KeyMaterial::YubiHsm { id, algorithm, .. } => {
                     let command = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
@@ -5604,13 +5914,140 @@ pub extern "C" fn C_UnwrapKey(
 #[no_mangle]
 pub extern "C" fn C_DeriveKey(
     session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
-    _base_key: CK_OBJECT_HANDLE,
-    _templ: *mut CK_ATTRIBUTE,
-    _attribute_count: ::std::os::raw::c_ulong,
-    _key: *mut CK_OBJECT_HANDLE,
+    mechanism: *mut CK_MECHANISM,
+    base_key: CK_OBJECT_HANDLE,
+    templ: *mut CK_ATTRIBUTE,
+    attribute_count: ::std::os::raw::c_ulong,
+    key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(derive_key(
+        session_handle,
+        mechanism,
+        base_key,
+        templ,
+        attribute_count,
+        key,
+    ))
+}
+
+fn derive_key(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: CK_MECHANISM_PTR,
+    base_key: CK_OBJECT_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    attribute_count: CK_ULONG,
+    key: CK_OBJECT_HANDLE_PTR,
+) -> Result<(), Error> {
+    let key_handle = as_mut(key)?;
+    let mechanism = _as_ref(mechanism)?;
+    if mechanism.mechanism != CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
+        && mechanism.mechanism != CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
+    {
+        return Err(CKR_MECHANISM_INVALID.into());
+    }
+    if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR)?;
+    if parameters.kdf != CKD_NULL as CK_EC_KDF_TYPE {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let shared_data = from_raw_parts(
+        parameters.pSharedData as *const u8,
+        parameters.ulSharedDataLen as usize,
+    )?;
+    if !shared_data.is_empty() {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let public_data = from_raw_parts(
+        parameters.pPublicData as *const u8,
+        parameters.ulPublicDataLen as usize,
+    )?;
+    let public_data = der_octet_string_value(public_data).unwrap_or(public_data);
+    let templ = from_raw_parts(templ, attribute_count as usize)?;
+    validate_unique_template(templ)?;
+
+    with_context_mut(|ctx| {
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        let object = ctx
+            .objects
+            .get(&base_key)
+            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || !object.private {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        if !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let (piv_slot, algorithm) = match &object.material {
+            KeyMaterial::PivPrivate {
+                slot, algorithm, ..
+            } => (*slot, *algorithm),
+            _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
+        };
+        let expected_length = match algorithm {
+            piv::Algorithm::EccP256 | piv::Algorithm::X25519 => 32,
+            piv::Algorithm::EccP384 => 48,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        let expected_public_length = match algorithm {
+            piv::Algorithm::EccP256 => 65,
+            piv::Algorithm::EccP384 => 97,
+            piv::Algorithm::X25519 => 32,
+            _ => unreachable!(),
+        };
+        if public_data.len() != expected_public_length
+            || (matches!(algorithm, piv::Algorithm::EccP256 | piv::Algorithm::EccP384)
+                && public_data.first() != Some(&0x04))
+        {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let derived =
+            ctx._get_session(session_handle)?
+                .1
+                .piv_decipher(piv_slot, algorithm, public_data)?;
+        if derived.len() != expected_length {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+
+        let mut object_template = TokenObjectTemplate {
+            class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+            key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+            private: true,
+            sensitive: Some(true),
+            extractable: Some(false),
+            ..TokenObjectTemplate::default()
+        };
+        let mut requested_length = None;
+        for attribute in templ {
+            if attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE {
+                requested_length =
+                    Some(read_ulong_template_attribute(attribute).map_err(Error::from)? as usize);
+            } else {
+                object_template
+                    .apply_attribute(attribute)
+                    .map_err(Error::from)?;
+            }
+        }
+        let requested_length = requested_length.unwrap_or(expected_length);
+        if requested_length == 0 || requested_length > derived.len() {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        let mut derived_object = object_template.into_object().map_err(Error::from)?;
+        if derived_object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+            || derived_object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        derived_object.material =
+            KeyMaterial::Secret(Zeroizing::new(derived[..requested_length].to_vec()));
+        derived_object.local = false;
+        validate_new_object_access(&derived_object, flags, logged_in)?;
+        derived_object.set_owner(session_handle, slot_id);
+        *key_handle = ctx.insert_object(derived_object);
+        Ok(())
+    })
 }
 
 #[no_mangle]

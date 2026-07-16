@@ -25,13 +25,21 @@ The client supports standard slots `9A`, `9C`, `9D`, and `9E`, RSA-1024 through
 RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers. Firmware and
 FIPS restrictions still apply.
 
-RSA certificates in the four standard slots are exposed as PKCS #11 public and
-private key objects. Public modulus and exponent attributes come from the X.509
-certificate. `CKM_RSA_PKCS` signing uses a hardware-backed key representation:
-the host creates the type-1 PKCS #1 v1.5 encoded block and the YubiKey performs
-the private RSA operation. The private key is never represented as host key
-material.
+The four standard slots are exposed as PKCS #11 public and private key objects.
+Public-key attributes are read from the PIV metadata public-key field when
+available, with the X.509 certificate used as a fallback. This matches the
+metadata-before-certificate portion of the YubiKey reference fallback order
+and avoids trusting a certificate whose key does not match the private key.
+Attestation-certificate discovery is not yet used. EC named-curve and point attributes are
+exposed for P-256, P-384, Ed25519, and X25519. Private key material remains on
+the card. RSA-3072, RSA-4096, Ed25519, and X25519 are only exposed on firmware
+5.7 and later.
 
-EC/25519 PKCS #11 objects and card-backed decrypt/derive entry points are not
-yet exposed. Their PIV protocol operations are implemented, but the PKCS #11
-object model still needs EC attributes and operation-state variants for them.
+`CKM_RSA_PKCS` signing uses a hardware-backed key representation: the host
+creates the type-1 PKCS #1 v1.5 encoded block and the YubiKey performs the
+private RSA operation. `CKM_ECDSA` converts the card's DER signature to the
+PKCS #11 fixed-width `r || s` format, while `CKM_EDDSA` returns the card's
+Ed25519 signature. `CKM_ECDH1_DERIVE` and
+`CKM_ECDH1_COFACTOR_DERIVE` support `CKD_NULL` for P-256, P-384, and X25519;
+the derived secret is returned as a sensitive generic secret object. This
+derive surface is an extension to the current YKCS11 mechanism list.
