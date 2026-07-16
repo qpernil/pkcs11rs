@@ -112,6 +112,44 @@ pub(crate) struct Metadata {
     pub(crate) public_key: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MetadataPublicKey {
+    Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
+    Ec(Vec<u8>),
+    Raw(Vec<u8>),
+}
+
+pub(crate) fn parse_metadata_public_key(
+    algorithm: Algorithm,
+    encoded: &[u8],
+) -> Result<MetadataPublicKey, Error> {
+    let fields = parse_tlvs(encoded)?;
+    match algorithm {
+        Algorithm::Rsa1024 | Algorithm::Rsa2048 | Algorithm::Rsa3072 | Algorithm::Rsa4096 => {
+            let modulus = field(&fields, 0x81)
+                .filter(|value| !value.is_empty())
+                .ok_or(CKR_DATA_INVALID)?;
+            let exponent = field(&fields, 0x82)
+                .filter(|value| !value.is_empty())
+                .ok_or(CKR_DATA_INVALID)?;
+            Ok(MetadataPublicKey::Rsa {
+                modulus: modulus.to_vec(),
+                exponent: exponent.to_vec(),
+            })
+        }
+        Algorithm::EccP256 | Algorithm::EccP384 => field(&fields, 0x86)
+            .filter(|value| !value.is_empty())
+            .map(<[u8]>::to_vec)
+            .map(MetadataPublicKey::Ec)
+            .ok_or_else(|| CKR_DATA_INVALID.into()),
+        Algorithm::Ed25519 | Algorithm::X25519 => field(&fields, 0x86)
+            .filter(|value| !value.is_empty())
+            .map(<[u8]>::to_vec)
+            .map(MetadataPublicKey::Raw)
+            .ok_or_else(|| CKR_DATA_INVALID.into()),
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Client;
 
@@ -694,6 +732,30 @@ mod tests {
                 .certificate(&connector, Slot::Authentication)
                 .unwrap(),
             [0x30, 0x01, 0x00]
+        );
+    }
+
+    #[test]
+    fn parses_metadata_public_key_by_algorithm() {
+        let rsa = parse_metadata_public_key(
+            Algorithm::Rsa2048,
+            &[0x81, 0x03, 0x01, 0x02, 0x03, 0x82, 0x03, 0x01, 0x00, 0x01],
+        )
+        .unwrap();
+        assert_eq!(
+            rsa,
+            MetadataPublicKey::Rsa {
+                modulus: vec![1, 2, 3],
+                exponent: vec![1, 0, 1],
+            }
+        );
+        assert_eq!(
+            parse_metadata_public_key(Algorithm::EccP256, &[0x86, 0x03, 0x04, 1, 2]).unwrap(),
+            MetadataPublicKey::Ec(vec![0x04, 1, 2])
+        );
+        assert_eq!(
+            parse_metadata_public_key(Algorithm::X25519, &[0x86, 0x02, 1, 2]).unwrap(),
+            MetadataPublicKey::Raw(vec![1, 2])
         );
     }
 
