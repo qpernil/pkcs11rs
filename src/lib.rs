@@ -25,10 +25,31 @@ use std::{
     ptr,
     rc::Rc,
     slice,
-    sync::{Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
     time::Duration,
 };
 use zeroize::Zeroizing;
+
+static DEBUG_LOGGING: AtomicBool = AtomicBool::new(false);
+
+fn initialize_debug_logging() {
+    DEBUG_LOGGING.store(
+        std::env::var_os("PKCS11RS_DEBUG").is_some(),
+        Ordering::Relaxed,
+    );
+}
+
+/// Emit diagnostic output only when explicitly requested by the caller.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if crate::DEBUG_LOGGING.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!($($arg)*);
+        }
+    };
+}
 
 pub mod error;
 use error::*;
@@ -2677,15 +2698,15 @@ impl Connector for UsbConnector {
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
-        eprintln!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
+        debug_log!("libusb.write_bulk({:?}) -> {}", send_buffer, len);
         ensure_complete_write(len, send_buffer.len())?;
         if needs_zero_length_packet(len, self.packet_size) {
             // Write a ZLP if last packet is full
             let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
-            eprintln!("libusb.write_bulk'zlp() -> {}", zlp);
+            debug_log!("libusb.write_bulk'zlp() -> {}", zlp);
         }
         let len = self.handle.read_bulk(0x81, receive_buffer, timeout)?;
-        eprintln!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
+        debug_log!("libusb.read_bulk({:?}) -> {}", &receive_buffer[..len], len);
         Ok(&receive_buffer[..len])
     }
 }
@@ -2726,7 +2747,7 @@ impl UsbConnector {
             .handle
             .read_bulk(0x81, &mut stale, Duration::from_millis(1))
         {
-            eprintln!("libusb drained {length} stale bytes");
+            debug_log!("libusb drained {length} stale bytes");
         }
         self.claimed = true;
         Ok(())
@@ -2791,7 +2812,7 @@ impl Connector for PcscConnector {
         match card.as_ref() {
             Some(card) => {
                 let received = card.transmit(send_buffer, receive_buffer)?;
-                eprintln!(
+                debug_log!(
                     "pcsc.transmit({} bytes) -> {} bytes",
                     send_buffer.len(),
                     received.len()
@@ -2906,7 +2927,7 @@ impl Connector for CurlConnector {
             transfer.perform()?;
         }
         let received = &receive_buffer[..write_len];
-        eprintln!("curl.post({:?}) -> {:?}", send_buffer, received);
+        debug_log!("curl.post({:?}) -> {:?}", send_buffer, received);
         Ok(received)
     }
 }
@@ -2925,7 +2946,7 @@ impl CurlConnector {
             })?;
             transfer.perform()?;
         }
-        eprintln!(
+        debug_log!(
             "curl.get() -> {:?}",
             String::from_utf8_lossy(&received).to_string()
         );
@@ -3164,7 +3185,7 @@ impl Context {
             libusb: match rusb::Context::new() {
                 Ok(context) => Some(context),
                 Err(e) => {
-                    eprintln!("libusb::Context::new: {}", e);
+                    debug_log!("libusb::Context::new: {}", e);
                     None
                 }
             },
@@ -3174,7 +3195,7 @@ impl Context {
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
                 Ok(context) => Some(Rc::new(context)),
                 Err(e) => {
-                    eprintln!("pcsc::Context::establish: {}", e);
+                    debug_log!("pcsc::Context::establish: {}", e);
                     None
                 }
             },
@@ -3192,7 +3213,7 @@ impl Context {
         };
         #[cfg(all(feature = "abi-tests", not(test)))]
         add_abi_test_backend_objects(&mut context)?;
-        eprintln!("Context.new {:?}", context);
+        debug_log!("Context.new {:?}", context);
         Ok(context)
     }
     fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
@@ -3372,7 +3393,7 @@ impl Context {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
                     if let Ok(desc) = device.device_descriptor() {
-                        //eprintln!("USB Bus {} Device {}: ID {}:{}", device.bus_number(), device.address(), desc.vendor_id(), desc.product_id());
+                        //eprintln!("USB Bus {} Device {}: ID {}: {}", device.bus_number(), device.address(), desc.vendor_id(), desc.product_id());
                         if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
                             match device.open() {
                                 Ok(handle) => {
@@ -3380,7 +3401,7 @@ impl Context {
                                     let packet_size = match bulk_out_packet_size(&device) {
                                         Ok(packet_size) => packet_size,
                                         Err(error) => {
-                                            eprintln!("libusb bulk OUT endpoint: {:?}", error);
+                                            debug_log!("libusb bulk OUT endpoint: {:?}", error);
                                             continue;
                                         }
                                     };
@@ -3403,7 +3424,7 @@ impl Context {
                                     };
                                     //let mut connector = CurlConnector { serial, url: String::from("http://127.0.0.1:12345"), connected: false, curl: RefCell::new(curl::easy::Easy::new()) };
                                     let name = connector.name();
-                                    eprintln!("{}", name);
+                                    debug_log!("{}", name);
                                     if let Some(slot_id) =
                                         self.slots.iter().find_map(|(slot_id, slot)| {
                                             (slot.name() == name).then_some(*slot_id)
@@ -3415,7 +3436,7 @@ impl Context {
                                         continue;
                                     }
                                     if let Err(error) = connector.connect() {
-                                        eprintln!("libusb.claim_interface: {:?}", error);
+                                        debug_log!("libusb.claim_interface: {:?}", error);
                                         continue;
                                     }
                                     let slot_id = next_key(&self.slots, 0);
@@ -3425,7 +3446,7 @@ impl Context {
                                         algorithms: Vec::new(),
                                     });
                                     if let Err(error) = slot.init_slot() {
-                                        eprintln!("YubiHSM GET DEVICE INFO: {:?}", error);
+                                        debug_log!("YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
                                     }
                                     self.slots.insert(slot_id, slot);
@@ -3433,7 +3454,7 @@ impl Context {
                                     seen_dynamic_slots.insert(slot_id);
                                 }
                                 Err(e) => {
-                                    eprintln!("libusb.open: {}", e);
+                                    debug_log!("libusb.open: {}", e);
                                 }
                             }
                         }
@@ -3450,7 +3471,7 @@ impl Context {
                         card: RefCell::new(None),
                     };
                     let name = connector.name();
-                    eprintln!("{}", name);
+                    debug_log!("{}", name);
                     if let Some(slot_id) = self
                         .slots
                         .iter()
@@ -3474,7 +3495,7 @@ impl Context {
                                 .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
                                 .and_then(|slot| slot.init_slot());
                             if let Err(error) = initialized {
-                                eprintln!("YubiKey backend initialization: {:?}", error);
+                                debug_log!("YubiKey backend initialization: {:?}", error);
                             } else {
                                 map(self.refresh_slot_token_objects(slot_id));
                             }
@@ -3502,20 +3523,20 @@ impl Context {
                             protocol: YubiKeySecureChannel::Scp11b,
                         }),
                         Err(error) => {
-                            eprintln!("PKCS11RS_YUBIKEY_BACKEND: {:?}", error);
+                            debug_log!("PKCS11RS_YUBIKEY_BACKEND: {:?}", error);
                             continue;
                         }
                     };
                     if slot.is_present() {
                         if let Err(error) = slot.init_slot() {
-                            eprintln!("YubiKey backend initialization: {:?}", error);
+                            debug_log!("YubiKey backend initialization: {:?}", error);
                             continue;
                         }
                     }
                     let token_objects = match slot.token_objects(slot_id) {
                         Ok(objects) => objects,
                         Err(error) => {
-                            eprintln!("YubiKey object discovery: {:?}", error);
+                            debug_log!("YubiKey object discovery: {:?}", error);
                             Vec::new()
                         }
                     };
@@ -3538,7 +3559,7 @@ impl Context {
             self.slots.remove(&slot_id);
             self.dynamic_slots.remove(&slot_id);
         }
-        eprintln!("Context.init {:?}", self);
+        debug_log!("Context.init {:?}", self);
     }
 }
 
@@ -4112,7 +4133,8 @@ fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
-    eprintln!("C_Initialize called with {:?}", init_args);
+    initialize_debug_logging();
+    debug_log!("C_Initialize called with {:?}", init_args);
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
     }
@@ -4167,7 +4189,7 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
 
 #[no_mangle]
 pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
-    eprintln!("C_Finalize called with {:?}", pReserved);
+    debug_log!("C_Finalize called with {:?}", pReserved);
     if !pReserved.is_null() {
         return CKR_ARGUMENTS_BAD.into();
     }
@@ -4203,12 +4225,12 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
     unsafe {
-        eprintln!("C_GetFunctionList called with {:?}", function_list);
+        debug_log!("C_GetFunctionList called with {:?}", function_list);
         match function_list.as_mut() {
             Some(function_list) => {
                 *function_list =
                     &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
-                eprintln!("C_GetFunctionList returning {:?}", *function_list);
+                debug_log!("C_GetFunctionList returning {:?}", *function_list);
                 CKR_OK
             }
             None => CKR_ARGUMENTS_BAD,
@@ -4223,7 +4245,7 @@ fn get_info(info_ptr: CK_INFO_PTR) -> Result<(), Error> {
 
 #[no_mangle]
 pub extern "C" fn C_GetInfo(info_ptr: *mut CK_INFO) -> CK_RV {
-    eprintln!("C_GetInfo called with {:?}", info_ptr);
+    debug_log!("C_GetInfo called with {:?}", info_ptr);
     map(get_info(info_ptr))
 }
 
@@ -4235,7 +4257,7 @@ pub extern "C" fn C_GetSlotList(
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
     unsafe {
-        eprintln!(
+        debug_log!(
             "C_GetSlotList called with {:?}",
             (token_present, slot_list, count)
         );
@@ -4260,17 +4282,17 @@ pub extern "C" fn C_GetSlotList(
                         keys.sort();
                         ptr::copy(keys.as_ptr(), slot_list, keys.len());
                         *count = keys.len() as ::std::os::raw::c_ulong;
-                        eprintln!("C_GetSlotList returning {:?}", (keys, *count));
+                        debug_log!("C_GetSlotList returning {:?}", (keys, *count));
                         Ok(CKR_OK as CK_RV)
                     } else {
                         *count = keys.len() as ::std::os::raw::c_ulong;
-                        eprintln!("C_GetSlotList returning {:?}", *count);
+                        debug_log!("C_GetSlotList returning {:?}", *count);
                         Ok(CKR_BUFFER_TOO_SMALL as CK_RV)
                     }
                 }
                 None => {
                     *count = keys.len() as ::std::os::raw::c_ulong;
-                    eprintln!("C_GetSlotList returning {:?}", *count);
+                    debug_log!("C_GetSlotList returning {:?}", *count);
                     Ok(CKR_OK as CK_RV)
                 }
             }
@@ -4287,7 +4309,7 @@ fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), E
 
 #[no_mangle]
 pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO) -> CK_RV {
-    eprintln!("C_GetSlotInfo called with {:?}", (slotID, info_ptr));
+    debug_log!("C_GetSlotInfo called with {:?}", (slotID, info_ptr));
     map(get_slot_info(slotID, info_ptr))
 }
 
@@ -4316,7 +4338,7 @@ fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(),
 
 #[no_mangle]
 pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_TOKEN_INFO) -> CK_RV {
-    eprintln!("C_GetTokenInfo called with {:?}", (slotID, info_ptr));
+    debug_log!("C_GetTokenInfo called with {:?}", (slotID, info_ptr));
     map(get_token_info(slotID, info_ptr))
 }
 
@@ -4587,7 +4609,7 @@ pub extern "C" fn C_GetMechanismList(
     mechanism_list: *mut CK_MECHANISM_TYPE,
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_GetMechanismList called with {:?}",
         (slotID, mechanism_list, count)
     );
@@ -4607,7 +4629,7 @@ fn get_mechanism_list(
         let required = mechanisms.len() as CK_ULONG;
         if mechanism_list.is_null() {
             *count = required;
-            eprintln!("C_GetMechanismList returning {:?}", *count);
+            debug_log!("C_GetMechanismList returning {:?}", *count);
             return Ok(());
         }
         if *count < required {
@@ -4620,7 +4642,7 @@ fn get_mechanism_list(
             *slot = mechanism.type_;
         }
         *count = required;
-        eprintln!("C_GetMechanismList returning {:?}", list);
+        debug_log!("C_GetMechanismList returning {:?}", list);
         Ok(())
     })
 }
@@ -4631,7 +4653,7 @@ pub extern "C" fn C_GetMechanismInfo(
     type_: CK_MECHANISM_TYPE,
     info_ptr: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_GetMechanismInfo called with {:?}",
         (slotID, type_, info_ptr)
     );
@@ -4652,7 +4674,7 @@ fn get_mechanism_info(
         info.ulMinKeySize = mechanism.min_key_size;
         info.ulMaxKeySize = mechanism.max_key_size;
         info.flags = mechanism.flags;
-        eprintln!("C_GetMechanismInfo returning {:?}", info);
+        debug_log!("C_GetMechanismInfo returning {:?}", info);
         Ok(())
     })
 }
@@ -4696,7 +4718,7 @@ pub extern "C" fn C_OpenSession(
     _notify: CK_NOTIFY,
     session: *mut CK_SESSION_HANDLE,
 ) -> CK_RV {
-    eprintln!("C_OpenSession called with {:?}", (slotID, flags));
+    debug_log!("C_OpenSession called with {:?}", (slotID, flags));
     unsafe {
         let session = match session.as_mut() {
             Some(session) => session,
@@ -4714,13 +4736,13 @@ pub extern "C" fn C_OpenSession(
             match ctx.slots.get_mut(&slotID) {
                 Some(slot) => {
                     let _ = slot.refresh();
-                    eprintln!("{:?}", slot);
+                    debug_log!("{:?}", slot);
                     if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
                         let k = next_key(&ctx.sessions, 1);
-                        eprintln!("C_OpenSession sessions before {:?}", ctx.sessions);
+                        debug_log!("C_OpenSession sessions before {:?}", ctx.sessions);
                         ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                        eprintln!("C_OpenSession sessions after {:?}", ctx.sessions);
-                        eprintln!("C_OpenSession returning {:?}", k);
+                        debug_log!("C_OpenSession sessions after {:?}", ctx.sessions);
+                        debug_log!("C_OpenSession returning {:?}", k);
                         *session = k;
                         Ok(CKR_OK as CK_RV)
                     } else {
@@ -4738,9 +4760,9 @@ pub extern "C" fn C_OpenSession(
 
 #[no_mangle]
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_CloseSession called with {:?}", session_handle);
+    debug_log!("C_CloseSession called with {:?}", session_handle);
     match with_context_mut(|ctx| {
-        eprintln!("C_CloseSession sessions before {:?}", ctx.sessions);
+        debug_log!("C_CloseSession sessions before {:?}", ctx.sessions);
         let slot_id = match ctx.sessions.get(&session_handle) {
             Some(session) => session.slotID(),
             None => return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
@@ -4772,8 +4794,8 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         ctx.verify_operations.remove(&session_handle);
         ctx.objects
             .retain(|_, object| object.owner_session != Some(session_handle));
-        eprintln!("C_CloseSession removed {:?}", (session_handle, session));
-        eprintln!("C_CloseSession sessions after {:?}", ctx.sessions);
+        debug_log!("C_CloseSession removed {:?}", (session_handle, session));
+        debug_log!("C_CloseSession sessions after {:?}", ctx.sessions);
         match logout_error {
             Some(error) => Err(error),
             None => Ok(CKR_OK as CK_RV),
@@ -4786,13 +4808,13 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
-    eprintln!("C_CloseAllSessions called with {:?}", slotID);
+    debug_log!("C_CloseAllSessions called with {:?}", slotID);
     match with_context_mut(|ctx| {
         ctx.init();
         if !ctx.slots.contains_key(&slotID) {
             return Ok(CKR_SLOT_ID_INVALID as CK_RV);
         }
-        eprintln!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
+        debug_log!("C_CloseAllSessions sessions before {:?}", ctx.sessions);
         let closed_sessions: HashSet<CK_SESSION_HANDLE> = ctx
             .sessions
             .iter()
@@ -4831,7 +4853,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
                 .map(|owner| !closed_sessions.contains(&owner))
                 .unwrap_or(true)
         });
-        eprintln!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
+        debug_log!("C_CloseAllSessions sessions after {:?}", ctx.sessions);
         match logout_error {
             Some(error) => Err(error),
             None => Ok(CKR_OK as CK_RV),
@@ -4848,7 +4870,7 @@ pub extern "C" fn C_GetSessionInfo(
     session_handle: CK_SESSION_HANDLE,
     info_ptr: *mut CK_SESSION_INFO,
 ) -> CK_RV {
-    eprintln!("C_GetSessionInfo called with {:?}", session_handle);
+    debug_log!("C_GetSessionInfo called with {:?}", session_handle);
     map(get_session_info(session_handle, info_ptr))
 }
 
@@ -4873,7 +4895,7 @@ fn get_session_info(
         info.state = session_state(flags, ctx.is_slot_logged_in(slot_id));
         info.flags = flags;
         info.ulDeviceError = 0;
-        eprintln!("C_GetSessionInfo returning {:?}", info);
+        debug_log!("C_GetSessionInfo returning {:?}", info);
         Ok(())
     })
 }
@@ -4934,7 +4956,7 @@ pub extern "C" fn C_Login(
     pin: *mut ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_Login called with {:?}",
         (session_handle, user_type, pin, pin_len)
     );
@@ -4954,7 +4976,7 @@ fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
 
 #[no_mangle]
 pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_Logout called with {:?}", session_handle);
+    debug_log!("C_Logout called with {:?}", session_handle);
     map(logout(session_handle))
 }
 
@@ -4965,7 +4987,7 @@ pub extern "C" fn C_CreateObject(
     count: ::std::os::raw::c_ulong,
     object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_CreateObject called with {:?}",
         (session_handle, templ, count, object)
     );
@@ -5304,7 +5326,7 @@ pub extern "C" fn C_CopyObject(
     count: ::std::os::raw::c_ulong,
     new_object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_CopyObject called with {:?}",
         (session_handle, object, templ, count, new_object)
     );
@@ -5360,7 +5382,7 @@ pub extern "C" fn C_DestroyObject(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!("C_DestroyObject called with {:?}", (session_handle, object));
+    debug_log!("C_DestroyObject called with {:?}", (session_handle, object));
     map(destroy_object(session_handle, object))
 }
 
@@ -5436,7 +5458,7 @@ pub extern "C" fn C_GetObjectSize(
     object: CK_OBJECT_HANDLE,
     size: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_GetObjectSize called with {:?}",
         (session_handle, object, size)
     );
@@ -5468,7 +5490,7 @@ pub extern "C" fn C_GetAttributeValue(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_GetAttributeValue called with {:?}",
         (session_handle, object, templ, count)
     );
@@ -5619,7 +5641,7 @@ pub extern "C" fn C_SetAttributeValue(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_SetAttributeValue called with {:?}",
         (session_handle, object, templ, count)
     );
@@ -5674,7 +5696,7 @@ pub extern "C" fn C_FindObjectsInit(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_FindObjectsInit called with {:?}",
         (session_handle, templ, count)
     );
@@ -5704,7 +5726,7 @@ fn find_objects_init(
         if ctx.find_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
-        eprintln!("C_FindObjectsInit template {:?}", templ);
+        debug_log!("C_FindObjectsInit template {:?}", templ);
         let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
             .objects
             .iter()
@@ -5728,7 +5750,7 @@ pub extern "C" fn C_FindObjects(
     max_object_count: ::std::os::raw::c_ulong,
     object_count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_FindObjects called with {:?}",
         (session_handle, object, max_object_count, object_count)
     );
@@ -5760,14 +5782,14 @@ fn find_objects(
         output[..returned].copy_from_slice(&remaining[..returned]);
         operation.next += returned;
         *object_count = returned as CK_ULONG;
-        eprintln!("C_FindObjects returning {:?}", &output[..returned]);
+        debug_log!("C_FindObjects returning {:?}", &output[..returned]);
         Ok(())
     })
 }
 
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    eprintln!("C_FindObjectsFinal called with {:?}", session_handle);
+    debug_log!("C_FindObjectsFinal called with {:?}", session_handle);
     map(find_objects_final(session_handle))
 }
 
@@ -6263,7 +6285,7 @@ pub extern "C" fn C_SignInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_SignInit called with {:?}",
         (session_handle, mechanism, key)
     );
@@ -6445,7 +6467,7 @@ pub extern "C" fn C_Sign(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_Sign called with {:?}",
         (session_handle, data, data_len, signature, signature_len)
     );
@@ -6853,7 +6875,7 @@ pub extern "C" fn C_VerifyInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_VerifyInit called with {:?}",
         (session_handle, mechanism, key)
     );
@@ -6963,7 +6985,7 @@ pub extern "C" fn C_Verify(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_Verify called with {:?}",
         (session_handle, data, data_len, signature, signature_len)
     );
@@ -7186,7 +7208,7 @@ pub extern "C" fn C_GenerateKey(
     count: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    eprintln!(
+    debug_log!(
         "C_GenerateKey called with {:?}",
         (session_handle, mechanism, templ, count, key)
     );
@@ -7747,7 +7769,7 @@ pub extern "C" fn C_SeedRandom(
     _seed: *mut ::std::os::raw::c_uchar,
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!("C_SeedRandom called");
+    debug_log!("C_SeedRandom called");
     let result: Result<(), Error> = with_context(|ctx| {
         ctx._get_session(session)?;
         Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
@@ -7761,7 +7783,7 @@ pub extern "C" fn C_GenerateRandom(
     random_data: *mut ::std::os::raw::c_uchar,
     random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    eprintln!("C_GenerateRandom called");
+    debug_log!("C_GenerateRandom called");
     let result: Result<(), Error> = with_context(|ctx| {
         let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
         ctx._get_session(session)?.1.generate_random(random_data)

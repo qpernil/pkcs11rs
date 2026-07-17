@@ -58,7 +58,7 @@ impl From<u32> for Error {
 
 impl From<Error> for CK_RV {
     fn from(error: Error) -> Self {
-        eprintln!("{:?}", error);
+        debug_log!("{:?}", error);
         match error {
             Error::Generic(rv) => rv,
             Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
