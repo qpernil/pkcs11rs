@@ -4113,7 +4113,7 @@ impl Connector for PcscConnector {
         *self.card.borrow_mut() = None;
         let card = self.context.connect(
             &self.reader,
-            pcsc::ShareMode::Shared,
+            pcsc::ShareMode::Exclusive,
             pcsc::Protocols::T0 | pcsc::Protocols::T1,
         )?;
         *self.card.borrow_mut() = Some(card);
@@ -4126,7 +4126,7 @@ impl PcscConnector {
         match self.card.borrow_mut().as_mut() {
             Some(card) => card
                 .reconnect(
-                    pcsc::ShareMode::Shared,
+                    pcsc::ShareMode::Exclusive,
                     pcsc::Protocols::T0 | pcsc::Protocols::T1,
                     pcsc::Disposition::ResetCard,
                 )
