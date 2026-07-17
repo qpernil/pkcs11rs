@@ -3907,6 +3907,121 @@ pub fn verify_accepts_matching_rsa_signature() {
 }
 
 #[test]
+pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+    let signing_key = openssl::ec::EcKey::generate(&group).unwrap();
+    let mut context = openssl::bn::BigNumContext::new().unwrap();
+    let point = signing_key
+        .public_key()
+        .to_bytes(
+            &group,
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut context,
+        )
+        .unwrap();
+    let public_key = point[1..].to_vec();
+    let data = b"hardware-backed signature";
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data).unwrap();
+    let signature = openssl::ecdsa::EcdsaSig::sign(&digest, &signing_key)
+        .unwrap()
+        .to_der()
+        .unwrap();
+    let signature = crate::piv_ecdsa_signature(&signature, 32).unwrap();
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut data = data.to_vec();
+    let mut signature = signature;
+
+    for material in [
+        crate::KeyMaterial::PivPublic {
+            algorithm: crate::piv::Algorithm::EccP256,
+            public_key: public_key.clone(),
+        },
+        crate::KeyMaterial::OpenPgpPublic {
+            algorithm: crate::OpenPgpAlgorithm::Ecdsa(crate::openpgp::Curve::P256),
+            public_key,
+        },
+    ] {
+        {
+            let mut context = crate::lock_context().unwrap();
+            let object = context.as_mut().unwrap().objects.get_mut(&1).unwrap();
+            object.key_type = CKK_EC as CK_KEY_TYPE;
+            object.verify = true;
+            object.material = material;
+        }
+        assert_eq!(
+            crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::C_Verify(
+                TEST_SESSION_HANDLE,
+                data.as_mut_ptr(),
+                data.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                signature.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+
+    let signing_key =
+        openssl::pkey::PKey::private_key_from_raw_bytes(&[0x42; 32], openssl::pkey::Id::ED25519)
+            .unwrap();
+    let mut signer = openssl::sign::Signer::new_without_digest(&signing_key).unwrap();
+    let signature = signer.sign_oneshot_to_vec(&data).unwrap();
+    let public_key = signing_key.raw_public_key().unwrap();
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_EDDSA as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    for material in [
+        crate::KeyMaterial::PivPublic {
+            algorithm: crate::piv::Algorithm::Ed25519,
+            public_key: public_key.clone(),
+        },
+        crate::KeyMaterial::OpenPgpPublic {
+            algorithm: crate::OpenPgpAlgorithm::Ed25519,
+            public_key,
+        },
+    ] {
+        {
+            let mut context = crate::lock_context().unwrap();
+            let object = context.as_mut().unwrap().objects.get_mut(&1).unwrap();
+            object.key_type = CKK_EC_EDWARDS as CK_KEY_TYPE;
+            object.verify = true;
+            object.material = material;
+        }
+        assert_eq!(
+            crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::C_Verify(
+                TEST_SESSION_HANDLE,
+                data.as_mut_ptr(),
+                data.len() as CK_ULONG,
+                signature.as_ptr() as *mut u8,
+                signature.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn verify_reports_signature_mismatches() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

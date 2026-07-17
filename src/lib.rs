@@ -8,13 +8,13 @@ extern crate rusb;
 
 use openssl::{
     bn::BigNum,
-    ec::PointConversionForm,
     ec::{EcGroup, EcKey, EcPoint},
     ecdsa::EcdsaSig,
     hash::{hash, MessageDigest},
     nid::Nid,
-    pkey::{Id, Private, Public},
+    pkey::{Id, PKey, Private, Public},
     rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
+    sign::Verifier,
 };
 use rusb::UsbContext;
 use std::{
@@ -722,56 +722,6 @@ fn piv_public_key_from_metadata(
     }
 }
 
-fn piv_public_key_from_certificate(
-    algorithm: piv::Algorithm,
-    certificate: &[u8],
-) -> Result<PivPublicKey, Error> {
-    let certificate = openssl::x509::X509::from_der(certificate).map_err(Error::from)?;
-    let certificate_key = certificate.public_key().map_err(Error::from)?;
-    match algorithm {
-        piv::Algorithm::Rsa1024
-        | piv::Algorithm::Rsa2048
-        | piv::Algorithm::Rsa3072
-        | piv::Algorithm::Rsa4096 => {
-            let public_key = certificate_key.rsa().map_err(Error::from)?;
-            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            Ok(PivPublicKey::Rsa(public_key))
-        }
-        piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
-            let public_key = certificate_key.ec_key().map_err(Error::from)?;
-            let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
-            let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
-            let point = public_key
-                .public_key()
-                .to_bytes(
-                    public_key.group(),
-                    PointConversionForm::UNCOMPRESSED,
-                    &mut context,
-                )
-                .map_err(Error::from)?;
-            if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            Ok(PivPublicKey::Ec(point[1..].to_vec()))
-        }
-        piv::Algorithm::Ed25519 | piv::Algorithm::X25519 => {
-            if !matches!(
-                (algorithm, certificate_key.id()),
-                (piv::Algorithm::Ed25519, Id::ED25519) | (piv::Algorithm::X25519, Id::X25519)
-            ) {
-                return Err(CKR_DATA_INVALID.into());
-            }
-            let public_key = certificate_key.raw_public_key().map_err(Error::from)?;
-            if public_key.len() != 32 {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            Ok(PivPublicKey::Raw(public_key))
-        }
-    }
-}
-
 fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> {
     let certificate = openssl::x509::X509::from_der(certificate).ok()?;
     let key = certificate.public_key().ok()?;
@@ -1181,6 +1131,46 @@ fn piv_ec_public_key(algorithm: piv::Algorithm, point: &[u8]) -> Result<EcKey<Pu
     EcKey::from_public_key(&group, &point).map_err(Error::from)
 }
 
+fn openpgp_ec_public_key(curve: openpgp::Curve, point: &[u8]) -> Result<EcKey<Public>, Error> {
+    let nid = match curve {
+        openpgp::Curve::P256 => Nid::X9_62_PRIME256V1,
+        openpgp::Curve::P384 => Nid::SECP384R1,
+        openpgp::Curve::P521 => Nid::SECP521R1,
+        openpgp::Curve::BrainpoolP256 => Nid::BRAINPOOL_P256R1,
+        openpgp::Curve::BrainpoolP384 => Nid::BRAINPOOL_P384R1,
+        openpgp::Curve::BrainpoolP512 => Nid::BRAINPOOL_P512R1,
+        openpgp::Curve::Secp256k1 => Nid::SECP256K1,
+        openpgp::Curve::Ed25519 | openpgp::Curve::X25519 => {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into())
+        }
+    };
+    let coordinate_length = curve.coordinate_length().ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    if point.len() != coordinate_length * 2 {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    let group = EcGroup::from_curve_name(nid).map_err(Error::from)?;
+    let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
+    let point = EcPoint::from_bytes(&group, &point_with_prefix(point), &mut context)
+        .map_err(Error::from)?;
+    EcKey::from_public_key(&group, &point).map_err(Error::from)
+}
+
+fn verify_ed25519(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), Error> {
+    if public_key.len() != 32 || signature.len() != 64 {
+        return Err(CKR_SIGNATURE_LEN_RANGE.into());
+    }
+    let key = PKey::public_key_from_raw_bytes(public_key, Id::ED25519).map_err(Error::from)?;
+    let mut verifier = Verifier::new_without_digest(&key).map_err(Error::from)?;
+    if verifier
+        .verify_oneshot(signature, data)
+        .map_err(Error::from)?
+    {
+        Ok(())
+    } else {
+        Err(CKR_SIGNATURE_INVALID.into())
+    }
+}
+
 fn point_with_prefix(point: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(point.len() + 1);
     encoded.push(0x04);
@@ -1550,8 +1540,7 @@ impl Slot for PivSlot {
             let algorithm = metadata
                 .as_ref()
                 .and_then(|metadata| metadata.algorithm)
-                .and_then(piv::Algorithm::from_id)
-                .or(certificate_algorithm);
+                .and_then(piv::Algorithm::from_id);
             let Some(algorithm) = algorithm else {
                 continue;
             };
@@ -1562,12 +1551,7 @@ impl Slot for PivSlot {
                 .as_ref()
                 .and_then(|metadata| metadata.public_key.as_deref())
                 .and_then(|encoded| piv::parse_metadata_public_key(algorithm, encoded).ok())
-                .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok())
-                .or_else(|| {
-                    certificate.as_deref().and_then(|certificate| {
-                        piv_public_key_from_certificate(algorithm, certificate).ok()
-                    })
-                });
+                .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok());
             let Some(public_key) = public_key else {
                 continue;
             };
@@ -1675,14 +1659,14 @@ impl Slot for PivSlot {
                 type_ as CK_MECHANISM_TYPE,
                 ec_sizes[0],
                 ec_sizes[1],
-                CKF_SIGN as CK_FLAGS,
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
             );
         }
         mechanisms.push(MechanismDetails {
             type_: CKM_EDDSA as CK_MECHANISM_TYPE,
             min_key_size: 256,
             max_key_size: 256,
-            flags: CKF_SIGN as CK_FLAGS,
+            flags: (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         });
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
@@ -2188,13 +2172,13 @@ impl Slot for OpenPgpSlot {
             CKM_ECDSA as CK_MECHANISM_TYPE,
             256,
             521,
-            CKF_SIGN as CK_FLAGS,
+            (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         );
         add(
             CKM_EDDSA as CK_MECHANISM_TYPE,
             256,
             256,
-            CKF_SIGN as CK_FLAGS,
+            (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         );
         if self
             .keys
@@ -8549,7 +8533,8 @@ fn verify_init(
             || piv_is_pss_mechanism(mechanism.mechanism);
         let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
             || piv_is_hashed_ecdsa(mechanism.mechanism);
-        if !rsa_mechanism && !ecdsa_mechanism {
+        let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
+        if !rsa_mechanism && !ecdsa_mechanism && !eddsa_mechanism {
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
@@ -8567,7 +8552,16 @@ fn verify_init(
                     || !matches!(object.material, KeyMaterial::RsaPublic(_))))
             || (ecdsa_mechanism
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
-                    || !matches!(object.material, KeyMaterial::PivPublic { .. })))
+                    || !matches!(
+                        object.material,
+                        KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
+                    )))
+            || (eddsa_mechanism
+                && (object.key_type != CKK_EC_EDWARDS as CK_KEY_TYPE
+                    || !matches!(
+                        object.material,
+                        KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
+                    )))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -8688,6 +8682,12 @@ fn verify(
                 algorithm,
                 public_key,
             } => {
+                if *algorithm == piv::Algorithm::Ed25519 {
+                    if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
+                        return Err(CKR_MECHANISM_INVALID.into());
+                    }
+                    return verify_ed25519(public_key, data, signature);
+                }
                 let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
                     data.to_vec()
                 } else {
@@ -8706,6 +8706,43 @@ fn verify(
                 let s = BigNum::from_slice(&signature[coordinate_length..])?;
                 let signature = EcdsaSig::from_private_components(r, s)?;
                 let key = piv_ec_public_key(*algorithm, public_key)?;
+                if signature.verify(&digest, &key)? {
+                    Ok(())
+                } else {
+                    Err(CKR_SIGNATURE_INVALID.into())
+                }
+            }
+            KeyMaterial::OpenPgpPublic {
+                algorithm: OpenPgpAlgorithm::Ed25519,
+                public_key,
+            } => {
+                if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
+                    return Err(CKR_MECHANISM_INVALID.into());
+                }
+                verify_ed25519(public_key, data, signature)
+            }
+            KeyMaterial::OpenPgpPublic {
+                algorithm: OpenPgpAlgorithm::Ecdsa(curve),
+                public_key,
+            } => {
+                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
+                    data.to_vec()
+                } else {
+                    hash(
+                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                        data,
+                    )?
+                    .to_vec()
+                };
+                let coordinate_length =
+                    curve.coordinate_length().ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+                if signature.len() != coordinate_length * 2 {
+                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
+                }
+                let r = BigNum::from_slice(&signature[..coordinate_length])?;
+                let s = BigNum::from_slice(&signature[coordinate_length..])?;
+                let signature = EcdsaSig::from_private_components(r, s)?;
+                let key = openpgp_ec_public_key(*curve, public_key)?;
                 if signature.verify(&digest, &key)? {
                     Ok(())
                 } else {
