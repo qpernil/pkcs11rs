@@ -112,6 +112,21 @@ const YUBIHSM_ALGO_EC_P224: u8 = 47;
 const YUBIHSM_ALGO_AES128: u8 = 50;
 const YUBIHSM_ALGO_AES192: u8 = 51;
 const YUBIHSM_ALGO_AES256: u8 = 52;
+const YUBIHSM_ALGO_X25519: u8 = 56;
+
+fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
+    matches!(
+        key_type,
+        x if x == CKK_SHA_1_HMAC as CK_KEY_TYPE
+            || x == CKK_SHA256_HMAC as CK_KEY_TYPE
+            || x == CKK_SHA384_HMAC as CK_KEY_TYPE
+            || x == CKK_SHA512_HMAC as CK_KEY_TYPE
+    )
+}
+
+fn is_montgomery_key_type(key_type: CK_KEY_TYPE) -> bool {
+    key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+}
 
 fn yubihsm_capability(capabilities: &[u8; 8], bit: usize) -> bool {
     capabilities[7 - bit / 8] & (1 << (bit % 8)) != 0
@@ -153,6 +168,10 @@ fn is_yubihsm_ec(algorithm: u8) -> bool {
     )
 }
 
+fn is_yubihsm_x25519(algorithm: u8) -> bool {
+    algorithm == YUBIHSM_ALGO_X25519
+}
+
 fn yubihsm_ec_parameters(algorithm: u8) -> Option<&'static [u8]> {
     match algorithm {
         YUBIHSM_ALGO_EC_P224 => Some(&[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21]),
@@ -170,6 +189,9 @@ fn yubihsm_ec_parameters(algorithm: u8) -> Option<&'static [u8]> {
             0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d,
         ]),
         YUBIHSM_ALGO_ED25519 => Some(&[0x06, 0x03, 0x2b, 0x65, 0x70]),
+        YUBIHSM_ALGO_X25519 => Some(&[
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ]),
         _ => None,
     }
 }
@@ -448,6 +470,7 @@ fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
         YUBIHSM_ALGO_HMAC_SHA512 => CKK_SHA512_HMAC as CK_KEY_TYPE,
         YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256 => CKK_AES as CK_KEY_TYPE,
         YUBIHSM_ALGO_ED25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+        YUBIHSM_ALGO_X25519 => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
         algorithm if is_yubihsm_rsa(algorithm) => CKK_RSA as CK_KEY_TYPE,
         algorithm if is_yubihsm_ec(algorithm) => CKK_EC as CK_KEY_TYPE,
         algorithm => CKK_VENDOR_DEFINED as CK_KEY_TYPE | algorithm as CK_KEY_TYPE,
@@ -461,7 +484,11 @@ fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
 fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
     if is_yubihsm_rsa(algorithm) {
         Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
-    } else if is_yubihsm_ec(algorithm) || algorithm == YUBIHSM_ALGO_ED25519 {
+    } else if is_yubihsm_x25519(algorithm) {
+        Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    } else if algorithm == YUBIHSM_ALGO_ED25519 {
+        Some(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    } else if is_yubihsm_ec(algorithm) {
         Some(CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
     } else if matches!(
         algorithm,
@@ -508,20 +535,29 @@ fn yubihsm_token_objects(
     let unique = format!("yubihsm-{:02x}-{:04x}", info.object_type, info.id);
     let generated = info.origin & 0x01 != 0;
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
-    let sign = algorithm_supported
+    let montgomery = is_montgomery_key_type(key_type);
+    let sign = (info.object_type == YUBIHSM_ASYMMETRIC_KEY
+        || (info.object_type == YUBIHSM_HMAC_KEY && is_hmac_key_type(key_type)))
+        && algorithm_supported
+        && !is_yubihsm_x25519(info.algorithm)
         && (yubihsm_capability(&info.capabilities, 0x05)
             || yubihsm_capability(&info.capabilities, 0x06)
             || yubihsm_capability(&info.capabilities, 0x07)
             || yubihsm_capability(&info.capabilities, 0x08)
             || yubihsm_capability(&info.capabilities, 0x16));
-    let decrypt = algorithm_supported
+    let decrypt = !montgomery
+        && algorithm_supported
         && (yubihsm_capability(&info.capabilities, 0x09)
             || yubihsm_capability(&info.capabilities, 0x0a)
             || yubihsm_capability(&info.capabilities, 0x32)
             || yubihsm_capability(&info.capabilities, 0x34));
-    let encrypt = algorithm_supported
+    let encrypt = !montgomery
+        && algorithm_supported
         && (yubihsm_capability(&info.capabilities, 0x33)
             || yubihsm_capability(&info.capabilities, 0x35));
+    let derive = algorithm_supported
+        && (is_yubihsm_ec(info.algorithm) || is_yubihsm_x25519(info.algorithm))
+        && yubihsm_capability(&info.capabilities, 0x0b);
     let material = yubihsm_remote_material(
         &info,
         public_key
@@ -553,7 +589,7 @@ fn yubihsm_token_objects(
         decrypt,
         sign,
         verify: false,
-        derive: false,
+        derive,
         sensitive: private,
         extractable: yubihsm_capability(&info.capabilities, 0x10)
             && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -673,7 +709,7 @@ fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
             0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39,
         ]),
         piv::Algorithm::X25519 => Some(&[
-            0x13, 0x0b, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
         ]),
         _ => None,
     }
@@ -1782,19 +1818,19 @@ impl Slot for PivSlot {
         }
         mechanisms.push(MechanismDetails {
             type_: CKM_EDDSA as CK_MECHANISM_TYPE,
-            min_key_size: 256,
-            max_key_size: 256,
+            min_key_size: 255,
+            max_key_size: 255,
             flags: (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         });
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 256,
+            min_key_size: 255,
             max_key_size: 384,
             flags: CKF_DERIVE as CK_FLAGS,
         });
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 256,
+            min_key_size: 255,
             max_key_size: 384,
             flags: CKF_DERIVE as CK_FLAGS,
         });
@@ -1869,7 +1905,7 @@ impl Slot for PivSlot {
                 encrypt: is_rsa,
                 decrypt: false,
                 sign: false,
-                verify: true,
+                verify: can_sign,
                 derive: false,
                 sensitive: false,
                 extractable: true,
@@ -2304,8 +2340,8 @@ impl Slot for OpenPgpSlot {
         );
         add(
             CKM_EDDSA as CK_MECHANISM_TYPE,
-            256,
-            256,
+            255,
+            255,
             (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         );
         if self
@@ -2315,7 +2351,7 @@ impl Slot for OpenPgpSlot {
         {
             add(
                 CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-                256,
+                255,
                 521,
                 CKF_DERIVE as CK_FLAGS,
             );
@@ -4379,6 +4415,7 @@ enum KeyMaterial {
         public_key: Vec<u8>,
     },
     Secret(Zeroizing<Vec<u8>>),
+    DerivedSecret(Zeroizing<Vec<u8>>),
 }
 
 impl std::fmt::Debug for KeyMaterial {
@@ -4444,6 +4481,7 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("length", length)
                 .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
+            Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
             Self::PivCertificate {
                 value,
                 algorithm,
@@ -5428,7 +5466,9 @@ impl TokenObject {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Secret(value) => Some(ulong_attribute(value.len() as CK_ULONG)),
+                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
+                    Some(ulong_attribute(value.len() as CK_ULONG))
+                }
                 KeyMaterial::YubiHsm { length, .. }
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
@@ -5437,7 +5477,9 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Secret(value) => Some(ulong_attribute((value.len() * 8) as CK_ULONG)),
+                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
+                    Some(ulong_attribute((value.len() * 8) as CK_ULONG))
+                }
                 KeyMaterial::YubiHsm { length, .. }
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
@@ -5553,6 +5595,13 @@ impl TokenObject {
                     } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
                         der_octet_string(public_key)
                     }
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if is_yubihsm_x25519(*algorithm) && !public_key.is_empty() => {
+                        der_octet_string(public_key)
+                    }
                     KeyMaterial::PivPublic {
                         algorithm,
                         public_key,
@@ -5596,6 +5645,9 @@ impl TokenObject {
                 || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
             {
                 match &self.material {
+                    KeyMaterial::DerivedSecret(value) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                        Some(value.to_vec())
+                    }
                     KeyMaterial::PivCertificate { value, .. }
                     | KeyMaterial::OpenPgpCertificate { value } => {
                         piv_certificate_attribute(value, x)
@@ -5628,8 +5680,9 @@ impl TokenObject {
     }
 
     fn is_nonextractable_key_object(&self) -> bool {
-        self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+        (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
+            && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
     }
 
     fn is_certificate_object(&self) -> bool {
@@ -5647,6 +5700,7 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
                 | KeyMaterial::YubiHsm { .. }
+                | KeyMaterial::DerivedSecret(_)
         )
     }
 
@@ -6101,7 +6155,7 @@ const MECHANISMS: [MechanismDetails; 5] = [
     },
 ];
 
-const YUBIHSM_MECHANISMS: [MechanismDetails; 14] = [
+const YUBIHSM_MECHANISMS: [MechanismDetails; 18] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -6137,6 +6191,30 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 14] = [
         min_key_size: 224,
         max_key_size: 521,
         flags: (CKF_HW | CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 255,
+        max_key_size: 255,
+        flags: (CKF_HW | CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 255,
+        max_key_size: 255,
+        flags: (CKF_HW | CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        min_key_size: 224,
+        max_key_size: 521,
+        flags: (CKF_HW | CKF_DERIVE) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_EDDSA as CK_MECHANISM_TYPE,
+        min_key_size: 255,
+        max_key_size: 255,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_AES_KEY_GEN as CK_MECHANISM_TYPE,
@@ -6205,6 +6283,8 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
         YUBIHSM_ALGO_EC_BP384,
         YUBIHSM_ALGO_EC_BP512,
     ]);
+    let has_x25519 = algorithms.contains(&YUBIHSM_ALGO_X25519);
+    let has_ed25519 = algorithms.contains(&YUBIHSM_ALGO_ED25519);
     let rsa_sizes: Vec<CK_ULONG> = algorithms
         .iter()
         .filter_map(|algorithm| match *algorithm {
@@ -6225,6 +6305,12 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             _ => None,
         })
         .collect();
+    let x25519_sizes = [255 as CK_ULONG];
+    let ed25519_sizes = [255 as CK_ULONG];
+    let mut derive_sizes = ec_sizes.clone();
+    if has_x25519 {
+        derive_sizes.push(255);
+    }
     let aes_sizes: Vec<CK_ULONG> = algorithms
         .iter()
         .filter_map(|algorithm| match *algorithm {
@@ -6251,6 +6337,13 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 {
                     &ec_sizes
                 }
+                y if y == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => &x25519_sizes,
+                y if y == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || y == CKM_EDDSA as CK_MECHANISM_TYPE =>
+                {
+                    &ed25519_sizes
+                }
+                y if y == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => &derive_sizes,
                 y if y == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
                     || y == CKM_AES_ECB as CK_MECHANISM_TYPE
                     || y == CKM_AES_CBC as CK_MECHANISM_TYPE =>
@@ -6281,6 +6374,10 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 }
                 x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_ec,
                 x if x == CKM_ECDSA as CK_MECHANISM_TYPE => has_ec && any(&[23, 43, 44, 45]),
+                x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_x25519,
+                x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_ed25519,
+                x if x == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => has_ec || has_x25519,
+                x if x == CKM_EDDSA as CK_MECHANISM_TYPE => has_ed25519,
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => any(&[
                     YUBIHSM_ALGO_AES128,
                     YUBIHSM_ALGO_AES192,
@@ -6791,7 +6888,9 @@ fn yubihsm_object_parameters(
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     let mut bits = Vec::new();
-    if object.sign {
+    if object.sign
+        && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS || is_hmac_key_type(object.key_type))
+    {
         if object.key_type == CKK_RSA as CK_KEY_TYPE {
             bits.extend([0x05, 0x06]);
         } else if object.key_type == CKK_EC as CK_KEY_TYPE {
@@ -6804,6 +6903,9 @@ fn yubihsm_object_parameters(
     }
     if object.verify {
         bits.push(0x17);
+    }
+    if object.derive {
+        bits.push(0x0b);
     }
     if object.decrypt {
         if object.key_type == CKK_RSA as CK_KEY_TYPE {
@@ -7258,6 +7360,11 @@ fn get_attribute_value(
         for attribute in templ {
             if attribute.type_ == CKA_VALUE as CK_ATTRIBUTE_TYPE {
                 match &object.material {
+                    KeyMaterial::DerivedSecret(value) => {
+                        if let Err(e) = write_attribute_value(attribute, value.as_slice()) {
+                            rv = combine_attribute_rv(rv, e);
+                        }
+                    }
                     KeyMaterial::Secret(value) if !object.sensitive && object.extractable => {
                         if let Err(e) = write_attribute_value(attribute, value.as_slice()) {
                             rv = combine_attribute_rv(rv, e);
@@ -8165,6 +8272,7 @@ fn sign_init(
             }
             x if piv_is_pss_mechanism(x) => 0x06,
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE => 0x07,
+            x if x == CKM_EDDSA as CK_MECHANISM_TYPE => 0x08,
             _ => 0x16,
         };
         if !yubihsm_material_has_capability(&object.material, required_capability) {
@@ -8181,7 +8289,10 @@ fn sign_init(
             x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => CKK_SHA512_HMAC as CK_KEY_TYPE,
             _ => CKK_RSA as CK_KEY_TYPE,
         };
-        if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        let hmac_yubihsm = is_hmac_key_type(expected_key_type)
+            && matches!(object.material, KeyMaterial::YubiHsm { .. });
+        if ((!hmac_yubihsm && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            || (hmac_yubihsm && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
             || object.key_type != expected_key_type
             || !matches!(
                 object.material,
@@ -8336,6 +8447,10 @@ fn sign(
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
                 yubihsm_ec_coordinate_length(*algorithm)? * 2
             }
+            KeyMaterial::YubiHsm {
+                algorithm: YUBIHSM_ALGO_ED25519,
+                ..
+            } => 64,
             KeyMaterial::YubiHsm { algorithm, .. } => match *algorithm {
                 YUBIHSM_ALGO_HMAC_SHA1 => 20,
                 YUBIHSM_ALGO_HMAC_SHA256 => 32,
@@ -8482,6 +8597,8 @@ fn sign(
                             || x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
                     ) {
                         YubiHsmCommand::key_data(YubiHsmCommandCode::SignHmac, *id, data)?
+                    } else if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE {
+                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignEddsa, *id, data)?
                     } else {
                         YubiHsmCommand::key_data(YubiHsmCommandCode::SignEcdsa, *id, data)?
                     };
@@ -9460,6 +9577,12 @@ fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
         [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d] => {
             Ok(YUBIHSM_ALGO_EC_BP512)
         }
+        [0x06, 0x03, 0x2b, 0x65, 0x70] => Ok(YUBIHSM_ALGO_ED25519),
+        [0x13, 0x07, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39] => Ok(YUBIHSM_ALGO_ED25519),
+        [0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39] => {
+            Ok(YUBIHSM_ALGO_X25519)
+        }
+        [0x06, 0x03, 0x2b, 0x65, 0x6e] => Ok(YUBIHSM_ALGO_X25519),
         _ => Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
     }
 }
@@ -9498,7 +9621,33 @@ fn yubihsm_generate_key_pair_command(
                 template_attribute(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)
                     .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
             let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
-            (CKK_EC as CK_KEY_TYPE, yubihsm_ec_algorithm(&parameters)?)
+            let algorithm = yubihsm_ec_algorithm(&parameters)?;
+            if is_yubihsm_x25519(algorithm) || algorithm == YUBIHSM_ALGO_ED25519 {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            (CKK_EC as CK_KEY_TYPE, algorithm)
+        }
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameters_attribute =
+                template_attribute(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)
+                    .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
+            let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
+            let algorithm = yubihsm_ec_algorithm(&parameters)?;
+            if !is_yubihsm_x25519(algorithm) {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            (CKK_EC_MONTGOMERY as CK_KEY_TYPE, algorithm)
+        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameters_attribute =
+                template_attribute(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)
+                    .ok_or_else(|| Error::from(CKR_TEMPLATE_INCOMPLETE))?;
+            let parameters = read_attribute_value(parameters_attribute).map_err(Error::from)?;
+            let algorithm = yubihsm_ec_algorithm(&parameters)?;
+            if algorithm != YUBIHSM_ALGO_ED25519 {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            (CKK_EC_EDWARDS as CK_KEY_TYPE, algorithm)
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
@@ -9509,6 +9658,19 @@ fn yubihsm_generate_key_pair_command(
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
+    if is_montgomery_key_type(key_type)
+        && (public_object.encrypt
+            || public_object.decrypt
+            || public_object.sign
+            || public_object.verify
+            || public_object.derive
+            || private_object.encrypt
+            || private_object.decrypt
+            || private_object.sign
+            || private_object.verify)
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
     if private_object.id.is_empty() {
         private_object.id = public_object.id;
     }
@@ -9629,6 +9791,10 @@ fn derive_key(
                 algorithm: OpenPgpAlgorithm,
                 pin_policy: u8,
             },
+            YubiHsm {
+                id: u16,
+                algorithm: u8,
+            },
         }
         let source = match &object.material {
             KeyMaterial::PivPrivate {
@@ -9651,6 +9817,14 @@ fn derive_key(
                 algorithm: *algorithm,
                 pin_policy: *pin_policy,
             },
+            KeyMaterial::YubiHsm { id, algorithm, .. }
+                if is_yubihsm_ec(*algorithm) || is_yubihsm_x25519(*algorithm) =>
+            {
+                DeriveSource::YubiHsm {
+                    id: *id,
+                    algorithm: *algorithm,
+                }
+            }
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
         match source {
@@ -9682,34 +9856,48 @@ fn derive_key(
                 }
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
+            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_x25519(algorithm) => {
+                (32, 32, false)
+            }
+            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_ec(algorithm) => {
+                let coordinate_length = yubihsm_ec_coordinate_length(algorithm)?;
+                (coordinate_length, coordinate_length * 2 + 1, true)
+            }
+            DeriveSource::YubiHsm { .. } => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
         if public_data.len() != expected_public_length
             || (requires_uncompressed && public_data.first() != Some(&0x04))
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let derived = match source {
-            DeriveSource::Piv {
-                slot,
-                algorithm,
-                pin_policy,
-            } => ctx._get_session(session_handle)?.1.piv_decipher(
-                slot,
-                algorithm,
-                public_data,
-                pin_policy,
-            )?,
-            DeriveSource::OpenPgp {
-                key_ref,
-                algorithm,
-                pin_policy,
-            } => ctx._get_session(session_handle)?.1.openpgp_derive(
-                key_ref,
-                algorithm,
-                public_data,
-                pin_policy,
-            )?,
-        };
+        let derived =
+            match source {
+                DeriveSource::Piv {
+                    slot,
+                    algorithm,
+                    pin_policy,
+                } => ctx._get_session(session_handle)?.1.piv_decipher(
+                    slot,
+                    algorithm,
+                    public_data,
+                    pin_policy,
+                )?,
+                DeriveSource::OpenPgp {
+                    key_ref,
+                    algorithm,
+                    pin_policy,
+                } => ctx._get_session(session_handle)?.1.openpgp_derive(
+                    key_ref,
+                    algorithm,
+                    public_data,
+                    pin_policy,
+                )?,
+                DeriveSource::YubiHsm { id, .. } => {
+                    ctx._get_session(session_handle)?.1.yubihsm_command(
+                        &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
+                    )?
+                }
+            };
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -9743,8 +9931,18 @@ fn derive_key(
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
+        derived_object.private = false;
+        derived_object.sensitive = false;
+        derived_object.extractable = true;
+        derived_object.always_sensitive = false;
+        derived_object.never_extractable = false;
+        derived_object.encrypt = false;
+        derived_object.decrypt = false;
+        derived_object.sign = false;
+        derived_object.verify = false;
+        derived_object.derive = false;
         derived_object.material =
-            KeyMaterial::Secret(Zeroizing::new(derived[..requested_length].to_vec()));
+            KeyMaterial::DerivedSecret(Zeroizing::new(derived[..requested_length].to_vec()));
         derived_object.local = false;
         validate_new_object_access(&derived_object, flags, logged_in)?;
         derived_object.set_owner(session_handle, slot_id);

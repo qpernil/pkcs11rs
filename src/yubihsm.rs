@@ -4,6 +4,8 @@ use crate::{
     CKR_FUNCTION_REJECTED, CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
     CKR_SESSION_CLOSED, CKR_SESSION_COUNT,
 };
+#[cfg(test)]
+use openssl::{derive::Deriver, pkey::Id};
 use openssl::{
     hash::MessageDigest,
     memcmp,
@@ -502,10 +504,36 @@ fn map_authentication_error(error: Error) -> Error {
 pub(crate) mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
 
     const PASSWORD: &[u8] = b"password";
     const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    const RFC7748_ALICE_PRIVATE_KEY: [u8; 32] = [
+        0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66,
+        0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9,
+        0x2c, 0x2a,
+    ];
+    const RFC7748_BOB_PRIVATE_KEY: [u8; 32] = [
+        0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80, 0x0e,
+        0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27, 0xff, 0x88,
+        0xe0, 0xeb,
+    ];
+    pub(crate) const RFC7748_ALICE_PUBLIC_KEY: [u8; 32] = [
+        0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7,
+        0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b,
+        0x4e, 0x6a,
+    ];
+    pub(crate) const RFC7748_BOB_PUBLIC_KEY: [u8; 32] = [
+        0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4, 0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35,
+        0x37, 0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d, 0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88,
+        0x2b, 0x4f,
+    ];
+    pub(crate) const RFC7748_SHARED_SECRET: [u8; 32] = [
+        0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1, 0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f,
+        0x25, 0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16,
+        0x17, 0x42,
+    ];
     type InnerCommands = std::rc::Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
 
     #[derive(Debug)]
@@ -525,6 +553,7 @@ pub(crate) mod tests {
         commands: RefCell<Vec<Vec<u8>>>,
         inner_commands: InnerCommands,
         objects: RefCell<Vec<u16>>,
+        x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
         corrupt_card_cryptogram: bool,
         corrupt_response_mac: std::rc::Rc<Cell<bool>>,
         authenticate_payload: Vec<u8>,
@@ -533,11 +562,15 @@ pub(crate) mod tests {
 
     impl ProtocolPeer {
         fn new() -> Self {
+            let mut x25519_private_keys = HashMap::new();
+            x25519_private_keys.insert(7, RFC7748_ALICE_PRIVATE_KEY);
+            x25519_private_keys.insert(8, RFC7748_BOB_PRIVATE_KEY);
             Self {
                 session: RefCell::new(None),
                 commands: RefCell::new(Vec::new()),
                 inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
                 objects: RefCell::new(vec![1]),
+                x25519_private_keys: RefCell::new(x25519_private_keys),
                 corrupt_card_cryptogram: false,
                 corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
                 authenticate_payload: Vec::new(),
@@ -557,6 +590,23 @@ pub(crate) mod tests {
                 authenticate_payload: payload,
                 ..Self::new()
             }
+        }
+
+        fn x25519_derive(&self, id: u16, public_key: &[u8]) -> Result<Vec<u8>, Error> {
+            let private_key = self
+                .x25519_private_keys
+                .borrow()
+                .get(&id)
+                .copied()
+                .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+            if public_key.len() != 32 {
+                return Err(CKR_DATA_LEN_RANGE.into());
+            }
+            let private_key = PKey::private_key_from_raw_bytes(&private_key, Id::X25519)?;
+            let public_key = PKey::public_key_from_raw_bytes(public_key, Id::X25519)?;
+            let mut deriver = Deriver::new(&private_key)?;
+            deriver.set_peer(&public_key)?;
+            deriver.derive_to_vec().map_err(Error::from)
         }
 
         fn reply(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
@@ -701,22 +751,42 @@ pub(crate) mod tests {
                         return Err(CKR_DEVICE_ERROR.into());
                     }
                     let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                    let mut info = vec![0; 66];
-                    for bit in [0x05usize, 0x06, 0x09, 0x0a] {
-                        info[7 - bit / 8] |= 1 << (bit % 8);
+                    if self.x25519_private_keys.borrow().contains_key(&id) {
+                        let mut info = vec![0; 66];
+                        info[7 - 0x0b / 8] |= 1 << (0x0b % 8);
+                        info[8..10].copy_from_slice(&id.to_be_bytes());
+                        info[10..12].copy_from_slice(&32u16.to_be_bytes());
+                        info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
+                        info[14..18].copy_from_slice(&[3, 56, 1, 1]);
+                        info[18..26].copy_from_slice(b"test-x25");
+                        (inner.command | RESPONSE_BIT, info)
+                    } else {
+                        let mut info = vec![0; 66];
+                        for bit in [0x05usize, 0x06, 0x09, 0x0a] {
+                            info[7 - bit / 8] |= 1 << (bit % 8);
+                        }
+                        info[8..10].copy_from_slice(&id.to_be_bytes());
+                        info[10..12].copy_from_slice(&256u16.to_be_bytes());
+                        info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
+                        info[14..18].copy_from_slice(&[3, 9, 1, 1]);
+                        info[18..26].copy_from_slice(b"test-rsa");
+                        (inner.command | RESPONSE_BIT, info)
                     }
-                    info[8..10].copy_from_slice(&id.to_be_bytes());
-                    info[10..12].copy_from_slice(&256u16.to_be_bytes());
-                    info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
-                    info[14..18].copy_from_slice(&[3, 9, 1, 1]);
-                    info[18..26].copy_from_slice(b"test-rsa");
-                    (inner.command | RESPONSE_BIT, info)
                 }
                 value if value == CommandCode::GetPublicKey as u8 => {
-                    let mut key = vec![9, 0xc5];
-                    key.resize(257, 0xa5);
-                    key[256] |= 1;
-                    (inner.command | RESPONSE_BIT, key)
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
+                        let private_key =
+                            PKey::private_key_from_raw_bytes(private_key, Id::X25519)?;
+                        let mut key = vec![56];
+                        key.extend_from_slice(&private_key.raw_public_key()?);
+                        (inner.command | RESPONSE_BIT, key)
+                    } else {
+                        let mut key = vec![9, 0xc5];
+                        key.resize(257, 0xa5);
+                        key[256] |= 1;
+                        (inner.command | RESPONSE_BIT, key)
+                    }
                 }
                 value
                     if value == CommandCode::GenerateAsymmetricKey as u8
@@ -724,6 +794,22 @@ pub(crate) mod tests {
                 {
                     let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                     let id = if requested == 0 { 2 } else { requested };
+                    if inner.command == CommandCode::GenerateAsymmetricKey as u8
+                        && inner.data.get(52) == Some(&56)
+                    {
+                        let private_key = match id {
+                            7 => RFC7748_ALICE_PRIVATE_KEY,
+                            8 => RFC7748_BOB_PRIVATE_KEY,
+                            _ => {
+                                let mut private_key = [0; 32];
+                                rand_bytes(&mut private_key)?;
+                                private_key
+                            }
+                        };
+                        self.x25519_private_keys
+                            .borrow_mut()
+                            .insert(id, private_key);
+                    }
                     if !self.objects.borrow().contains(&id) {
                         self.objects.borrow_mut().push(id);
                     }
@@ -741,6 +827,17 @@ pub(crate) mod tests {
                 }
                 value if value == CommandCode::DecryptPkcs1 as u8 => {
                     (inner.command | RESPONSE_BIT, b"plaintext".to_vec())
+                }
+                value if value == CommandCode::DeriveEcdh as u8 => {
+                    if inner.data.len() == 34 {
+                        let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                        (
+                            inner.command | RESPONSE_BIT,
+                            self.x25519_derive(id, &inner.data[2..])?,
+                        )
+                    } else {
+                        (inner.command | RESPONSE_BIT, vec![0x42; 32])
+                    }
                 }
                 value if value == CommandCode::ResetDevice as u8 && inner.data == [0xde] => {
                     (COMMAND_ERROR, vec![0x0b])
@@ -782,7 +879,9 @@ pub(crate) mod tests {
                 connector: peer,
                 session: std::rc::Rc::new(RefCell::new(None)),
                 version: (2, 4, 1),
-                algorithms: vec![1, 5, 9, 12, 19, 20, 21, 22, 25, 48, 50, 51, 52, 53, 54],
+                algorithms: vec![
+                    1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+                ],
             }),
             commands,
             corrupt_response_mac,
@@ -1022,7 +1121,12 @@ pub(crate) mod tests {
         }) {
             let data = [code as u8, 0xa5];
             let command = Command::raw(code, &data).unwrap();
-            assert_eq!(session.send_command(&peer, &command).unwrap(), data);
+            let response = session.send_command(&peer, &command).unwrap();
+            if code == CommandCode::DeriveEcdh {
+                assert_eq!(response, vec![0x42; 32]);
+            } else {
+                assert_eq!(response, data);
+            }
         }
     }
 
