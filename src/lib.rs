@@ -5201,7 +5201,6 @@ fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     matches!(
         attribute_type,
         x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
-            || x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE
             || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
             || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
             || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
@@ -5370,6 +5369,9 @@ impl TokenObject {
             x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(bool_attribute(false))
             }
+            x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
+                Some(ulong_attribute(CKC_X_509 as CK_ULONG))
+            }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::Secret(value) => Some(ulong_attribute(value.len() as CK_ULONG)),
                 KeyMaterial::YubiHsm { length, .. }
@@ -5527,7 +5529,6 @@ impl TokenObject {
                 }
             }
             x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
-                || x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE
                 || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
                 || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
