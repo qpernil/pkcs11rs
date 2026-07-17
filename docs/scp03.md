@@ -1,16 +1,16 @@
 # SCP03 configuration
 
-Set `PKCS11RS_YUBIKEY_BACKEND=scp03` to use this backend for PC/SC YubiKeys.
-The default PC/SC backend is `piv`; see `docs/piv.md`. Selecting one backend is
-necessary because selecting another card application invalidates the current
-application's authentication and secure-channel state.
+Set `PKCS11RS_CCID_SECURE_CHANNEL=scp03` to use SCP03 as the transport for
+the selected CCID applet on a PC/SC card. See [`ccid.md`](ccid.md) for the
+default applet list, allowlist, AID overrides, and shared-slot behavior.
 
-The PC/SC YubiKey path selects an application and establishes an SCP03 channel
-during `C_Login`. The selected AID defaults to the Issuer Security Domain
-`A0 00 00 01 51 00 00 00`. Set `PKCS11RS_SCP03_AID` to the hexadecimal AID of
-another YubiKey application when the channel is intended for that application.
-YubiKey secure channels are scoped to the selected application; selecting a
-different application ends the channel and requires another login.
+For `globalplatform`, the selected AID is the Secure Domain used for
+management. For PIV and OpenPGP, the transport initializes against those
+applets' AIDs directly.
+
+The PC/SC CCID path selects an application and establishes an SCP03 channel
+during `C_Login`. The channel is scoped to the selected application and is
+renegotiated when another applet is selected.
 
 SCP03 configuration is supplied as hexadecimal environment variables:
 
@@ -21,7 +21,6 @@ SCP03 configuration is supplied as hexadecimal environment variables:
 - `PKCS11RS_SCP03_KEY_VERSION` (optional decimal or `0x` byte, default `255`)
 - `PKCS11RS_SCP03_KEY_ID` (optional decimal or `0x` byte, default `0`)
 - `PKCS11RS_SCP03_SECURITY_LEVEL` (optional, default `0x33`)
-- `PKCS11RS_SCP03_AID` (optional selected application AID)
 
 When none of ENC, MAC, DEK, or BMK is configured, key version `255` uses the
 YubiKey factory test value `40 41 42 43 44 45 46 47 48 49 4A 4B 4C 4D 4E 4F`
