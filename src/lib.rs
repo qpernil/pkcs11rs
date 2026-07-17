@@ -1370,18 +1370,27 @@ fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>,
 
 impl PivSlot {
     fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        let version = connector
+            .firmware_version()
+            .map(|(major, minor, patch)| piv::Version {
+                major,
+                minor,
+                patch,
+            })
+            .unwrap_or(piv::Version {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            });
+        let serial = connector.serial().to_owned();
         Self {
             connector,
             application_aid,
             slot_description: None,
             authenticated: Rc::new(Cell::new(false)),
             cached_pin: Rc::new(RefCell::new(None)),
-            version: piv::Version {
-                major: 0,
-                minor: 0,
-                patch: 0,
-            },
-            serial: String::from("0"),
+            version,
+            serial,
             keys: Vec::new(),
             certificates: Vec::new(),
         }
@@ -1394,7 +1403,29 @@ impl PivSlot {
             Some((info.version.major, info.version.minor, info.version.patch)),
             serial.as_deref(),
         );
-        self.serial = serial.unwrap_or_default();
+        if let Some(serial) = serial {
+            self.serial = serial;
+        }
+    }
+
+    fn reported_version(&self) -> piv::Version {
+        if self.version
+            != (piv::Version {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            })
+        {
+            return self.version;
+        }
+        self.connector
+            .firmware_version()
+            .map(|(major, minor, patch)| piv::Version {
+                major,
+                minor,
+                patch,
+            })
+            .unwrap_or(self.version)
     }
 }
 
@@ -1414,7 +1445,11 @@ impl Slot for PivSlot {
         "YubiKey PIV"
     }
     fn serial(&self) -> &str {
-        &self.serial
+        if self.serial == "0" || self.serial.is_empty() {
+            self.connector.serial()
+        } else {
+            &self.serial
+        }
     }
     fn major(&self) -> u8 {
         self.version.major
@@ -1556,17 +1591,18 @@ impl Slot for PivSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        info.firmwareVersion.major = self.version.major;
-        info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
-        apply_connector_versions(info, self.connector.as_ref());
+        let version = self.reported_version();
+        info.firmwareVersion.major = version.major;
+        info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
         info.ulMaxPinLen = 8;
         info.ulMinPinLen = 6;
-        info.firmwareVersion.major = self.version.major;
-        info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
+        let version = self.reported_version();
+        info.firmwareVersion.major = version.major;
+        info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
         Ok(())
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
@@ -1883,13 +1919,18 @@ struct OpenPgpCertificate {
 
 impl OpenPgpSlot {
     fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        let serial = connector.serial().to_owned();
+        let version = connector
+            .firmware_version()
+            .map(|(major, minor, _patch)| (major, minor))
+            .unwrap_or((0, 0));
         Self {
             connector,
             application_aid,
             authenticated: Rc::new(Cell::new(false)),
             cached_pin: Rc::new(RefCell::new(None)),
-            version: (0, 0),
-            serial: String::from("0"),
+            version,
+            serial,
             pin_min: 6,
             pin_max: 127,
             kdf: None,
@@ -1905,6 +1946,16 @@ impl OpenPgpSlot {
         self.pin_min = info.pin_min;
         self.pin_max = info.pin_max;
         self.kdf = info.kdf.clone();
+    }
+
+    fn reported_version(&self) -> (u8, u8) {
+        if self.version != (0, 0) {
+            return self.version;
+        }
+        self.connector
+            .firmware_version()
+            .map(|(major, minor, _patch)| (major, minor))
+            .unwrap_or(self.version)
     }
 }
 
@@ -1945,7 +1996,11 @@ impl Slot for OpenPgpSlot {
         "YubiKey OpenPGP"
     }
     fn serial(&self) -> &str {
-        &self.serial
+        if self.serial == "0" {
+            self.connector.serial()
+        } else {
+            &self.serial
+        }
     }
     fn major(&self) -> u8 {
         self.version.0
@@ -2008,19 +2063,41 @@ impl Slot for OpenPgpSlot {
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+        let info = OpenPgpClient
+            .select(self.connector.as_ref(), &self.application_aid)
+            .map_err(|error| {
+                log!(
+                    1,
+                    "OpenPGP application metadata discovery failed: {:?}",
+                    error
+                );
+                error
+            })?;
         self.update_info(&info);
         self.keys.clear();
         self.certificates.clear();
         for key_ref in OpenPgpKeyRef::ALL {
             let Some(algorithm) = info.algorithm(key_ref) else {
+                log!(
+                    1,
+                    "OpenPGP key reference {:?} has no supported algorithm",
+                    key_ref
+                );
                 continue;
             };
-            let Ok(public_key) =
-                OpenPgpClient.public_key(self.connector.as_ref(), key_ref, algorithm)
-            else {
-                continue;
-            };
+            let public_key =
+                match OpenPgpClient.public_key(self.connector.as_ref(), key_ref, algorithm) {
+                    Ok(public_key) => public_key,
+                    Err(error) => {
+                        log!(
+                            1,
+                            "OpenPGP public-key discovery failed for {:?}: {:?}",
+                            key_ref,
+                            error
+                        );
+                        continue;
+                    }
+                };
             self.keys.push(openpgp::KeyInfo {
                 key_ref,
                 algorithm,
@@ -2043,14 +2120,16 @@ impl Slot for OpenPgpSlot {
             info.hardwareVersion.major = major;
             info.hardwareVersion.minor = minor;
         }
-        info.firmwareVersion.major = self.version.0;
-        info.firmwareVersion.minor = self.version.1;
+        let (major, minor) = self.reported_version();
+        info.firmwareVersion.major = major;
+        info.firmwareVersion.minor = minor;
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        info.firmwareVersion.major = self.version.0;
-        info.firmwareVersion.minor = self.version.1;
+        let (major, minor) = self.reported_version();
+        info.firmwareVersion.major = major;
+        info.firmwareVersion.minor = minor;
         info.ulMinPinLen = self.pin_min as CK_ULONG;
         info.ulMaxPinLen = self.pin_max as CK_ULONG;
         Ok(())
@@ -3604,17 +3683,18 @@ impl PcscAppletConnector {
     }
 
     fn ensure_selected(&self) -> Result<(), Error> {
-        if self.protocol.is_none() || !self.enabled.get() {
-            return select_application(self.base.as_ref(), &self.application_aid);
+        let mut state = self.state.try_borrow_mut()?;
+        if state.application_aid != self.application_aid {
+            state.session = None;
+            state.application_aid.clear();
+            select_application(self.base.as_ref(), &self.application_aid)?;
+            state.application_aid = self.application_aid.clone();
         }
 
-        let mut state = self.state.try_borrow_mut()?;
-        if state.application_aid == self.application_aid && state.session.is_some() {
+        if self.protocol.is_none() || !self.enabled.get() || state.session.is_some() {
             return Ok(());
         }
-        state.session = None;
-        state.application_aid.clear();
-        select_application(self.base.as_ref(), &self.application_aid)?;
+
         let established = match self.protocol.ok_or(CKR_ARGUMENTS_BAD)? {
             SecureChannelProtocol::Scp03 => {
                 let keys = Scp03KeySet::from_environment()?;
@@ -3736,6 +3816,10 @@ impl Connector for PcscAppletConnector {
         self.clear_secure_channel();
         match select_application(self.base.as_ref(), &self.application_aid) {
             Ok(()) => {
+                if let Ok(mut state) = self.state.try_borrow_mut() {
+                    state.session = None;
+                    state.application_aid = self.application_aid.clone();
+                }
                 self.applet_present.set(true);
                 self.forget_discovery_error();
                 Ok(())
@@ -4836,7 +4920,10 @@ impl Context {
                             );
                             continue;
                         }
-                        let application_aid_for_log = application_aid.clone();
+                        if let Ok(mut state) = shared_state.try_borrow_mut() {
+                            state.session = None;
+                            state.application_aid = application_aid.clone();
+                        }
                         let application_connector: Rc<dyn Connector> =
                             Rc::new(PcscAppletConnector::new(
                                 base_connector.clone(),
@@ -4866,10 +4953,11 @@ impl Context {
                         };
                         if slot.is_present() {
                             if let Err(error) = slot.init_slot() {
-                                log!(1,                                    "CCID application initialization failed for reader {}, applet {}, AID {:?}: {:?}",
+                                log!(
+                                    1,
+                                    "CCID application initialization failed for reader {}, applet {}: {:?}",
                                     base_connector.name(),
                                     application_label,
-                                    application_aid_for_log,
                                     error
                                 );
                                 slot.set_discovery_error(&error);

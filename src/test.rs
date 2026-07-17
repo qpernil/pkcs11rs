@@ -546,6 +546,10 @@ impl crate::Connector for SelectableConnector {
         0
     }
 
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        Some((5, 7, 0))
+    }
+
     fn is_present(&self) -> bool {
         self.present.get()
     }
@@ -1680,6 +1684,39 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
 }
 
 #[test]
+fn pcsc_applet_connector_reuses_selected_aid() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "SELECT0001",
+    });
+    let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let connector = crate::PcscAppletConnector::new(
+        base.clone(),
+        &aid,
+        None,
+        std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+    );
+    let mut receive = [0; 16];
+
+    assert!(crate::Connector::transmit(
+        &connector,
+        &[0x00, 0x00],
+        &mut receive,
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok());
+    base.select_ok.set(false);
+    assert!(crate::Connector::transmit(
+        &connector,
+        &[0x00, 0x00],
+        &mut receive,
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok());
+}
+
+#[test]
 fn openpgp_slot_info_reports_application_version_and_serial() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
@@ -1718,6 +1755,54 @@ fn openpgp_slot_info_reports_application_version_and_serial() {
 }
 
 #[test]
+fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "12345678",
+    });
+    let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let slot = crate::OpenPgpSlot::new(connector, aid);
+
+    assert_eq!(crate::Slot::serial(&slot), "12345678");
+}
+
+#[test]
+fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "12345678",
+    });
+    let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let slot = crate::OpenPgpSlot::new(connector, aid);
+
+    let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
+    assert!(crate::Slot::get_slot_info(&slot, &mut slot_info).is_ok());
+    assert_eq!(
+        (
+            slot_info.firmwareVersion.major,
+            slot_info.firmwareVersion.minor
+        ),
+        (5, 7)
+    );
+}
+
+#[test]
 fn openpgp_metadata_failure_does_not_hide_selected_applet() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
@@ -1737,6 +1822,35 @@ fn openpgp_metadata_failure_does_not_hide_selected_applet() {
     assert!(crate::Slot::is_present(&slot));
     assert!(crate::Slot::init_slot(&mut slot).is_err());
     assert!(crate::Slot::is_present(&slot));
+}
+
+#[test]
+fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "12345678",
+    });
+    let aid = crate::piv::PIV_AID.to_vec();
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let slot = crate::PivSlot::new(connector, aid);
+
+    assert_eq!(crate::Slot::serial(&slot), "12345678");
+    let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
+    assert!(crate::Slot::get_slot_info(&slot, &mut slot_info).is_ok());
+    assert_eq!(
+        (
+            slot_info.firmwareVersion.major,
+            slot_info.firmwareVersion.minor
+        ),
+        (5, 70)
+    );
 }
 
 #[test]
