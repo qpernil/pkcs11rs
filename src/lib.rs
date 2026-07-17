@@ -66,6 +66,12 @@ use scp11::{Scp11KeySet, Scp11Variant};
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 
+mod openpgp;
+use openpgp::{
+    Algorithm as OpenPgpAlgorithm, Client as OpenPgpClient, KeyRef as OpenPgpKeyRef,
+    PublicKey as OpenPgpPublicKey,
+};
+
 mod yubihsm;
 use yubihsm::{
     get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
@@ -811,6 +817,57 @@ fn piv_sign_mechanism_supported(algorithm: piv::Algorithm, mechanism: CK_MECHANI
     }
 }
 
+fn openpgp_sign_mechanism_supported(
+    algorithm: OpenPgpAlgorithm,
+    mechanism: CK_MECHANISM_TYPE,
+) -> bool {
+    match algorithm {
+        OpenPgpAlgorithm::Rsa { .. } => matches!(
+            mechanism,
+            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
+        ),
+        OpenPgpAlgorithm::Ecdsa(_) => {
+            matches!(
+                mechanism,
+                x if x == CKM_ECDSA as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE
+                    || x == CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE
+            )
+        }
+        OpenPgpAlgorithm::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+        OpenPgpAlgorithm::Ecdh(_) => false,
+    }
+}
+
+fn openpgp_ec_coordinate_length(algorithm: OpenPgpAlgorithm) -> Option<usize> {
+    match algorithm {
+        OpenPgpAlgorithm::Ecdsa(curve) | OpenPgpAlgorithm::Ecdh(curve) => curve.coordinate_length(),
+        OpenPgpAlgorithm::Ed25519 => Some(32),
+        OpenPgpAlgorithm::Rsa { .. } => None,
+    }
+}
+
+fn openpgp_ec_params(algorithm: OpenPgpAlgorithm) -> Option<Vec<u8>> {
+    match algorithm {
+        OpenPgpAlgorithm::Ecdsa(curve) | OpenPgpAlgorithm::Ecdh(curve) => {
+            Some(curve.oid().to_vec())
+        }
+        OpenPgpAlgorithm::Ed25519 => Some(openpgp::Curve::Ed25519.oid().to_vec()),
+        OpenPgpAlgorithm::Rsa { .. } => None,
+    }
+}
+
+fn openpgp_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
+    if signature.len() == coordinate_length * 2 {
+        return Ok(signature.to_vec());
+    }
+    piv_ecdsa_signature(signature, coordinate_length)
+}
+
 fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<MessageDigest> {
     match mechanism {
         x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
@@ -1140,6 +1197,7 @@ fn verify_rsa_pss(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum YubiKeyBackend {
     Piv,
+    OpenPgp,
     Scp03,
     Scp11a,
     Scp11b,
@@ -1148,6 +1206,9 @@ enum YubiKeyBackend {
 fn configured_yubikey_backend() -> Result<YubiKeyBackend, Error> {
     match std::env::var("PKCS11RS_YUBIKEY_BACKEND") {
         Ok(value) if value.eq_ignore_ascii_case("piv") => Ok(YubiKeyBackend::Piv),
+        Ok(value) if value.eq_ignore_ascii_case("openpgp") || value.eq_ignore_ascii_case("pgp") => {
+            Ok(YubiKeyBackend::OpenPgp)
+        }
         Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(YubiKeyBackend::Scp03),
         Ok(value) if value.eq_ignore_ascii_case("scp11a") => Ok(YubiKeyBackend::Scp11a),
         Ok(value)
@@ -1622,6 +1683,287 @@ impl Slot for PivSlot {
     }
 }
 
+#[derive(Debug)]
+struct OpenPgpSlot {
+    connector: Rc<dyn Connector>,
+    authenticated: Rc<Cell<bool>>,
+    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
+    version: (u8, u8),
+    serial: String,
+    pin_min: u8,
+    pin_max: u8,
+    keys: Vec<openpgp::KeyInfo>,
+}
+
+impl OpenPgpSlot {
+    fn new(connector: Rc<dyn Connector>) -> Self {
+        Self {
+            connector,
+            authenticated: Rc::new(Cell::new(false)),
+            cached_pin: Rc::new(RefCell::new(None)),
+            version: (0, 0),
+            serial: String::from("0"),
+            pin_min: 6,
+            pin_max: 127,
+            keys: Vec::new(),
+        }
+    }
+
+    fn update_info(&mut self, info: &openpgp::ApplicationInfo) {
+        self.version = info.version;
+        self.serial = info.serial.clone();
+        self.pin_min = info.pin_min;
+        self.pin_max = info.pin_max;
+    }
+}
+
+fn openpgp_public_material(key: &OpenPgpPublicKey) -> Vec<u8> {
+    match key {
+        OpenPgpPublicKey::Rsa(key) => key.n().to_vec(),
+        OpenPgpPublicKey::Ec { point, .. } | OpenPgpPublicKey::Raw { key: point, .. } => {
+            point.clone()
+        }
+    }
+}
+
+fn openpgp_rsa_components(key: &OpenPgpPublicKey) -> (Vec<u8>, Vec<u8>) {
+    match key {
+        OpenPgpPublicKey::Rsa(key) => (key.n().to_vec(), key.e().to_vec()),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+fn openpgp_key_can_sign(key_ref: OpenPgpKeyRef, algorithm: OpenPgpAlgorithm) -> bool {
+    matches!(
+        key_ref,
+        OpenPgpKeyRef::Signature | OpenPgpKeyRef::Authentication
+    ) && !matches!(algorithm, OpenPgpAlgorithm::Ecdh(_))
+}
+
+impl Slot for OpenPgpSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn name(&self) -> String {
+        self.connector.name()
+    }
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+    fn product(&self) -> &str {
+        "YubiKey OpenPGP"
+    }
+    fn serial(&self) -> &str {
+        &self.serial
+    }
+    fn major(&self) -> u8 {
+        self.version.0
+    }
+    fn minor(&self) -> u8 {
+        self.version.1
+    }
+    fn is_present(&self) -> bool {
+        self.connector.is_present()
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        self.connector.refresh()
+    }
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(OpenPgpSession {
+            slotID,
+            flags,
+            connector: self.connector.clone(),
+            authenticated: self.authenticated.clone(),
+            cached_pin: self.cached_pin.clone(),
+        })
+    }
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        let info = OpenPgpClient.select(self.connector.as_ref())?;
+        self.update_info(&info);
+        OpenPgpClient.verify_pin(self.connector.as_ref(), pin, false)?;
+        *self.cached_pin.try_borrow_mut()? = Some(pin.to_vec());
+        self.authenticated.set(true);
+        Ok(())
+    }
+    fn logout(&mut self) -> Result<(), Error> {
+        OpenPgpClient.unverify(self.connector.as_ref(), false);
+        OpenPgpClient.unverify(self.connector.as_ref(), true);
+        self.authenticated.set(false);
+        *self.cached_pin.try_borrow_mut()? = None;
+        Ok(())
+    }
+    fn init_slot(&mut self) -> Result<(), Error> {
+        let info = OpenPgpClient.select(self.connector.as_ref())?;
+        self.update_info(&info);
+        self.keys.clear();
+        for key_ref in OpenPgpKeyRef::ALL {
+            let Some(algorithm) = info.algorithm(key_ref) else {
+                continue;
+            };
+            let Ok(public_key) =
+                OpenPgpClient.public_key(self.connector.as_ref(), key_ref, algorithm)
+            else {
+                continue;
+            };
+            self.keys.push(openpgp::KeyInfo {
+                key_ref,
+                algorithm,
+                public_key,
+                pin_policy: info.pin_policy,
+            });
+        }
+        Ok(())
+    }
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        info.ulMinPinLen = self.pin_min as CK_ULONG;
+        info.ulMaxPinLen = self.pin_max as CK_ULONG;
+        Ok(())
+    }
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        let mut mechanisms = Vec::new();
+        let mut add = |type_, min_key_size, max_key_size, flags| {
+            mechanisms.push(MechanismDetails {
+                type_,
+                min_key_size,
+                max_key_size,
+                flags,
+            });
+        };
+        for type_ in [
+            CKM_RSA_X_509,
+            CKM_RSA_PKCS,
+            CKM_SHA256_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+        ] {
+            add(
+                type_ as CK_MECHANISM_TYPE,
+                2048,
+                4096,
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            );
+        }
+        for type_ in [CKM_RSA_PKCS, CKM_RSA_X_509] {
+            add(
+                type_ as CK_MECHANISM_TYPE,
+                2048,
+                4096,
+                (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+            );
+        }
+        add(
+            CKM_ECDSA as CK_MECHANISM_TYPE,
+            256,
+            521,
+            CKF_SIGN as CK_FLAGS,
+        );
+        add(
+            CKM_EDDSA as CK_MECHANISM_TYPE,
+            256,
+            256,
+            CKF_SIGN as CK_FLAGS,
+        );
+        mechanisms
+    }
+    fn clear_session(&mut self) {
+        self.authenticated.set(false);
+        *self.cached_pin.borrow_mut() = None;
+    }
+    fn login_is_active(&self) -> bool {
+        self.authenticated.get()
+    }
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let mut objects = Vec::with_capacity(self.keys.len() * 2);
+        for key in &self.keys {
+            let public_bytes = openpgp_public_material(&key.public_key);
+            let key_type = key.algorithm.key_type() as CK_KEY_TYPE;
+            let (modulus, public_exponent) = openpgp_rsa_components(&key.public_key);
+            let can_sign = openpgp_key_can_sign(key.key_ref, key.algorithm);
+            let can_decrypt = key.key_ref == OpenPgpKeyRef::Decipher && key.algorithm.is_rsa();
+            let label = format!("OpenPGP {:?} key", key.key_ref).into_bytes();
+            let id = vec![key.key_ref as u8];
+            let public_material = match &key.public_key {
+                OpenPgpPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
+                OpenPgpPublicKey::Ec { curve, point } => KeyMaterial::OpenPgpPublic {
+                    algorithm: if matches!(key.algorithm, OpenPgpAlgorithm::Ecdh(_)) {
+                        OpenPgpAlgorithm::Ecdh(*curve)
+                    } else {
+                        OpenPgpAlgorithm::Ecdsa(*curve)
+                    },
+                    public_key: point.clone(),
+                },
+                OpenPgpPublicKey::Raw { curve, key } => KeyMaterial::OpenPgpPublic {
+                    algorithm: if *curve == openpgp::Curve::Ed25519 {
+                        OpenPgpAlgorithm::Ed25519
+                    } else {
+                        OpenPgpAlgorithm::Ecdh(*curve)
+                    },
+                    public_key: key.clone(),
+                },
+            };
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8).into_bytes(),
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type,
+                label: label.clone(),
+                id: id.clone(),
+                token: true,
+                private: false,
+                encrypt: key.key_ref == OpenPgpKeyRef::Decipher && key.algorithm.is_rsa(),
+                decrypt: false,
+                sign: false,
+                verify: can_sign,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: true,
+                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                owner_session: None,
+                material: public_material,
+            });
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("openpgp-{:02x}-private", key.key_ref as u8).into_bytes(),
+                class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                key_type,
+                label,
+                id,
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: can_decrypt,
+                sign: can_sign,
+                verify: false,
+                derive: false,
+                sensitive: true,
+                extractable: false,
+                always_sensitive: true,
+                never_extractable: true,
+                local: true,
+                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                owner_session: None,
+                material: KeyMaterial::OpenPgpPrivate {
+                    key_ref: key.key_ref,
+                    algorithm: key.algorithm,
+                    modulus,
+                    public_exponent,
+                    public_key: public_bytes,
+                    pin_policy: key.pin_policy,
+                },
+            });
+        }
+        Ok(objects)
+    }
+}
+
 impl Slot for YubiHsmSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -1871,6 +2213,17 @@ trait Session {
         _input: &[u8],
         _pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn openpgp_sign(
+        &self,
+        _key_ref: OpenPgpKeyRef,
+        _input: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn openpgp_decipher(&self, _input: &[u8], _raw: bool) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
@@ -2506,6 +2859,82 @@ impl Session for PivSession {
 }
 
 #[derive(Debug)]
+struct OpenPgpSession {
+    slotID: CK_SLOT_ID,
+    flags: CK_FLAGS,
+    connector: Rc<dyn Connector>,
+    authenticated: Rc<Cell<bool>>,
+    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
+}
+
+impl OpenPgpSession {
+    fn verify_pin(&self, extended: bool) -> Result<(), Error> {
+        let pin = self
+            .cached_pin
+            .borrow()
+            .clone()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, extended)
+    }
+}
+
+impl Session for OpenPgpSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slotID
+    }
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+    fn get_session_info(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        for chunk in output.chunks_mut(256) {
+            let random = OpenPgpClient.challenge(self.connector.as_ref(), chunk.len())?;
+            chunk.copy_from_slice(&random);
+        }
+        Ok(())
+    }
+    fn openpgp_sign(
+        &self,
+        key_ref: OpenPgpKeyRef,
+        input: &[u8],
+        pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
+        if !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let extended = key_ref == OpenPgpKeyRef::Authentication;
+        if extended || pin_policy == 0 {
+            self.verify_pin(extended)?;
+        }
+        let result = OpenPgpClient.sign(self.connector.as_ref(), key_ref, input);
+        if pin_policy == 0 {
+            OpenPgpClient.unverify(self.connector.as_ref(), false);
+            self.authenticated.set(false);
+        }
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+            self.authenticated.set(false);
+        }
+        result
+    }
+    fn openpgp_decipher(&self, input: &[u8], raw: bool) -> Result<Vec<u8>, Error> {
+        if !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        self.verify_pin(true)?;
+        let result = OpenPgpClient.decipher(self.connector.as_ref(), input, raw);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+            self.authenticated.set(false);
+        }
+        result
+    }
+}
+
+#[derive(Debug)]
 struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
@@ -3016,6 +3445,18 @@ enum KeyMaterial {
         algorithm: piv::Algorithm,
         public_key: Vec<u8>,
     },
+    OpenPgpPrivate {
+        key_ref: OpenPgpKeyRef,
+        algorithm: OpenPgpAlgorithm,
+        modulus: Vec<u8>,
+        public_exponent: Vec<u8>,
+        public_key: Vec<u8>,
+        pin_policy: u8,
+    },
+    OpenPgpPublic {
+        algorithm: OpenPgpAlgorithm,
+        public_key: Vec<u8>,
+    },
     PivCertificate {
         algorithm: piv::Algorithm,
         value: Vec<u8>,
@@ -3057,6 +3498,27 @@ impl std::fmt::Debug for KeyMaterial {
                 public_key,
             } => fmt
                 .debug_struct("PivPublic")
+                .field("algorithm", algorithm)
+                .field("size", &public_key.len())
+                .finish(),
+            Self::OpenPgpPrivate {
+                key_ref,
+                algorithm,
+                modulus,
+                pin_policy,
+                ..
+            } => fmt
+                .debug_struct("OpenPgpPrivate")
+                .field("key_ref", key_ref)
+                .field("algorithm", algorithm)
+                .field("size", &modulus.len())
+                .field("pin_policy", pin_policy)
+                .finish(),
+            Self::OpenPgpPublic {
+                algorithm,
+                public_key,
+            } => fmt
+                .debug_struct("OpenPgpPublic")
                 .field("algorithm", algorithm)
                 .field("size", &public_key.len())
                 .finish(),
@@ -3507,6 +3969,7 @@ impl Context {
                     let connector: Rc<dyn Connector> = Rc::new(connector);
                     let mut slot: Box<dyn Slot> = match configured_yubikey_backend() {
                         Ok(YubiKeyBackend::Piv) => Box::new(PivSlot::new(connector)),
+                        Ok(YubiKeyBackend::OpenPgp) => Box::new(OpenPgpSlot::new(connector)),
                         Ok(YubiKeyBackend::Scp03) => Box::new(YubiKeySlot {
                             connector,
                             session: Rc::new(RefCell::new(None)),
@@ -3771,6 +4234,9 @@ impl TokenObject {
                 } if piv_effective_pin_policy(*slot, *pin_policy) == 3 => {
                     Some(bool_attribute(true))
                 }
+                KeyMaterial::OpenPgpPrivate { pin_policy, .. } if *pin_policy == 0 => {
+                    Some(bool_attribute(true))
+                }
                 _ => None,
             },
             x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.encrypt)),
@@ -3784,6 +4250,8 @@ impl TokenObject {
                     KeyMaterial::PivPrivate { .. }
                         | KeyMaterial::PivPublic { .. }
                         | KeyMaterial::PivCertificate { .. }
+                        | KeyMaterial::OpenPgpPrivate { .. }
+                        | KeyMaterial::OpenPgpPublic { .. }
                 ) =>
             {
                 Some(bool_attribute(false))
@@ -3794,6 +4262,8 @@ impl TokenObject {
                     KeyMaterial::PivPrivate { .. }
                         | KeyMaterial::PivPublic { .. }
                         | KeyMaterial::PivCertificate { .. }
+                        | KeyMaterial::OpenPgpPrivate { .. }
+                        | KeyMaterial::OpenPgpPublic { .. }
                 ) =>
             {
                 Some(bool_attribute(false))
@@ -3804,6 +4274,8 @@ impl TokenObject {
                     KeyMaterial::PivPrivate { .. }
                         | KeyMaterial::PivPublic { .. }
                         | KeyMaterial::PivCertificate { .. }
+                        | KeyMaterial::OpenPgpPrivate { .. }
+                        | KeyMaterial::OpenPgpPublic { .. }
                 ) =>
             {
                 Some(bool_attribute(false))
@@ -3849,6 +4321,9 @@ impl TokenObject {
                 KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
                     Some(modulus.clone())
                 }
+                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(modulus.clone())
+                }
                 KeyMaterial::YubiHsm {
                     algorithm,
                     public_key,
@@ -3864,6 +4339,9 @@ impl TokenObject {
                 KeyMaterial::PivPrivate {
                     public_exponent, ..
                 } if !public_exponent.is_empty() => Some(public_exponent.clone()),
+                KeyMaterial::OpenPgpPrivate {
+                    public_exponent, ..
+                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                     Some(vec![0x01, 0x00, 0x01])
                 }
@@ -3873,6 +4351,9 @@ impl TokenObject {
                 KeyMaterial::RsaPrivate(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
                 KeyMaterial::RsaPublic(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
                 KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+                }
+                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
                     Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
                 }
                 KeyMaterial::YubiHsm {
@@ -3892,6 +4373,8 @@ impl TokenObject {
                 | KeyMaterial::PivPublic { algorithm, .. } => {
                     piv_ec_parameters(*algorithm).map(<[u8]>::to_vec)
                 }
+                KeyMaterial::OpenPgpPrivate { algorithm, .. }
+                | KeyMaterial::OpenPgpPublic { algorithm, .. } => openpgp_ec_params(*algorithm),
                 _ => None,
             },
             x if x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
@@ -3920,6 +4403,23 @@ impl TokenObject {
                         public_key,
                     } if !public_key.is_empty() => {
                         let point = if piv_ec_coordinate_length(*algorithm).is_some() {
+                            let mut point = Vec::with_capacity(public_key.len() + 1);
+                            point.push(0x04);
+                            point.extend_from_slice(public_key);
+                            point
+                        } else {
+                            public_key.clone()
+                        };
+                        der_octet_string(&point)
+                    }
+                    KeyMaterial::OpenPgpPublic {
+                        algorithm,
+                        public_key,
+                    } if !public_key.is_empty() => {
+                        let point = if matches!(
+                            algorithm,
+                            OpenPgpAlgorithm::Ecdsa(_) | OpenPgpAlgorithm::Ecdh(_)
+                        ) {
                             let mut point = Vec::with_capacity(public_key.len() + 1);
                             point.push(0x04);
                             point.extend_from_slice(public_key);
@@ -5984,7 +6484,9 @@ fn crypt_init(
                     } else {
                         matches!(
                             object.material,
-                            KeyMaterial::YubiHsm { .. } | KeyMaterial::PivPrivate { .. }
+                            KeyMaterial::YubiHsm { .. }
+                                | KeyMaterial::PivPrivate { .. }
+                                | KeyMaterial::OpenPgpPrivate { .. }
                         )
                     }
             }
@@ -6069,6 +6571,7 @@ fn crypt(
         let required = match &operation.key {
             KeyMaterial::RsaPublic(key) => key.size() as usize,
             KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
+            KeyMaterial::OpenPgpPrivate { modulus, .. } if !encrypting => modulus.len(),
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                 match yubihsm_rsa_length(*algorithm) {
                     Ok(length) => length,
@@ -6158,6 +6661,15 @@ fn crypt(
                         }
                         _ => Err(CKR_MECHANISM_INVALID.into()),
                     }
+                }
+                KeyMaterial::OpenPgpPrivate { algorithm, .. } if !encrypting => {
+                    if !matches!(algorithm, OpenPgpAlgorithm::Rsa { .. }) {
+                        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+                    }
+                    ctx._get_session(session_handle)?.1.openpgp_decipher(
+                        input,
+                        operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+                    )
                 }
                 KeyMaterial::YubiHsm { id, .. } => {
                     let command = match operation.mechanism {
@@ -6412,6 +6924,7 @@ fn sign_init(
                 object.material,
                 KeyMaterial::RsaPrivate(_)
                     | KeyMaterial::PivPrivate { .. }
+                    | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
             )
         {
@@ -6422,8 +6935,14 @@ fn sign_init(
             KeyMaterial::PivPrivate { algorithm, .. }
                 if piv_sign_mechanism_supported(*algorithm, mechanism.mechanism)
         );
+        let openpgp_mechanism_supported = matches!(
+            &object.material,
+            KeyMaterial::OpenPgpPrivate { algorithm, .. }
+                if openpgp_sign_mechanism_supported(*algorithm, mechanism.mechanism)
+        );
         if !matches!(object.material, KeyMaterial::YubiHsm { .. })
             && !piv_mechanism_supported
+            && !openpgp_mechanism_supported
             && !matches!(
                 &object.material,
                 KeyMaterial::RsaPrivate(_) if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
@@ -6533,6 +7052,14 @@ fn sign(
                 piv::Algorithm::Ed25519 => 64,
                 piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
+            KeyMaterial::OpenPgpPrivate {
+                algorithm, modulus, ..
+            } => match algorithm {
+                OpenPgpAlgorithm::Rsa { .. } => modulus.len(),
+                OpenPgpAlgorithm::Ecdsa(_) => openpgp_ec_coordinate_length(*algorithm).unwrap() * 2,
+                OpenPgpAlgorithm::Ed25519 => 64,
+                OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
             KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                 match *algorithm {
                     YUBIHSM_ALGO_RSA_2048 => 256,
@@ -6634,6 +7161,44 @@ fn sign(
                     match algorithm {
                         piv::Algorithm::EccP256 => piv_ecdsa_signature(&response, 32),
                         piv::Algorithm::EccP384 => piv_ecdsa_signature(&response, 48),
+                        _ => Ok(response),
+                    }
+                }
+                KeyMaterial::OpenPgpPrivate {
+                    key_ref,
+                    algorithm,
+                    pin_policy,
+                    ..
+                } => {
+                    let digest = piv_hash_mechanism(operation.mechanism)
+                        .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                        .transpose()
+                        .map_err(Error::from)?;
+                    let input = match algorithm {
+                        OpenPgpAlgorithm::Rsa { .. } => {
+                            if piv_is_hashed_rsa_pkcs(operation.mechanism) {
+                                piv_digest_info(
+                                    operation.mechanism,
+                                    digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                )
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?
+                            } else {
+                                data.to_vec()
+                            }
+                        }
+                        OpenPgpAlgorithm::Ecdsa(_) => digest.unwrap_or_else(|| data.to_vec()),
+                        OpenPgpAlgorithm::Ed25519 => data.to_vec(),
+                        OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                    };
+                    let response = ctx._get_session(session_handle)?.1.openpgp_sign(
+                        *key_ref,
+                        &input,
+                        *pin_policy,
+                    )?;
+                    match algorithm {
+                        OpenPgpAlgorithm::Ecdsa(curve) => {
+                            openpgp_signature(&response, curve.coordinate_length().unwrap())
+                        }
                         _ => Ok(response),
                     }
                 }
