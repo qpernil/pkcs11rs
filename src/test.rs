@@ -413,6 +413,10 @@ fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
         crate::piv_effective_pin_policy(crate::piv::Slot::CardAuthentication, 0),
         1
     );
+    assert_eq!(
+        crate::piv_effective_pin_policy(crate::piv::Slot::Signature, 0),
+        3
+    );
     for slot in crate::piv::Slot::all() {
         assert!(!crate::piv_policy_requires_login(*slot, 1));
         assert!(crate::piv_policy_requires_login(*slot, 2));
