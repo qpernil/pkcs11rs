@@ -258,8 +258,20 @@ impl ResponseApdu {
         })
     }
 
-    pub(crate) fn require_success(self) -> Result<Self, Error> {
+    pub(crate) fn require_success(self, command: &CommandApdu) -> Result<Self, Error> {
         if self.status != RESPONSE_OK {
+            log!(
+                1,
+                "APDU command {:02x}{:02x}{:02x}{:02x} failed with status {:04x} ({} data bytes, Le {:?}, extended {})",
+                command.cla,
+                command.ins,
+                command.p1,
+                command.p2,
+                self.status,
+                command.data.len(),
+                command.le,
+                command.extended
+            );
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(self)
@@ -623,7 +635,7 @@ impl Scp03Session {
             le: Some(256),
             extended: false,
         };
-        let initialize_response = transmit(connector, &initialize)?.require_success()?;
+        let initialize_response = transmit(connector, &initialize)?.require_success(&initialize)?;
         let update = InitializeUpdate::parse(&initialize_response.data)?;
         if update.scp_id != 0x03
             || (keys.key_version != 0 && update.key_version != keys.key_version)
@@ -655,7 +667,7 @@ impl Scp03Session {
             &initialize_response.data[21..29],
         )?;
         let authenticate = session.external_authenticate(&host_cryptogram)?;
-        transmit(connector, &authenticate)?.require_success()?;
+        transmit(connector, &authenticate)?.require_success(&authenticate)?;
         Ok(session)
     }
 
@@ -789,7 +801,7 @@ impl Scp03Session {
         Err(CKR_DEVICE_ERROR.into())
     }
 
-    fn collect_response_chain(
+    pub(crate) fn collect_response_chain(
         connector: &dyn Connector,
         mut response: ResponseApdu,
     ) -> Result<ResponseApdu, Error> {
@@ -957,7 +969,7 @@ pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Resul
         le: Some(256),
         extended: false,
     };
-    transmit(connector, &select)?.require_success()?;
+    transmit(connector, &select)?.require_success(&select)?;
     Ok(())
 }
 
@@ -1800,6 +1812,27 @@ mod tests {
     }
 
     #[test]
+    fn collects_unprotected_iso_response_chains() {
+        let connector = ScriptedConnector::new(vec![hex("BB CC 90 00")]);
+        let response = Scp03Session::collect_response_chain(
+            &connector,
+            ResponseApdu {
+                data: hex("AA"),
+                status: 0x6102,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            response,
+            ResponseApdu {
+                data: hex("AA BB CC"),
+                status: RESPONSE_OK,
+            }
+        );
+        assert_eq!(connector.commands.into_inner(), vec![hex("00 C0 00 00 02")]);
+    }
+
+    #[test]
     fn response_chain_requires_progress_after_initial_continuation() {
         let command = CommandApdu {
             cla: 0x80,
@@ -2274,7 +2307,7 @@ mod tests {
             let authenticate = session.external_authenticate(&host_cryptogram).unwrap();
             transmit(&connector, &authenticate)
                 .unwrap()
-                .require_success()
+                .require_success(&authenticate)
                 .unwrap();
 
             for (p1, expected) in [0x20, 0x40, 0x80].into_iter().zip(plain_responses) {

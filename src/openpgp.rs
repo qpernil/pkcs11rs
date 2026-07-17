@@ -2,7 +2,7 @@
 
 use crate::{
     error::Error,
-    scp03::{select_application, transmit, CommandApdu},
+    scp03::{select_application, transmit, CommandApdu, Scp03Session},
     Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
     CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
@@ -547,19 +547,34 @@ impl Client {
     }
 
     fn transmit(&self, connector: &dyn Connector, command: CommandApdu) -> Result<Vec<u8>, Error> {
-        let response = transmit(connector, &command)?;
-        require_success(response.status)?;
+        let response =
+            Scp03Session::collect_response_chain(connector, transmit(connector, &command)?)?;
+        require_success(response.status, &command)?;
         Ok(response.data)
     }
 }
 
-fn require_success(status: u16) -> Result<(), Error> {
+fn require_success(status: u16, command: &CommandApdu) -> Result<(), Error> {
     match status {
         STATUS_SUCCESS => Ok(()),
         0x6983 => Err(CKR_PIN_LOCKED.into()),
         0x6982 | 0x6985 => Err(CKR_USER_NOT_LOGGED_IN.into()),
         0x63c0..=0x63cf => Err(CKR_PIN_INCORRECT.into()),
-        _ => Err(CKR_DEVICE_ERROR.into()),
+        _ => {
+            log!(
+                1,
+                "OpenPGP command {:02x}{:02x}{:02x}{:02x} failed with status {:04x} ({} data bytes, Le {:?}, extended {})",
+                command.cla,
+                command.ins,
+                command.p1,
+                command.p2,
+                status,
+                command.data.len(),
+                command.le,
+                command.extended
+            );
+            Err(CKR_DEVICE_ERROR.into())
+        }
     }
 }
 
@@ -608,7 +623,10 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
 }
 
 fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
-    let body = tlv_value(0xf9, encoded)?;
+    let body = match tlv_value(0xf9, encoded) {
+        Ok(body) => body,
+        Err(_) => encoded.to_vec(),
+    };
     let fields = parse_tlvs(&body)?;
     let algorithm = *field_value(&fields, 0x81)
         .ok_or(CKR_DATA_INVALID)?
@@ -844,5 +862,22 @@ mod tests {
                 0x90, 0x1f, 0x44, 0xb6,
             ]
         );
+    }
+
+    #[test]
+    fn parses_wrapped_and_unwrapped_kdf_data_objects() {
+        let inner = vec![
+            0x81, 0x01, 0x03, 0x82, 0x01, 0x08, 0x83, 0x04, 0x00, 0x01, 0x86, 0xa0, 0x84, 0x08,
+            b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7',
+        ];
+        let mut wrapped = vec![0xf9, inner.len() as u8];
+        wrapped.extend_from_slice(&inner);
+
+        for encoded in [inner, wrapped] {
+            let kdf = parse_kdf(&encoded).unwrap().unwrap();
+            assert_eq!(kdf.hash_algorithm, 0x08);
+            assert_eq!(kdf.iteration_count, 100_000);
+            assert_eq!(kdf.user_salt, b"01234567");
+        }
     }
 }

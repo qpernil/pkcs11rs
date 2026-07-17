@@ -128,19 +128,16 @@ impl Scp11KeySet {
         self.upload_host_certificates(connector)?;
         let host_ephemeral_point = encode_public_point(&ephemeral)?;
         let request_data = authentication_data(&host_ephemeral_point, self.variant.parameter())?;
-        let response = transmit(
-            connector,
-            &CommandApdu {
-                cla: 0x80,
-                ins: self.variant.instruction(),
-                p1: self.key_version,
-                p2: self.variant.key_id(),
-                data: request_data.clone(),
-                le: Some(256),
-                extended: false,
-            },
-        )?
-        .require_success()?;
+        let authenticate = CommandApdu {
+            cla: 0x80,
+            ins: self.variant.instruction(),
+            p1: self.key_version,
+            p2: self.variant.key_id(),
+            data: request_data.clone(),
+            le: Some(256),
+            extended: false,
+        };
+        let response = transmit(connector, &authenticate)?.require_success(&authenticate)?;
         let authentication = parse_authentication_response(&response.data)?;
         let card_ephemeral_key = parse_public_point(authentication.card_ephemeral_point)?;
 
@@ -183,19 +180,16 @@ impl Scp11KeySet {
         };
         for (index, certificate) in host.certificates.iter().enumerate() {
             let more = index + 1 < host.certificates.len();
-            transmit(
-                connector,
-                &CommandApdu {
-                    cla: 0x80,
-                    ins: 0x2a,
-                    p1: host.key_version,
-                    p2: host.key_id | if more { 0x80 } else { 0 },
-                    data: certificate.clone(),
-                    le: None,
-                    extended: certificate.len() > u8::MAX as usize,
-                },
-            )?
-            .require_success()?;
+            let upload = CommandApdu {
+                cla: 0x80,
+                ins: 0x2a,
+                p1: host.key_version,
+                p2: host.key_id | if more { 0x80 } else { 0 },
+                data: certificate.clone(),
+                le: None,
+                extended: certificate.len() > u8::MAX as usize,
+            };
+            transmit(connector, &upload)?.require_success(&upload)?;
         }
         Ok(())
     }
