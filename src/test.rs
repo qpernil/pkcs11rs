@@ -7480,3 +7480,120 @@ fn bindgen_test_layout_CK_FUNCTION_LIST() {
         )
     );
 }
+
+#[cfg(feature = "abi-tests")]
+#[test]
+fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let mut count = 0;
+    assert_eq!(
+        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        slots,
+        vec![
+            crate::ABI_TEST_SLOT_ID,
+            crate::ABI_TEST_PIV_SLOT_ID,
+            crate::ABI_TEST_SCP03_SLOT_ID,
+            crate::ABI_TEST_YUBIHSM_SLOT_ID,
+            crate::ABI_TEST_SCP11_SLOT_ID,
+        ]
+    );
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            crate::ABI_TEST_SCP03_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_ptr() as *mut CK_BYTE,
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut random = [0; 16];
+    assert_eq!(
+        crate::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(random, [0; 16]);
+
+    finalize_for_test();
+}
+
+#[cfg(not(feature = "abi-tests"))]
+#[test]
+#[ignore = "requires a live YubiKey or YubiHSM"]
+fn live_hardware_slots_report_metadata() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let mut count = 0;
+    assert_eq!(
+        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    for slot_id in slots {
+        let mut slot_info = CK_SLOT_INFO {
+            slotDescription: [0; 64],
+            manufacturerID: [0; 32],
+            flags: 0,
+            hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+            firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+        };
+        let mut token_info = CK_TOKEN_INFO {
+            label: [0; 32],
+            manufacturerID: [0; 32],
+            model: [0; 16],
+            serialNumber: [0; 16],
+            flags: 0,
+            ulMaxSessionCount: 0,
+            ulSessionCount: 0,
+            ulMaxRwSessionCount: 0,
+            ulRwSessionCount: 0,
+            ulMaxPinLen: 0,
+            ulMinPinLen: 0,
+            ulTotalPublicMemory: 0,
+            ulFreePublicMemory: 0,
+            ulTotalPrivateMemory: 0,
+            ulFreePrivateMemory: 0,
+            hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+            firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+            utcTime: [0; 16],
+        };
+        assert_eq!(
+            crate::C_GetSlotInfo(slot_id, &mut slot_info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            CKR_OK as CK_RV
+        );
+    }
+    finalize_for_test();
+}

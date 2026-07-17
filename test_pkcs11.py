@@ -74,6 +74,10 @@ CKS_RO_USER_FUNCTIONS = 1
 CKS_RW_PUBLIC_SESSION = 2
 CKS_RW_USER_FUNCTIONS = 3
 ABI_TEST_SLOT_ID = 77
+ABI_TEST_PIV_SLOT_ID = 78
+ABI_TEST_SCP03_SLOT_ID = 79
+ABI_TEST_YUBIHSM_SLOT_ID = 80
+ABI_TEST_SCP11_SLOT_ID = 81
 CK_UNAVAILABLE_INFORMATION = (1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1
 
 
@@ -638,6 +642,142 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_Login(session, CKU_USER, pin, len(pin)),
             CKR_OK,
         )
+
+    def open_slot_session(self, slot_id: int) -> int:
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        return session.value
+
+    def login_with_pin(self, session: int, value: bytes) -> None:
+        pin = (CK_BYTE * len(value))(*value)
+        self.assertEqual(
+            self.lib.C_Login(session, CKU_USER, pin, len(pin)),
+            CKR_OK,
+        )
+
+    def test_abi_hardware_fixtures_are_present_without_real_hardware(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        count = CK_ULONG()
+        self.assertEqual(self.lib.C_GetSlotList(1, None, ctypes.byref(count)), CKR_OK)
+        slots = (CK_ULONG * count.value)()
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+            CKR_OK,
+        )
+        self.assertEqual(list(slots), [
+            ABI_TEST_SLOT_ID,
+            ABI_TEST_PIV_SLOT_ID,
+            ABI_TEST_SCP03_SLOT_ID,
+            ABI_TEST_YUBIHSM_SLOT_ID,
+            ABI_TEST_SCP11_SLOT_ID,
+        ])
+
+    def test_abi_piv_fixture_exercises_sign_dispatch(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
+        self.login_with_pin(session, b"123456")
+
+        object_class = CK_ULONG(CKO_PRIVATE_KEY)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual((found.value, handle.value), (1, 4))
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        data = (CK_BYTE * 4)(1, 2, 3, 4)
+        signature_len = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session, data, len(data), None, ctypes.byref(signature_len)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(signature_len.value, 256)
+
+    def test_abi_scp03_fixture_exercises_secure_session_dispatch(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_SCP03_SLOT_ID)
+        self.login_session(session)
+        random_data = (CK_BYTE * 16)()
+        self.assertEqual(
+            self.lib.C_GenerateRandom(session, random_data, len(random_data)), CKR_OK
+        )
+        self.assertEqual(bytes(random_data), bytes(16))
+
+    def test_abi_scp11_fixture_exercises_secure_session_dispatch(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_SCP11_SLOT_ID)
+        self.login_session(session)
+        random_data = (CK_BYTE * 16)()
+        self.assertEqual(
+            self.lib.C_GenerateRandom(session, random_data, len(random_data)), CKR_OK
+        )
+        self.assertEqual(bytes(random_data), bytes(16))
+
+    def test_abi_yubihsm_fixture_exercises_remote_sign_dispatch(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        object_class = CK_ULONG(CKO_PRIVATE_KEY)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
+        data = (CK_BYTE * 4)(1, 2, 3, 4)
+        signature_len = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session, data, len(data), None, ctypes.byref(signature_len)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(signature_len.value, 256)
 
     def test_legacy_function_list_entries_are_stubbed(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
