@@ -233,7 +233,11 @@ pub(crate) fn parse_metadata_public_key(
 pub(crate) struct Client;
 
 impl Client {
-    pub(crate) fn select(&self, connector: &dyn Connector) -> Result<DeviceInfo, Error> {
+    pub(crate) fn select(
+        &self,
+        connector: &dyn Connector,
+        application_aid: &[u8],
+    ) -> Result<DeviceInfo, Error> {
         let response = self.transmit(
             connector,
             CommandApdu {
@@ -241,7 +245,7 @@ impl Client {
                 ins: INS_SELECT,
                 p1: 0x04,
                 p2: 0,
-                data: PIV_AID.to_vec(),
+                data: application_aid.to_vec(),
                 le: Some(256),
                 extended: false,
             },
@@ -720,7 +724,7 @@ mod tests {
             response(&[5, 7, 2], STATUS_SUCCESS),
             response(&0x01020304u32.to_be_bytes(), STATUS_SUCCESS),
         ]);
-        let info = Client.select(&connector).unwrap();
+        let info = Client.select(&connector, &PIV_AID).unwrap();
         assert_eq!(
             info.version,
             Version {

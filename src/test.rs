@@ -505,6 +505,62 @@ impl crate::Connector for FailingConnector {
     }
 }
 
+#[derive(Debug)]
+struct SelectableConnector {
+    present: std::cell::Cell<bool>,
+    select_ok: std::cell::Cell<bool>,
+}
+
+impl crate::Connector for SelectableConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+
+    fn product(&self) -> &str {
+        "Selectable connector"
+    }
+
+    fn serial(&self) -> &str {
+        "SELECT0001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        self.present.get()
+    }
+
+    fn buffer_size(&self) -> usize {
+        16
+    }
+
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::error::Error> {
+        if !self.present.get() {
+            return Err(rusb::Error::NoDevice.into());
+        }
+        if send_buffer.get(1) == Some(&0xa4) && !self.select_ok.get() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);
+        Ok(&receive_buffer[..2])
+    }
+}
+
 unsafe extern "C" fn test_create_mutex(_mutex: CK_VOID_PTR_PTR) -> CK_RV {
     CKR_OK as CK_RV
 }
@@ -1539,14 +1595,82 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 
 #[test]
 pub fn yubikey_login_preserves_connector_errors() {
-    let mut slot = crate::YubiKeySlot {
-        connector: std::rc::Rc::new(FailingConnector),
-        session: std::rc::Rc::new(std::cell::RefCell::new(None)),
-        protocol: crate::YubiKeySecureChannel::Scp03,
+    let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let mut slot = crate::GlobalPlatformSlot {
+        connector: std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &application_aid,
+            Some(crate::SecureChannelProtocol::Scp03),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        )),
+        application_aid,
+        authenticated: std::cell::Cell::new(false),
     };
 
     let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
+}
+
+#[test]
+fn applet_configuration_rejects_removed_transport_aliases() {
+    assert_eq!(
+        crate::parse_ccid_application("globalplatform").unwrap(),
+        crate::CcidApplication::GlobalPlatform
+    );
+    assert!(crate::parse_ccid_application("scp03").is_err());
+}
+
+#[test]
+fn ccid_application_discovery_defaults_to_supported_applets() {
+    assert_eq!(
+        crate::default_ccid_applications(),
+        vec![
+            crate::CcidApplication::Piv,
+            crate::CcidApplication::OpenPgp,
+            crate::CcidApplication::HsmAuth,
+            crate::CcidApplication::GlobalPlatform,
+        ]
+    );
+}
+
+#[test]
+fn pcsc_applet_presence_requires_a_successful_aid_select() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+    });
+    let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let connector = crate::PcscAppletConnector::new(
+        base.clone(),
+        &aid,
+        None,
+        std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+    );
+
+    assert!(crate::Connector::refresh(&connector).is_ok());
+    assert!(crate::Connector::is_present(&connector));
+    base.select_ok.set(false);
+    assert!(crate::Connector::refresh(&connector).is_err());
+    assert!(!crate::Connector::is_present(&connector));
+    assert!(connector
+        .discovery_error
+        .borrow()
+        .as_deref()
+        .is_some_and(|reason| reason.contains("Generic")));
+    base.select_ok.set(true);
+    assert!(crate::Connector::refresh(&connector).is_ok());
+    assert!(crate::Connector::is_present(&connector));
+    assert!(connector.discovery_error.borrow().is_none());
+}
+
+#[test]
+fn yubikey_application_list_is_an_allowlist() {
+    assert_eq!(
+        crate::parse_ccid_application_list("openpgp, piv, openpgp").unwrap(),
+        vec![crate::CcidApplication::OpenPgp, crate::CcidApplication::Piv,]
+    );
+    assert!(crate::parse_ccid_application_list(", ,").is_err());
 }
 
 #[test]
@@ -1555,26 +1679,32 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
-    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
-    let scp_session = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &application_aid,
+            Some(crate::SecureChannelProtocol::Scp03),
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
     {
         let mut context = crate::lock_context().unwrap();
         let context = context.as_mut().unwrap();
         context.slots.insert(
             TEST_SLOT_ID,
-            Box::new(crate::YubiKeySlot {
+            Box::new(crate::GlobalPlatformSlot {
                 connector: connector.clone(),
-                session: scp_session.clone(),
-                protocol: crate::YubiKeySecureChannel::Scp03,
+                application_aid,
+                authenticated: std::cell::Cell::new(false),
             }),
         );
         context.sessions.insert(
             TEST_SESSION_HANDLE,
-            Box::new(crate::YubiKeySession {
+            Box::new(crate::PcscAppletSession {
                 slotID: TEST_SLOT_ID,
                 flags: CKF_SERIAL_SESSION as CK_FLAGS,
                 connector,
-                session: scp_session,
             }),
         );
         context.logged_in_slots.insert(TEST_SLOT_ID);
@@ -2279,8 +2409,14 @@ pub fn token_and_mechanism_queries_require_a_present_token() {
     }
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
     let mut count = 0;
     let mut mechanism_info = unsafe { ::std::mem::zeroed::<CK_MECHANISM_INFO>() };
+    assert_eq!(
+        crate::C_GetSlotInfo(TEST_SLOT_ID, &mut slot_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(slot_info.flags & CKF_TOKEN_PRESENT as CK_FLAGS, 0);
     assert_eq!(
         crate::C_GetTokenInfo(TEST_SLOT_ID, &mut token_info),
         CKR_TOKEN_NOT_PRESENT as CK_RV

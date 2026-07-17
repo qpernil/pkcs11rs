@@ -65,6 +65,110 @@ pub(crate) struct CommandApdu {
 }
 
 impl CommandApdu {
+    pub(crate) fn decode(encoded: &[u8]) -> Result<Self, Error> {
+        if encoded.len() < 4 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let cla = encoded[0];
+        let ins = encoded[1];
+        let p1 = encoded[2];
+        let p2 = encoded[3];
+        let body = &encoded[4..];
+        if body.is_empty() {
+            return Ok(Self {
+                cla,
+                ins,
+                p1,
+                p2,
+                data: Vec::new(),
+                le: None,
+                extended: false,
+            });
+        }
+        if body.len() == 1 {
+            return Ok(Self {
+                cla,
+                ins,
+                p1,
+                p2,
+                data: Vec::new(),
+                le: Some(if body[0] == 0 { 256 } else { body[0] as u32 }),
+                extended: false,
+            });
+        }
+        if body[0] != 0 {
+            let data_len = body[0] as usize;
+            if body.len() == data_len + 1 {
+                return Ok(Self {
+                    cla,
+                    ins,
+                    p1,
+                    p2,
+                    data: body[1..].to_vec(),
+                    le: None,
+                    extended: false,
+                });
+            }
+            if body.len() == data_len + 2 {
+                return Ok(Self {
+                    cla,
+                    ins,
+                    p1,
+                    p2,
+                    data: body[1..1 + data_len].to_vec(),
+                    le: Some(if body[1 + data_len] == 0 {
+                        256
+                    } else {
+                        body[1 + data_len] as u32
+                    }),
+                    extended: false,
+                });
+            }
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        if body.len() == 3 {
+            let le = u16::from_be_bytes([body[1], body[2]]) as u32;
+            return Ok(Self {
+                cla,
+                ins,
+                p1,
+                p2,
+                data: Vec::new(),
+                le: Some(if le == 0 { 65_536 } else { le }),
+                extended: true,
+            });
+        }
+        if body.len() < 3 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let data_len = u16::from_be_bytes([body[1], body[2]]) as usize;
+        if body.len() == data_len + 3 {
+            return Ok(Self {
+                cla,
+                ins,
+                p1,
+                p2,
+                data: body[3..].to_vec(),
+                le: None,
+                extended: true,
+            });
+        }
+        if body.len() == data_len + 5 {
+            let le_offset = 3 + data_len;
+            let le = u16::from_be_bytes([body[le_offset], body[le_offset + 1]]) as u32;
+            return Ok(Self {
+                cla,
+                ins,
+                p1,
+                p2,
+                data: body[3..le_offset].to_vec(),
+                le: Some(if le == 0 { 65_536 } else { le }),
+                extended: true,
+            });
+        }
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
         let extended = self.uses_extended_length(self.data.len())?;
         let mut encoded = self.encode_header_and_data(self.data.len())?;
@@ -137,6 +241,12 @@ pub(crate) struct ResponseApdu {
 }
 
 impl ResponseApdu {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut encoded = self.data.clone();
+        encoded.extend_from_slice(&self.status.to_be_bytes());
+        encoded
+    }
+
     pub(crate) fn parse(encoded: &[u8]) -> Result<Self, Error> {
         if encoded.len() < 2 {
             return Err(CKR_DEVICE_ERROR.into());
@@ -896,20 +1006,6 @@ pub(crate) fn configured_security_level() -> Result<u8, Error> {
     Ok(security_level)
 }
 
-pub(crate) fn configured_application_aid() -> Result<Zeroizing<Vec<u8>>, Error> {
-    let aid = match std::env::var("PKCS11RS_SCP03_AID") {
-        Ok(value) => Zeroizing::new(parse_hex(&value)?),
-        Err(std::env::VarError::NotPresent) => {
-            Zeroizing::new(YUBIKEY_ISSUER_SECURITY_DOMAIN_AID.to_vec())
-        }
-        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
-    };
-    if !(5..=16).contains(&aid.len()) {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(aid)
-}
-
 fn yubico_diversify_key(
     bmk: &[u8],
     label: [u8; 4],
@@ -1228,6 +1324,77 @@ mod tests {
                 .as_slice(),
             hex("070a16b46b4d4144f79bdd9dd04a287c")
         );
+    }
+
+    #[test]
+    fn decodes_apdu_forms_used_by_secure_channel_transport() {
+        let commands = [
+            CommandApdu {
+                cla: 0,
+                ins: 0x84,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: Some(256),
+                extended: false,
+            },
+            CommandApdu {
+                cla: 0,
+                ins: 0xda,
+                p1: 0x01,
+                p2: 0x02,
+                data: vec![0xaa; 255],
+                le: Some(256),
+                extended: false,
+            },
+            CommandApdu {
+                cla: 0,
+                ins: 0xda,
+                p1: 0x01,
+                p2: 0x02,
+                data: vec![0xaa; 256],
+                le: Some(65_536),
+                extended: true,
+            },
+        ];
+        for command in commands {
+            let encoded = command.encode().unwrap();
+            assert_eq!(CommandApdu::decode(&encoded).unwrap(), command);
+        }
+    }
+
+    #[test]
+    fn secure_channel_connector_wraps_encoded_apdus() {
+        let base = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]))
+            as std::rc::Rc<dyn crate::Connector>;
+        let application_aid = vec![1, 2, 3, 4, 5];
+        let connector = crate::PcscAppletConnector {
+            base,
+            application_aid: application_aid.clone(),
+            protocol: Some(crate::SecureChannelProtocol::Scp03),
+            state: std::rc::Rc::new(RefCell::new(crate::SecureChannelState {
+                application_aid,
+                session: Some(test_session(0x01)),
+            })),
+            enabled: std::cell::Cell::new(true),
+            applet_present: std::cell::Cell::new(true),
+            discovery_error: RefCell::new(None),
+        };
+        let command = CommandApdu {
+            cla: 0,
+            ins: 0x84,
+            p1: 0,
+            p2: 0,
+            data: Vec::new(),
+            le: Some(8),
+            extended: false,
+        };
+        let encoded = command.encode().unwrap();
+        let mut received = vec![0; 256];
+        let response = connector
+            .transmit(&encoded, &mut received, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(response, hex("90 00"));
     }
 
     #[test]
@@ -1773,7 +1940,7 @@ mod tests {
     fn yubikey_sessions_share_and_require_the_authenticated_channel() {
         let connector = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]));
         let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
-        let session = crate::YubiKeySession {
+        let session = crate::GlobalPlatformSession {
             slotID: 1,
             flags: 0,
             connector: connector.clone(),
@@ -1820,7 +1987,7 @@ mod tests {
     fn yubikey_sessions_discard_desynchronized_channels() {
         let connector = std::rc::Rc::new(ScriptedConnector::new(vec![]));
         let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
-        let session = crate::YubiKeySession {
+        let session = crate::GlobalPlatformSession {
             slotID: 1,
             flags: 0,
             connector,
