@@ -6602,6 +6602,10 @@ fn login(
                 context_operation = Some((operation.slot_id, operation.context_specific_extended));
             }
             let (slot_id, extended) = context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            ctx.reconcile_login_state(slot_id);
+            if !ctx.is_slot_logged_in(slot_id) {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
             ctx._get_slot_mut(slot_id)?
                 .login_context_specific(pin, extended)?;
             return Ok(());

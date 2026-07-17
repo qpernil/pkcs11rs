@@ -2463,6 +2463,43 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
 }
 
 #[test]
+fn context_specific_login_requires_user_login() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    {
+        let mut context = crate::lock_context().unwrap();
+        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        object.private = false;
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn login_is_shared_and_logout_invalidates_private_objects() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
