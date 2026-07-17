@@ -450,7 +450,34 @@ fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
         YUBIHSM_ALGO_ED25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
         algorithm if is_yubihsm_rsa(algorithm) => CKK_RSA as CK_KEY_TYPE,
         algorithm if is_yubihsm_ec(algorithm) => CKK_EC as CK_KEY_TYPE,
-        _ => CKK_GENERIC_SECRET as CK_KEY_TYPE,
+        algorithm => CKK_VENDOR_DEFINED as CK_KEY_TYPE | algorithm as CK_KEY_TYPE,
+    }
+}
+
+fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
+    yubihsm_key_type(algorithm) < CKK_VENDOR_DEFINED as CK_KEY_TYPE
+}
+
+fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
+    if is_yubihsm_rsa(algorithm) {
+        Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    } else if is_yubihsm_ec(algorithm) || algorithm == YUBIHSM_ALGO_ED25519 {
+        Some(CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    } else if matches!(
+        algorithm,
+        YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256
+    ) {
+        Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE)
+    } else if matches!(
+        algorithm,
+        YUBIHSM_ALGO_HMAC_SHA1
+            | YUBIHSM_ALGO_HMAC_SHA256
+            | YUBIHSM_ALGO_HMAC_SHA384
+            | YUBIHSM_ALGO_HMAC_SHA512
+    ) {
+        Some(CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE)
+    } else {
+        None
     }
 }
 
@@ -480,17 +507,21 @@ fn yubihsm_token_objects(
     let id = info.id.to_be_bytes().to_vec();
     let unique = format!("yubihsm-{:02x}-{:04x}", info.object_type, info.id);
     let generated = info.origin & 0x01 != 0;
-    let sign = yubihsm_capability(&info.capabilities, 0x05)
-        || yubihsm_capability(&info.capabilities, 0x06)
-        || yubihsm_capability(&info.capabilities, 0x07)
-        || yubihsm_capability(&info.capabilities, 0x08)
-        || yubihsm_capability(&info.capabilities, 0x16);
-    let decrypt = yubihsm_capability(&info.capabilities, 0x09)
-        || yubihsm_capability(&info.capabilities, 0x0a)
-        || yubihsm_capability(&info.capabilities, 0x32)
-        || yubihsm_capability(&info.capabilities, 0x34);
-    let encrypt = yubihsm_capability(&info.capabilities, 0x33)
-        || yubihsm_capability(&info.capabilities, 0x35);
+    let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
+    let sign = algorithm_supported
+        && (yubihsm_capability(&info.capabilities, 0x05)
+            || yubihsm_capability(&info.capabilities, 0x06)
+            || yubihsm_capability(&info.capabilities, 0x07)
+            || yubihsm_capability(&info.capabilities, 0x08)
+            || yubihsm_capability(&info.capabilities, 0x16));
+    let decrypt = algorithm_supported
+        && (yubihsm_capability(&info.capabilities, 0x09)
+            || yubihsm_capability(&info.capabilities, 0x0a)
+            || yubihsm_capability(&info.capabilities, 0x32)
+            || yubihsm_capability(&info.capabilities, 0x34));
+    let encrypt = algorithm_supported
+        && (yubihsm_capability(&info.capabilities, 0x33)
+            || yubihsm_capability(&info.capabilities, 0x35));
     let material = yubihsm_remote_material(
         &info,
         public_key
@@ -532,18 +563,9 @@ fn yubihsm_token_objects(
             || class == CKO_SECRET_KEY as CK_OBJECT_CLASS
             || !yubihsm_capability(&info.capabilities, 0x10),
         local: generated,
-        key_gen_mechanism: generated.then_some(if is_yubihsm_rsa(info.algorithm) {
-            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-        } else if is_yubihsm_ec(info.algorithm) || info.algorithm == YUBIHSM_ALGO_ED25519 {
-            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-        } else if matches!(
-            info.algorithm,
-            YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256
-        ) {
-            CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
-        } else {
-            CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
-        }),
+        key_gen_mechanism: generated
+            .then(|| yubihsm_key_generation_mechanism(info.algorithm))
+            .flatten(),
         owner_session: None,
         material,
     }];
@@ -571,10 +593,10 @@ fn yubihsm_token_objects(
             id,
             token: true,
             private: false,
-            encrypt: is_yubihsm_rsa(info.algorithm),
+            encrypt: algorithm_supported && is_yubihsm_rsa(info.algorithm),
             decrypt: false,
             sign: false,
-            verify: sign,
+            verify: algorithm_supported && sign,
             derive: false,
             sensitive: false,
             extractable: true,

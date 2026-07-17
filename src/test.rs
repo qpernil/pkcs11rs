@@ -354,6 +354,49 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
 }
 
 #[test]
+fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
+    let unknown_algorithm = 0xfe;
+    let mut label = [0u8; 40];
+    label[..12].copy_from_slice(b"unknown-algo");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x05]),
+        id: 0x1234,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: unknown_algorithm,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: unknown_algorithm,
+        key: vec![0x5a; 32],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let vendor_key_type = CKK_VENDOR_DEFINED as CK_KEY_TYPE + unknown_algorithm as CK_KEY_TYPE;
+
+    assert_eq!(objects.len(), 2);
+    for object in &objects {
+        assert_eq!(object.key_type, vendor_key_type);
+        assert_eq!(
+            object.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+            Some(crate::ulong_attribute(
+                CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE,
+            ))
+        );
+        assert!(!object.sign);
+        assert!(!object.encrypt);
+        assert!(!object.decrypt);
+        assert!(!object.verify);
+    }
+    assert!(objects
+        .iter()
+        .all(|object| object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE));
+}
+
+#[test]
 fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
     let object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
