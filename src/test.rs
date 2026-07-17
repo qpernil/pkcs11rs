@@ -16,6 +16,15 @@ const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
 const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
+#[test]
+fn debug_level_configuration_has_three_modes() {
+    assert_eq!(crate::parse_debug_level(None), 0);
+    assert_eq!(crate::parse_debug_level(Some("0")), 0);
+    assert_eq!(crate::parse_debug_level(Some("1")), 1);
+    assert_eq!(crate::parse_debug_level(Some("2")), 2);
+    assert_eq!(crate::parse_debug_level(Some("enabled")), 2);
+}
+
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
 }
@@ -1706,6 +1715,28 @@ fn openpgp_slot_info_reports_application_version_and_serial() {
         (3, 4)
     );
     assert_eq!(crate::Slot::serial(&slot), "12345678");
+}
+
+#[test]
+fn openpgp_metadata_failure_does_not_hide_selected_applet() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "12345678",
+    });
+    let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let mut slot = crate::OpenPgpSlot::new(connector, aid);
+
+    assert!(crate::Slot::is_present(&slot));
+    assert!(crate::Slot::init_slot(&mut slot).is_err());
+    assert!(crate::Slot::is_present(&slot));
 }
 
 #[test]

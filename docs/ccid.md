@@ -42,3 +42,15 @@ OpenPGP, or YubiHSM Auth.
 
 Protocol-specific key and certificate configuration is documented in
 [`scp03.md`](scp03.md) and [`scp11.md`](scp11.md).
+
+## Diagnostics
+
+`PKCS11RS_DEBUG` is read once during `C_Initialize` and accepts a numeric
+log level:
+
+- unset or `0`: no diagnostic output;
+- `1`: initialization and applet-discovery failures only;
+- `2`: all diagnostic output, including API and transport tracing.
+
+Invalid non-empty values are treated as level `2` for compatibility with the
+previous boolean setting, where any value enabled diagnostics.
