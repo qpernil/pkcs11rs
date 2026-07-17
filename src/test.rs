@@ -1648,6 +1648,10 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
         std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
     );
 
+    assert_eq!(
+        crate::Connector::name(&connector),
+        crate::Connector::name(base.as_ref())
+    );
     assert!(crate::Connector::refresh(&connector).is_ok());
     assert!(crate::Connector::is_present(&connector));
     base.select_ok.set(false);
@@ -2401,9 +2405,8 @@ pub fn token_and_mechanism_queries_require_a_present_token() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     {
         let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
         context
-            .as_mut()
-            .unwrap()
             .slots
             .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
     }
@@ -5800,6 +5803,29 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
 }
 
 #[test]
+pub fn slot_info_does_not_rescan_dynamic_slots() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context
+            .slots
+            .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
+        context.dynamic_slots.insert(TEST_SLOT_ID);
+    }
+
+    let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
+    assert_eq!(
+        crate::C_GetSlotInfo(TEST_SLOT_ID, &mut slot_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(slot_info.flags & CKF_TOKEN_PRESENT as CK_FLAGS, 0);
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn generate_key_reports_mechanism_and_template_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -7694,6 +7720,7 @@ fn live_hardware_slots_report_metadata() {
         crate::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
         CKR_OK as CK_RV
     );
+    slots.truncate(count as usize);
     for slot_id in slots {
         let mut slot_info = CK_SLOT_INFO {
             slotDescription: [0; 64],
