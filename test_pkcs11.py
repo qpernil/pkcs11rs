@@ -2111,7 +2111,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(read_value_len.value, value_len.value)
 
         sensitive = CK_BYTE()
-        extractable = CK_BYTE(1)
+        extractable = CK_BYTE(0)
         always_sensitive = CK_BYTE()
         never_extractable = CK_BYTE()
         policy = (CK_ATTRIBUTE * 4)(
@@ -2196,7 +2196,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
         value_len = CK_ULONG(24)
         sensitive = CK_BYTE(0)
-        extractable = CK_BYTE(1)
+        extractable = CK_BYTE(0)
         template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_VALUE_LEN,
@@ -2234,21 +2234,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ctypes.byref(value_attribute),
                 1,
             ),
-            CKR_OK,
+            CKR_ATTRIBUTE_SENSITIVE,
         )
-        self.assertEqual(value_attribute.ulValueLen, value_len.value)
-        value = (CK_BYTE * value_attribute.ulValueLen)()
-        value_attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
-        self.assertEqual(
-            self.lib.C_GetAttributeValue(
-                session,
-                key.value,
-                ctypes.byref(value_attribute),
-                1,
-            ),
-            CKR_OK,
-        )
-        self.assertNotEqual(bytes(value), bytes(len(value)))
+        self.assertEqual(value_attribute.ulValueLen, CK_UNAVAILABLE_INFORMATION)
 
         sensitive.value = 1
         extractable.value = 0
@@ -2300,7 +2288,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(
             (always_sensitive.value, never_extractable.value),
-            (0, 0),
+            (0, 1),
         )
 
         value_attribute.pValue = None
