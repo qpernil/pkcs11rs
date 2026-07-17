@@ -1576,7 +1576,11 @@ impl Slot for PivSlot {
         self.keys.clear();
         self.certificates.clear();
         for slot in piv::Slot::all().iter().copied() {
-            let metadata = PivClient.metadata(self.connector.as_ref(), slot).ok();
+            let metadata = if slot == piv::Slot::Attestation {
+                None
+            } else {
+                PivClient.metadata(self.connector.as_ref(), slot).ok()
+            };
             let metadata_key = metadata.as_ref().and_then(|metadata| {
                 let algorithm = metadata
                     .algorithm
@@ -1602,6 +1606,9 @@ impl Slot for PivSlot {
                         attestation: slot == piv::Slot::Attestation,
                     });
                 }
+            }
+            if slot == piv::Slot::Attestation {
+                continue;
             }
             let (algorithm, public_key, metadata) = if let Some(key) = metadata_key {
                 (key.0, key.1, key.2)
@@ -1754,6 +1761,9 @@ impl Slot for PivSlot {
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {
+            if key.slot == piv::Slot::Attestation {
+                continue;
+            }
             let id = vec![key.slot as u8];
             let label = format!("PIV slot {:02X}", key.slot as u8).into_bytes();
             let key_type = key.public_key.key_type(key.algorithm);
@@ -1903,6 +1913,9 @@ impl Slot for PivSlot {
             });
         }
         for key in &self.keys {
+            if key.slot == piv::Slot::Attestation {
+                continue;
+            }
             let key_type = key.public_key.key_type(key.algorithm);
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
