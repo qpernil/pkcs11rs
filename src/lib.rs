@@ -5167,7 +5167,16 @@ impl TokenObject {
             CKA_SIGN as CK_ATTRIBUTE_TYPE,
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+            CKA_WRAP as CK_ATTRIBUTE_TYPE,
+            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
+            CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE,
+            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+            CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE,
+            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+            CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE,
             CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE,
             CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
             CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
             CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
@@ -5187,6 +5196,7 @@ impl TokenObject {
             CKA_ISSUER as CK_ATTRIBUTE_TYPE,
             CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
             CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
+            CKA_TRUSTED as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
@@ -5198,7 +5208,9 @@ impl TokenObject {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
             x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Some(self.unique_id.clone()),
-            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.key_type)),
+            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(ulong_attribute(self.key_type))
+            }
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.clone()),
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
@@ -5219,45 +5231,28 @@ impl TokenObject {
             x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.sign)),
             x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.verify)),
             x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.derive)),
-            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
-                && matches!(
-                    &self.material,
-                    KeyMaterial::PivPrivate { .. }
-                        | KeyMaterial::PivPublic { .. }
-                        | KeyMaterial::PivCertificate { .. }
-                        | KeyMaterial::OpenPgpPrivate { .. }
-                        | KeyMaterial::OpenPgpPublic { .. }
-                ) =>
+            x if self.is_key_object()
+                && (x == CKA_WRAP as CK_ATTRIBUTE_TYPE
+                    || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+                    || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+                    || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
+                    || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE) =>
             {
                 Some(bool_attribute(false))
             }
-            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
-                && matches!(
-                    &self.material,
-                    KeyMaterial::PivPrivate { .. }
-                        | KeyMaterial::PivPublic { .. }
-                        | KeyMaterial::PivCertificate { .. }
-                        | KeyMaterial::OpenPgpPrivate { .. }
-                        | KeyMaterial::OpenPgpPublic { .. }
-                ) =>
-            {
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }
-            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
-                && matches!(
-                    &self.material,
-                    KeyMaterial::PivPrivate { .. }
-                        | KeyMaterial::PivPublic { .. }
-                        | KeyMaterial::PivCertificate { .. }
-                        | KeyMaterial::OpenPgpPrivate { .. }
-                        | KeyMaterial::OpenPgpPublic { .. }
-                ) =>
-            {
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }
-            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
-                && matches!(&self.material, KeyMaterial::PivCertificate { .. }) =>
-            {
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(bool_attribute(false))
             }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -5266,6 +5261,15 @@ impl TokenObject {
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
                     Some(ulong_attribute(*length as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Secret(value) => Some(ulong_attribute((value.len() * 8) as CK_ULONG)),
+                KeyMaterial::YubiHsm { length, .. }
+                    if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+                {
+                    Some(ulong_attribute((*length * 8) as CK_ULONG))
                 }
                 _ => None,
             },
@@ -5426,6 +5430,29 @@ impl TokenObject {
             }
             _ => None,
         }
+    }
+
+    fn is_key_object(&self) -> bool {
+        self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
+    fn is_certificate_object(&self) -> bool {
+        self.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
+    }
+
+    fn is_immutable_object(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::PivPrivate { .. }
+                | KeyMaterial::PivPublic { .. }
+                | KeyMaterial::PivCertificate { .. }
+                | KeyMaterial::OpenPgpPrivate { .. }
+                | KeyMaterial::OpenPgpPublic { .. }
+                | KeyMaterial::OpenPgpCertificate { .. }
+                | KeyMaterial::YubiHsm { .. }
+        )
     }
 
     fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
@@ -7011,6 +7038,19 @@ fn get_attribute_value(
                     KeyMaterial::Secret(_) => {
                         attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
                         rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
+                    }
+                    KeyMaterial::PivCertificate { .. } | KeyMaterial::OpenPgpCertificate { .. } => {
+                        match object.attribute_value(attribute.type_) {
+                            Some(value) => {
+                                if let Err(e) = write_attribute_value(attribute, &value) {
+                                    rv = combine_attribute_rv(rv, e);
+                                }
+                            }
+                            None => {
+                                attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                                rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                            }
+                        }
                     }
                     _ => {
                         attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
