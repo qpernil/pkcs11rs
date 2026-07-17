@@ -397,6 +397,514 @@ fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
 }
 
 #[test]
+fn yubihsm_secret_key_sign_capability_matches_key_type() {
+    let mut label = [0u8; 40];
+    label[..11].copy_from_slice(b"hmac-secret");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x16]),
+        id: 0x1234,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_HMAC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_HMAC_SHA256,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, None).unwrap();
+
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert!(objects[0].sign);
+
+    let mut label = [0u8; 40];
+    label[..10].copy_from_slice(b"aes-secret");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x16]),
+        id: 0x1235,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_SYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_AES256,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, None).unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert!(!objects[0].sign);
+}
+
+#[test]
+fn yubihsm_x25519_objects_use_montgomery_key_type() {
+    assert_eq!(
+        crate::yubihsm_ec_algorithm(&[
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ])
+        .unwrap(),
+        crate::YUBIHSM_ALGO_X25519
+    );
+    assert_eq!(
+        crate::yubihsm_ec_algorithm(&[0x06, 0x03, 0x2b, 0x65, 0x6e]).unwrap(),
+        crate::YUBIHSM_ALGO_X25519
+    );
+    assert_eq!(
+        crate::yubihsm_ec_algorithm(&[0x06, 0x03, 0x2b, 0x65, 0x70]).unwrap(),
+        crate::YUBIHSM_ALGO_ED25519
+    );
+    assert_eq!(
+        crate::yubihsm_ec_algorithm(&[0x13, 0x07, 0x65, 0x64, 0x32, 0x35, 0x35, 0x31, 0x39])
+            .unwrap(),
+        crate::YUBIHSM_ALGO_ED25519
+    );
+    let mut label = [0u8; 40];
+    label[..6].copy_from_slice(b"x25519");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x05, 0x07, 0x0b, 0x17]),
+        id: 0x1234,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_X25519,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_X25519,
+        key: vec![0x5a; 32],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+
+    assert_eq!(objects.len(), 2);
+    for object in &objects {
+        assert_eq!(object.key_type, CKK_EC_MONTGOMERY as CK_KEY_TYPE);
+        assert_eq!(
+            object.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+            Some(vec![
+                0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+            ])
+        );
+        assert_eq!(
+            object.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+            Some(crate::ulong_attribute(
+                CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            ))
+        );
+    }
+    let public = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+        Some([0x04, 0x20].into_iter().chain([0x5a; 32]).collect())
+    );
+    assert!(!public.encrypt);
+    assert!(!public.decrypt);
+    assert!(!public.sign);
+    assert!(!public.verify);
+    assert!(!public.derive);
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert!(!private.encrypt);
+    assert!(!private.decrypt);
+    assert!(!private.sign);
+    assert!(!private.verify);
+    assert!(private.derive);
+}
+
+#[test]
+fn yubihsm_x25519_derive_returns_readable_session_object() {
+    yubihsm_x25519_two_way_derive(
+        7,
+        8,
+        Some(&crate::yubihsm::tests::RFC7748_ALICE_PUBLIC_KEY),
+        Some(&crate::yubihsm::tests::RFC7748_BOB_PUBLIC_KEY),
+        Some(&crate::yubihsm::tests::RFC7748_SHARED_SECRET),
+    );
+}
+
+#[test]
+fn yubihsm_ed25519_objects_use_edwards_key_type() {
+    let mut label = [0u8; 40];
+    label[..7].copy_from_slice(b"ed25519");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x08]),
+        id: 0x1236,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_ED25519,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_ED25519,
+        key: vec![0x5a; 32],
+    };
+    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    assert_eq!(objects.len(), 2);
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.key_type, CKK_EC_EDWARDS as CK_KEY_TYPE);
+    assert!(private.sign);
+    assert!(!private.verify);
+    assert!(!private.derive);
+    assert_eq!(
+        private.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x06, 0x03, 0x2b, 0x65, 0x70])
+    );
+    assert_eq!(
+        private.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+        Some(crate::ulong_attribute(
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+        ))
+    );
+    let public = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert!(public.verify);
+    assert_eq!(
+        public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+        Some([0x04, 0x20].into_iter().chain([0x5a; 32]).collect())
+    );
+}
+
+#[test]
+fn yubihsm_x25519_random_keys_derive_both_directions() {
+    yubihsm_x25519_two_way_derive(9, 10, None, None, None);
+}
+
+fn yubihsm_x25519_two_way_derive(
+    first_id: u8,
+    second_id: u8,
+    expected_first_public: Option<&[u8; 32]>,
+    expected_second_public: Option<&[u8; 32]>,
+    expected_shared: Option<&[u8; 32]>,
+) {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let generate_x25519 = |id: u8| {
+        let mut ec_params: [u8; 12] = [
+            0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+        ];
+        let mut key_id = [0, id];
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut derive = CK_TRUE as CK_BBOOL;
+        let mut public_template = [
+            CK_ATTRIBUTE {
+                type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+                pValue: ec_params.as_mut_ptr().cast(),
+                ulValueLen: ec_params.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: key_id.as_mut_ptr().cast(),
+                ulValueLen: key_id.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut token as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        let mut private_template = [
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: key_id.as_mut_ptr().cast(),
+                ulValueLen: key_id.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut token as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut derive as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        let mut public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            pParameter: ::std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let rv = crate::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public_key,
+            &mut private_key,
+        );
+        assert_eq!(rv, CKR_OK as CK_RV);
+        (public_key, private_key)
+    };
+    let _ = generate_x25519(first_id);
+    let _ = generate_x25519(second_id);
+
+    let find_key = |id: u8, class: CK_OBJECT_CLASS| {
+        let mut key_id = [0, id];
+        let mut class_value = class;
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: key_id.as_mut_ptr().cast(),
+                ulValueLen: key_id.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut class_value as *mut CK_OBJECT_CLASS).cast(),
+                ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+            },
+        ];
+        assert_eq!(
+            crate::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG,),
+            CKR_OK as CK_RV
+        );
+        let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut count = 0;
+        assert_eq!(
+            crate::C_FindObjects(session, &mut object, 1, &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(count, 1);
+        assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        object
+    };
+    let public_key_one = find_key(first_id, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    let private_handle = find_key(first_id, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
+    let public_key_two = find_key(second_id, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    let other_private_handle = find_key(second_id, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
+
+    let read_ec_point = |object| {
+        let mut point = vec![0u8; 34];
+        let mut attribute = CK_ATTRIBUTE {
+            type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+            pValue: point.as_mut_ptr().cast(),
+            ulValueLen: point.len() as CK_ULONG,
+        };
+        assert_eq!(
+            crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        point.truncate(attribute.ulValueLen as usize);
+        point
+    };
+    let mut public_data = read_ec_point(public_key_two);
+    if let Some(expected) = expected_second_public {
+        assert_eq!(&public_data[2..], expected);
+    }
+    let mut parameters = CK_ECDH1_DERIVE_PARAMS {
+        kdf: CKD_NULL as CK_EC_KDF_TYPE,
+        pSharedData: ::std::ptr::null_mut(),
+        ulSharedDataLen: 0,
+        pPublicData: public_data.as_mut_ptr(),
+        ulPublicDataLen: public_data.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    };
+    let mut derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_DeriveKey(
+            session,
+            &mut mechanism,
+            private_handle,
+            ::std::ptr::null_mut(),
+            0,
+            &mut derived_key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut private = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut encrypt = CK_TRUE as CK_BBOOL;
+    let mut decrypt = CK_TRUE as CK_BBOOL;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_TRUE as CK_BBOOL;
+    let mut value = [0u8; 32];
+    let mut attributes = [
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut token as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut private as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut sensitive as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut extractable as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut encrypt as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut decrypt as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut sign as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut verify as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut derive as *mut CK_BBOOL).cast(),
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr().cast(),
+            ulValueLen: value.len() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            session,
+            derived_key,
+            attributes.as_mut_ptr(),
+            attributes.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(token, CK_FALSE as CK_BBOOL);
+    assert_eq!(private, CK_FALSE as CK_BBOOL);
+    assert_eq!(sensitive, CK_FALSE as CK_BBOOL);
+    assert_eq!(extractable, CK_TRUE as CK_BBOOL);
+    assert_eq!(encrypt, CK_FALSE as CK_BBOOL);
+    assert_eq!(decrypt, CK_FALSE as CK_BBOOL);
+    assert_eq!(sign, CK_FALSE as CK_BBOOL);
+    assert_eq!(verify, CK_FALSE as CK_BBOOL);
+    assert_eq!(derive, CK_FALSE as CK_BBOOL);
+
+    let mut reverse_public_data = read_ec_point(public_key_one);
+    if let Some(expected) = expected_first_public {
+        assert_eq!(&reverse_public_data[2..], expected);
+    }
+    let mut reverse_parameters = CK_ECDH1_DERIVE_PARAMS {
+        kdf: CKD_NULL as CK_EC_KDF_TYPE,
+        pSharedData: ::std::ptr::null_mut(),
+        ulSharedDataLen: 0,
+        pPublicData: reverse_public_data.as_mut_ptr(),
+        ulPublicDataLen: reverse_public_data.len() as CK_ULONG,
+    };
+    let mut reverse_mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut reverse_parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    };
+    let mut reverse_derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_DeriveKey(
+            session,
+            &mut reverse_mechanism,
+            other_private_handle,
+            ::std::ptr::null_mut(),
+            0,
+            &mut reverse_derived_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut reverse_value = [0u8; 32];
+    let mut reverse_value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: reverse_value.as_mut_ptr().cast(),
+        ulValueLen: reverse_value.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            session,
+            reverse_derived_key,
+            &mut reverse_value_attribute,
+            1,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value, reverse_value);
+    if let Some(expected) = expected_shared {
+        assert_eq!(&value, expected);
+    }
+    assert!(commands
+        .borrow()
+        .iter()
+        .any(|(command, _)| { *command == crate::yubihsm::CommandCode::DeriveEcdh as u8 }));
+
+    finalize_for_test();
+}
+
+#[test]
 fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
     let object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
@@ -450,7 +958,7 @@ fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
     );
     assert_eq!(
         crate::piv_ec_parameters(crate::piv::Algorithm::X25519),
-        Some([0x13, 0x0b, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39].as_slice())
+        Some([0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39].as_slice())
     );
     assert_eq!(
         crate::piv_effective_pin_policy(crate::piv::Slot::CardAuthentication, 0),
@@ -464,6 +972,78 @@ fn piv_edwards_and_montgomery_parameters_match_ykcs11() {
         assert!(!crate::piv_policy_requires_login(*slot, 1));
         assert!(crate::piv_policy_requires_login(*slot, 2));
     }
+}
+
+#[test]
+fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let piv = crate::PivSlot {
+        connector: connector.clone(),
+        application_aid: crate::piv::PIV_AID.to_vec(),
+        slot_description: None,
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: crate::piv::Version {
+            major: 5,
+            minor: 7,
+            patch: 0,
+        },
+        serial: String::from("TEST0001"),
+        keys: Vec::new(),
+        certificates: Vec::new(),
+    };
+    let mechanism = |mechanisms: Vec<crate::MechanismDetails>, type_: CK_MECHANISM_TYPE| {
+        mechanisms
+            .into_iter()
+            .find(|mechanism| mechanism.type_ == type_)
+            .unwrap()
+    };
+    let piv_eddsa = mechanism(
+        crate::Slot::mechanisms(&piv),
+        CKM_EDDSA as CK_MECHANISM_TYPE,
+    );
+    assert_eq!((piv_eddsa.min_key_size, piv_eddsa.max_key_size), (255, 255));
+    let piv_ecdh = mechanism(
+        crate::Slot::mechanisms(&piv),
+        CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+    );
+    assert_eq!((piv_ecdh.min_key_size, piv_ecdh.max_key_size), (255, 384));
+
+    let openpgp = crate::OpenPgpSlot {
+        connector,
+        application_aid: Vec::new(),
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: (0, 0),
+        serial: String::from("TEST0001"),
+        pin_min: 6,
+        pin_max: 127,
+        kdf: None,
+        keys: vec![crate::openpgp::KeyInfo {
+            key_ref: crate::openpgp::KeyRef::Decipher,
+            algorithm: crate::openpgp::Algorithm::Ecdh(crate::openpgp::Curve::X25519),
+            public_key: crate::openpgp::PublicKey::Raw {
+                curve: crate::openpgp::Curve::X25519,
+                key: vec![0; 32],
+            },
+            pin_policy: 0,
+        }],
+        certificates: Vec::new(),
+    };
+    let openpgp_eddsa = mechanism(
+        crate::Slot::mechanisms(&openpgp),
+        CKM_EDDSA as CK_MECHANISM_TYPE,
+    );
+    assert_eq!(
+        (openpgp_eddsa.min_key_size, openpgp_eddsa.max_key_size),
+        (255, 255)
+    );
+    let openpgp_ecdh = mechanism(
+        crate::Slot::mechanisms(&openpgp),
+        CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+    );
+    assert_eq!(
+        (openpgp_ecdh.min_key_size, openpgp_ecdh.max_key_size),
+        (255, 521)
+    );
 }
 
 #[test]
@@ -482,6 +1062,8 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         crate::YUBIHSM_ALGO_AES128,
         crate::YUBIHSM_ALGO_HMAC_SHA1,
         crate::YUBIHSM_ALGO_HMAC_SHA512,
+        crate::YUBIHSM_ALGO_ED25519,
+        crate::YUBIHSM_ALGO_X25519,
         53,
     ]);
     let mechanism = |type_| {
@@ -502,8 +1084,32 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 128));
     let generated = mechanism(CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((generated.min_key_size, generated.max_key_size), (20, 64));
+    let montgomery = mechanism(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!(
+        (montgomery.min_key_size, montgomery.max_key_size),
+        (255, 255)
+    );
+    assert_ne!(montgomery.flags & CKF_EC_CURVENAME as CK_FLAGS, 0);
+    let ecdh = mechanism(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((ecdh.min_key_size, ecdh.max_key_size), (255, 255));
+    let edwards = mechanism(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((edwards.min_key_size, edwards.max_key_size), (255, 255));
+    assert_eq!(edwards.flags, montgomery.flags);
+    let eddsa = mechanism(CKM_EDDSA as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
+
+    let without_x25519 = crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_EC_P256]);
+    assert!(!without_x25519
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE));
+    assert!(!without_x25519
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE));
+    assert!(!without_x25519
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
 }
 
 #[derive(Debug)]
