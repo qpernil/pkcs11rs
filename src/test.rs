@@ -1949,6 +1949,30 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
 }
 
 #[test]
+fn openpgp_always_authenticate_expires_after_one_signature() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "OPENPGP001",
+    });
+    let authenticated = std::rc::Rc::new(std::cell::Cell::new(true));
+    let session = crate::OpenPgpSession {
+        slotID: TEST_SLOT_ID,
+        flags: CKF_SERIAL_SESSION as CK_FLAGS,
+        connector,
+        authenticated: authenticated.clone(),
+    };
+
+    let _ = crate::Session::openpgp_sign(
+        &session,
+        crate::openpgp::KeyRef::Signature,
+        &[],
+        crate::openpgp::PW1_ONE_SIGNATURE,
+    );
+    assert!(!authenticated.get());
+}
+
+#[test]
 fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
@@ -2337,6 +2361,63 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
         object.decrypt = false;
         object.sensitive = true;
         object.extractable = false;
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        TEST_CONTEXT_LOGIN_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+fn context_specific_login_does_not_require_always_authenticate_attribute() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    TEST_CONTEXT_LOGIN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    {
+        let mut context = crate::lock_context().unwrap();
+        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        object.material = crate::KeyMaterial::PivPrivate {
+            slot: crate::piv::Slot::Signature,
+            algorithm: crate::piv::Algorithm::Rsa1024,
+            modulus: vec![0; 128],
+            public_exponent: vec![1, 0, 1],
+            pin_policy: 2,
+            touch_policy: 1,
+        };
+        object.private = true;
+        object.sign = true;
+        object.decrypt = false;
+        object.sensitive = true;
+        object.extractable = false;
+        assert!(object
+            .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+            .is_none());
     }
 
     let mut mechanism = CK_MECHANISM {

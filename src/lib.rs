@@ -3408,14 +3408,10 @@ impl Session for PivSession {
         input: &[u8],
         pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        let effective_policy = piv_effective_pin_policy(slot, pin_policy);
         if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
-        if effective_policy == 3 {
-            self.authenticated.set(false);
-        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -3428,14 +3424,10 @@ impl Session for PivSession {
         input: &[u8],
         pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
-        let effective_policy = piv_effective_pin_policy(slot, pin_policy);
         if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
-        if effective_policy == 3 {
-            self.authenticated.set(false);
-        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -3475,12 +3467,15 @@ impl Session for OpenPgpSession {
         &self,
         key_ref: OpenPgpKeyRef,
         input: &[u8],
-        _pin_policy: u8,
+        pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
         if !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = OpenPgpClient.sign(self.connector.as_ref(), key_ref, input);
+        if key_ref == OpenPgpKeyRef::Signature && pin_policy == openpgp::PW1_ONE_SIGNATURE {
+            self.authenticated.set(false);
+        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -4457,7 +4452,6 @@ struct SignatureOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
     requires_login: bool,
-    requires_context_specific_login: bool,
     context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
@@ -4470,7 +4464,6 @@ struct CryptOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
     requires_login: bool,
-    requires_context_specific_login: bool,
     context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
     iv: Option<[u8; 16]>,
@@ -5599,11 +5592,6 @@ impl TokenObject {
         )
     }
 
-    fn requires_context_specific_login(&self) -> bool {
-        self.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
-            == Some(bool_attribute(true))
-    }
-
     fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         let value = read_attribute_value(attribute)?;
         match attribute.type_ {
@@ -6583,19 +6571,13 @@ fn login(
             let pin = from_raw_parts(pin, pin_len as usize)?;
             let mut context_operation = None;
             if let Some(operation) = ctx.sign_operations.get(&session_handle) {
-                if operation.requires_context_specific_login {
-                    context_operation =
-                        Some((operation.slot_id, operation.context_specific_extended));
-                }
+                context_operation = Some((operation.slot_id, operation.context_specific_extended));
             }
             if let Some(operation) = ctx.decrypt_operations.get(&session_handle) {
-                if operation.requires_context_specific_login {
-                    if context_operation.is_some() {
-                        return Err(CKR_OPERATION_ACTIVE.into());
-                    }
-                    context_operation =
-                        Some((operation.slot_id, operation.context_specific_extended));
+                if context_operation.is_some() {
+                    return Err(CKR_OPERATION_ACTIVE.into());
                 }
+                context_operation = Some((operation.slot_id, operation.context_specific_extended));
             }
             let (slot_id, extended) = context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
             ctx._get_slot_mut(slot_id)?
@@ -7704,7 +7686,6 @@ fn crypt_init(
             key: object.material.clone(),
             slot_id,
             requires_login: object.private,
-            requires_context_specific_login: object.requires_context_specific_login(),
             context_specific_extended: matches!(
                 &object.material,
                 KeyMaterial::OpenPgpPrivate { .. }
@@ -8173,7 +8154,6 @@ fn sign_init(
                 key: object.material.clone(),
                 slot_id,
                 requires_login: object.private,
-                requires_context_specific_login: object.requires_context_specific_login(),
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 pss,
@@ -8754,7 +8734,6 @@ fn verify_init(
                 key: object.material.clone(),
                 slot_id,
                 requires_login: false,
-                requires_context_specific_login: false,
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 pss,
