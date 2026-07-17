@@ -4172,6 +4172,43 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
 }
 
 #[test]
+fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
+    let private_key = openssl::rsa::Rsa::generate(2048).unwrap();
+    let public_key = openssl::rsa::Rsa::from_public_components(
+        private_key.n().to_owned().unwrap(),
+        private_key.e().to_owned().unwrap(),
+    )
+    .unwrap();
+    let slot = crate::PivSlot {
+        connector: std::rc::Rc::new(FailingConnector),
+        application_aid: crate::piv::PIV_AID.to_vec(),
+        slot_description: None,
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: crate::piv::Version {
+            major: 5,
+            minor: 7,
+            patch: 0,
+        },
+        serial: String::from("TEST0001"),
+        keys: vec![crate::PivKey {
+            slot: crate::piv::Slot::Attestation,
+            algorithm: crate::piv::Algorithm::Rsa2048,
+            public_key: crate::PivPublicKey::Rsa(public_key),
+            attestation: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            attestation_attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            pin_policy: 0,
+            touch_policy: 0,
+        }],
+        certificates: Vec::new(),
+    };
+
+    assert!(crate::Slot::token_objects(&slot, 1)
+        .unwrap()
+        .iter()
+        .all(|object| object.token));
+}
+
+#[test]
 pub fn verify_reports_signature_mismatches() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

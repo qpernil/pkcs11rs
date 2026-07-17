@@ -20,8 +20,9 @@ The protocol layer implements:
 - PIV `GET DATA` certificate retrieval;
 - `GENERAL AUTHENTICATE` signing, RSA deciphering, and EC/X25519 key agreement.
 
-The client supports the four standard slots (`9A`, `9C`, `9D`, `9E`), retired
-key slots (`82` through `95`), and the attestation slot (`F9`). RSA-1024
+The client supports the four standard slots (`9A`, `9C`, `9D`, `9E`) and retired
+key slots (`82` through `95`). The attestation slot (`F9`) is exposed as its
+static certificate object, not as a normal public/private key slot. RSA-1024
 through RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers are
 recognized. Firmware and FIPS restrictions still apply.
 
