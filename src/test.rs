@@ -5448,6 +5448,24 @@ pub fn create_object_requires_and_imports_real_key_material() {
     ));
     assert!(!imported.local);
     assert_eq!(imported.key_gen_mechanism, None);
+    assert_eq!(
+        imported.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
+    assert_eq!(
+        imported.attribute_value(CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+
+    let extractable_private_template = crate::TokenObjectTemplate {
+        class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+        extractable: Some(true),
+        ..crate::TokenObjectTemplate::default()
+    };
+    assert!(matches!(
+        extractable_private_template.into_object(),
+        Err(rv) if rv == CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    ));
 }
 
 #[test]
@@ -6442,7 +6460,7 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
     };
     let mut value_len = 24 as CK_ULONG;
     let mut sensitive = CK_FALSE as CK_BBOOL;
-    let mut extractable = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
     let mut template = [
         CK_ATTRIBUTE {
             type_: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
@@ -6479,16 +6497,12 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
     };
     assert_eq!(
         crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
-        CKR_OK as CK_RV
+        CKR_ATTRIBUTE_SENSITIVE as CK_RV
     );
-    assert_eq!(value_attribute.ulValueLen, value_len);
-    let mut value = vec![0; value_len as usize];
-    value_attribute.pValue = value.as_mut_ptr() as CK_VOID_PTR;
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
-        CKR_OK as CK_RV
+        value_attribute.ulValueLen,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
     );
-    assert!(value.iter().any(|byte| *byte != 0));
 
     sensitive = CK_TRUE as CK_BBOOL;
     extractable = CK_FALSE as CK_BBOOL;
@@ -6564,7 +6578,7 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
         CKR_OK as CK_RV
     );
     assert_eq!(always_sensitive, CK_FALSE as CK_BBOOL);
-    assert_eq!(never_extractable, CK_FALSE as CK_BBOOL);
+    assert_eq!(never_extractable, CK_TRUE as CK_BBOOL);
 
     value_attribute.pValue = ::std::ptr::null_mut();
     assert_eq!(

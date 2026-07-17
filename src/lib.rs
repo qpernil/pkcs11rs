@@ -524,9 +524,13 @@ fn yubihsm_token_objects(
         verify: false,
         derive: false,
         sensitive: private,
-        extractable: yubihsm_capability(&info.capabilities, 0x10),
+        extractable: yubihsm_capability(&info.capabilities, 0x10)
+            && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            && class != CKO_SECRET_KEY as CK_OBJECT_CLASS,
         always_sensitive: private,
-        never_extractable: !yubihsm_capability(&info.capabilities, 0x10),
+        never_extractable: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+            || !yubihsm_capability(&info.capabilities, 0x10),
         local: generated,
         key_gen_mechanism: generated.then_some(if is_yubihsm_rsa(info.algorithm) {
             CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
@@ -5400,7 +5404,9 @@ impl TokenObject {
                 Some(bool_attribute(self.sensitive))
             }
             x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE && self.has_sensitive_attributes() => {
-                Some(bool_attribute(self.extractable))
+                Some(bool_attribute(
+                    self.extractable && !self.is_nonextractable_key_object(),
+                ))
             }
             x if x == CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE
                 && self.has_sensitive_attributes() =>
@@ -5410,7 +5416,9 @@ impl TokenObject {
             x if x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
                 && self.has_sensitive_attributes() =>
             {
-                Some(bool_attribute(self.never_extractable))
+                Some(bool_attribute(
+                    self.never_extractable || self.is_nonextractable_key_object(),
+                ))
             }
             x if x == CKA_LOCAL as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.local)),
             x if x == CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(
@@ -5574,6 +5582,11 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
+    fn is_nonextractable_key_object(&self) -> bool {
+        self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
     fn is_certificate_object(&self) -> bool {
         self.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
     }
@@ -5619,6 +5632,9 @@ impl TokenObject {
                     return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
                 }
                 let requested = read_bool_template_attribute(attribute)?;
+                if self.is_nonextractable_key_object() && requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
                 if !self.extractable && requested {
                     return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
                 }
@@ -5728,11 +5744,17 @@ impl TokenObjectTemplate {
 
     fn into_object(self) -> Result<TokenObject, CK_RV> {
         let sensitive = self.sensitive.unwrap_or(false);
-        let extractable = self.extractable.unwrap_or(true);
+        let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
+        let nonextractable_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
+        let extractable = self.extractable.unwrap_or(!nonextractable_key);
+        if nonextractable_key && extractable {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+        }
         Ok(TokenObject {
             slot_id: None,
             unique_id: Vec::new(),
-            class: self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
+            class,
             key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             label: self.label,
             id: self.id,
@@ -5746,7 +5768,7 @@ impl TokenObjectTemplate {
             sensitive,
             extractable,
             always_sensitive: sensitive,
-            never_extractable: !extractable,
+            never_extractable: !extractable || nonextractable_key,
             local: false,
             key_gen_mechanism: None,
             owner_session: None,
@@ -6744,7 +6766,10 @@ fn yubihsm_object_parameters(
     if object.encrypt {
         bits.extend([0x33, 0x35]);
     }
-    if object.extractable {
+    if object.extractable
+        && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+    {
         bits.push(0x10);
     }
     Ok(YubiHsmObjectParameters {
