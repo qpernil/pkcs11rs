@@ -1876,6 +1876,18 @@ impl std::fmt::Debug for dyn Session + '_ {
 const ABI_TEST_SLOT_ID: CK_SLOT_ID = 77;
 
 #[cfg(feature = "abi-tests")]
+const ABI_TEST_PIV_SLOT_ID: CK_SLOT_ID = 78;
+
+#[cfg(feature = "abi-tests")]
+const ABI_TEST_SCP03_SLOT_ID: CK_SLOT_ID = 79;
+
+#[cfg(feature = "abi-tests")]
+const ABI_TEST_YUBIHSM_SLOT_ID: CK_SLOT_ID = 80;
+
+#[cfg(feature = "abi-tests")]
+const ABI_TEST_SCP11_SLOT_ID: CK_SLOT_ID = 81;
+
+#[cfg(feature = "abi-tests")]
 #[derive(Debug)]
 struct AbiTestSlot;
 
@@ -1966,6 +1978,420 @@ impl Session for AbiTestSession {
 
     fn get_session_info(&self) -> Result<(), Error> {
         Ok(())
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+// ABI fixtures exercise slot/session dispatch without touching host hardware.
+// Protocol handshakes and cryptographic vectors remain covered by module tests.
+#[derive(Debug)]
+struct AbiPivConnector;
+
+#[cfg(feature = "abi-tests")]
+impl Connector for AbiPivConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        "ABI PIV test token"
+    }
+
+    fn serial(&self) -> &str {
+        "PIV00001"
+    }
+
+    fn major(&self) -> u8 {
+        5
+    }
+
+    fn minor(&self) -> u8 {
+        7
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+
+    fn transmit<'a>(
+        &self,
+        command: &[u8],
+        receive: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let response = match command.get(1).copied() {
+            Some(0xa4) | Some(0x20) => vec![0x90, 0x00],
+            Some(0xfd) => vec![5, 7, 0, 0x90, 0x00],
+            Some(0xf8) => vec![0, 0, 0, 1, 0x90, 0x00],
+            Some(0x87) => {
+                let mut response = vec![0x7c, 0x82, 0x01, 0x04, 0x82, 0x82, 0x01, 0x00];
+                response.extend(std::iter::repeat_n(0, 256));
+                response.extend([0x90, 0x00]);
+                response
+            }
+            _ => vec![0x6d, 0x00],
+        };
+        if response.len() > receive.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        receive[..response.len()].copy_from_slice(&response);
+        Ok(&receive[..response.len()])
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_piv_slot() -> Result<PivSlot, Error> {
+    let public_key = Rsa::generate(2048)?;
+    let public_key =
+        Rsa::from_public_components(public_key.n().to_owned()?, public_key.e().to_owned()?)?;
+    let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
+    Ok(PivSlot {
+        connector,
+        authenticated: Rc::new(Cell::new(false)),
+        cached_pin: Rc::new(RefCell::new(None)),
+        version: piv::Version {
+            major: 5,
+            minor: 7,
+            patch: 0,
+        },
+        serial: String::from("1"),
+        keys: vec![PivKey {
+            slot: piv::Slot::Signature,
+            algorithm: piv::Algorithm::Rsa2048,
+            public_key: PivPublicKey::Rsa(public_key),
+            pin_policy: 2,
+            touch_policy: 1,
+            origin: 0,
+        }],
+        certificates: Vec::new(),
+    })
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiScp03Connector;
+
+#[cfg(feature = "abi-tests")]
+impl Connector for AbiScp03Connector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        "ABI SCP03 test token"
+    }
+
+    fn serial(&self) -> &str {
+        "SCP03001"
+    }
+
+    fn major(&self) -> u8 {
+        5
+    }
+
+    fn minor(&self) -> u8 {
+        7
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+
+    fn transmit<'a>(
+        &self,
+        command: &[u8],
+        receive: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let response = if command.get(1) == Some(&0x84) {
+            let length = command.last().copied().unwrap_or(0);
+            let length = if length == 0 { 256 } else { length as usize };
+            let mut response = vec![0; length];
+            response.extend([0x90, 0x00]);
+            response
+        } else {
+            vec![0x90, 0x00]
+        };
+        if response.len() > receive.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        receive[..response.len()].copy_from_slice(&response);
+        Ok(&receive[..response.len()])
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiScp03Slot {
+    connector: Rc<dyn Connector>,
+    session: Rc<RefCell<Option<Scp03Session>>>,
+    protocol: &'static str,
+}
+
+#[cfg(feature = "abi-tests")]
+impl AbiScp03Slot {
+    fn new(protocol: &'static str) -> Result<Self, Error> {
+        Ok(Self {
+            connector: Rc::new(AbiScp03Connector),
+            session: Rc::new(RefCell::new(Some(Scp03Session::from_session_keys(
+                vec![0; 16],
+                vec![0; 16],
+                vec![0; 16],
+                [0; 16],
+                0,
+            )?))),
+            protocol,
+        })
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+impl Slot for AbiScp03Slot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn name(&self) -> String {
+        format!("PKCS11RS ABI {} test slot", self.protocol)
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        if self.protocol == "SCP03" {
+            "ABI SCP03 test token"
+        } else {
+            "ABI SCP11 test token"
+        }
+    }
+
+    fn serial(&self) -> &str {
+        if self.protocol == "SCP03" {
+            "SCP03001"
+        } else {
+            "SCP11001"
+        }
+    }
+
+    fn major(&self) -> u8 {
+        5
+    }
+
+    fn minor(&self) -> u8 {
+        7
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(YubiKeySession {
+            slotID: slot_id,
+            flags,
+            connector: self.connector.clone(),
+            session: self.session.clone(),
+        })
+    }
+
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        *self.session.try_borrow_mut()? = Some(Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            [0; 16],
+            0,
+        )?);
+        Ok(())
+    }
+
+    fn logout(&mut self) -> Result<(), Error> {
+        *self.session.try_borrow_mut()? = None;
+        Ok(())
+    }
+
+    fn init_slot(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+
+    fn clear_session(&mut self) {
+        *self.session.borrow_mut() = None;
+    }
+
+    fn login_is_active(&self) -> bool {
+        self.session.borrow().is_some()
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiYubiHsmSession {
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+}
+
+#[cfg(feature = "abi-tests")]
+impl Session for AbiYubiHsmSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+
+    fn get_session_info(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
+        Ok(vec![0x5a; 256])
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug)]
+struct AbiYubiHsmSlot;
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: b"abi-yubihsm-rsa".to_vec(),
+        class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: b"ABI YubiHSM RSA key".to_vec(),
+        id: 1u16.to_be_bytes().to_vec(),
+        token: true,
+        private: true,
+        encrypt: false,
+        decrypt: true,
+        sign: true,
+        verify: false,
+        derive: false,
+        sensitive: true,
+        extractable: false,
+        always_sensitive: true,
+        never_extractable: true,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::YubiHsm {
+            id: 1,
+            object_type: YUBIHSM_ASYMMETRIC_KEY,
+            algorithm: YUBIHSM_ALGO_RSA_2048,
+            length: 256,
+            capabilities: yubihsm_capabilities(&[5]),
+            public_key: Vec::new(),
+        },
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+impl Slot for AbiYubiHsmSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn name(&self) -> String {
+        String::from("PKCS11RS ABI YubiHSM test slot")
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        "ABI YubiHSM test token"
+    }
+
+    fn serial(&self) -> &str {
+        "HSM00001"
+    }
+
+    fn major(&self) -> u8 {
+        2
+    }
+
+    fn minor(&self) -> u8 {
+        4
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(AbiYubiHsmSession { slot_id, flags })
+    }
+
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if pin == b"1234" {
+            Ok(())
+        } else {
+            Err(CKR_PIN_INCORRECT.into())
+        }
+    }
+
+    fn logout(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn init_slot(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        Ok(vec![abi_test_yubihsm_object(slot_id)])
+    }
+
+    fn is_yubihsm(&self) -> bool {
+        true
     }
 }
 
@@ -2704,15 +3130,37 @@ impl std::fmt::Debug for Context {
 }
 
 impl Context {
+    #[allow(unused_mut)]
     fn new() -> Result<Context, Error> {
         #[cfg(feature = "abi-tests")]
-        let slots = HashMap::from([(ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>)]);
+        let slots = HashMap::from([
+            (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
+            (
+                ABI_TEST_PIV_SLOT_ID,
+                Box::new(abi_test_piv_slot()?) as Box<dyn Slot>,
+            ),
+            (
+                ABI_TEST_SCP03_SLOT_ID,
+                Box::new(AbiScp03Slot::new("SCP03")?) as Box<dyn Slot>,
+            ),
+            (
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                Box::new(AbiYubiHsmSlot) as Box<dyn Slot>,
+            ),
+            (
+                ABI_TEST_SCP11_SLOT_ID,
+                Box::new(AbiScp03Slot::new("SCP11")?) as Box<dyn Slot>,
+            ),
+        ]);
         #[cfg(not(feature = "abi-tests"))]
         let slots = HashMap::new();
 
         let objects = default_objects()?;
         let next_object_handle = objects.keys().max().map(|handle| handle + 1).unwrap_or(1);
-        let context = Context {
+        let mut context = Context {
+            #[cfg(feature = "abi-tests")]
+            libusb: None,
+            #[cfg(not(feature = "abi-tests"))]
             libusb: match rusb::Context::new() {
                 Ok(context) => Some(context),
                 Err(e) => {
@@ -2720,6 +3168,9 @@ impl Context {
                     None
                 }
             },
+            #[cfg(feature = "abi-tests")]
+            pcsc: None,
+            #[cfg(not(feature = "abi-tests"))]
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
                 Ok(context) => Some(Rc::new(context)),
                 Err(e) => {
@@ -2739,6 +3190,8 @@ impl Context {
             sign_operations: HashMap::new(),
             verify_operations: HashMap::new(),
         };
+        #[cfg(all(feature = "abi-tests", not(test)))]
+        add_abi_test_backend_objects(&mut context)?;
         eprintln!("Context.new {:?}", context);
         Ok(context)
     }
@@ -2908,7 +3361,12 @@ impl Context {
         });
     }
 
+    #[allow(unreachable_code)]
     fn init(&mut self) {
+        #[cfg(feature = "abi-tests")]
+        {
+            return;
+        }
         let mut seen_dynamic_slots = HashSet::new();
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
@@ -3094,7 +3552,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
     let private_key = Rsa::generate(2048)?;
     let public_key =
         Rsa::from_public_components(private_key.n().to_owned()?, private_key.e().to_owned()?)?;
-    Ok(HashMap::from([
+    let objects = HashMap::from([
         (
             1,
             TokenObject {
@@ -3147,7 +3605,19 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 material: KeyMaterial::RsaPrivate(private_key),
             },
         ),
-    ]))
+    ]);
+
+    Ok(objects)
+}
+
+#[cfg(feature = "abi-tests")]
+#[allow(dead_code)]
+fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), Error> {
+    for object in abi_test_piv_slot()?.token_objects(ABI_TEST_PIV_SLOT_ID)? {
+        context.insert_object(object);
+    }
+    context.insert_object(abi_test_yubihsm_object(ABI_TEST_YUBIHSM_SLOT_ID));
+    Ok(())
 }
 
 fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
