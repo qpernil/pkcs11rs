@@ -8,7 +8,7 @@ shared-slot behavior. YubiKey SCP11 support requires firmware 5.7.2 or later.
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11a` to use SCP11a instead. SCP11a adds
 mutual authentication and requires the OCE credentials described below.
 
-The Issuer Security Domain is used separately for Secure Domain management.
+The Issuer SD is used separately for Secure Domain management.
 
 SCP11b authenticates the card to the host. This implementation requires the
 expected P-256 Security Domain public key to be pinned using exactly one of:

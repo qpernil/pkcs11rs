@@ -1363,7 +1363,7 @@ fn ccid_application_label(application: CcidApplication) -> &'static str {
         CcidApplication::Piv => "PIV",
         CcidApplication::OpenPgp => "OpenPGP",
         CcidApplication::HsmAuth => "YubiHSM Auth",
-        CcidApplication::GlobalPlatform => "Issuer Security Domain",
+        CcidApplication::GlobalPlatform => "Issuer SD",
     }
 }
 
@@ -2644,7 +2644,7 @@ impl Slot for GlobalPlatformSlot {
         self
     }
     fn name(&self) -> String {
-        format!("{} Issuer Security Domain", self.connector.name())
+        format!("{} Issuer SD", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
