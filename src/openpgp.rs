@@ -4,7 +4,7 @@ use crate::{
     error::Error,
     scp03::{select_application, transmit, CommandApdu},
     Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LOCKED,
-    CKR_USER_NOT_LOGGED_IN,
+    CKR_PIN_LEN_RANGE, CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     bn::BigNum,
@@ -16,6 +16,8 @@ use std::time::Duration;
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
 
 const INS_VERIFY: u8 = 0x20;
+const INS_CHANGE_REFERENCE_DATA: u8 = 0x24;
+const INS_PUT_DATA: u8 = 0xda;
 const INS_PSO: u8 = 0x2a;
 const INS_GET_DATA: u8 = 0xca;
 const INS_INTERNAL_AUTHENTICATE: u8 = 0x88;
@@ -368,6 +370,33 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) fn change_user_pin(
+        &self,
+        connector: &dyn Connector,
+        old_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), Error> {
+        if old_pin.is_empty() || new_pin.is_empty() {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        let mut data = Vec::with_capacity(old_pin.len() + new_pin.len());
+        data.extend_from_slice(old_pin);
+        data.extend_from_slice(new_pin);
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_CHANGE_REFERENCE_DATA,
+                p1: 0,
+                p2: 0x81,
+                data,
+                le: None,
+                extended: old_pin.len() + new_pin.len() > 255,
+            },
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn unverify(&self, connector: &dyn Connector, extended: bool) {
         let _ = self.transmit(
             connector,
@@ -477,7 +506,7 @@ impl Client {
         Ok(response)
     }
 
-    fn get_data(&self, connector: &dyn Connector, tag: u16) -> Result<Vec<u8>, Error> {
+    pub(crate) fn get_data(&self, connector: &dyn Connector, tag: u16) -> Result<Vec<u8>, Error> {
         self.transmit(
             connector,
             CommandApdu {
@@ -490,6 +519,27 @@ impl Client {
                 extended: false,
             },
         )
+    }
+
+    pub(crate) fn put_data(
+        &self,
+        connector: &dyn Connector,
+        tag: u16,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_PUT_DATA,
+                p1: (tag >> 8) as u8,
+                p2: tag as u8,
+                data: value.to_vec(),
+                le: None,
+                extended: value.len() > 255,
+            },
+        )?;
+        Ok(())
     }
 
     fn transmit(&self, connector: &dyn Connector, command: CommandApdu) -> Result<Vec<u8>, Error> {
