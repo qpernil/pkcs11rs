@@ -781,6 +781,7 @@ pub(crate) mod tests {
             Box::new(crate::YubiHsmSlot {
                 connector: peer,
                 session: std::rc::Rc::new(RefCell::new(None)),
+                version: (2, 4, 1),
                 algorithms: vec![1, 5, 9, 12, 19, 20, 21, 22, 25, 48, 50, 51, 52, 53, 54],
             }),
             commands,

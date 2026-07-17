@@ -27,7 +27,7 @@ use std::{
     slice,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard,
+        Mutex, MutexGuard, OnceLock,
     },
     time::Duration,
 };
@@ -299,6 +299,12 @@ trait Slot {
     fn serial(&self) -> &str;
     fn major(&self) -> u8;
     fn minor(&self) -> u8;
+    fn hardware_major(&self) -> u8 {
+        1
+    }
+    fn hardware_minor(&self) -> u8 {
+        0
+    }
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
@@ -335,14 +341,18 @@ trait Slot {
     }
 
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.serial())
+        format!("{} #{}", self.model(), self.serial())
+    }
+
+    fn model(&self) -> &str {
+        self.product()
     }
 
     fn format_slot_info(&self, info: &mut CK_SLOT_INFO) {
         info.firmwareVersion.major = 1;
         info.firmwareVersion.minor = 0;
-        info.hardwareVersion.major = 1;
-        info.hardwareVersion.minor = 0;
+        info.hardwareVersion.major = self.hardware_major();
+        info.hardwareVersion.minor = self.hardware_minor();
         str_pad(&self.name(), &mut info.slotDescription);
         str_pad(self.manufacturer(), &mut info.manufacturerID);
         info.flags = self.flags();
@@ -351,7 +361,7 @@ trait Slot {
     fn format_token_info(&self, info: &mut CK_TOKEN_INFO) {
         str_pad(&self.label(), &mut info.label);
         str_pad(self.manufacturer(), &mut info.manufacturerID);
-        str_pad(self.product(), &mut info.model);
+        str_pad(self.model(), &mut info.model);
         str_pad(self.serial(), &mut info.serialNumber);
         info.flags =
             (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED)
@@ -366,11 +376,22 @@ trait Slot {
         info.ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulFreePrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-        info.hardwareVersion.major = self.major();
-        info.hardwareVersion.minor = self.minor();
+        info.hardwareVersion.major = self.hardware_major();
+        info.hardwareVersion.minor = self.hardware_minor();
         info.firmwareVersion.major = self.major();
         info.firmwareVersion.minor = self.minor();
         info.utcTime.fill(0);
+    }
+}
+
+fn apply_connector_versions(info: &mut CK_SLOT_INFO, connector: &dyn Connector) {
+    if let Some((major, minor)) = connector.hardware_version() {
+        info.hardwareVersion.major = major;
+        info.hardwareVersion.minor = minor;
+    }
+    if let Some((major, minor, patch)) = connector.firmware_version() {
+        info.firmwareVersion.major = major;
+        info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
     }
 }
 
@@ -384,6 +405,7 @@ impl std::fmt::Debug for dyn Slot + '_ {
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+    version: (u8, u8, u8),
     algorithms: Vec<u8>,
 }
 
@@ -553,6 +575,7 @@ fn yubihsm_token_objects(
 struct PivSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
+    slot_description: Option<String>,
     authenticated: Rc<Cell<bool>>,
     cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: piv::Version,
@@ -1286,7 +1309,7 @@ fn ccid_application_label(application: CcidApplication) -> &'static str {
         CcidApplication::Piv => "PIV",
         CcidApplication::OpenPgp => "OpenPGP",
         CcidApplication::HsmAuth => "YubiHSM Auth",
-        CcidApplication::GlobalPlatform => "GlobalPlatform",
+        CcidApplication::GlobalPlatform => "Issuer Security Domain",
     }
 }
 
@@ -1342,6 +1365,7 @@ impl PivSlot {
         Self {
             connector,
             application_aid,
+            slot_description: None,
             authenticated: Rc::new(Cell::new(false)),
             cached_pin: Rc::new(RefCell::new(None)),
             version: piv::Version {
@@ -1357,7 +1381,12 @@ impl PivSlot {
 
     fn update_device_info(&mut self, info: PivDeviceInfo) {
         self.version = info.version;
-        self.serial = info.serial.unwrap_or_default().to_string();
+        let serial = info.serial.map(|serial| serial.to_string());
+        self.connector.set_device_identity(
+            Some((info.version.major, info.version.minor, info.version.patch)),
+            serial.as_deref(),
+        );
+        self.serial = serial.unwrap_or_default();
     }
 }
 
@@ -1366,7 +1395,9 @@ impl Slot for PivSlot {
         self
     }
     fn name(&self) -> String {
-        format!("{} PIV", self.connector.name())
+        self.slot_description
+            .clone()
+            .unwrap_or_else(|| format!("{} PIV", self.connector.name()))
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
@@ -1519,6 +1550,7 @@ impl Slot for PivSlot {
         self.format_slot_info(info);
         info.firmwareVersion.major = self.version.major;
         info.firmwareVersion.minor = self.version.minor.saturating_mul(10) + self.version.patch;
+        apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
@@ -1861,6 +1893,7 @@ impl OpenPgpSlot {
     fn update_info(&mut self, info: &openpgp::ApplicationInfo) {
         self.version = info.version;
         self.serial = info.serial.clone();
+        self.connector.set_device_identity(None, Some(&info.serial));
         self.pin_min = info.pin_min;
         self.pin_max = info.pin_max;
         self.kdf = info.kdf.clone();
@@ -1998,10 +2031,18 @@ impl Slot for OpenPgpSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        if let Some((major, minor)) = self.connector.hardware_version() {
+            info.hardwareVersion.major = major;
+            info.hardwareVersion.minor = minor;
+        }
+        info.firmwareVersion.major = self.version.0;
+        info.firmwareVersion.minor = self.version.1;
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        info.firmwareVersion.major = self.version.0;
+        info.firmwareVersion.minor = self.version.1;
         info.ulMinPinLen = self.pin_min as CK_ULONG;
         info.ulMaxPinLen = self.pin_max as CK_ULONG;
         Ok(())
@@ -2210,6 +2251,18 @@ impl Slot for YubiHsmSlot {
     fn minor(&self) -> u8 {
         self.connector.minor()
     }
+    fn hardware_major(&self) -> u8 {
+        self.connector
+            .hardware_version()
+            .map(|(major, _)| major)
+            .unwrap_or(1)
+    }
+    fn hardware_minor(&self) -> u8 {
+        self.connector
+            .hardware_version()
+            .map(|(_, minor)| minor)
+            .unwrap_or(0)
+    }
     fn is_present(&self) -> bool {
         self.connector.is_present()
     }
@@ -2243,21 +2296,25 @@ impl Slot for YubiHsmSlot {
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
+        self.version = (device_info.major, device_info.minor, device_info.patch);
         self.algorithms = device_info.algorithms;
         Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        apply_connector_versions(info, self.connector.as_ref());
+        info.firmwareVersion.major = self.version.0;
+        info.firmwareVersion.minor = self.version.1.saturating_mul(10) + self.version.2;
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.format_token_info(info);
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
-        info.ulMaxPinLen = 64;
-        info.ulMinPinLen = 8;
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
+        info.ulMaxPinLen = 64;
+        info.ulMinPinLen = 8;
         Ok(())
     }
     fn clear_session(&mut self) {
@@ -2385,10 +2442,15 @@ impl Slot for GenericPcscSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        if let Some((major, minor, patch)) = self.connector.firmware_version() {
+            info.firmwareVersion.major = major;
+            info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
+        }
         Ok(())
     }
     fn clear_session(&mut self) {
@@ -2415,22 +2477,25 @@ impl Slot for GlobalPlatformSlot {
         self
     }
     fn name(&self) -> String {
-        format!("{} GlobalPlatform", self.connector.name())
+        format!("{} Issuer Security Domain", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
     }
     fn product(&self) -> &str {
-        self.connector.product()
+        "Issuer SD"
+    }
+    fn model(&self) -> &str {
+        "Issuer SD"
     }
     fn serial(&self) -> &str {
-        "12345678"
+        self.connector.serial()
     }
     fn major(&self) -> u8 {
-        5
+        self.connector.major()
     }
     fn minor(&self) -> u8 {
-        43
+        self.connector.minor()
     }
     fn is_present(&self) -> bool {
         self.connector.is_present()
@@ -2477,10 +2542,15 @@ impl Slot for GlobalPlatformSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        if let Some((major, minor, patch)) = self.connector.firmware_version() {
+            info.firmwareVersion.major = major;
+            info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
+        }
         Ok(())
     }
 }
@@ -2725,7 +2795,7 @@ impl Connector for AbiPivConnector {
     }
 
     fn product(&self) -> &str {
-        "ABI PIV test token"
+        "YubiKey"
     }
 
     fn serial(&self) -> &str {
@@ -2783,6 +2853,7 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
     Ok(PivSlot {
         connector,
         application_aid: piv::PIV_AID.to_vec(),
+        slot_description: Some(String::from("PKCS11RS ABI PIV test slot")),
         authenticated: Rc::new(Cell::new(false)),
         cached_pin: Rc::new(RefCell::new(None)),
         version: piv::Version {
@@ -2790,7 +2861,7 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             minor: 7,
             patch: 0,
         },
-        serial: String::from("1"),
+        serial: String::from("PIV00001"),
         keys: vec![PivKey {
             slot: piv::Slot::Signature,
             algorithm: piv::Algorithm::Rsa2048,
@@ -2805,7 +2876,9 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
 
 #[cfg(feature = "abi-tests")]
 #[derive(Debug)]
-struct AbiScp03Connector;
+struct AbiScp03Connector {
+    protocol: &'static str,
+}
 
 #[cfg(feature = "abi-tests")]
 impl Connector for AbiScp03Connector {
@@ -2818,11 +2891,19 @@ impl Connector for AbiScp03Connector {
     }
 
     fn product(&self) -> &str {
-        "ABI SCP03 test token"
+        if self.protocol == "SCP03" {
+            "ABI SCP03"
+        } else {
+            "ABI SCP11"
+        }
     }
 
     fn serial(&self) -> &str {
-        "SCP03001"
+        if self.protocol == "SCP03" {
+            "SCP03001"
+        } else {
+            "SCP11001"
+        }
     }
 
     fn major(&self) -> u8 {
@@ -2876,7 +2957,7 @@ struct AbiScp03Slot {
 impl AbiScp03Slot {
     fn new(protocol: &'static str) -> Result<Self, Error> {
         Ok(Self {
-            connector: Rc::new(AbiScp03Connector),
+            connector: Rc::new(AbiScp03Connector { protocol }),
             session: Rc::new(RefCell::new(Some(Scp03Session::from_session_keys(
                 vec![0; 16],
                 vec![0; 16],
@@ -2904,19 +2985,19 @@ impl Slot for AbiScp03Slot {
     }
 
     fn product(&self) -> &str {
+        self.connector.product()
+    }
+
+    fn model(&self) -> &str {
         if self.protocol == "SCP03" {
-            "ABI SCP03 test token"
+            "ABI SCP03"
         } else {
-            "ABI SCP11 test token"
+            "ABI SCP11"
         }
     }
 
     fn serial(&self) -> &str {
-        if self.protocol == "SCP03" {
-            "SCP03001"
-        } else {
-            "SCP11001"
-        }
+        self.connector.serial()
     }
 
     fn major(&self) -> u8 {
@@ -3065,7 +3146,11 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn product(&self) -> &str {
-        "ABI YubiHSM test token"
+        "ABI YubiHSM"
+    }
+
+    fn model(&self) -> &str {
+        "ABI YubiHSM"
     }
 
     fn serial(&self) -> &str {
@@ -3426,6 +3511,13 @@ trait Connector {
     fn serial(&self) -> &str;
     fn major(&self) -> u8;
     fn minor(&self) -> u8;
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        None
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        None
+    }
+    fn set_device_identity(&self, _firmware: Option<(u8, u8, u8)>, _serial: Option<&str>) {}
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
     fn transmit<'a>(
@@ -3572,6 +3664,15 @@ impl Connector for PcscAppletConnector {
     fn minor(&self) -> u8 {
         self.base.minor()
     }
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        self.base.hardware_version()
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.base.firmware_version()
+    }
+    fn set_device_identity(&self, firmware: Option<(u8, u8, u8)>, serial: Option<&str>) {
+        self.base.set_device_identity(firmware, serial);
+    }
 
     fn is_present(&self) -> bool {
         self.base.is_present() && self.applet_present.get()
@@ -3712,6 +3813,9 @@ impl Connector for UsbConnector {
     fn minor(&self) -> u8 {
         self.version.minor()
     }
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        Some((self.version.major(), self.version.minor()))
+    }
     fn is_present(&self) -> bool {
         self.claimed
     }
@@ -3790,6 +3894,8 @@ struct PcscConnector {
     reader: std::ffi::CString,
     context: Rc<pcsc::Context>,
     card: RefCell<Option<pcsc::Card>>,
+    firmware_version: Cell<Option<(u8, u8, u8)>>,
+    serial_number: OnceLock<String>,
 }
 
 impl std::fmt::Debug for PcscConnector {
@@ -3815,13 +3921,24 @@ impl Connector for PcscConnector {
         "YubiKey"
     }
     fn serial(&self) -> &str {
-        "0"
+        self.serial_number.get().map(String::as_str).unwrap_or("0")
     }
     fn major(&self) -> u8 {
         0
     }
     fn minor(&self) -> u8 {
         0
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.firmware_version.get()
+    }
+    fn set_device_identity(&self, firmware: Option<(u8, u8, u8)>, serial: Option<&str>) {
+        if let Some(firmware) = firmware {
+            self.firmware_version.set(Some(firmware));
+        }
+        if let Some(serial) = serial {
+            let _ = self.serial_number.set(serial.to_string());
+        }
     }
     fn is_present(&self) -> bool {
         self.card.borrow().is_some()
@@ -4511,6 +4628,7 @@ impl Context {
                                     let mut slot = Box::new(YubiHsmSlot {
                                         connector: Rc::new(connector),
                                         session: Rc::new(RefCell::new(None)),
+                                        version: (0, 0, 0),
                                         algorithms: Vec::new(),
                                     });
                                     if let Err(error) = slot.init_slot() {
@@ -4537,6 +4655,8 @@ impl Context {
                         reader,
                         context: context.clone(),
                         card: RefCell::new(None),
+                        firmware_version: Cell::new(None),
+                        serial_number: OnceLock::new(),
                     };
                     let name = connector.name();
                     debug_log!("{}", name);
