@@ -3549,6 +3549,10 @@ impl Connector for PcscAppletConnector {
         self
     }
 
+    fn name(&self) -> String {
+        self.base.name()
+    }
+
     fn manufacturer(&self) -> &str {
         self.base.manufacturer()
     }
@@ -4579,7 +4583,33 @@ impl Context {
                         }
                         continue;
                     }
-                    map(connector.refresh());
+                    if let Err(error) = connector.refresh() {
+                        debug_log!("PCSC reader has no usable card: {:?}", error);
+                        let reader_prefix = format!("{} ", name);
+                        let known_slot_ids: Vec<CK_SLOT_ID> = self
+                            .slots
+                            .iter()
+                            .filter(|(slot_id, slot)| {
+                                self.dynamic_slots.contains(slot_id)
+                                    && slot.name().starts_with(&reader_prefix)
+                            })
+                            .map(|(slot_id, _)| *slot_id)
+                            .collect();
+                        for slot_id in known_slot_ids {
+                            seen_dynamic_slots.insert(slot_id);
+                            let was_present = self
+                                .slots
+                                .get(&slot_id)
+                                .is_some_and(|slot| slot.is_present());
+                            if let Some(slot) = self.slots.get(&slot_id) {
+                                map(slot.refresh());
+                                if was_present && !slot.is_present() {
+                                    self.close_slot_state(slot_id, false);
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let configurations = match configured_ccid_configurations() {
                         Ok(configurations) => configurations,
                         Err(error) => {
@@ -5510,10 +5540,7 @@ pub extern "C" fn C_GetSlotList(
 
 fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context_mut(|ctx| {
-        ctx.init();
-        ctx.get_slot(slotID)?.get_slot_info(info)
-    })
+    with_context(|ctx| ctx.get_slot(slotID)?.get_slot_info(info))
 }
 
 #[no_mangle]

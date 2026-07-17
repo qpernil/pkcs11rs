@@ -62,7 +62,8 @@ class HardwareDiscoveryTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_GetSlotList(1, slots, ctypes.byref(count)), CKR_OK
         )
-        for slot_id in slots:
+        for index in range(count.value):
+            slot_id = slots[index]
             slot_info = CK_SLOT_INFO()
             token_info = CK_TOKEN_INFO()
             self.assertEqual(
