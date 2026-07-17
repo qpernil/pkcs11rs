@@ -1235,6 +1235,29 @@ fn openpgp_ec_public_key(curve: openpgp::Curve, point: &[u8]) -> Result<EcKey<Pu
     EcKey::from_public_key(&group, &point).map_err(Error::from)
 }
 
+fn yubihsm_ec_public_key(algorithm: u8, point: &[u8]) -> Result<EcKey<Public>, Error> {
+    let nid = match algorithm {
+        YUBIHSM_ALGO_EC_P224 => Nid::SECP224R1,
+        YUBIHSM_ALGO_EC_P256 => Nid::X9_62_PRIME256V1,
+        YUBIHSM_ALGO_EC_P384 => Nid::SECP384R1,
+        YUBIHSM_ALGO_EC_P521 => Nid::SECP521R1,
+        YUBIHSM_ALGO_EC_K256 => Nid::SECP256K1,
+        YUBIHSM_ALGO_EC_BP256 => Nid::BRAINPOOL_P256R1,
+        YUBIHSM_ALGO_EC_BP384 => Nid::BRAINPOOL_P384R1,
+        YUBIHSM_ALGO_EC_BP512 => Nid::BRAINPOOL_P512R1,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    let coordinate_length = yubihsm_ec_coordinate_length(algorithm)?;
+    if point.len() != coordinate_length * 2 {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    let group = EcGroup::from_curve_name(nid).map_err(Error::from)?;
+    let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
+    let point = EcPoint::from_bytes(&group, &point_with_prefix(point), &mut context)
+        .map_err(Error::from)?;
+    EcKey::from_public_key(&group, &point).map_err(Error::from)
+}
+
 fn verify_ed25519(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), Error> {
     if public_key.len() != 32 || signature.len() != 64 {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
@@ -8765,16 +8788,23 @@ fn verify_init(
                     || !matches!(object.material, KeyMaterial::RsaPublic(_))))
             || (ecdsa_mechanism
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
-                    || !matches!(
-                        object.material,
+                    || (!matches!(
+                        &object.material,
                         KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
-                    )))
+                    ) && !matches!(
+                        &object.material,
+                        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm)
+                    ))))
             || (eddsa_mechanism
                 && (object.key_type != CKK_EC_EDWARDS as CK_KEY_TYPE
-                    || !matches!(
-                        object.material,
+                    || (!matches!(
+                        &object.material,
                         KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
-                    )))
+                    ) && !matches!(
+                        &object.material,
+                        KeyMaterial::YubiHsm { algorithm, .. }
+                            if *algorithm == YUBIHSM_ALGO_ED25519
+                    ))))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -8960,6 +8990,44 @@ fn verify(
                 } else {
                     Err(CKR_SIGNATURE_INVALID.into())
                 }
+            }
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if is_yubihsm_ec(*algorithm) => {
+                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
+                    data.to_vec()
+                } else {
+                    hash(
+                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                        data,
+                    )?
+                    .to_vec()
+                };
+                let coordinate_length = yubihsm_ec_coordinate_length(*algorithm)?;
+                if signature.len() != coordinate_length * 2 {
+                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
+                }
+                let r = BigNum::from_slice(&signature[..coordinate_length])?;
+                let s = BigNum::from_slice(&signature[coordinate_length..])?;
+                let signature = EcdsaSig::from_private_components(r, s)?;
+                let key = yubihsm_ec_public_key(*algorithm, public_key)?;
+                if signature.verify(&digest, &key)? {
+                    Ok(())
+                } else {
+                    Err(CKR_SIGNATURE_INVALID.into())
+                }
+            }
+            KeyMaterial::YubiHsm {
+                algorithm: YUBIHSM_ALGO_ED25519,
+                public_key,
+                ..
+            } => {
+                if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
+                    return Err(CKR_MECHANISM_INVALID.into());
+                }
+                verify_ed25519(public_key, data, signature)
             }
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }

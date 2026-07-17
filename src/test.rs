@@ -4174,6 +4174,14 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             algorithm: crate::piv::Algorithm::EccP256,
             public_key: public_key.clone(),
         },
+        crate::KeyMaterial::YubiHsm {
+            id: 1,
+            object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+            algorithm: crate::YUBIHSM_ALGO_EC_P256,
+            length: 32,
+            capabilities: crate::yubihsm_capabilities(&[0x07]),
+            public_key: public_key.clone(),
+        },
         crate::KeyMaterial::OpenPgpPublic {
             algorithm: crate::OpenPgpAlgorithm::Ecdsa(crate::openpgp::Curve::P256),
             public_key,
@@ -4216,6 +4224,14 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     for material in [
         crate::KeyMaterial::PivPublic {
             algorithm: crate::piv::Algorithm::Ed25519,
+            public_key: public_key.clone(),
+        },
+        crate::KeyMaterial::YubiHsm {
+            id: 1,
+            object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+            algorithm: crate::YUBIHSM_ALGO_ED25519,
+            length: 32,
+            capabilities: crate::yubihsm_capabilities(&[0x16]),
             public_key: public_key.clone(),
         },
         crate::KeyMaterial::OpenPgpPublic {
