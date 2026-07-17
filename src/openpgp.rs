@@ -23,6 +23,7 @@ const INS_GET_DATA: u8 = 0xca;
 const INS_INTERNAL_AUTHENTICATE: u8 = 0x88;
 const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_GET_CHALLENGE: u8 = 0x84;
+const SELECT_CERTIFICATE_DATA: [u8; 6] = [0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21];
 const STATUS_SUCCESS: u16 = 0x9000;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -345,8 +346,8 @@ impl Client {
                 ins: 0xa5,
                 p1: key_ref.certificate_occurrence(),
                 p2: 0x04,
-                data: Vec::new(),
-                le: None,
+                data: SELECT_CERTIFICATE_DATA.to_vec(),
+                le: Some(256),
                 extended: false,
             },
         )?;
@@ -845,6 +846,23 @@ mod tests {
             expected.extend_from_slice(&point);
             expected
         });
+    }
+
+    #[test]
+    fn selects_certificate_data_object_with_required_reference() {
+        let command = CommandApdu {
+            cla: 0,
+            ins: 0xa5,
+            p1: KeyRef::Signature.certificate_occurrence(),
+            p2: 0x04,
+            data: SELECT_CERTIFICATE_DATA.to_vec(),
+            le: Some(256),
+            extended: false,
+        };
+        assert_eq!(
+            command.encode().unwrap(),
+            [0x00, 0xa5, 0x02, 0x04, 0x06, 0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21, 0x00]
+        );
     }
 
     #[test]

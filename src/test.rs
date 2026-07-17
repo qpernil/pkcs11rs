@@ -5199,8 +5199,14 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + b"Test RSA public key".len() + 2 + 7 + 256 + 3 + 1)
-            as CK_ULONG
+        (4 * ::std::mem::size_of::<CK_ULONG>()
+            + b"Test RSA public key".len()
+            + 2
+            + 7
+            + 256
+            + 3
+            + 1
+            + 8) as CK_ULONG
     );
 
     let mut label = *b"Short";
@@ -5232,7 +5238,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3 + 1)
+        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3 + 1 + 8)
             as CK_ULONG
     );
 
@@ -5296,7 +5302,8 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11 + 1) as CK_ULONG
+        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11 + 1 + 16)
+            as CK_ULONG
     );
     assert_eq!(
         crate::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
@@ -5369,6 +5376,125 @@ pub fn get_attribute_value_reports_sizes_and_values() {
     );
     assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     assert_eq!(sign, CK_FALSE as CK_BBOOL);
+
+    let mut wrap = CK_FALSE as CK_BBOOL;
+    let mut unwrap = CK_FALSE as CK_BBOOL;
+    let mut sign_recover = CK_FALSE as CK_BBOOL;
+    let mut verify_recover = CK_FALSE as CK_BBOOL;
+    let mut wrap_with_trusted = CK_FALSE as CK_BBOOL;
+    let mut operation_attrs = [
+        CK_ATTRIBUTE {
+            type_: CKA_WRAP as CK_ATTRIBUTE_TYPE,
+            pValue: &mut wrap as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+            pValue: &mut unwrap as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
+            pValue: &mut sign_recover as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE,
+            pValue: &mut verify_recover as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+            pValue: &mut wrap_with_trusted as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+    ];
+    assert_eq!(
+        crate::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            1,
+            operation_attrs.as_mut_ptr(),
+            operation_attrs.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        (
+            wrap,
+            unwrap,
+            sign_recover,
+            verify_recover,
+            wrap_with_trusted
+        ),
+        (
+            CK_FALSE as CK_BBOOL,
+            CK_FALSE as CK_BBOOL,
+            CK_FALSE as CK_BBOOL,
+            CK_FALSE as CK_BBOOL,
+            CK_FALSE as CK_BBOOL
+        )
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn get_attribute_value_reads_certificate_values() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let certificate = b"synthetic certificate".to_vec();
+    let object = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: b"openpgp-certificate".to_vec(),
+        class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: b"OpenPGP certificate".to_vec(),
+        id: vec![1],
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: crate::KeyMaterial::OpenPgpCertificate {
+            value: certificate.clone(),
+        },
+    };
+    let object_handle = {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().insert_object(object)
+    };
+
+    let mut value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: ::std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value_attribute.ulValueLen, certificate.len() as CK_ULONG);
+
+    let mut value = vec![0; certificate.len()];
+    value_attribute.pValue = value.as_mut_ptr() as CK_VOID_PTR;
+    value_attribute.ulValueLen = value.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value, certificate);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
