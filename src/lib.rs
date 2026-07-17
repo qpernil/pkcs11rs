@@ -1692,7 +1692,16 @@ struct OpenPgpSlot {
     serial: String,
     pin_min: u8,
     pin_max: u8,
+    kdf: Option<openpgp::KdfParams>,
     keys: Vec<openpgp::KeyInfo>,
+    certificates: Vec<OpenPgpCertificate>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenPgpCertificate {
+    key_ref: OpenPgpKeyRef,
+    key_type: CK_KEY_TYPE,
+    value: Vec<u8>,
 }
 
 impl OpenPgpSlot {
@@ -1705,7 +1714,9 @@ impl OpenPgpSlot {
             serial: String::from("0"),
             pin_min: 6,
             pin_max: 127,
+            kdf: None,
             keys: Vec::new(),
+            certificates: Vec::new(),
         }
     }
 
@@ -1714,6 +1725,7 @@ impl OpenPgpSlot {
         self.serial = info.serial.clone();
         self.pin_min = info.pin_min;
         self.pin_max = info.pin_max;
+        self.kdf = info.kdf.clone();
     }
 }
 
@@ -1780,8 +1792,14 @@ impl Slot for OpenPgpSlot {
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         let info = OpenPgpClient.select(self.connector.as_ref())?;
         self.update_info(&info);
-        OpenPgpClient.verify_pin(self.connector.as_ref(), pin, false)?;
-        *self.cached_pin.try_borrow_mut()? = Some(pin.to_vec());
+        let pin = self
+            .kdf
+            .as_ref()
+            .map(|kdf| kdf.derive_user_pin(pin))
+            .transpose()?
+            .unwrap_or_else(|| pin.to_vec());
+        OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, false)?;
+        *self.cached_pin.try_borrow_mut()? = Some(pin);
         self.authenticated.set(true);
         Ok(())
     }
@@ -1796,6 +1814,7 @@ impl Slot for OpenPgpSlot {
         let info = OpenPgpClient.select(self.connector.as_ref())?;
         self.update_info(&info);
         self.keys.clear();
+        self.certificates.clear();
         for key_ref in OpenPgpKeyRef::ALL {
             let Some(algorithm) = info.algorithm(key_ref) else {
                 continue;
@@ -1811,6 +1830,13 @@ impl Slot for OpenPgpSlot {
                 public_key,
                 pin_policy: info.pin_policy,
             });
+            if let Ok(value) = OpenPgpClient.certificate(self.connector.as_ref(), key_ref) {
+                self.certificates.push(OpenPgpCertificate {
+                    key_ref,
+                    key_type: algorithm.key_type() as CK_KEY_TYPE,
+                    value,
+                });
+            }
         }
         Ok(())
     }
@@ -1868,6 +1894,18 @@ impl Slot for OpenPgpSlot {
             256,
             CKF_SIGN as CK_FLAGS,
         );
+        if self
+            .keys
+            .iter()
+            .any(|key| matches!(key.algorithm, OpenPgpAlgorithm::Ecdh(_)))
+        {
+            add(
+                CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+                256,
+                521,
+                CKF_DERIVE as CK_FLAGS,
+            );
+        }
         mechanisms
     }
     fn clear_session(&mut self) {
@@ -1878,7 +1916,7 @@ impl Slot for OpenPgpSlot {
         self.authenticated.get()
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = Vec::with_capacity(self.keys.len() * 2);
+        let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len());
         for key in &self.keys {
             let public_bytes = openpgp_public_material(&key.public_key);
             let key_type = key.algorithm.key_type() as CK_KEY_TYPE;
@@ -1942,7 +1980,8 @@ impl Slot for OpenPgpSlot {
                 decrypt: can_decrypt,
                 sign: can_sign,
                 verify: false,
-                derive: false,
+                derive: key.key_ref == OpenPgpKeyRef::Decipher
+                    && matches!(key.algorithm, OpenPgpAlgorithm::Ecdh(_)),
                 sensitive: true,
                 extractable: false,
                 always_sensitive: true,
@@ -1957,6 +1996,34 @@ impl Slot for OpenPgpSlot {
                     public_exponent,
                     public_key: public_bytes,
                     pin_policy: key.pin_policy,
+                },
+            });
+        }
+        for certificate in &self.certificates {
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("openpgp-{:02x}-certificate", certificate.key_ref as u8)
+                    .into_bytes(),
+                class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                key_type: certificate.key_type,
+                label: format!("OpenPGP {:?} certificate", certificate.key_ref).into_bytes(),
+                id: vec![certificate.key_ref as u8],
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::OpenPgpCertificate {
+                    value: certificate.value.clone(),
                 },
             });
         }
@@ -2224,6 +2291,15 @@ trait Session {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn openpgp_decipher(&self, _input: &[u8], _raw: bool) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn openpgp_derive(
+        &self,
+        _key_ref: OpenPgpKeyRef,
+        _algorithm: OpenPgpAlgorithm,
+        _public_key: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
@@ -2932,6 +3008,30 @@ impl Session for OpenPgpSession {
         }
         result
     }
+    fn openpgp_derive(
+        &self,
+        key_ref: OpenPgpKeyRef,
+        algorithm: OpenPgpAlgorithm,
+        public_key: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, Error> {
+        if !self.authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if key_ref != OpenPgpKeyRef::Decipher {
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+        let curve = match algorithm {
+            OpenPgpAlgorithm::Ecdh(curve) => curve,
+            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        };
+        self.verify_pin(true)?;
+        let result = OpenPgpClient.ecdh(self.connector.as_ref(), curve, public_key);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+            self.authenticated.set(false);
+        }
+        result
+    }
 }
 
 #[derive(Debug)]
@@ -3462,6 +3562,9 @@ enum KeyMaterial {
         value: Vec<u8>,
         attestation: bool,
     },
+    OpenPgpCertificate {
+        value: Vec<u8>,
+    },
     YubiHsm {
         id: u16,
         object_type: u8,
@@ -3544,6 +3647,10 @@ impl std::fmt::Debug for KeyMaterial {
                 .debug_struct("PivCertificate")
                 .field("algorithm", algorithm)
                 .field("attestation", attestation)
+                .field("size", &value.len())
+                .finish(),
+            Self::OpenPgpCertificate { value } => fmt
+                .debug_struct("OpenPgpCertificate")
                 .field("size", &value.len())
                 .finish(),
         }
@@ -4442,7 +4549,8 @@ impl TokenObject {
                 || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
             {
                 match &self.material {
-                    KeyMaterial::PivCertificate { value, .. } => {
+                    KeyMaterial::PivCertificate { value, .. }
+                    | KeyMaterial::OpenPgpCertificate { value } => {
                         piv_certificate_attribute(value, x)
                     }
                     _ => None,
@@ -8250,41 +8358,99 @@ fn derive_key(
         if !object.derive {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let (piv_slot, algorithm, pin_policy) = match &object.material {
+        #[derive(Clone, Copy)]
+        enum DeriveSource {
+            Piv {
+                slot: piv::Slot,
+                algorithm: piv::Algorithm,
+                pin_policy: u8,
+            },
+            OpenPgp {
+                key_ref: OpenPgpKeyRef,
+                algorithm: OpenPgpAlgorithm,
+                pin_policy: u8,
+            },
+        }
+        let source = match &object.material {
             KeyMaterial::PivPrivate {
                 slot,
                 algorithm,
                 pin_policy,
                 ..
-            } => (*slot, *algorithm, *pin_policy),
+            } => DeriveSource::Piv {
+                slot: *slot,
+                algorithm: *algorithm,
+                pin_policy: *pin_policy,
+            },
+            KeyMaterial::OpenPgpPrivate {
+                key_ref,
+                algorithm: algorithm @ OpenPgpAlgorithm::Ecdh(_),
+                pin_policy,
+                ..
+            } => DeriveSource::OpenPgp {
+                key_ref: *key_ref,
+                algorithm: *algorithm,
+                pin_policy: *pin_policy,
+            },
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
-        if piv_policy_requires_login(piv_slot, pin_policy) && !logged_in {
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        match source {
+            DeriveSource::Piv {
+                slot, pin_policy, ..
+            } if piv_policy_requires_login(slot, pin_policy) && !logged_in => {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
+            DeriveSource::OpenPgp { .. } if !logged_in => {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
+            _ => {}
         }
-        let expected_length = match algorithm {
-            piv::Algorithm::EccP256 | piv::Algorithm::X25519 => 32,
-            piv::Algorithm::EccP384 => 48,
-            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        };
-        let expected_public_length = match algorithm {
-            piv::Algorithm::EccP256 => 65,
-            piv::Algorithm::EccP384 => 97,
-            piv::Algorithm::X25519 => 32,
-            _ => unreachable!(),
+        let (expected_length, expected_public_length, requires_uncompressed) = match source {
+            DeriveSource::Piv { algorithm, .. } => match algorithm {
+                piv::Algorithm::EccP256 => (32, 65, true),
+                piv::Algorithm::EccP384 => (48, 97, true),
+                piv::Algorithm::X25519 => (32, 32, false),
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
+            DeriveSource::OpenPgp { algorithm, .. } => match algorithm {
+                OpenPgpAlgorithm::Ecdh(curve) => {
+                    let coordinate_length = curve.coordinate_length();
+                    (
+                        coordinate_length.unwrap_or(32),
+                        coordinate_length.map(|length| length * 2 + 1).unwrap_or(32),
+                        coordinate_length.is_some(),
+                    )
+                }
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
         };
         if public_data.len() != expected_public_length
-            || (matches!(algorithm, piv::Algorithm::EccP256 | piv::Algorithm::EccP384)
-                && public_data.first() != Some(&0x04))
+            || (requires_uncompressed && public_data.first() != Some(&0x04))
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let derived = ctx._get_session(session_handle)?.1.piv_decipher(
-            piv_slot,
-            algorithm,
-            public_data,
-            pin_policy,
-        )?;
+        let derived = match source {
+            DeriveSource::Piv {
+                slot,
+                algorithm,
+                pin_policy,
+            } => ctx._get_session(session_handle)?.1.piv_decipher(
+                slot,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?,
+            DeriveSource::OpenPgp {
+                key_ref,
+                algorithm,
+                pin_policy,
+            } => ctx._get_session(session_handle)?.1.openpgp_derive(
+                key_ref,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?,
+        };
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
