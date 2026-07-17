@@ -315,6 +315,9 @@ trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
+    fn login_context_specific(&mut self, _pin: &[u8], _extended: bool) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn logout(&mut self) -> Result<(), Error>;
     fn init_slot(&mut self) -> Result<(), Error>;
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error>;
@@ -585,7 +588,6 @@ struct PivSlot {
     application_aid: Vec<u8>,
     slot_description: Option<String>,
     authenticated: Rc<Cell<bool>>,
-    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: piv::Version,
     serial: String,
     keys: Vec<PivKey>,
@@ -1388,7 +1390,6 @@ impl PivSlot {
             application_aid,
             slot_description: None,
             authenticated: Rc::new(Cell::new(false)),
-            cached_pin: Rc::new(RefCell::new(None)),
             version,
             serial,
             keys: Vec::new(),
@@ -1482,12 +1483,10 @@ impl Slot for PivSlot {
             flags,
             connector: self.connector.clone(),
             authenticated: self.authenticated.clone(),
-            cached_pin: self.cached_pin.clone(),
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
-        *self.cached_pin.borrow_mut() = None;
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
@@ -1502,7 +1501,6 @@ impl Slot for PivSlot {
                 self.authenticated.set(true);
             } else {
                 PivClient.verify_pin(self.connector.as_ref(), pin)?;
-                *self.cached_pin.borrow_mut() = Some(pin.to_vec());
             }
             self.authenticated.set(true);
             Ok(())
@@ -1514,7 +1512,6 @@ impl Slot for PivSlot {
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
-        *self.cached_pin.borrow_mut() = None;
         let result = PivClient.select(self.connector.as_ref(), &self.application_aid);
         if let Ok(info) = result.as_ref() {
             self.version = info.version;
@@ -1522,6 +1519,11 @@ impl Slot for PivSlot {
         }
         self.connector.clear_secure_channel();
         result.map(|_| ())
+    }
+    fn login_context_specific(&mut self, pin: &[u8], _extended: bool) -> Result<(), Error> {
+        PivClient.verify_pin(self.connector.as_ref(), pin)?;
+        self.authenticated.set(true);
+        Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
@@ -1698,7 +1700,6 @@ impl Slot for PivSlot {
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
-        *self.cached_pin.borrow_mut() = None;
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
@@ -1900,7 +1901,6 @@ struct OpenPgpSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Rc<Cell<bool>>,
-    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: (u8, u8),
     serial: String,
     pin_min: u8,
@@ -1928,7 +1928,6 @@ impl OpenPgpSlot {
             connector,
             application_aid,
             authenticated: Rc::new(Cell::new(false)),
-            cached_pin: Rc::new(RefCell::new(None)),
             version,
             serial,
             pin_min: 6,
@@ -1982,6 +1981,13 @@ fn openpgp_key_can_sign(key_ref: OpenPgpKeyRef, algorithm: OpenPgpAlgorithm) -> 
     ) && !matches!(algorithm, OpenPgpAlgorithm::Ecdh(_))
 }
 
+fn openpgp_signature_requires_context_specific_login(
+    key_ref: OpenPgpKeyRef,
+    pin_policy: u8,
+) -> bool {
+    key_ref == OpenPgpKeyRef::Signature && pin_policy == openpgp::PW1_ONE_SIGNATURE
+}
+
 impl Slot for OpenPgpSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -2029,7 +2035,6 @@ impl Slot for OpenPgpSlot {
             flags,
             connector: self.connector.clone(),
             authenticated: self.authenticated.clone(),
-            cached_pin: self.cached_pin.clone(),
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
@@ -2044,8 +2049,10 @@ impl Slot for OpenPgpSlot {
                 .map(|kdf| kdf.derive_user_pin(pin))
                 .transpose()?
                 .unwrap_or_else(|| pin.to_vec());
-            OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, false)?;
-            *self.cached_pin.try_borrow_mut()? = Some(pin);
+            OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, true)?;
+            if info.pin_policy == openpgp::PW1_MULTIPLE_SIGNATURES {
+                OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, false)?;
+            }
             self.authenticated.set(true);
             Ok(())
         })();
@@ -2054,11 +2061,22 @@ impl Slot for OpenPgpSlot {
         }
         result
     }
+    fn login_context_specific(&mut self, pin: &[u8], extended: bool) -> Result<(), Error> {
+        let pin = self
+            .kdf
+            .as_ref()
+            .map(|kdf| kdf.derive_user_pin(pin))
+            .transpose()?
+            .unwrap_or_else(|| pin.to_vec());
+        OpenPgpClient.unverify(self.connector.as_ref(), extended);
+        OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, extended)?;
+        self.authenticated.set(true);
+        Ok(())
+    }
     fn logout(&mut self) -> Result<(), Error> {
         OpenPgpClient.unverify(self.connector.as_ref(), false);
         OpenPgpClient.unverify(self.connector.as_ref(), true);
         self.authenticated.set(false);
-        *self.cached_pin.try_borrow_mut()? = None;
         self.connector.clear_secure_channel();
         Ok(())
     }
@@ -2194,7 +2212,6 @@ impl Slot for OpenPgpSlot {
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
-        *self.cached_pin.borrow_mut() = None;
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
@@ -2942,7 +2959,6 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
         application_aid: piv::PIV_AID.to_vec(),
         slot_description: Some(String::from("PKCS11RS ABI PIV test slot")),
         authenticated: Rc::new(Cell::new(false)),
-        cached_pin: Rc::new(RefCell::new(None)),
         version: piv::Version {
             major: 5,
             minor: 7,
@@ -3301,7 +3317,6 @@ struct PivSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     authenticated: Rc<Cell<bool>>,
-    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 impl Session for PivSession {
@@ -3333,16 +3348,6 @@ impl Session for PivSession {
         if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if effective_policy == 3 {
-            let pin = self
-                .cached_pin
-                .borrow()
-                .clone()
-                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-            self.authenticated.set(false);
-            PivClient.verify_pin(self.connector.as_ref(), &pin)?;
-            self.authenticated.set(true);
-        }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
         if effective_policy == 3 {
             self.authenticated.set(false);
@@ -3363,16 +3368,6 @@ impl Session for PivSession {
         if piv_policy_requires_login(slot, pin_policy) && !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if effective_policy == 3 {
-            let pin = self
-                .cached_pin
-                .borrow()
-                .clone()
-                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-            self.authenticated.set(false);
-            PivClient.verify_pin(self.connector.as_ref(), &pin)?;
-            self.authenticated.set(true);
-        }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
         if effective_policy == 3 {
             self.authenticated.set(false);
@@ -3390,18 +3385,6 @@ struct OpenPgpSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     authenticated: Rc<Cell<bool>>,
-    cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
-}
-
-impl OpenPgpSession {
-    fn verify_pin(&self, extended: bool) -> Result<(), Error> {
-        let pin = self
-            .cached_pin
-            .borrow()
-            .clone()
-            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
-        OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, extended)
-    }
 }
 
 impl Session for OpenPgpSession {
@@ -3428,20 +3411,12 @@ impl Session for OpenPgpSession {
         &self,
         key_ref: OpenPgpKeyRef,
         input: &[u8],
-        pin_policy: u8,
+        _pin_policy: u8,
     ) -> Result<Vec<u8>, Error> {
         if !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        let extended = key_ref == OpenPgpKeyRef::Authentication;
-        if extended || pin_policy == 0 {
-            self.verify_pin(extended)?;
-        }
         let result = OpenPgpClient.sign(self.connector.as_ref(), key_ref, input);
-        if pin_policy == 0 {
-            OpenPgpClient.unverify(self.connector.as_ref(), false);
-            self.authenticated.set(false);
-        }
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
         }
@@ -3451,7 +3426,6 @@ impl Session for OpenPgpSession {
         if !self.authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        self.verify_pin(true)?;
         let result = OpenPgpClient.decipher(self.connector.as_ref(), input, raw);
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
@@ -3475,7 +3449,6 @@ impl Session for OpenPgpSession {
             OpenPgpAlgorithm::Ecdh(curve) => curve,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        self.verify_pin(true)?;
         let result = OpenPgpClient.ecdh(self.connector.as_ref(), curve, public_key);
         if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
             self.authenticated.set(false);
@@ -4402,6 +4375,8 @@ struct SignatureOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
     requires_login: bool,
+    requires_context_specific_login: bool,
+    context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
     piv_pin_policy: Option<u8>,
@@ -4413,6 +4388,8 @@ struct CryptOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
     requires_login: bool,
+    requires_context_specific_login: bool,
+    context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
     iv: Option<[u8; 16]>,
     oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
@@ -5221,7 +5198,11 @@ impl TokenObject {
                 } if piv_effective_pin_policy(*slot, *pin_policy) == 3 => {
                     Some(bool_attribute(true))
                 }
-                KeyMaterial::OpenPgpPrivate { pin_policy, .. } if *pin_policy == 0 => {
+                KeyMaterial::OpenPgpPrivate {
+                    key_ref,
+                    pin_policy,
+                    ..
+                } if openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy) => {
                     Some(bool_attribute(true))
                 }
                 _ => None,
@@ -5453,6 +5434,11 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpCertificate { .. }
                 | KeyMaterial::YubiHsm { .. }
         )
+    }
+
+    fn requires_context_specific_login(&self) -> bool {
+        self.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+            == Some(bool_attribute(true))
     }
 
     fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
@@ -6430,6 +6416,29 @@ fn login(
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
+        if user_type == CKU_CONTEXT_SPECIFIC as CK_USER_TYPE {
+            let pin = from_raw_parts(pin, pin_len as usize)?;
+            let mut context_operation = None;
+            if let Some(operation) = ctx.sign_operations.get(&session_handle) {
+                if operation.requires_context_specific_login {
+                    context_operation =
+                        Some((operation.slot_id, operation.context_specific_extended));
+                }
+            }
+            if let Some(operation) = ctx.decrypt_operations.get(&session_handle) {
+                if operation.requires_context_specific_login {
+                    if context_operation.is_some() {
+                        return Err(CKR_OPERATION_ACTIVE.into());
+                    }
+                    context_operation =
+                        Some((operation.slot_id, operation.context_specific_extended));
+                }
+            }
+            let (slot_id, extended) = context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            ctx._get_slot_mut(slot_id)?
+                .login_context_specific(pin, extended)?;
+            return Ok(());
+        }
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
@@ -7529,6 +7538,11 @@ fn crypt_init(
             key: object.material.clone(),
             slot_id,
             requires_login: object.private,
+            requires_context_specific_login: object.requires_context_specific_login(),
+            context_specific_extended: matches!(
+                &object.material,
+                KeyMaterial::OpenPgpPrivate { .. }
+            ),
             mechanism: mechanism.mechanism,
             iv,
             oaep,
@@ -7993,6 +8007,8 @@ fn sign_init(
                 key: object.material.clone(),
                 slot_id,
                 requires_login: object.private,
+                requires_context_specific_login: object.requires_context_specific_login(),
+                context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 pss,
                 piv_pin_policy: match &object.material {
@@ -8562,6 +8578,8 @@ fn verify_init(
                 key: object.material.clone(),
                 slot_id,
                 requires_login: false,
+                requires_context_specific_login: false,
+                context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 pss,
                 piv_pin_policy: None,

@@ -6,6 +6,8 @@ static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static TEST_SLOT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static TEST_CONTEXT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 static TEST_SLOT_LOGOUT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static TEST_SLOT_FAIL_LOGOUT: std::sync::atomic::AtomicBool =
@@ -697,6 +699,18 @@ impl crate::Slot for TestSlot {
         }
         TEST_SLOT_LOGGED_IN.store(true, std::sync::atomic::Ordering::SeqCst);
         TEST_SLOT_LOGIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn login_context_specific(
+        &mut self,
+        pin: &[u8],
+        _extended: bool,
+    ) -> Result<(), crate::error::Error> {
+        if pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        TEST_CONTEXT_LOGIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -1825,6 +1839,67 @@ fn openpgp_metadata_failure_does_not_hide_selected_applet() {
 }
 
 #[test]
+fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
+    assert!(crate::openpgp_signature_requires_context_specific_login(
+        crate::openpgp::KeyRef::Signature,
+        crate::openpgp::PW1_ONE_SIGNATURE,
+    ));
+    assert!(!crate::openpgp_signature_requires_context_specific_login(
+        crate::openpgp::KeyRef::Signature,
+        crate::openpgp::PW1_MULTIPLE_SIGNATURES,
+    ));
+    assert!(!crate::openpgp_signature_requires_context_specific_login(
+        crate::openpgp::KeyRef::Authentication,
+        crate::openpgp::PW1_ONE_SIGNATURE,
+    ));
+
+    let mut object = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: b"openpgp-private".to_vec(),
+        class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: b"OpenPGP signature key".to_vec(),
+        id: vec![1],
+        token: true,
+        private: true,
+        encrypt: false,
+        decrypt: false,
+        sign: true,
+        verify: false,
+        derive: false,
+        sensitive: true,
+        extractable: false,
+        always_sensitive: true,
+        never_extractable: true,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: crate::KeyMaterial::OpenPgpPrivate {
+            key_ref: crate::openpgp::KeyRef::Signature,
+            algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
+            modulus: vec![0; 256],
+            public_exponent: vec![1, 0, 1],
+            public_key: vec![0; 256],
+            pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
+        },
+    };
+    assert!(object
+        .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+        .is_some());
+    object.material = crate::KeyMaterial::OpenPgpPrivate {
+        key_ref: crate::openpgp::KeyRef::Authentication,
+        algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
+        modulus: vec![0; 256],
+        public_exponent: vec![1, 0, 1],
+        public_key: vec![0; 256],
+        pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
+    };
+    assert!(object
+        .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+        .is_none());
+}
+
+#[test]
 fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
@@ -2186,6 +2261,60 @@ pub fn login_controls_private_object_visibility_and_signing() {
         ),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+fn context_specific_login_authenticates_an_always_authenticate_operation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    TEST_CONTEXT_LOGIN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    {
+        let mut context = crate::lock_context().unwrap();
+        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        object.material = crate::KeyMaterial::PivPrivate {
+            slot: crate::piv::Slot::Signature,
+            algorithm: crate::piv::Algorithm::Rsa1024,
+            modulus: vec![0; 128],
+            public_exponent: vec![1, 0, 1],
+            pin_policy: 3,
+            touch_policy: 1,
+        };
+        object.private = true;
+        object.sign = true;
+        object.decrypt = false;
+        object.sensitive = true;
+        object.extractable = false;
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            TEST_SESSION_HANDLE,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        TEST_CONTEXT_LOGIN_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 

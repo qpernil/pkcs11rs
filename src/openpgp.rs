@@ -14,6 +14,8 @@ use openssl::{
 use std::time::Duration;
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
+pub(crate) const PW1_MULTIPLE_SIGNATURES: u8 = 0x01;
 
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE_DATA: u8 = 0x24;
