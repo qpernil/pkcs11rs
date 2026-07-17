@@ -26,6 +26,9 @@ static certificate object, not as a normal public/private key slot. RSA-1024
 through RSA-4096, P-256, P-384, Ed25519, and X25519 protocol identifiers are
 recognized. Firmware and FIPS restrictions still apply.
 
+When a slot reports the default PIN policy, `9C` uses `ALWAYS`, `9E` uses
+`NEVER`, and the other standard and retired key slots use `ONCE`.
+
 Every discovered slot is exposed as PKCS #11 public/private key objects when
 metadata or a certificate supplies a usable public key. Certificates are
 exposed as `CKO_CERTIFICATE` objects with DER value, X.509 subject, issuer, and
