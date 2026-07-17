@@ -3,8 +3,8 @@
 use crate::{
     error::Error,
     scp03::{select_application, transmit, CommandApdu},
-    Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LOCKED,
-    CKR_PIN_LEN_RANGE, CKR_USER_NOT_LOGGED_IN,
+    Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
+    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     bn::BigNum,
@@ -251,8 +251,12 @@ impl ApplicationInfo {
 pub(crate) struct Client;
 
 impl Client {
-    pub(crate) fn select(&self, connector: &dyn Connector) -> Result<ApplicationInfo, Error> {
-        select_application(connector, &OPENPGP_AID)?;
+    pub(crate) fn select(
+        &self,
+        connector: &dyn Connector,
+        application_aid: &[u8],
+    ) -> Result<ApplicationInfo, Error> {
+        select_application(connector, application_aid)?;
         let data = self.get_data(connector, 0x006e)?;
         let mut info = parse_application_info(&data)?;
         info.kdf = self

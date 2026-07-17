@@ -17,8 +17,6 @@ use openssl::{
 use std::{env, fs};
 use zeroize::Zeroizing;
 
-pub(crate) const YUBIKEY_SECURITY_DOMAIN_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
-
 const SCP11A_KEY_ID: u8 = 0x11;
 const SCP11B_KEY_ID: u8 = 0x13;
 const SCP11_SECURITY_LEVEL: u8 = 0x33;
@@ -267,18 +265,6 @@ fn load_certificates(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
         }
     }
     Ok(certificates)
-}
-
-pub(crate) fn configured_application_aid() -> Result<Zeroizing<Vec<u8>>, Error> {
-    let aid = match env::var("PKCS11RS_SCP11_AID") {
-        Ok(value) => Zeroizing::new(parse_hex(&value)?),
-        Err(env::VarError::NotPresent) => Zeroizing::new(YUBIKEY_SECURITY_DOMAIN_AID.to_vec()),
-        Err(env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
-    };
-    if !(5..=16).contains(&aid.len()) {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(aid)
 }
 
 fn p256_group() -> Result<EcGroup, Error> {

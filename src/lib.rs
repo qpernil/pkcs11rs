@@ -56,8 +56,8 @@ use error::*;
 
 mod scp03;
 use scp03::{
-    configured_application_aid, configured_security_level, select_application, CommandApdu,
-    ResponseApdu, Scp03KeySet, Scp03Session,
+    configured_security_level, parse_hex, select_application, CommandApdu, ResponseApdu,
+    Scp03KeySet, Scp03Session, YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
 };
 
 mod scp11;
@@ -309,6 +309,9 @@ trait Slot {
     fn refresh(&self) -> Result<(), Error> {
         Ok(())
     }
+    fn set_applet_present(&self, _present: bool) {}
+    fn set_discovery_error(&self, _error: &Error) {}
+    fn clear_discovery_error(&self) {}
     fn clear_session(&mut self) {}
     fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
@@ -549,6 +552,7 @@ fn yubihsm_token_objects(
 #[derive(Debug)]
 struct PivSlot {
     connector: Rc<dyn Connector>,
+    application_aid: Vec<u8>,
     authenticated: Rc<Cell<bool>>,
     cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: piv::Version,
@@ -1195,36 +1199,149 @@ fn verify_rsa_pss(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum YubiKeyBackend {
+enum CcidApplication {
     Piv,
     OpenPgp,
+    HsmAuth,
+    GlobalPlatform,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CcidConfiguration {
+    application: CcidApplication,
+    secure_channel: Option<SecureChannelProtocol>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecureChannelProtocol {
     Scp03,
     Scp11a,
     Scp11b,
 }
 
-fn configured_yubikey_backend() -> Result<YubiKeyBackend, Error> {
-    match std::env::var("PKCS11RS_YUBIKEY_BACKEND") {
-        Ok(value) if value.eq_ignore_ascii_case("piv") => Ok(YubiKeyBackend::Piv),
-        Ok(value) if value.eq_ignore_ascii_case("openpgp") || value.eq_ignore_ascii_case("pgp") => {
-            Ok(YubiKeyBackend::OpenPgp)
+fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
+    let secure_channel = configured_secure_channel_optional()?;
+    let applications = match std::env::var("PKCS11RS_CCID_APPLICATIONS") {
+        Ok(value) => parse_ccid_application_list(&value)?,
+        Err(std::env::VarError::NotPresent) => default_ccid_applications(),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+
+    applications
+        .into_iter()
+        .map(|application| {
+            let secure_channel = match application {
+                CcidApplication::Piv
+                | CcidApplication::OpenPgp
+                | CcidApplication::HsmAuth
+                | CcidApplication::GlobalPlatform => secure_channel,
+            };
+            Ok(CcidConfiguration {
+                application,
+                secure_channel,
+            })
+        })
+        .collect()
+}
+
+fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Error> {
+    let mut applications = Vec::new();
+    for application in value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let application = parse_ccid_application(application)?;
+        if !applications.contains(&application) {
+            applications.push(application);
         }
-        Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(YubiKeyBackend::Scp03),
-        Ok(value) if value.eq_ignore_ascii_case("scp11a") => Ok(YubiKeyBackend::Scp11a),
+    }
+    if applications.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(applications)
+}
+
+fn default_ccid_applications() -> Vec<CcidApplication> {
+    vec![
+        CcidApplication::Piv,
+        CcidApplication::OpenPgp,
+        CcidApplication::HsmAuth,
+        CcidApplication::GlobalPlatform,
+    ]
+}
+
+fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
+    match value.to_ascii_lowercase().as_str() {
+        "piv" => Ok(CcidApplication::Piv),
+        "openpgp" | "pgp" => Ok(CcidApplication::OpenPgp),
+        "hsmauth" | "yubihsm-auth" => Ok(CcidApplication::HsmAuth),
+        "globalplatform" | "global-platform" | "gp" => Ok(CcidApplication::GlobalPlatform),
+        _ => Err(CKR_ARGUMENTS_BAD.into()),
+    }
+}
+
+fn ccid_application_label(application: CcidApplication) -> &'static str {
+    match application {
+        CcidApplication::Piv => "PIV",
+        CcidApplication::OpenPgp => "OpenPGP",
+        CcidApplication::HsmAuth => "YubiHSM Auth",
+        CcidApplication::GlobalPlatform => "GlobalPlatform",
+    }
+}
+
+fn ccid_application_aid(
+    application: CcidApplication,
+    _secure_channel: Option<SecureChannelProtocol>,
+) -> Result<Vec<u8>, Error> {
+    let (name, default) = match application {
+        CcidApplication::Piv => ("PKCS11RS_PIV_AID", &piv::PIV_AID[..]),
+        CcidApplication::OpenPgp => ("PKCS11RS_OPENPGP_AID", &openpgp::OPENPGP_AID[..]),
+        CcidApplication::HsmAuth => (
+            "PKCS11RS_HSMAUTH_AID",
+            &[0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01][..],
+        ),
+        CcidApplication::GlobalPlatform => (
+            "PKCS11RS_GLOBALPLATFORM_AID",
+            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID[..],
+        ),
+    };
+    configured_ccid_aid(name, default)
+}
+
+fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
+    let aid = match std::env::var(name) {
+        Ok(value) => parse_hex(&value)?,
+        Err(std::env::VarError::NotPresent) => default.to_vec(),
+        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+    if !(5..=16).contains(&aid.len()) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(aid)
+}
+
+fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>, Error> {
+    match std::env::var("PKCS11RS_CCID_SECURE_CHANNEL") {
+        Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(Some(SecureChannelProtocol::Scp03)),
+        Ok(value) if value.eq_ignore_ascii_case("scp11a") => {
+            Ok(Some(SecureChannelProtocol::Scp11a))
+        }
         Ok(value)
             if value.eq_ignore_ascii_case("scp11") || value.eq_ignore_ascii_case("scp11b") =>
         {
-            Ok(YubiKeyBackend::Scp11b)
+            Ok(Some(SecureChannelProtocol::Scp11b))
         }
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
-        Err(std::env::VarError::NotPresent) => Ok(YubiKeyBackend::Piv),
+        Err(std::env::VarError::NotPresent) => Ok(None),
     }
 }
 
 impl PivSlot {
-    fn new(connector: Rc<dyn Connector>) -> Self {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
+            application_aid,
             authenticated: Rc::new(Cell::new(false)),
             cached_pin: Rc::new(RefCell::new(None)),
             version: piv::Version {
@@ -1249,7 +1366,7 @@ impl Slot for PivSlot {
         self
     }
     fn name(&self) -> String {
-        self.connector.name()
+        format!("{} PIV", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
@@ -1276,6 +1393,15 @@ impl Slot for PivSlot {
         }
         Ok(())
     }
+    fn set_applet_present(&self, present: bool) {
+        self.connector.set_applet_present(present);
+    }
+    fn set_discovery_error(&self, error: &Error) {
+        self.connector.set_discovery_error(error);
+    }
+    fn clear_discovery_error(&self) {
+        self.connector.clear_discovery_error();
+    }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(PivSession {
             slotID,
@@ -1288,35 +1414,44 @@ impl Slot for PivSlot {
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         *self.cached_pin.borrow_mut() = None;
-        let info = PivClient.select(self.connector.as_ref())?;
-        self.update_device_info(info);
-        let only_never = !self.keys.is_empty()
-            && self
-                .keys
-                .iter()
-                .all(|key| !piv_policy_requires_login(key.slot, key.pin_policy));
-        if pin.is_empty() && only_never {
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_device_info(info);
+            let only_never = !self.keys.is_empty()
+                && self
+                    .keys
+                    .iter()
+                    .all(|key| !piv_policy_requires_login(key.slot, key.pin_policy));
+            if pin.is_empty() && only_never {
+                self.authenticated.set(true);
+            } else {
+                PivClient.verify_pin(self.connector.as_ref(), pin)?;
+                *self.cached_pin.borrow_mut() = Some(pin.to_vec());
+            }
             self.authenticated.set(true);
-        } else {
-            PivClient.verify_pin(self.connector.as_ref(), pin)?;
-            *self.cached_pin.borrow_mut() = Some(pin.to_vec());
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connector.clear_secure_channel();
         }
-        self.authenticated.set(true);
-        Ok(())
+        result
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
         *self.cached_pin.borrow_mut() = None;
-        let result = PivClient.select(self.connector.as_ref());
+        let result = PivClient.select(self.connector.as_ref(), &self.application_aid);
         if let Ok(info) = result.as_ref() {
             self.version = info.version;
             self.serial = info.serial.unwrap_or_default().to_string();
         }
+        self.connector.clear_secure_channel();
         result.map(|_| ())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
-        let info = PivClient.select(self.connector.as_ref())?;
+        let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
         self.update_device_info(info);
         self.keys.clear();
         self.certificates.clear();
@@ -1488,6 +1623,7 @@ impl Slot for PivSlot {
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         *self.cached_pin.borrow_mut() = None;
+        self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
@@ -1686,6 +1822,7 @@ impl Slot for PivSlot {
 #[derive(Debug)]
 struct OpenPgpSlot {
     connector: Rc<dyn Connector>,
+    application_aid: Vec<u8>,
     authenticated: Rc<Cell<bool>>,
     cached_pin: Rc<RefCell<Option<Vec<u8>>>>,
     version: (u8, u8),
@@ -1705,9 +1842,10 @@ struct OpenPgpCertificate {
 }
 
 impl OpenPgpSlot {
-    fn new(connector: Rc<dyn Connector>) -> Self {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
+            application_aid,
             authenticated: Rc::new(Cell::new(false)),
             cached_pin: Rc::new(RefCell::new(None)),
             version: (0, 0),
@@ -1757,7 +1895,7 @@ impl Slot for OpenPgpSlot {
         self
     }
     fn name(&self) -> String {
-        self.connector.name()
+        format!("{} OpenPGP", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
@@ -1780,6 +1918,15 @@ impl Slot for OpenPgpSlot {
     fn refresh(&self) -> Result<(), Error> {
         self.connector.refresh()
     }
+    fn set_applet_present(&self, present: bool) {
+        self.connector.set_applet_present(present);
+    }
+    fn set_discovery_error(&self, error: &Error) {
+        self.connector.set_discovery_error(error);
+    }
+    fn clear_discovery_error(&self) {
+        self.connector.clear_discovery_error();
+    }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(OpenPgpSession {
             slotID,
@@ -1790,28 +1937,37 @@ impl Slot for OpenPgpSlot {
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        let info = OpenPgpClient.select(self.connector.as_ref())?;
-        self.update_info(&info);
-        let pin = self
-            .kdf
-            .as_ref()
-            .map(|kdf| kdf.derive_user_pin(pin))
-            .transpose()?
-            .unwrap_or_else(|| pin.to_vec());
-        OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, false)?;
-        *self.cached_pin.try_borrow_mut()? = Some(pin);
-        self.authenticated.set(true);
-        Ok(())
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_info(&info);
+            let pin = self
+                .kdf
+                .as_ref()
+                .map(|kdf| kdf.derive_user_pin(pin))
+                .transpose()?
+                .unwrap_or_else(|| pin.to_vec());
+            OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, false)?;
+            *self.cached_pin.try_borrow_mut()? = Some(pin);
+            self.authenticated.set(true);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connector.clear_secure_channel();
+        }
+        result
     }
     fn logout(&mut self) -> Result<(), Error> {
         OpenPgpClient.unverify(self.connector.as_ref(), false);
         OpenPgpClient.unverify(self.connector.as_ref(), true);
         self.authenticated.set(false);
         *self.cached_pin.try_borrow_mut()? = None;
+        self.connector.clear_secure_channel();
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let info = OpenPgpClient.select(self.connector.as_ref())?;
+        let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
         self.update_info(&info);
         self.keys.clear();
         self.certificates.clear();
@@ -1911,6 +2067,7 @@ impl Slot for OpenPgpSlot {
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         *self.cached_pin.borrow_mut() = None;
+        self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
@@ -2150,34 +2307,115 @@ impl Slot for YubiHsmSlot {
 }
 
 #[derive(Debug)]
-struct YubiKeySlot {
+struct GenericPcscSlot {
     connector: Rc<dyn Connector>,
-    session: Rc<RefCell<Option<Scp03Session>>>,
-    protocol: YubiKeySecureChannel,
+    application_aid: Vec<u8>,
+    label: &'static str,
+    authenticated: Cell<bool>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum YubiKeySecureChannel {
-    Scp03,
-    Scp11a,
-    Scp11b,
-}
-
-impl YubiKeySecureChannel {
-    fn application_aid(self) -> Result<Zeroizing<Vec<u8>>, Error> {
-        match self {
-            Self::Scp03 => configured_application_aid(),
-            Self::Scp11a | Self::Scp11b => scp11::configured_application_aid(),
+impl GenericPcscSlot {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>, label: &'static str) -> Self {
+        Self {
+            connector,
+            application_aid,
+            label,
+            authenticated: Cell::new(false),
         }
     }
 }
 
-impl Slot for YubiKeySlot {
+impl Slot for GenericPcscSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn name(&self) -> String {
-        self.connector.name()
+        format!("{} {}", self.connector.name(), self.label)
+    }
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+    fn product(&self) -> &str {
+        self.label
+    }
+    fn serial(&self) -> &str {
+        self.connector.serial()
+    }
+    fn major(&self) -> u8 {
+        self.connector.major()
+    }
+    fn minor(&self) -> u8 {
+        self.connector.minor()
+    }
+    fn is_present(&self) -> bool {
+        self.connector.is_present()
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        self.connector.refresh()
+    }
+    fn set_applet_present(&self, present: bool) {
+        self.connector.set_applet_present(present);
+    }
+    fn set_discovery_error(&self, error: &Error) {
+        self.connector.set_discovery_error(error);
+    }
+    fn clear_discovery_error(&self) {
+        self.connector.clear_discovery_error();
+    }
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+        Box::new(PcscAppletSession {
+            slotID: slot_id,
+            flags,
+            connector: self.connector.clone(),
+        })
+    }
+    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        self.authenticated.set(true);
+        Ok(())
+    }
+    fn logout(&mut self) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
+        Ok(())
+    }
+    fn init_slot(&mut self) -> Result<(), Error> {
+        select_application(self.connector.as_ref(), &self.application_aid)
+    }
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+    fn clear_session(&mut self) {
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
+    }
+    fn login_is_active(&self) -> bool {
+        self.authenticated.get()
+    }
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+struct GlobalPlatformSlot {
+    connector: Rc<dyn Connector>,
+    application_aid: Vec<u8>,
+    authenticated: Cell<bool>,
+}
+
+impl Slot for GlobalPlatformSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn name(&self) -> String {
+        format!("{} GlobalPlatform", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
@@ -2200,50 +2438,42 @@ impl Slot for YubiKeySlot {
     fn refresh(&self) -> Result<(), Error> {
         self.connector.refresh()
     }
+    fn set_applet_present(&self, present: bool) {
+        self.connector.set_applet_present(present);
+    }
+    fn set_discovery_error(&self, error: &Error) {
+        self.connector.set_discovery_error(error);
+    }
+    fn clear_discovery_error(&self) {
+        self.connector.clear_discovery_error();
+    }
     fn clear_session(&mut self) {
-        *self.session.borrow_mut() = None;
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.session.borrow().is_some()
+        self.authenticated.get()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiKeySession {
+        Box::new(PcscAppletSession {
             slotID,
             flags,
             connector: self.connector.clone(),
-            session: self.session.clone(),
         })
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        *self.session.try_borrow_mut()? = None;
-        let selected_aid = self.protocol.application_aid()?;
-        select_application(self.connector.as_ref(), &selected_aid)?;
-        let session = match self.protocol {
-            YubiKeySecureChannel::Scp03 => {
-                let keys = Scp03KeySet::from_environment()?;
-                let security_level = configured_security_level()?;
-                Scp03Session::authenticate_selected(
-                    self.connector.as_ref(),
-                    &keys,
-                    security_level,
-                    &selected_aid,
-                )?
-            }
-            YubiKeySecureChannel::Scp11a => Scp11KeySet::from_environment(Scp11Variant::A)?
-                .authenticate_selected(self.connector.as_ref())?,
-            YubiKeySecureChannel::Scp11b => Scp11KeySet::from_environment(Scp11Variant::B)?
-                .authenticate_selected(self.connector.as_ref())?,
-        };
-        *self.session.try_borrow_mut()? = Some(session);
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        self.authenticated.set(true);
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
-        *self.session.try_borrow_mut()? = None;
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        let selected_aid = self.protocol.application_aid()?;
-        select_application(self.connector.as_ref(), &selected_aid)
+        select_application(self.connector.as_ref(), &self.application_aid)
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
@@ -2251,6 +2481,53 @@ impl Slot for YubiKeySlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct PcscAppletSession {
+    slotID: CK_SLOT_ID,
+    flags: CK_FLAGS,
+    connector: Rc<dyn Connector>,
+}
+
+impl Session for PcscAppletSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slotID
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+
+    fn get_session_info(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        for chunk in output.chunks_mut(256) {
+            let response = scp03::transmit(
+                self.connector.as_ref(),
+                &CommandApdu {
+                    cla: 0,
+                    ins: 0x84,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(chunk.len() as u32),
+                    extended: false,
+                },
+            )?;
+            if response.status != 0x9000 || response.data.len() != chunk.len() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            chunk.copy_from_slice(&response.data);
+        }
         Ok(())
     }
 }
@@ -2505,6 +2782,7 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
     let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
     Ok(PivSlot {
         connector,
+        application_aid: piv::PIV_AID.to_vec(),
         authenticated: Rc::new(Cell::new(false)),
         cached_pin: Rc::new(RefCell::new(None)),
         version: piv::Version {
@@ -2654,7 +2932,7 @@ impl Slot for AbiScp03Slot {
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(YubiKeySession {
+        Box::new(GlobalPlatformSession {
             slotID: slot_id,
             flags,
             connector: self.connector.clone(),
@@ -3079,14 +3357,14 @@ impl YubiHsmSession {
 }
 
 #[derive(Debug)]
-struct YubiKeySession {
+struct GlobalPlatformSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
-impl Session for YubiKeySession {
+impl Session for GlobalPlatformSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -3123,7 +3401,7 @@ impl Session for YubiKeySession {
     }
 }
 
-impl YubiKeySession {
+impl GlobalPlatformSession {
     fn send_apdu(&self, command: &CommandApdu, chained: bool) -> Result<ResponseApdu, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
         let result = {
@@ -3160,6 +3438,16 @@ trait Connector {
         Ok(())
     }
 
+    fn set_applet_present(&self, _present: bool) {}
+    fn set_discovery_error(&self, _error: &Error) {}
+    fn clear_discovery_error(&self) {}
+
+    fn establish_secure_channel(&self, _application_aid: &[u8]) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn clear_secure_channel(&self) {}
+
     fn name(&self) -> String {
         format!(
             "{} {} {}",
@@ -3175,6 +3463,212 @@ trait Connector {
         let len = slice.len();
         receive_buffer.truncate(len);
         Ok(receive_buffer)
+    }
+}
+
+#[derive(Debug, Default)]
+struct SecureChannelState {
+    application_aid: Vec<u8>,
+    session: Option<Scp03Session>,
+}
+
+#[derive(Debug)]
+struct PcscAppletConnector {
+    base: Rc<dyn Connector>,
+    application_aid: Vec<u8>,
+    protocol: Option<SecureChannelProtocol>,
+    state: Rc<RefCell<SecureChannelState>>,
+    enabled: Cell<bool>,
+    applet_present: Cell<bool>,
+    discovery_error: RefCell<Option<String>>,
+}
+
+impl PcscAppletConnector {
+    fn new(
+        base: Rc<dyn Connector>,
+        application_aid: &[u8],
+        protocol: Option<SecureChannelProtocol>,
+        state: Rc<RefCell<SecureChannelState>>,
+    ) -> Self {
+        let applet_present = base.is_present();
+        Self {
+            base,
+            application_aid: application_aid.to_vec(),
+            protocol,
+            state,
+            enabled: Cell::new(false),
+            applet_present: Cell::new(applet_present),
+            discovery_error: RefCell::new(None),
+        }
+    }
+
+    fn ensure_selected(&self) -> Result<(), Error> {
+        if self.protocol.is_none() || !self.enabled.get() {
+            return select_application(self.base.as_ref(), &self.application_aid);
+        }
+
+        let mut state = self.state.try_borrow_mut()?;
+        if state.application_aid == self.application_aid && state.session.is_some() {
+            return Ok(());
+        }
+        state.session = None;
+        state.application_aid.clear();
+        select_application(self.base.as_ref(), &self.application_aid)?;
+        let established = match self.protocol.ok_or(CKR_ARGUMENTS_BAD)? {
+            SecureChannelProtocol::Scp03 => {
+                let keys = Scp03KeySet::from_environment()?;
+                let security_level = configured_security_level()?;
+                Scp03Session::authenticate_selected(
+                    self.base.as_ref(),
+                    &keys,
+                    security_level,
+                    &self.application_aid,
+                )?
+            }
+            SecureChannelProtocol::Scp11a => Scp11KeySet::from_environment(Scp11Variant::A)?
+                .authenticate_selected(self.base.as_ref())?,
+            SecureChannelProtocol::Scp11b => Scp11KeySet::from_environment(Scp11Variant::B)?
+                .authenticate_selected(self.base.as_ref())?,
+        };
+        state.application_aid = self.application_aid.clone();
+        state.session = Some(established);
+        Ok(())
+    }
+
+    fn record_discovery_error(&self, error: &Error) {
+        *self.discovery_error.borrow_mut() = Some(format!("{error:?}"));
+    }
+
+    fn forget_discovery_error(&self) {
+        *self.discovery_error.borrow_mut() = None;
+    }
+}
+
+impl Connector for PcscAppletConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        self.base.manufacturer()
+    }
+
+    fn product(&self) -> &str {
+        self.base.product()
+    }
+
+    fn serial(&self) -> &str {
+        self.base.serial()
+    }
+
+    fn major(&self) -> u8 {
+        self.base.major()
+    }
+
+    fn minor(&self) -> u8 {
+        self.base.minor()
+    }
+
+    fn is_present(&self) -> bool {
+        self.base.is_present() && self.applet_present.get()
+    }
+
+    fn buffer_size(&self) -> usize {
+        self.base.buffer_size()
+    }
+
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        self.ensure_selected()?;
+        if self.protocol.is_none() || !self.enabled.get() {
+            return self.base.transmit(send_buffer, receive_buffer, timeout);
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let result: Result<Vec<u8>, Error> = (|| {
+            let command = CommandApdu::decode(send_buffer)?;
+            let response = channel.transmit(self.base.as_ref(), &command)?;
+            Ok(response.encode())
+        })();
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        let encoded = result?;
+        if encoded.len() > receive_buffer.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        receive_buffer[..encoded.len()].copy_from_slice(&encoded);
+        Ok(&receive_buffer[..encoded.len()])
+    }
+
+    fn refresh(&self) -> Result<(), Error> {
+        let result = self.base.refresh();
+        if result.is_err() || !self.base.is_present() {
+            self.applet_present.set(false);
+            if let Err(error) = &result {
+                self.record_discovery_error(error);
+            } else {
+                self.record_discovery_error(&Error::from(CKR_DEVICE_REMOVED));
+            }
+            self.clear_secure_channel();
+            return result;
+        }
+
+        self.clear_secure_channel();
+        match select_application(self.base.as_ref(), &self.application_aid) {
+            Ok(()) => {
+                self.applet_present.set(true);
+                self.forget_discovery_error();
+                Ok(())
+            }
+            Err(error) => {
+                self.applet_present.set(false);
+                self.record_discovery_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    fn set_applet_present(&self, present: bool) {
+        self.applet_present.set(present);
+        if !present {
+            self.clear_secure_channel();
+        }
+    }
+
+    fn set_discovery_error(&self, error: &Error) {
+        self.record_discovery_error(error);
+    }
+
+    fn clear_discovery_error(&self) {
+        self.forget_discovery_error();
+    }
+
+    fn establish_secure_channel(&self, application_aid: &[u8]) -> Result<(), Error> {
+        if application_aid != self.application_aid {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.enabled.set(true);
+        if let Err(error) = self.ensure_selected() {
+            self.enabled.set(false);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn clear_secure_channel(&self) {
+        self.enabled.set(false);
+        if let Ok(mut state) = self.state.try_borrow_mut() {
+            if state.application_aid == self.application_aid {
+                state.session = None;
+                state.application_aid.clear();
+            }
+        }
     }
 }
 
@@ -3363,7 +3857,7 @@ impl Connector for PcscConnector {
         *self.card.borrow_mut() = None;
         let card = self.context.connect(
             &self.reader,
-            pcsc::ShareMode::Exclusive,
+            pcsc::ShareMode::Shared,
             pcsc::Protocols::T0 | pcsc::Protocols::T1,
         )?;
         *self.card.borrow_mut() = Some(card);
@@ -3376,7 +3870,7 @@ impl PcscConnector {
         match self.card.borrow_mut().as_mut() {
             Some(card) => card
                 .reconnect(
-                    pcsc::ShareMode::Exclusive,
+                    pcsc::ShareMode::Shared,
                     pcsc::Protocols::T0 | pcsc::Protocols::T1,
                     pcsc::Disposition::ResetCard,
                 )
@@ -3550,6 +4044,7 @@ enum KeyMaterial {
         algorithm: OpenPgpAlgorithm,
         modulus: Vec<u8>,
         public_exponent: Vec<u8>,
+        #[allow(dead_code)]
         public_key: Vec<u8>,
         pin_policy: u8,
     },
@@ -4064,58 +4559,160 @@ impl Context {
                                 .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
                                 .and_then(|slot| slot.init_slot());
                             if let Err(error) = initialized {
-                                debug_log!("YubiKey backend initialization: {:?}", error);
+                                debug_log!("CCID application initialization: {:?}", error);
+                                if let Some(slot) = self.slots.get(&slot_id) {
+                                    slot.set_discovery_error(&error);
+                                    slot.set_applet_present(false);
+                                }
                             } else {
-                                map(self.refresh_slot_token_objects(slot_id));
+                                if let Some(slot) = self.slots.get(&slot_id) {
+                                    slot.clear_discovery_error();
+                                }
+                                if let Err(error) = self.refresh_slot_token_objects(slot_id) {
+                                    debug_log!("CCID object discovery: {:?}", error);
+                                    if let Some(slot) = self.slots.get(&slot_id) {
+                                        slot.set_discovery_error(&error);
+                                        slot.set_applet_present(false);
+                                    }
+                                }
                             }
                         }
                         continue;
                     }
                     map(connector.refresh());
-                    let slot_id = next_key(&self.slots, 0);
-                    let connector: Rc<dyn Connector> = Rc::new(connector);
-                    let mut slot: Box<dyn Slot> = match configured_yubikey_backend() {
-                        Ok(YubiKeyBackend::Piv) => Box::new(PivSlot::new(connector)),
-                        Ok(YubiKeyBackend::OpenPgp) => Box::new(OpenPgpSlot::new(connector)),
-                        Ok(YubiKeyBackend::Scp03) => Box::new(YubiKeySlot {
-                            connector,
-                            session: Rc::new(RefCell::new(None)),
-                            protocol: YubiKeySecureChannel::Scp03,
-                        }),
-                        Ok(YubiKeyBackend::Scp11a) => Box::new(YubiKeySlot {
-                            connector,
-                            session: Rc::new(RefCell::new(None)),
-                            protocol: YubiKeySecureChannel::Scp11a,
-                        }),
-                        Ok(YubiKeyBackend::Scp11b) => Box::new(YubiKeySlot {
-                            connector,
-                            session: Rc::new(RefCell::new(None)),
-                            protocol: YubiKeySecureChannel::Scp11b,
-                        }),
+                    let configurations = match configured_ccid_configurations() {
+                        Ok(configurations) => configurations,
                         Err(error) => {
-                            debug_log!("PKCS11RS_YUBIKEY_BACKEND: {:?}", error);
+                            debug_log!("CCID application configuration: {:?}", error);
                             continue;
                         }
                     };
-                    if slot.is_present() {
-                        if let Err(error) = slot.init_slot() {
-                            debug_log!("YubiKey backend initialization: {:?}", error);
+                    let base_connector: Rc<dyn Connector> = Rc::new(connector);
+                    let shared_state = Rc::new(RefCell::new(SecureChannelState::default()));
+                    for configuration in configurations {
+                        let application_label = ccid_application_label(configuration.application);
+                        let name = format!("{} {}", base_connector.name(), application_label);
+                        if let Some(slot_id) = self
+                            .slots
+                            .iter()
+                            .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
+                        {
+                            if self.dynamic_slots.contains(&slot_id) {
+                                seen_dynamic_slots.insert(slot_id);
+                            }
+                            let (was_present, is_present) = {
+                                let slot = self.slots.get(&slot_id).unwrap();
+                                let was_present = slot.is_present();
+                                map(slot.refresh());
+                                (was_present, slot.is_present())
+                            };
+                            if was_present && !is_present {
+                                self.close_slot_state(slot_id, false);
+                            } else if !was_present && is_present {
+                                let initialized = self
+                                    .slots
+                                    .get_mut(&slot_id)
+                                    .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
+                                    .and_then(|slot| slot.init_slot());
+                                if let Err(error) = initialized {
+                                    debug_log!("CCID application initialization: {:?}", error);
+                                    if let Some(slot) = self.slots.get(&slot_id) {
+                                        slot.set_discovery_error(&error);
+                                        slot.set_applet_present(false);
+                                    }
+                                } else {
+                                    if let Some(slot) = self.slots.get(&slot_id) {
+                                        slot.clear_discovery_error();
+                                    }
+                                    if let Err(error) = self.refresh_slot_token_objects(slot_id) {
+                                        debug_log!("CCID object discovery: {:?}", error);
+                                        if let Some(slot) = self.slots.get(&slot_id) {
+                                            slot.set_discovery_error(&error);
+                                            slot.set_applet_present(false);
+                                        }
+                                    }
+                                }
+                            }
                             continue;
                         }
-                    }
-                    let token_objects = match slot.token_objects(slot_id) {
-                        Ok(objects) => objects,
-                        Err(error) => {
-                            debug_log!("YubiKey object discovery: {:?}", error);
+
+                        let slot_id = next_key(&self.slots, 0);
+                        let application_aid = match ccid_application_aid(
+                            configuration.application,
+                            configuration.secure_channel,
+                        ) {
+                            Ok(aid) => aid,
+                            Err(error) => {
+                                debug_log!("CCID application AID configuration: {:?}", error);
+                                continue;
+                            }
+                        };
+                        if let Err(error) =
+                            select_application(base_connector.as_ref(), &application_aid)
+                        {
+                            debug_log!(
+                                "CCID application AID selection for {}: {:?}",
+                                application_label,
+                                error
+                            );
+                            continue;
+                        }
+                        let application_connector: Rc<dyn Connector> =
+                            Rc::new(PcscAppletConnector::new(
+                                base_connector.clone(),
+                                &application_aid,
+                                configuration.secure_channel,
+                                shared_state.clone(),
+                            ));
+                        let mut slot: Box<dyn Slot> = match configuration.application {
+                            CcidApplication::Piv => Box::new(PivSlot::new(
+                                application_connector,
+                                application_aid.clone(),
+                            )),
+                            CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new(
+                                application_connector,
+                                application_aid.clone(),
+                            )),
+                            CcidApplication::HsmAuth => Box::new(GenericPcscSlot::new(
+                                application_connector,
+                                application_aid,
+                                "YubiHSM Auth",
+                            )),
+                            CcidApplication::GlobalPlatform => Box::new(GlobalPlatformSlot {
+                                connector: application_connector,
+                                application_aid,
+                                authenticated: Cell::new(false),
+                            }),
+                        };
+                        if slot.is_present() {
+                            if let Err(error) = slot.init_slot() {
+                                debug_log!("CCID application initialization: {:?}", error);
+                                slot.set_discovery_error(&error);
+                                slot.set_applet_present(false);
+                            } else {
+                                slot.clear_discovery_error();
+                            }
+                        }
+                        let token_objects = if slot.is_present() {
+                            match slot.token_objects(slot_id) {
+                                Ok(objects) => objects,
+                                Err(error) => {
+                                    debug_log!("CCID object discovery: {:?}", error);
+                                    slot.set_discovery_error(&error);
+                                    slot.set_applet_present(false);
+                                    Vec::new()
+                                }
+                            }
+                        } else {
                             Vec::new()
+                        };
+                        self.slots.insert(slot_id, slot);
+                        for object in token_objects {
+                            self.insert_object(object);
                         }
-                    };
-                    self.slots.insert(slot_id, slot);
-                    for object in token_objects {
-                        self.insert_object(object);
+                        self.dynamic_slots.insert(slot_id);
+                        seen_dynamic_slots.insert(slot_id);
                     }
-                    self.dynamic_slots.insert(slot_id);
-                    seen_dynamic_slots.insert(slot_id);
                 }
             }
         }
@@ -4912,7 +5509,11 @@ pub extern "C" fn C_GetSlotList(
 }
 
 fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
-    with_context(|ctx| ctx.get_slot(slotID)?.get_slot_info(as_mut(info_ptr)?))
+    let info = as_mut(info_ptr)?;
+    with_context_mut(|ctx| {
+        ctx.init();
+        ctx.get_slot(slotID)?.get_slot_info(info)
+    })
 }
 
 #[no_mangle]
