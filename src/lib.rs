@@ -5331,21 +5331,21 @@ impl TokenObject {
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
-            x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::PivPrivate {
-                    slot, pin_policy, ..
-                } => Some(bool_attribute(
-                    piv_effective_pin_policy(*slot, *pin_policy) == 3,
-                )),
-                KeyMaterial::OpenPgpPrivate {
-                    key_ref,
-                    pin_policy,
-                    ..
-                } if openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy) => {
-                    Some(bool_attribute(true))
-                }
-                _ => None,
-            },
+            x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
+                && self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
+            {
+                Some(bool_attribute(match &self.material {
+                    KeyMaterial::PivPrivate {
+                        slot, pin_policy, ..
+                    } => piv_effective_pin_policy(*slot, *pin_policy) == 3,
+                    KeyMaterial::OpenPgpPrivate {
+                        key_ref,
+                        pin_policy,
+                        ..
+                    } => openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy),
+                    _ => false,
+                }))
+            }
             x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.encrypt)),
             x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.decrypt)),
             x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.sign)),

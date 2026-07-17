@@ -343,6 +343,14 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
         .unwrap();
     assert_eq!(&point[..4], &[0x04, 0x81, 0x85, 0x04]);
     assert_eq!(point.len(), 136);
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        private.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
 }
 
 #[test]
@@ -1943,9 +1951,10 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
         public_key: vec![0; 256],
         pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
     };
-    assert!(object
-        .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
-        .is_none());
+    assert_eq!(
+        object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
 }
 
 #[test]
