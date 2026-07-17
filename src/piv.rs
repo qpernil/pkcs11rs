@@ -229,6 +229,101 @@ pub(crate) fn parse_metadata_public_key(
     }
 }
 
+const YUBICO_PIV_USAGE_POLICY_OID: &[u8] =
+    &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x44, 0x0a, 0x03, 0x08];
+
+fn der_tlv(input: &[u8], offset: usize) -> Result<(u8, usize, usize), Error> {
+    let tag = *input.get(offset).ok_or(CKR_DATA_INVALID)?;
+    let length_offset = offset.checked_add(1).ok_or(CKR_DATA_INVALID)?;
+    let first_length = *input.get(length_offset).ok_or(CKR_DATA_INVALID)?;
+    let (length, content_offset) = if first_length & 0x80 == 0 {
+        (first_length as usize, length_offset + 1)
+    } else {
+        let length_bytes = (first_length & 0x7f) as usize;
+        if length_bytes == 0 || length_bytes > 4 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let end = length_offset
+            .checked_add(1 + length_bytes)
+            .ok_or(CKR_DATA_INVALID)?;
+        let bytes = input.get(length_offset + 1..end).ok_or(CKR_DATA_INVALID)?;
+        if bytes.first() == Some(&0) {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        (
+            bytes
+                .iter()
+                .fold(0usize, |length, byte| (length << 8) | *byte as usize),
+            end,
+        )
+    };
+    let end = content_offset.checked_add(length).ok_or(CKR_DATA_INVALID)?;
+    if end > input.len() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok((tag, content_offset, end))
+}
+
+fn find_der_extension(input: &[u8], oid: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    fn scan(input: &[u8], start: usize, end: usize, oid: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        let mut offset = start;
+        while offset < end {
+            let (tag, content, next) = der_tlv(input, offset)?;
+            if next > end {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            if tag == 0x30 {
+                let (first_tag, first_content, first_next) = der_tlv(input, content)?;
+                if first_tag == 0x06 && input.get(first_content..first_next) == Some(oid) {
+                    let mut child = first_next;
+                    while child < next {
+                        let (child_tag, child_content, child_next) = der_tlv(input, child)?;
+                        if child_tag == 0x04 {
+                            return Ok(Some(input[child_content..child_next].to_vec()));
+                        }
+                        child = child_next;
+                    }
+                }
+                if let Some(value) = scan(input, content, next, oid)? {
+                    return Ok(Some(value));
+                }
+            } else if tag & 0x20 != 0 {
+                if let Some(value) = scan(input, content, next, oid)? {
+                    return Ok(Some(value));
+                }
+            }
+            offset = next;
+        }
+        Ok(None)
+    }
+
+    let (tag, content, end) = der_tlv(input, 0)?;
+    if tag != 0x30 || end != input.len() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    scan(input, content, end, oid)
+}
+
+pub(crate) fn parse_attestation_metadata(certificate: &[u8]) -> Result<Metadata, Error> {
+    let policy = find_der_extension(certificate, YUBICO_PIV_USAGE_POLICY_OID)?;
+    let (pin_policy, touch_policy) = match policy {
+        Some(policy) => {
+            let [pin_policy, touch_policy] = policy.as_slice() else {
+                return Err(CKR_DATA_INVALID.into());
+            };
+            (Some(*pin_policy), Some(*touch_policy))
+        }
+        None => (None, None),
+    };
+    Ok(Metadata {
+        algorithm: None,
+        pin_policy,
+        touch_policy,
+        origin: Some(1),
+        public_key: None,
+    })
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Client;
 
@@ -849,6 +944,19 @@ mod tests {
             parse_metadata_public_key(Algorithm::X25519, &[0x86, 0x02, 1, 2]).unwrap(),
             MetadataPublicKey::Raw(vec![1, 2])
         );
+    }
+
+    #[test]
+    fn parses_attestation_usage_policy_metadata() {
+        let oid = encode_tlv(0x06, YUBICO_PIV_USAGE_POLICY_OID).unwrap();
+        let policy = encode_tlv(0x04, &[2, 3]).unwrap();
+        let extension = encode_tlv(0x30, &[oid, policy].concat()).unwrap();
+        let certificate = encode_tlv(0x30, &extension).unwrap();
+
+        let metadata = parse_attestation_metadata(&certificate).unwrap();
+        assert_eq!(metadata.pin_policy, Some(2));
+        assert_eq!(metadata.touch_policy, Some(3));
+        assert_eq!(metadata.origin, Some(1));
     }
 
     #[test]
