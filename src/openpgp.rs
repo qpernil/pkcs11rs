@@ -6,7 +6,11 @@ use crate::{
     Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LOCKED,
     CKR_USER_NOT_LOGGED_IN,
 };
-use openssl::{bn::BigNum, rsa::Rsa};
+use openssl::{
+    bn::BigNum,
+    hash::{Hasher, MessageDigest},
+    rsa::Rsa,
+};
 use std::time::Duration;
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -30,6 +34,14 @@ pub(crate) enum KeyRef {
 
 impl KeyRef {
     pub(crate) const ALL: [Self; 3] = [Self::Signature, Self::Decipher, Self::Authentication];
+
+    fn certificate_occurrence(self) -> u8 {
+        match self {
+            Self::Authentication => 0,
+            Self::Decipher => 1,
+            Self::Signature => 2,
+        }
+    }
 
     fn crt(self) -> &'static [u8] {
         match self {
@@ -183,7 +195,46 @@ pub(crate) struct ApplicationInfo {
     pub(crate) pin_policy: u8,
     pub(crate) pin_min: u8,
     pub(crate) pin_max: u8,
+    pub(crate) kdf: Option<KdfParams>,
     algorithms: Vec<(KeyRef, Algorithm)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct KdfParams {
+    hash_algorithm: u8,
+    iteration_count: u32,
+    user_salt: Vec<u8>,
+}
+
+impl KdfParams {
+    pub(crate) fn derive_user_pin(&self, pin: &[u8]) -> Result<Vec<u8>, Error> {
+        let digest = match self.hash_algorithm {
+            0x08 => MessageDigest::sha256(),
+            0x0a => MessageDigest::sha512(),
+            _ => return Err(CKR_DATA_INVALID.into()),
+        };
+        if self.iteration_count == 0 || self.user_salt.is_empty() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let mut salted_pin = Vec::with_capacity(self.user_salt.len() + pin.len());
+        salted_pin.extend_from_slice(&self.user_salt);
+        salted_pin.extend_from_slice(pin);
+        if salted_pin.is_empty() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+
+        let digest_length = digest.size();
+        let mut hasher = Hasher::new(digest)?;
+        let mut remaining = self.iteration_count as usize;
+        while remaining > 0 {
+            let length = remaining.min(salted_pin.len());
+            hasher.update(&salted_pin[..length])?;
+            remaining -= length;
+        }
+        let mut derived = hasher.finish()?.to_vec();
+        derived.truncate(digest_length);
+        Ok(derived)
+    }
 }
 
 impl ApplicationInfo {
@@ -201,7 +252,14 @@ impl Client {
     pub(crate) fn select(&self, connector: &dyn Connector) -> Result<ApplicationInfo, Error> {
         select_application(connector, &OPENPGP_AID)?;
         let data = self.get_data(connector, 0x006e)?;
-        parse_application_info(&data)
+        let mut info = parse_application_info(&data)?;
+        info.kdf = self
+            .get_data(connector, 0x00f9)
+            .ok()
+            .map(|data| parse_kdf(&data))
+            .transpose()?
+            .flatten();
+        Ok(info)
     }
 
     pub(crate) fn public_key(
@@ -267,6 +325,26 @@ impl Client {
             }
             _ => Err(CKR_DATA_INVALID.into()),
         }
+    }
+
+    pub(crate) fn certificate(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+    ) -> Result<Vec<u8>, Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: 0xa5,
+                p1: key_ref.certificate_occurrence(),
+                p2: 0x04,
+                data: Vec::new(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        self.get_data(connector, 0x7f21)
     }
 
     pub(crate) fn verify_pin(
@@ -353,6 +431,27 @@ impl Client {
             },
         )?;
         Ok(response)
+    }
+
+    pub(crate) fn ecdh(
+        &self,
+        connector: &dyn Connector,
+        curve: Curve,
+        public_key: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let data = ecdh_cipher_do(curve, public_key)?;
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_PSO,
+                p1: 0x80,
+                p2: 0x86,
+                data,
+                le: Some(256),
+                extended: false,
+            },
+        )
     }
 
     pub(crate) fn challenge(
@@ -449,8 +548,44 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
         pin_policy: pin_status[0],
         pin_min: 6,
         pin_max: pin_status[1],
+        kdf: None,
         algorithms,
     })
+}
+
+fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
+    let body = tlv_value(0xf9, encoded)?;
+    let fields = parse_tlvs(&body)?;
+    let algorithm = *field_value(&fields, 0x81)
+        .ok_or(CKR_DATA_INVALID)?
+        .first()
+        .ok_or(CKR_DATA_INVALID)?;
+    if algorithm == 0 {
+        return Ok(None);
+    }
+    if algorithm != 3 {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let hash_algorithm = *field_value(&fields, 0x82)
+        .ok_or(CKR_DATA_INVALID)?
+        .first()
+        .ok_or(CKR_DATA_INVALID)?;
+    if !matches!(hash_algorithm, 0x08 | 0x0a) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let iteration_bytes = field_value(&fields, 0x83).ok_or(CKR_DATA_INVALID)?;
+    if iteration_bytes.len() != 4 {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let user_salt = field_value(&fields, 0x84).ok_or(CKR_DATA_INVALID)?.to_vec();
+    if user_salt.is_empty() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(Some(KdfParams {
+        hash_algorithm,
+        iteration_count: u32::from_be_bytes(iteration_bytes.try_into().unwrap()),
+        user_salt,
+    }))
 }
 
 fn parse_algorithm(value: &[u8]) -> Result<Algorithm, Error> {
@@ -478,6 +613,46 @@ fn parse_algorithm(value: &[u8]) -> Result<Algorithm, Error> {
         }
         _ => Err(CKR_DATA_INVALID.into()),
     }
+}
+
+fn ecdh_cipher_do(curve: Curve, public_key: &[u8]) -> Result<Vec<u8>, Error> {
+    let expected_length = curve
+        .coordinate_length()
+        .map(|length| length * 2 + 1)
+        .unwrap_or(32);
+    if public_key.len() != expected_length {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    if curve.coordinate_length().is_some() && public_key.first() != Some(&0x04) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+
+    let public_key_do = encode_tlv(0x86, public_key)?;
+    let public_key_template = encode_tlv(0x7f49, &public_key_do)?;
+    encode_tlv(0xa6, &public_key_template)
+}
+
+fn encode_tlv(tag: u32, value: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut encoded = Vec::with_capacity(value.len() + 4);
+    match tag {
+        0..=0xff => encoded.push(tag as u8),
+        0x100..=0xffff => encoded.extend_from_slice(&(tag as u16).to_be_bytes()),
+        _ => return Err(CKR_DATA_INVALID.into()),
+    }
+    let length = value.len();
+    match length {
+        0..=0x7f => encoded.push(length as u8),
+        0x80..=0xff => {
+            encoded.extend([0x81, length as u8]);
+        }
+        0x100..=0xffff => {
+            encoded.push(0x82);
+            encoded.extend_from_slice(&(length as u16).to_be_bytes());
+        }
+        _ => return Err(CKR_DATA_INVALID.into()),
+    }
+    encoded.extend_from_slice(value);
+    Ok(encoded)
 }
 
 fn bcd(value: u8) -> u8 {
@@ -547,8 +722,8 @@ mod tests {
         vec![
             0x6e, 0x2b, 0x4f, 0x0e, 0xd2, 0x76, 0x00, 0x01, 0x24, 0x01, 0x03, 0x04, 0x00, 0x06,
             0x12, 0x34, 0x56, 0x78, 0x73, 0x19, 0xc1, 0x06, 0x01, 0x08, 0x00, 0x20, 0x00, 0x00,
-            0xc2, 0x06, 0x01, 0x08, 0x00, 0x20, 0x00, 0x00, 0xc4, 0x07, 0x01, 0x20,
-            0x08, 0x03, 0x03, 0x03, 0x03,
+            0xc2, 0x06, 0x01, 0x08, 0x00, 0x20, 0x00, 0x00, 0xc4, 0x07, 0x01, 0x20, 0x08, 0x03,
+            0x03, 0x03, 0x03,
         ]
     }
 
@@ -563,6 +738,7 @@ mod tests {
             Some(Algorithm::Rsa { bits: 2048 })
         );
         assert_eq!(info.pin_policy, 1);
+        assert!(info.kdf.is_none());
     }
 
     #[test]
@@ -574,5 +750,45 @@ mod tests {
         let mut encoded = vec![0x01, 0x82, 0x01, 0x00];
         encoded.extend(std::iter::repeat_n(0, 256));
         assert_eq!(parse_tlvs(&encoded).unwrap()[0].1.len(), 256);
+    }
+
+    #[test]
+    fn encodes_ecdh_cipher_do() {
+        let point = vec![0x04, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(matches!(
+            ecdh_cipher_do(Curve::P256, &point),
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as _
+        ));
+
+        let point = vec![0x04; 65];
+        assert_eq!(ecdh_cipher_do(Curve::P256, &point).unwrap(), {
+            let mut expected = vec![0xa6, 0x46, 0x7f, 0x49, 0x43, 0x86, 0x41];
+            expected.extend_from_slice(&point);
+            expected
+        });
+
+        let point = vec![0x55; 32];
+        assert_eq!(ecdh_cipher_do(Curve::X25519, &point).unwrap(), {
+            let mut expected = vec![0xa6, 0x25, 0x7f, 0x49, 0x22, 0x86, 0x20];
+            expected.extend_from_slice(&point);
+            expected
+        });
+    }
+
+    #[test]
+    fn derives_iterated_salted_s2k_user_pin() {
+        let kdf = KdfParams {
+            hash_algorithm: 0x08,
+            iteration_count: 100_000,
+            user_salt: b"01234567".to_vec(),
+        };
+        assert_eq!(
+            kdf.derive_user_pin(b"123456").unwrap(),
+            [
+                0x77, 0x37, 0x84, 0xa6, 0x02, 0xb6, 0xc8, 0x1e, 0x3f, 0x09, 0x2f, 0x4d, 0x7d, 0x00,
+                0xe1, 0x7c, 0xc8, 0x22, 0xd8, 0x8f, 0x73, 0x60, 0xfc, 0xf2, 0xd2, 0xef, 0x2d, 0x9d,
+                0x90, 0x1f, 0x44, 0xb6,
+            ]
+        );
     }
 }
