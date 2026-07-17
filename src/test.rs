@@ -509,6 +509,7 @@ impl crate::Connector for FailingConnector {
 struct SelectableConnector {
     present: std::cell::Cell<bool>,
     select_ok: std::cell::Cell<bool>,
+    serial: &'static str,
 }
 
 impl crate::Connector for SelectableConnector {
@@ -525,7 +526,7 @@ impl crate::Connector for SelectableConnector {
     }
 
     fn serial(&self) -> &str {
-        "SELECT0001"
+        self.serial
     }
 
     fn major(&self) -> u8 {
@@ -1639,6 +1640,7 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
         select_ok: std::cell::Cell::new(true),
+        serial: "SELECT0001",
     });
     let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
     let connector = crate::PcscAppletConnector::new(
@@ -1666,6 +1668,71 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
     assert!(crate::Connector::refresh(&connector).is_ok());
     assert!(crate::Connector::is_present(&connector));
     assert!(connector.discovery_error.borrow().is_none());
+}
+
+#[test]
+fn openpgp_slot_info_reports_application_version_and_serial() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "12345678",
+    });
+    let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let mut slot = crate::OpenPgpSlot::new(connector, aid);
+    slot.version = (3, 4);
+    slot.serial = String::from("12345678");
+
+    let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
+    assert!(crate::Slot::get_slot_info(&slot, &mut slot_info).is_ok());
+    assert_eq!(
+        (
+            slot_info.hardwareVersion.major,
+            slot_info.hardwareVersion.minor
+        ),
+        (1, 0)
+    );
+    assert_eq!(
+        (
+            slot_info.firmwareVersion.major,
+            slot_info.firmwareVersion.minor
+        ),
+        (3, 4)
+    );
+    assert_eq!(crate::Slot::serial(&slot), "12345678");
+}
+
+#[test]
+fn globalplatform_token_model_identifies_the_applet() {
+    let base = std::rc::Rc::new(SelectableConnector {
+        present: std::cell::Cell::new(true),
+        select_ok: std::cell::Cell::new(true),
+        serial: "SELECT0001",
+    });
+    let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
+            base,
+            &aid,
+            None,
+            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        ));
+    let slot = crate::GlobalPlatformSlot {
+        connector,
+        application_aid: aid,
+        authenticated: std::cell::Cell::new(false),
+    };
+
+    let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());
+    assert_eq!(&token_info.model[..9], b"Issuer SD");
+    assert_eq!(&token_info.label[..21], b"Issuer SD #SELECT0001");
 }
 
 #[test]
@@ -7670,6 +7737,76 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
             crate::ABI_TEST_SCP11_SLOT_ID,
         ]
     );
+
+    for slot_id in &slots {
+        let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
+        assert_eq!(
+            crate::C_GetSlotInfo(*slot_id, &mut slot_info),
+            CKR_OK as CK_RV
+        );
+        let description = String::from_utf8_lossy(&slot_info.slotDescription);
+        assert!(!description.to_ascii_lowercase().contains("token"));
+        if *slot_id == crate::ABI_TEST_PIV_SLOT_ID {
+            assert_eq!(
+                &slot_info.slotDescription[..b"PKCS11RS ABI PIV test slot".len()],
+                b"PKCS11RS ABI PIV test slot"
+            );
+        }
+    }
+
+    for (slot_id, label, serial) in [
+        (
+            crate::ABI_TEST_SLOT_ID,
+            b"ABI test token #ABI00001".as_slice(),
+            b"ABI00001".as_slice(),
+        ),
+        (
+            crate::ABI_TEST_PIV_SLOT_ID,
+            b"YubiKey PIV #PIV00001".as_slice(),
+            b"PIV00001".as_slice(),
+        ),
+        (
+            crate::ABI_TEST_SCP03_SLOT_ID,
+            b"ABI SCP03 #SCP03001".as_slice(),
+            b"SCP03001".as_slice(),
+        ),
+        (
+            crate::ABI_TEST_YUBIHSM_SLOT_ID,
+            b"ABI YubiHSM #HSM00001".as_slice(),
+            b"HSM00001".as_slice(),
+        ),
+        (
+            crate::ABI_TEST_SCP11_SLOT_ID,
+            b"ABI SCP11 #SCP11001".as_slice(),
+            b"SCP11001".as_slice(),
+        ),
+    ] {
+        let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+        assert_eq!(
+            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(&token_info.label[..label.len()], label);
+        assert_eq!(&token_info.serialNumber[..serial.len()], serial);
+    }
+
+    for (slot_id, model) in [
+        (crate::ABI_TEST_SLOT_ID, b"ABI test token".as_slice()),
+        (crate::ABI_TEST_PIV_SLOT_ID, b"YubiKey PIV".as_slice()),
+        (crate::ABI_TEST_SCP03_SLOT_ID, b"ABI SCP03".as_slice()),
+        (crate::ABI_TEST_YUBIHSM_SLOT_ID, b"ABI YubiHSM".as_slice()),
+        (crate::ABI_TEST_SCP11_SLOT_ID, b"ABI SCP11".as_slice()),
+    ] {
+        let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+        assert_eq!(
+            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(&token_info.model[..model.len()], model);
+        assert!(token_info.model[model.len()..]
+            .iter()
+            .all(|byte| *byte == b' '));
+    }
 
     let mut session = 0;
     assert_eq!(

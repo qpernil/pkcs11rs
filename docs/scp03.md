@@ -4,7 +4,7 @@ Set `PKCS11RS_CCID_SECURE_CHANNEL=scp03` to use SCP03 as the transport for
 the selected CCID applet on a PC/SC card. See [`ccid.md`](ccid.md) for the
 default applet list, allowlist, AID overrides, and shared-slot behavior.
 
-For `globalplatform`, the selected AID is the Secure Domain used for
+For the Issuer Security Domain, the selected AID is the Secure Domain used for
 management. For PIV and OpenPGP, the transport initializes against those
 applets' AIDs directly.
 
