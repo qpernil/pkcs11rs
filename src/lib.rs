@@ -5334,9 +5334,9 @@ impl TokenObject {
             x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::PivPrivate {
                     slot, pin_policy, ..
-                } if piv_effective_pin_policy(*slot, *pin_policy) == 3 => {
-                    Some(bool_attribute(true))
-                }
+                } => Some(bool_attribute(
+                    piv_effective_pin_policy(*slot, *pin_policy) == 3,
+                )),
                 KeyMaterial::OpenPgpPrivate {
                     key_ref,
                     pin_policy,

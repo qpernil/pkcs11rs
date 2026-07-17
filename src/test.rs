@@ -2361,6 +2361,10 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
         object.decrypt = false;
         object.sensitive = true;
         object.extractable = false;
+        assert_eq!(
+            object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
+            Some(vec![CK_TRUE as CK_BBOOL])
+        );
     }
 
     let mut mechanism = CK_MECHANISM {
@@ -2415,9 +2419,10 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
         object.decrypt = false;
         object.sensitive = true;
         object.extractable = false;
-        assert!(object
-            .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
-            .is_none());
+        assert_eq!(
+            object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
+            Some(vec![CK_FALSE as CK_BBOOL])
+        );
     }
 
     let mut mechanism = CK_MECHANISM {
