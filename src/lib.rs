@@ -384,8 +384,8 @@ trait Slot {
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = 0;
         info.ulRwSessionCount = 0;
-        info.ulMaxPinLen = 34;
-        info.ulMinPinLen = 4;
+        info.ulMaxPinLen = 8;
+        info.ulMinPinLen = 6;
         info.ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
