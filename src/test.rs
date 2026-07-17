@@ -4154,6 +4154,10 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
     assert!(object
         .attribute_value(CKA_LABEL as CK_ATTRIBUTE_TYPE)
         .is_some());
+    assert_eq!(
+        object.attribute_value(CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE),
+        Some(crate::ulong_attribute(CKC_X_509 as CK_ULONG))
+    );
     assert_eq!(transmissions.get(), 0);
     let _ = object.size();
     assert_eq!(transmissions.get(), 0);
