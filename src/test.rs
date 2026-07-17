@@ -577,6 +577,55 @@ impl crate::Connector for SelectableConnector {
     }
 }
 
+#[derive(Debug)]
+struct CountingConnector {
+    transmissions: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl crate::Connector for CountingConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+
+    fn product(&self) -> &str {
+        "Counting connector"
+    }
+
+    fn serial(&self) -> &str {
+        "COUNT0001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn buffer_size(&self) -> usize {
+        16
+    }
+
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        _receive_buffer: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::error::Error> {
+        self.transmissions.set(self.transmissions.get() + 1);
+        Err(CKR_DEVICE_ERROR.into())
+    }
+}
+
 unsafe extern "C" fn test_create_mutex(_mutex: CK_VOID_PTR_PTR) -> CK_RV {
     CKR_OK as CK_RV
 }
@@ -4019,6 +4068,103 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     }
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+fn piv_attestation_certificate_supplies_public_key_for_metadata_fallback() {
+    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+    let signing_key = openssl::ec::EcKey::generate(&group).unwrap();
+    let signing_key = openssl::pkey::PKey::from_ec_key(signing_key).unwrap();
+    let mut name = openssl::x509::X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", "PIV attestation test")
+        .unwrap();
+    let name = name.build();
+    let mut builder = openssl::x509::X509::builder().unwrap();
+    builder.set_version(2).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+    builder.set_pubkey(&signing_key).unwrap();
+    builder
+        .set_not_before(openssl::asn1::Asn1Time::days_from_now(0).unwrap().as_ref())
+        .unwrap();
+    builder
+        .set_not_after(openssl::asn1::Asn1Time::days_from_now(1).unwrap().as_ref())
+        .unwrap();
+    builder
+        .sign(&signing_key, openssl::hash::MessageDigest::sha256())
+        .unwrap();
+    let attestation = builder.build().to_der().unwrap();
+
+    let parsed =
+        crate::piv_public_key_from_certificate(crate::piv::Algorithm::EccP256, &attestation)
+            .unwrap();
+    let crate::PivPublicKey::Ec(parsed) = parsed else {
+        panic!("expected an EC public key");
+    };
+    let mut context = openssl::bn::BigNumContext::new().unwrap();
+    let expected = signing_key
+        .ec_key()
+        .unwrap()
+        .public_key()
+        .to_bytes(
+            &group,
+            openssl::ec::PointConversionForm::UNCOMPRESSED,
+            &mut context,
+        )
+        .unwrap();
+    assert_eq!(parsed, expected[1..]);
+}
+
+#[test]
+fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
+    let transmissions = std::rc::Rc::new(std::cell::Cell::new(0));
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(CountingConnector {
+        transmissions: transmissions.clone(),
+    });
+    let object = crate::TokenObject {
+        slot_id: Some(1),
+        unique_id: b"piv-attestation".to_vec(),
+        class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+        key_type: CKK_EC as CK_KEY_TYPE,
+        label: b"PIV attestation".to_vec(),
+        id: vec![0x9c],
+        token: false,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: Some(2),
+        material: crate::KeyMaterial::PivAttestation {
+            connector,
+            slot: crate::piv::Slot::Signature,
+            algorithm: crate::piv::Algorithm::EccP256,
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+        },
+    };
+
+    assert!(object
+        .attribute_value(CKA_LABEL as CK_ATTRIBUTE_TYPE)
+        .is_some());
+    assert_eq!(transmissions.get(), 0);
+    let _ = object.size();
+    assert_eq!(transmissions.get(), 0);
+    assert!(object
+        .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        .is_none());
+    assert_eq!(transmissions.get(), 1);
+    assert!(object
+        .attribute_value(CKA_SUBJECT as CK_ATTRIBUTE_TYPE)
+        .is_none());
+    assert_eq!(transmissions.get(), 1);
 }
 
 #[test]

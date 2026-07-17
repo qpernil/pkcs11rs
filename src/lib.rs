@@ -8,7 +8,7 @@ extern crate rusb;
 
 use openssl::{
     bn::BigNum,
-    ec::{EcGroup, EcKey, EcPoint},
+    ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     ecdsa::EcdsaSig,
     hash::{hash, MessageDigest},
     nid::Nid,
@@ -333,6 +333,9 @@ trait Slot {
     fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
+    fn session_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        Ok(Vec::new())
+    }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         MECHANISMS.to_vec()
     }
@@ -599,9 +602,10 @@ struct PivKey {
     slot: piv::Slot,
     algorithm: piv::Algorithm,
     public_key: PivPublicKey,
+    attestation: Rc<RefCell<Option<Vec<u8>>>>,
+    attestation_attempted: Rc<Cell<bool>>,
     pin_policy: u8,
     touch_policy: u8,
-    origin: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -744,6 +748,56 @@ fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> 
         Id::ED25519 => Some(piv::Algorithm::Ed25519),
         Id::X25519 => Some(piv::Algorithm::X25519),
         _ => None,
+    }
+}
+
+fn piv_public_key_from_certificate(
+    algorithm: piv::Algorithm,
+    certificate_der: &[u8],
+) -> Result<PivPublicKey, Error> {
+    let certificate = openssl::x509::X509::from_der(certificate_der).map_err(Error::from)?;
+    let certificate_key = certificate.public_key().map_err(Error::from)?;
+    match algorithm {
+        piv::Algorithm::Rsa1024
+        | piv::Algorithm::Rsa2048
+        | piv::Algorithm::Rsa3072
+        | piv::Algorithm::Rsa4096 => {
+            let public_key = certificate_key.rsa().map_err(Error::from)?;
+            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Rsa(public_key))
+        }
+        piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
+            let public_key = certificate_key.ec_key().map_err(Error::from)?;
+            let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
+            let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
+            let point = public_key
+                .public_key()
+                .to_bytes(
+                    public_key.group(),
+                    PointConversionForm::UNCOMPRESSED,
+                    &mut context,
+                )
+                .map_err(Error::from)?;
+            if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Ec(point[1..].to_vec()))
+        }
+        piv::Algorithm::Ed25519 | piv::Algorithm::X25519 => {
+            if !matches!(
+                (algorithm, certificate_key.id()),
+                (piv::Algorithm::Ed25519, Id::ED25519) | (piv::Algorithm::X25519, Id::X25519)
+            ) {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            let public_key = certificate_key.raw_public_key().map_err(Error::from)?;
+            if public_key.len() != 32 {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(PivPublicKey::Raw(public_key))
+        }
     }
 }
 
@@ -1523,6 +1577,18 @@ impl Slot for PivSlot {
         self.certificates.clear();
         for slot in piv::Slot::all().iter().copied() {
             let metadata = PivClient.metadata(self.connector.as_ref(), slot).ok();
+            let metadata_key = metadata.as_ref().and_then(|metadata| {
+                let algorithm = metadata
+                    .algorithm
+                    .and_then(piv::Algorithm::from_id)
+                    .filter(|algorithm| piv_algorithm_supported(self.version, *algorithm))?;
+                let public_key = metadata
+                    .public_key
+                    .as_deref()
+                    .and_then(|encoded| piv::parse_metadata_public_key(algorithm, encoded).ok())
+                    .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok())?;
+                Some((algorithm, public_key, metadata.clone()))
+            });
             let certificate = PivClient.certificate(self.connector.as_ref(), slot).ok();
             let certificate_algorithm = certificate
                 .as_deref()
@@ -1537,40 +1603,36 @@ impl Slot for PivSlot {
                     });
                 }
             }
-            let algorithm = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.algorithm)
-                .and_then(piv::Algorithm::from_id);
-            let Some(algorithm) = algorithm else {
-                continue;
-            };
-            if !piv_algorithm_supported(self.version, algorithm) {
-                continue;
-            }
-            let public_key = metadata
-                .as_ref()
-                .and_then(|metadata| metadata.public_key.as_deref())
-                .and_then(|encoded| piv::parse_metadata_public_key(algorithm, encoded).ok())
-                .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok());
-            let Some(public_key) = public_key else {
+            let (algorithm, public_key, metadata) = if let Some(key) = metadata_key {
+                (key.0, key.1, key.2)
+            } else if let (Some(certificate), Some(algorithm)) =
+                (certificate.as_deref(), certificate_algorithm)
+            {
+                if !piv_algorithm_supported(self.version, algorithm) {
+                    continue;
+                }
+                let Ok(public_key) = piv_public_key_from_certificate(algorithm, certificate) else {
+                    continue;
+                };
+                let metadata = metadata.unwrap_or(piv::Metadata {
+                    algorithm: None,
+                    pin_policy: None,
+                    touch_policy: None,
+                    origin: None,
+                    public_key: None,
+                });
+                (algorithm, public_key, metadata)
+            } else {
                 continue;
             };
             self.keys.push(PivKey {
                 slot,
                 algorithm,
                 public_key,
-                pin_policy: metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.pin_policy)
-                    .unwrap_or(0),
-                touch_policy: metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.touch_policy)
-                    .unwrap_or(0),
-                origin: metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.origin)
-                    .unwrap_or(0),
+                attestation: Rc::new(RefCell::new(None)),
+                attestation_attempted: Rc::new(Cell::new(false)),
+                pin_policy: metadata.pin_policy.unwrap_or(0),
+                touch_policy: metadata.touch_policy.unwrap_or(0),
             });
         }
         Ok(())
@@ -1841,12 +1903,6 @@ impl Slot for PivSlot {
             });
         }
         for key in &self.keys {
-            if key.origin != 1 {
-                continue;
-            }
-            let Ok(value) = PivClient.attestation(self.connector.as_ref(), key.slot) else {
-                continue;
-            };
             let key_type = key.public_key.key_type(key.algorithm);
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
@@ -1869,14 +1925,24 @@ impl Slot for PivSlot {
                 local: true,
                 key_gen_mechanism: None,
                 owner_session: None,
-                material: KeyMaterial::PivCertificate {
+                material: KeyMaterial::PivAttestation {
+                    connector: self.connector.clone(),
+                    slot: key.slot,
                     algorithm: key.algorithm,
-                    value,
-                    attestation: true,
+                    value: key.attestation.clone(),
+                    attempted: key.attestation_attempted.clone(),
                 },
             });
         }
         Ok(objects)
+    }
+
+    fn session_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        Ok(self
+            .token_objects(slot_id)?
+            .into_iter()
+            .filter(|object| !object.token)
+            .collect())
     }
 }
 
@@ -2953,9 +3019,10 @@ fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             slot: piv::Slot::Signature,
             algorithm: piv::Algorithm::Rsa2048,
             public_key: PivPublicKey::Rsa(public_key),
+            attestation: Rc::new(RefCell::new(None)),
+            attestation_attempted: Rc::new(Cell::new(false)),
             pin_policy: 2,
             touch_policy: 1,
-            origin: 0,
         }],
         certificates: Vec::new(),
     })
@@ -4236,6 +4303,13 @@ enum KeyMaterial {
         value: Vec<u8>,
         attestation: bool,
     },
+    PivAttestation {
+        connector: Rc<dyn Connector>,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        value: Rc<RefCell<Option<Vec<u8>>>>,
+        attempted: Rc<Cell<bool>>,
+    },
     OpenPgpCertificate {
         value: Vec<u8>,
     },
@@ -4322,6 +4396,17 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("algorithm", algorithm)
                 .field("attestation", attestation)
                 .field("size", &value.len())
+                .finish(),
+            Self::PivAttestation {
+                slot,
+                algorithm,
+                value,
+                ..
+            } => fmt
+                .debug_struct("PivAttestation")
+                .field("slot", slot)
+                .field("algorithm", algorithm)
+                .field("cached", &value.borrow().is_some())
                 .finish(),
             Self::OpenPgpCertificate { value } => fmt
                 .debug_struct("OpenPgpCertificate")
@@ -4555,7 +4640,31 @@ impl Context {
             .token_objects(slot_id)?;
         self.objects
             .retain(|_, object| object.slot_id != Some(slot_id) || !object.token);
-        for object in objects {
+        for object in objects.into_iter().filter(|object| object.token) {
+            self.insert_object(object);
+        }
+        Ok(())
+    }
+
+    fn insert_session_objects(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<(), Error> {
+        let objects = self
+            .slots
+            .get(&slot_id)
+            .ok_or(CKR_SLOT_ID_INVALID)?
+            .session_objects(slot_id)?;
+        for mut object in objects.into_iter().filter(|object| !object.token) {
+            if self.objects.values().any(|existing| {
+                existing.owner_session == Some(session_handle)
+                    && existing.slot_id == Some(slot_id)
+                    && existing.unique_id == object.unique_id
+            }) {
+                continue;
+            }
+            object.set_owner(session_handle, slot_id);
             self.insert_object(object);
         }
         Ok(())
@@ -4939,7 +5048,7 @@ impl Context {
                             Vec::new()
                         };
                         self.slots.insert(slot_id, slot);
-                        for object in token_objects {
+                        for object in token_objects.into_iter().filter(|object| object.token) {
                             self.insert_object(object);
                         }
                         self.dynamic_slots.insert(slot_id);
@@ -5088,6 +5197,40 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
     }
 }
 
+fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE
+            || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
+            || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+            || x == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+            || x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn lazy_piv_attestation_certificate(
+    connector: &dyn Connector,
+    slot: piv::Slot,
+    algorithm: piv::Algorithm,
+    value: &RefCell<Option<Vec<u8>>>,
+    attempted: &Cell<bool>,
+) -> Option<Vec<u8>> {
+    if attempted.replace(true) {
+        return value.borrow().clone();
+    }
+
+    let certificate = PivClient.attestation(connector, slot).ok()?;
+    if piv_algorithm_from_certificate(&certificate)? != algorithm {
+        return None;
+    }
+    piv_public_key_from_certificate(algorithm, &certificate).ok()?;
+    *value.borrow_mut() = Some(certificate.clone());
+    Some(certificate)
+}
+
 impl TokenObject {
     fn has_sensitive_attributes(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -5114,6 +5257,10 @@ impl TokenObject {
     }
 
     fn size(&self) -> CK_ULONG {
+        let defer_certificate_attributes = matches!(
+            &self.material,
+            KeyMaterial::PivAttestation { attempted, .. } if !attempted.get()
+        );
         [
             CKA_CLASS as CK_ATTRIBUTE_TYPE,
             CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
@@ -5160,6 +5307,9 @@ impl TokenObject {
             CKA_TRUSTED as CK_ATTRIBUTE_TYPE,
         ]
         .iter()
+        .filter(|&&attribute_type| {
+            !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
+        })
         .filter_map(|&attribute_type| self.attribute_value(attribute_type))
         .map(|value| value.len() as CK_ULONG)
         .sum()
@@ -5390,6 +5540,20 @@ impl TokenObject {
                     | KeyMaterial::OpenPgpCertificate { value } => {
                         piv_certificate_attribute(value, x)
                     }
+                    KeyMaterial::PivAttestation {
+                        connector,
+                        slot,
+                        algorithm,
+                        value,
+                        attempted,
+                    } => lazy_piv_attestation_certificate(
+                        connector.as_ref(),
+                        *slot,
+                        *algorithm,
+                        value,
+                        attempted,
+                    )
+                    .and_then(|value| piv_certificate_attribute(&value, x)),
                     _ => None,
                 }
             }
@@ -5413,6 +5577,7 @@ impl TokenObject {
             KeyMaterial::PivPrivate { .. }
                 | KeyMaterial::PivPublic { .. }
                 | KeyMaterial::PivCertificate { .. }
+                | KeyMaterial::PivAttestation { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
@@ -7032,7 +7197,9 @@ fn get_attribute_value(
                         attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
                         rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
                     }
-                    KeyMaterial::PivCertificate { .. } | KeyMaterial::OpenPgpCertificate { .. } => {
+                    KeyMaterial::PivCertificate { .. }
+                    | KeyMaterial::PivAttestation { .. }
+                    | KeyMaterial::OpenPgpCertificate { .. } => {
                         match object.attribute_value(attribute.type_) {
                             Some(value) => {
                                 if let Err(e) = write_attribute_value(attribute, &value) {
@@ -7245,6 +7412,7 @@ fn find_objects_init(
         if ctx.find_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
+        ctx.insert_session_objects(slot_id, session_handle)?;
         log!(2, "C_FindObjectsInit template {:?}", templ);
         let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
             .objects
