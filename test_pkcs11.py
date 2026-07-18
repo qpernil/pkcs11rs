@@ -19,6 +19,7 @@ CKR_ARGUMENTS_BAD = 7
 CKR_ATTRIBUTE_READ_ONLY = 0x10
 CKR_ATTRIBUTE_SENSITIVE = 0x11
 CKR_DATA_LEN_RANGE = 0x21
+CKR_ENCRYPTED_DATA_INVALID = 0x40
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
@@ -49,6 +50,9 @@ CKM_RSA_PKCS = 0x00000001
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
+CKM_AES_ECB = 0x00001081
+CKM_AES_CBC = 0x00001082
+CKM_AES_GCM = 0x00001087
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
 CKK_GENERIC_SECRET = 0x00000010
@@ -59,6 +63,7 @@ CKA_LABEL = 0x00000003
 CKA_UNIQUE_ID = 0x00000004
 CKA_VALUE = 0x00000011
 CKA_KEY_TYPE = 0x00000100
+CKA_ID = 0x00000102
 CKA_SENSITIVE = 0x00000103
 CKA_SIGN = 0x00000108
 CKA_VALUE_LEN = 0x00000161
@@ -185,6 +190,17 @@ class CK_MECHANISM(ctypes.Structure):
         ("mechanism", CK_ULONG),
         ("pParameter", CK_VOID_PTR),
         ("ulParameterLen", CK_ULONG),
+    ]
+
+
+class CK_GCM_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("pIv", ctypes.POINTER(CK_BYTE)),
+        ("ulIvLen", CK_ULONG),
+        ("ulIvBits", CK_ULONG),
+        ("pAAD", ctypes.POINTER(CK_BYTE)),
+        ("ulAADLen", CK_ULONG),
+        ("ulTagBits", CK_ULONG),
     ]
 
 
@@ -524,6 +540,34 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.C_FindObjects.restype = CK_RV
         cls.lib.C_FindObjectsFinal.argtypes = [CK_ULONG]
         cls.lib.C_FindObjectsFinal.restype = CK_RV
+        cls.lib.C_EncryptInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+        ]
+        cls.lib.C_EncryptInit.restype = CK_RV
+        cls.lib.C_Encrypt.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_Encrypt.restype = CK_RV
+        cls.lib.C_DecryptInit.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+        ]
+        cls.lib.C_DecryptInit.restype = CK_RV
+        cls.lib.C_Decrypt.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_Decrypt.restype = CK_RV
         cls.lib.C_SignInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -778,6 +822,216 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(signature_len.value, 256)
+
+    def test_abi_yubihsm_fixture_exercises_aes_gcm(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertIn(CKM_AES_GCM, mechanisms)
+
+        object_class = CK_ULONG(CKO_SECRET_KEY)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        iv = (CK_BYTE * 12)()
+        parameters = CK_GCM_PARAMS(iv, len(iv), len(iv) * 8, None, 0, 128)
+        mechanism = CK_MECHANISM(
+            CKM_AES_GCM,
+            ctypes.cast(ctypes.byref(parameters), CK_VOID_PTR),
+            ctypes.sizeof(parameters),
+        )
+        plaintext = (CK_BYTE * 16)()
+        encrypted = (CK_BYTE * 32)()
+        encrypted_len = CK_ULONG(len(encrypted))
+        self.assertEqual(
+            self.lib.C_EncryptInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_Encrypt(
+                session,
+                plaintext,
+                len(plaintext),
+                encrypted,
+                ctypes.byref(encrypted_len),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(encrypted_len.value, 32)
+        self.assertEqual(
+            bytes(encrypted),
+            bytes.fromhex(
+                "0388dace60b6a392f328c2b971b2fe78"
+                "ab6e47d42cec13bdf53a67b21257bddf"
+            ),
+        )
+
+        decrypted = (CK_BYTE * 16)()
+        decrypted_len = CK_ULONG(len(decrypted))
+        self.assertEqual(
+            self.lib.C_DecryptInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_Decrypt(
+                session,
+                encrypted,
+                encrypted_len.value,
+                decrypted,
+                ctypes.byref(decrypted_len),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual((decrypted_len.value, bytes(decrypted)), (16, bytes(16)))
+
+        encrypted[31] ^= 1
+        self.assertEqual(
+            self.lib.C_DecryptInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        self.assertEqual(
+            self.lib.C_Decrypt(
+                session,
+                encrypted,
+                encrypted_len.value,
+                decrypted,
+                ctypes.byref(decrypted_len),
+            ),
+            CKR_ENCRYPTED_DATA_INVALID,
+        )
+
+    def test_abi_yubihsm_aes_ecb_and_cbc_match_nist_vectors(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        key_id = (CK_BYTE * 2)(0, 3)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_ID,
+                ctypes.cast(key_id, CK_VOID_PTR),
+                len(key_id),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        plaintext_bytes = bytes.fromhex(
+            "6bc1bee22e409f96e93d7e117393172a"
+            "ae2d8a571e03ac9c9eb76fac45af8e51"
+            "30c81c46a35ce411e5fbc1191a0a52ef"
+            "f69f2445df4f9b17ad2b417be66c3710"
+        )
+
+        def assert_vector(mechanism: CK_MECHANISM, expected: bytes) -> None:
+            plaintext = (CK_BYTE * len(plaintext_bytes)).from_buffer_copy(
+                plaintext_bytes
+            )
+            encrypted = (CK_BYTE * len(expected))()
+            encrypted_len = CK_ULONG(len(encrypted))
+            self.assertEqual(
+                self.lib.C_EncryptInit(
+                    session, ctypes.byref(mechanism), handle.value
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Encrypt(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    encrypted,
+                    ctypes.byref(encrypted_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(bytes(encrypted[: encrypted_len.value]), expected)
+
+            decrypted = (CK_BYTE * len(plaintext_bytes))()
+            decrypted_len = CK_ULONG(len(decrypted))
+            self.assertEqual(
+                self.lib.C_DecryptInit(
+                    session, ctypes.byref(mechanism), handle.value
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Decrypt(
+                    session,
+                    encrypted,
+                    encrypted_len.value,
+                    decrypted,
+                    ctypes.byref(decrypted_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                bytes(decrypted[: decrypted_len.value]), plaintext_bytes
+            )
+
+        # NIST SP 800-38A, Appendices F.1.1/F.1.2.
+        assert_vector(
+            CK_MECHANISM(CKM_AES_ECB, None, 0),
+            bytes.fromhex(
+                "3ad77bb40d7a3660a89ecaf32466ef97"
+                "f5d3d58503b9699de785895a96fdbaaf"
+                "43b1cd7f598ece23881b00e3ed030688"
+                "7b0c785e27e8ad3f8223207104725dd4"
+            ),
+        )
+
+        # NIST SP 800-38A, Appendices F.2.1/F.2.2.
+        iv = (CK_BYTE * 16).from_buffer_copy(
+            bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+        )
+        assert_vector(
+            CK_MECHANISM(CKM_AES_CBC, ctypes.cast(iv, CK_VOID_PTR), len(iv)),
+            bytes.fromhex(
+                "7649abac8119b246cee98e9b12e9197d"
+                "5086cb9b507219ee95db113a917678b2"
+                "73bed6b8e3c1743b7116e69e22229516"
+                "3ff1caa1681fac09120eca307586e1a7"
+            ),
+        )
 
     def test_legacy_function_list_entries_are_stubbed(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
