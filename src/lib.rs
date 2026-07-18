@@ -83,11 +83,12 @@ use openpgp::{
 
 mod yubihsm;
 use yubihsm::{
-    get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
-    parse_object_list as parse_yubihsm_object_list, parse_pin as parse_yubihsm_pin,
-    Command as YubiHsmCommand, CommandCode as YubiHsmCommandCode, ObjectInfo as YubiHsmObjectInfo,
-    ObjectParameters as YubiHsmObjectParameters, PublicKey as YubiHsmPublicKey,
-    SecureSession as YubiHsmSecureSession,
+    get_device_info as get_yubihsm_device_info,
+    parse_asymmetric_pin as parse_yubihsm_asymmetric_pin,
+    parse_object_id as parse_yubihsm_object_id, parse_object_list as parse_yubihsm_object_list,
+    parse_pin as parse_yubihsm_pin, Command as YubiHsmCommand, CommandCode as YubiHsmCommandCode,
+    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
+    PublicKey as YubiHsmPublicKey, SecureSession as YubiHsmSecureSession,
 };
 
 #[allow(dead_code)]
@@ -166,6 +167,17 @@ mod yubihsm_algorithm {
 }
 use yubihsm_algorithm::*;
 
+const YUBICO_BASE_VENDOR: CK_KEY_TYPE = 0x5955_4200;
+const CKK_YUBICO_AES128_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE
+    | YUBICO_BASE_VENDOR
+    | YUBIHSM_ALGO_AES128_CCM_WRAP as CK_KEY_TYPE;
+const CKK_YUBICO_AES192_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE
+    | YUBICO_BASE_VENDOR
+    | YUBIHSM_ALGO_AES192_CCM_WRAP as CK_KEY_TYPE;
+const CKK_YUBICO_AES256_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE
+    | YUBICO_BASE_VENDOR
+    | YUBIHSM_ALGO_AES256_CCM_WRAP as CK_KEY_TYPE;
+
 fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(
         key_type,
@@ -178,6 +190,13 @@ fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
 
 fn is_montgomery_key_type(key_type: CK_KEY_TYPE) -> bool {
     key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+}
+
+fn is_yubihsm_ccm_wrap(algorithm: u8) -> bool {
+    matches!(
+        algorithm,
+        YUBIHSM_ALGO_AES128_CCM_WRAP | YUBIHSM_ALGO_AES192_CCM_WRAP | YUBIHSM_ALGO_AES256_CCM_WRAP
+    )
 }
 
 fn yubihsm_capability(capabilities: &[u8; 8], bit: usize) -> bool {
@@ -516,6 +535,9 @@ fn send_yubihsm_secure_command(
 
 fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
     match algorithm {
+        YUBIHSM_ALGO_AES128_CCM_WRAP => CKK_YUBICO_AES128_CCM_WRAP,
+        YUBIHSM_ALGO_AES192_CCM_WRAP => CKK_YUBICO_AES192_CCM_WRAP,
+        YUBIHSM_ALGO_AES256_CCM_WRAP => CKK_YUBICO_AES256_CCM_WRAP,
         YUBIHSM_ALGO_HMAC_SHA1 => CKK_SHA_1_HMAC as CK_KEY_TYPE,
         YUBIHSM_ALGO_HMAC_SHA256 => CKK_SHA256_HMAC as CK_KEY_TYPE,
         YUBIHSM_ALGO_HMAC_SHA384 => CKK_SHA384_HMAC as CK_KEY_TYPE,
@@ -564,9 +586,17 @@ fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> 
 }
 
 fn yubihsm_remote_material(info: &YubiHsmObjectInfo, public_key: Vec<u8>) -> KeyMaterial {
+    yubihsm_remote_material_with_type(info, info.object_type, public_key)
+}
+
+fn yubihsm_remote_material_with_type(
+    info: &YubiHsmObjectInfo,
+    object_type: u8,
+    public_key: Vec<u8>,
+) -> KeyMaterial {
     KeyMaterial::YubiHsm {
         id: info.id,
-        object_type: info.object_type,
+        object_type,
         algorithm: info.algorithm,
         length: info.length as usize,
         domains: info.domains,
@@ -575,6 +605,13 @@ fn yubihsm_remote_material(info: &YubiHsmObjectInfo, public_key: Vec<u8>) -> Key
         public_key,
         value: Rc::new(RefCell::new(None)),
     }
+}
+
+fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
+    matches!(
+        info.object_type,
+        YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_PUBLIC_WRAP_KEY
+    ) || (info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm))
 }
 
 fn yubihsm_token_objects(
@@ -600,6 +637,8 @@ fn yubihsm_token_objects(
     let generated = info.origin & 0x01 != 0;
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
     let authentication_key = info.object_type == YUBIHSM_AUTHENTICATION_KEY;
+    let rsa_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm);
+    let ccm_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_ccm_wrap(info.algorithm);
     let montgomery = is_montgomery_key_type(key_type);
     let sign = !authentication_key
         && (info.object_type == YUBIHSM_ASYMMETRIC_KEY
@@ -611,18 +650,30 @@ fn yubihsm_token_objects(
             || yubihsm_capability(&info.capabilities, 0x07)
             || yubihsm_capability(&info.capabilities, 0x08)
             || yubihsm_capability(&info.capabilities, 0x16));
-    let decrypt = !authentication_key
-        && !montgomery
-        && algorithm_supported
-        && (yubihsm_capability(&info.capabilities, 0x09)
-            || yubihsm_capability(&info.capabilities, 0x0a)
-            || yubihsm_capability(&info.capabilities, 0x32)
-            || yubihsm_capability(&info.capabilities, 0x34));
-    let encrypt = !authentication_key
-        && !montgomery
-        && algorithm_supported
-        && (yubihsm_capability(&info.capabilities, 0x33)
-            || yubihsm_capability(&info.capabilities, 0x35));
+    let decrypt = if ccm_wrap_key {
+        yubihsm_capability(&info.capabilities, 0x26)
+    } else {
+        !authentication_key
+            && !rsa_wrap_key
+            && info.object_type != YUBIHSM_PUBLIC_WRAP_KEY
+            && !montgomery
+            && algorithm_supported
+            && (yubihsm_capability(&info.capabilities, 0x09)
+                || yubihsm_capability(&info.capabilities, 0x0a)
+                || yubihsm_capability(&info.capabilities, 0x32)
+                || yubihsm_capability(&info.capabilities, 0x34))
+    };
+    let encrypt = if ccm_wrap_key {
+        yubihsm_capability(&info.capabilities, 0x25)
+    } else {
+        !authentication_key
+            && !rsa_wrap_key
+            && info.object_type != YUBIHSM_PUBLIC_WRAP_KEY
+            && !montgomery
+            && algorithm_supported
+            && (yubihsm_capability(&info.capabilities, 0x33)
+                || yubihsm_capability(&info.capabilities, 0x35))
+    };
     let derive = !authentication_key
         && algorithm_supported
         && (is_yubihsm_ec(info.algorithm) || is_yubihsm_x25519(info.algorithm))
@@ -640,6 +691,7 @@ fn yubihsm_token_objects(
         }
         YUBIHSM_OPAQUE => CKO_DATA as CK_OBJECT_CLASS,
         YUBIHSM_ASYMMETRIC_KEY => CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        YUBIHSM_WRAP_KEY if rsa_wrap_key => CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         YUBIHSM_PUBLIC_WRAP_KEY => CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         YUBIHSM_TEMPLATE => CKO_DATA as CK_OBJECT_CLASS,
         YUBIHSM_AUTHENTICATION_KEY
@@ -681,12 +733,18 @@ fn yubihsm_token_objects(
         material,
     }];
 
-    if info.object_type == YUBIHSM_ASYMMETRIC_KEY {
+    if info.object_type == YUBIHSM_ASYMMETRIC_KEY || rsa_wrap_key {
         let public_key = public_key.ok_or(CKR_DEVICE_ERROR)?;
         if public_key.algorithm != info.algorithm {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        let public_material = if is_yubihsm_rsa(info.algorithm) {
+        let public_material = if rsa_wrap_key {
+            yubihsm_remote_material_with_type(
+                &info,
+                YUBIHSM_WRAP_KEY_PUBLIC,
+                public_key.key.clone(),
+            )
+        } else if is_yubihsm_rsa(info.algorithm) {
             let modulus = BigNum::from_slice(&public_key.key).map_err(Error::from)?;
             let exponent = BigNum::from_u32(65537).map_err(Error::from)?;
             KeyMaterial::RsaPublic(
@@ -704,10 +762,10 @@ fn yubihsm_token_objects(
             id,
             token: true,
             private: false,
-            encrypt: algorithm_supported && is_yubihsm_rsa(info.algorithm),
+            encrypt: !rsa_wrap_key && algorithm_supported && is_yubihsm_rsa(info.algorithm),
             decrypt: false,
             sign: false,
-            verify: algorithm_supported && sign,
+            verify: !rsa_wrap_key && algorithm_supported && sign,
             derive: false,
             sensitive: false,
             extractable: true,
@@ -2606,9 +2664,17 @@ impl Slot for YubiHsmSlot {
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
-        let (authkey_id, password) = parse_yubihsm_pin(pin)?;
-        let session =
-            YubiHsmSecureSession::authenticate(self.connector.as_ref(), authkey_id, password)?;
+        let session = if pin.first() == Some(&b'@') {
+            let (authkey_id, password) = parse_yubihsm_asymmetric_pin(pin)?;
+            YubiHsmSecureSession::authenticate_asymmetric(
+                self.connector.as_ref(),
+                authkey_id,
+                password,
+            )?
+        } else {
+            let (authkey_id, password) = parse_yubihsm_pin(pin)?;
+            YubiHsmSecureSession::authenticate(self.connector.as_ref(), authkey_id, password)?
+        };
         *self.session.try_borrow_mut()? = Some(session);
         Ok(())
     }
@@ -2640,8 +2706,8 @@ impl Slot for YubiHsmSlot {
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
-        info.ulMaxPinLen = 64;
-        info.ulMinPinLen = 8;
+        info.ulMaxPinLen = 69;
+        info.ulMinPinLen = 12;
         Ok(())
     }
     fn clear_session(&mut self) {
@@ -2666,10 +2732,7 @@ impl Slot for YubiHsmSlot {
             if info.id != entry.id || info.object_type != entry.object_type {
                 return Err(CKR_DEVICE_ERROR.into());
             }
-            let public_key = if matches!(
-                info.object_type,
-                YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_WRAP_KEY | YUBIHSM_PUBLIC_WRAP_KEY
-            ) {
+            let public_key = if yubihsm_object_has_public_key(&info) {
                 Some(YubiHsmPublicKey::parse(&send_yubihsm_secure_command(
                     self.connector.as_ref(),
                     self.session.as_ref(),
@@ -3620,6 +3683,67 @@ fn abi_test_yubihsm_authentication_objects(slot_id: CK_SLOT_ID) -> Result<Vec<To
 }
 
 #[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+    let wrap_info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
+        let mut label = [0; 40];
+        label[..name.len()].copy_from_slice(name);
+        YubiHsmObjectInfo {
+            capabilities: yubihsm_capabilities(capabilities),
+            id,
+            length,
+            domains: 1,
+            object_type,
+            algorithm,
+            sequence: 1,
+            origin: 1,
+            label,
+            delegated_capabilities: [0; 8],
+        }
+    };
+    let mut objects = yubihsm_token_objects(
+        slot_id,
+        wrap_info(
+            8,
+            YUBIHSM_WRAP_KEY,
+            YUBIHSM_ALGO_AES128_CCM_WRAP,
+            16,
+            &[0x0c, 0x0d, 0x25, 0x26],
+            b"ccm-wrap",
+        ),
+        None,
+    )?;
+    let rsa_public = YubiHsmPublicKey {
+        algorithm: YUBIHSM_ALGO_RSA_2048,
+        key: vec![0xa5; 256],
+    };
+    objects.extend(yubihsm_token_objects(
+        slot_id,
+        wrap_info(
+            9,
+            YUBIHSM_WRAP_KEY,
+            YUBIHSM_ALGO_RSA_2048,
+            256,
+            &[0x0c, 0x0d],
+            b"rsa-wrap",
+        ),
+        Some(rsa_public.clone()),
+    )?);
+    objects.extend(yubihsm_token_objects(
+        slot_id,
+        wrap_info(
+            10,
+            YUBIHSM_PUBLIC_WRAP_KEY,
+            YUBIHSM_ALGO_RSA_2048,
+            256,
+            &[0x0c],
+            b"public-wrap",
+        ),
+        Some(rsa_public),
+    )?);
+    Ok(objects)
+}
+
+#[cfg(feature = "abi-tests")]
 fn abi_test_yubihsm_opaque_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
     let definitions = [
         (
@@ -3734,6 +3858,7 @@ impl Slot for AbiYubiHsmSlot {
             abi_test_yubihsm_nist_aes_object(slot_id),
         ];
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
+        objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
         Ok(objects)
     }
@@ -5765,10 +5890,14 @@ impl TokenObject {
             x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.derive))
             }
+            x if x == CKA_WRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.can_wrap()))
+            }
+            x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.can_unwrap()))
+            }
             x if self.is_key_object()
-                && (x == CKA_WRAP as CK_ATTRIBUTE_TYPE
-                    || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
-                    || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+                && (x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
                     || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
                     || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE) =>
             {
@@ -6034,6 +6163,28 @@ impl TokenObject {
         self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
             || self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
+    fn can_wrap(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_WRAP_KEY | YUBIHSM_PUBLIC_WRAP_KEY,
+                capabilities,
+                ..
+            } if yubihsm_capability(capabilities, 0x0c)
+        )
+    }
+
+    fn can_unwrap(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_WRAP_KEY,
+                capabilities,
+                ..
+            } if yubihsm_capability(capabilities, 0x0d)
+        )
     }
 
     fn is_nonextractable_key_object(&self) -> bool {
