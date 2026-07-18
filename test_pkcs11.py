@@ -55,23 +55,39 @@ CKM_AES_CBC = 0x00001082
 CKM_AES_GCM = 0x00001087
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
+CKO_DATA = 0x00000000
+CKO_CERTIFICATE = 0x00000001
+CKC_X_509 = 0x00000000
 CKK_GENERIC_SECRET = 0x00000010
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
 CKA_PRIVATE = 0x00000002
 CKA_LABEL = 0x00000003
 CKA_UNIQUE_ID = 0x00000004
+CKA_APPLICATION = 0x00000010
 CKA_VALUE = 0x00000011
+CKA_OBJECT_ID = 0x00000012
+CKA_CERTIFICATE_TYPE = 0x00000080
+CKA_ISSUER = 0x00000081
+CKA_SERIAL_NUMBER = 0x00000082
 CKA_KEY_TYPE = 0x00000100
+CKA_SUBJECT = 0x00000101
 CKA_ID = 0x00000102
 CKA_SENSITIVE = 0x00000103
+CKA_ENCRYPT = 0x00000104
+CKA_DECRYPT = 0x00000105
 CKA_SIGN = 0x00000108
+CKA_VERIFY = 0x0000010A
+CKA_DERIVE = 0x0000010C
 CKA_VALUE_LEN = 0x00000161
 CKA_EXTRACTABLE = 0x00000162
 CKA_LOCAL = 0x00000163
 CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
 CKA_KEY_GEN_MECHANISM = 0x00000166
+CKA_MODIFIABLE = 0x00000170
+CKA_COPYABLE = 0x00000171
+CKA_DESTROYABLE = 0x00000172
 CKU_SO = 0
 CKU_USER = 1
 CKS_RO_PUBLIC_SESSION = 0
@@ -1032,6 +1048,169 @@ class Pkcs11AbiTests(unittest.TestCase):
                 "3ff1caa1681fac09120eca307586e1a7"
             ),
         )
+
+    def test_abi_yubihsm_authentication_keys_are_generic_secrets(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        for object_id, expected_length in ((4, 32), (7, 64)):
+            key_id = (CK_BYTE * 2)(0, object_id)
+            template = (CK_ATTRIBUTE * 1)(
+                CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id))
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handle = CK_ULONG()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session, ctypes.byref(handle), 1, ctypes.byref(found)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+            object_class = CK_ULONG()
+            key_type = CK_ULONG()
+            value_len = CK_ULONG()
+            generation_mechanism = CK_ULONG()
+            encrypt = CK_BYTE()
+            decrypt = CK_BYTE()
+            sign = CK_BYTE()
+            verify = CK_BYTE()
+            derive = CK_BYTE()
+
+            def attribute(
+                attribute_type: int, value: ctypes._SimpleCData
+            ) -> CK_ATTRIBUTE:
+                return CK_ATTRIBUTE(
+                    attribute_type,
+                    ctypes.cast(ctypes.byref(value), CK_VOID_PTR),
+                    ctypes.sizeof(value),
+                )
+
+            attributes = (CK_ATTRIBUTE * 9)(
+                attribute(CKA_CLASS, object_class),
+                attribute(CKA_KEY_TYPE, key_type),
+                attribute(CKA_VALUE_LEN, value_len),
+                attribute(CKA_KEY_GEN_MECHANISM, generation_mechanism),
+                attribute(CKA_ENCRYPT, encrypt),
+                attribute(CKA_DECRYPT, decrypt),
+                attribute(CKA_SIGN, sign),
+                attribute(CKA_VERIFY, verify),
+                attribute(CKA_DERIVE, derive),
+            )
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle.value, attributes, len(attributes)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(object_class.value, CKO_SECRET_KEY)
+            self.assertEqual(key_type.value, CKK_GENERIC_SECRET)
+            self.assertEqual(value_len.value, expected_length)
+            self.assertEqual(
+                generation_mechanism.value, CK_UNAVAILABLE_INFORMATION
+            )
+            self.assertEqual(
+                (encrypt.value, decrypt.value, sign.value, verify.value, derive.value),
+                (0, 0, 0, 0, 0),
+            )
+
+    def test_abi_yubihsm_opaque_objects_match_reference_attributes(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        def find_by_id(object_id: int) -> int:
+            encoded_id = (CK_BYTE * 2)(0, object_id)
+            template = (CK_ATTRIBUTE * 1)(
+                CK_ATTRIBUTE(
+                    CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), len(encoded_id)
+                )
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handle = CK_ULONG()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session, ctypes.byref(handle), 1, ctypes.byref(found)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            return handle.value
+
+        def scalar_attribute(handle: int, attribute_type: int, value: object) -> int:
+            attribute = CK_ATTRIBUTE(
+                attribute_type,
+                ctypes.cast(ctypes.byref(value), CK_VOID_PTR),
+                ctypes.sizeof(value),
+            )
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return value.value
+
+        def bytes_attribute(handle: int, attribute_type: int) -> bytes:
+            attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            if attribute.ulValueLen == 0:
+                return b""
+            value = (CK_BYTE * attribute.ulValueLen)()
+            attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return bytes(value)
+
+        data = find_by_id(5)
+        self.assertEqual(scalar_attribute(data, CKA_CLASS, CK_ULONG()), CKO_DATA)
+        self.assertEqual(bytes_attribute(data, CKA_APPLICATION), b"Opaque object")
+        self.assertEqual(bytes_attribute(data, CKA_OBJECT_ID), b"")
+        self.assertEqual(bytes_attribute(data, CKA_VALUE), b"ABI opaque data")
+        for attribute_type, expected in [
+            (CKA_TOKEN, 1),
+            (CKA_PRIVATE, 0),
+            (CKA_SENSITIVE, 0),
+            (CKA_MODIFIABLE, 0),
+            (CKA_COPYABLE, 0),
+            (CKA_DESTROYABLE, 1),
+        ]:
+            self.assertEqual(
+                scalar_attribute(data, attribute_type, CK_BYTE()), expected
+            )
+
+        certificate = find_by_id(6)
+        self.assertEqual(
+            scalar_attribute(certificate, CKA_CLASS, CK_ULONG()), CKO_CERTIFICATE
+        )
+        self.assertEqual(
+            scalar_attribute(certificate, CKA_CERTIFICATE_TYPE, CK_ULONG()),
+            CKC_X_509,
+        )
+        self.assertEqual(
+            bytes_attribute(certificate, CKA_VALUE), b"\x30\x03\x02\x01\x01"
+        )
+        for attribute_type in (CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER):
+            self.assertEqual(bytes_attribute(certificate, attribute_type), b"")
 
     def test_legacy_function_list_entries_are_stubbed(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
