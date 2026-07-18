@@ -6,6 +6,8 @@ extern crate openssl;
 extern crate pcsc;
 extern crate rusb;
 
+#[cfg(feature = "abi-tests")]
+use openssl::symm::{Cipher, Crypter, Mode};
 use openssl::{
     bn::BigNum,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
@@ -3340,8 +3342,55 @@ impl Session for AbiYubiHsmSession {
         Ok(())
     }
 
-    fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
-        Ok(vec![0x5a; 256])
+    fn yubihsm_command(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
+        const NIST_AES_KEY_ID: u16 = 3;
+        const NIST_AES_128_KEY: [u8; 16] = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        let data = command.data();
+        let id = data
+            .get(..2)
+            .and_then(|value| value.try_into().ok())
+            .map(u16::from_be_bytes)
+            .ok_or(CKR_DATA_LEN_RANGE)?;
+        let key = if id == NIST_AES_KEY_ID {
+            &NIST_AES_128_KEY
+        } else {
+            &[0; 16]
+        };
+        let (cipher, mode, iv, input) = match command.code() {
+            YubiHsmCommandCode::EncryptEcb => {
+                (Cipher::aes_128_ecb(), Mode::Encrypt, None, data.get(2..))
+            }
+            YubiHsmCommandCode::DecryptEcb => {
+                (Cipher::aes_128_ecb(), Mode::Decrypt, None, data.get(2..))
+            }
+            YubiHsmCommandCode::EncryptCbc => (
+                Cipher::aes_128_cbc(),
+                Mode::Encrypt,
+                data.get(2..18),
+                data.get(18..),
+            ),
+            YubiHsmCommandCode::DecryptCbc => (
+                Cipher::aes_128_cbc(),
+                Mode::Decrypt,
+                data.get(2..18),
+                data.get(18..),
+            ),
+            _ => return Ok(vec![0x5a; 256]),
+        };
+        let input = input.ok_or(CKR_DATA_LEN_RANGE)?;
+        if !input.len().is_multiple_of(AES_BLOCK_LENGTH) {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let mut crypter = Crypter::new(cipher, mode, key, iv)?;
+        crypter.pad(false);
+        let mut output = vec![0; input.len() + AES_BLOCK_LENGTH];
+        let written = crypter.update(input, &mut output)?;
+        let final_written = crypter.finalize(&mut output[written..])?;
+        output.truncate(written + final_written);
+        Ok(output)
     }
 }
 
@@ -3381,6 +3430,57 @@ fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
             public_key: Vec::new(),
         },
     }
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: b"abi-yubihsm-aes".to_vec(),
+        class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_AES as CK_KEY_TYPE,
+        label: b"ABI YubiHSM AES key".to_vec(),
+        id: 2u16.to_be_bytes().to_vec(),
+        token: true,
+        private: true,
+        encrypt: true,
+        decrypt: true,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: true,
+        extractable: false,
+        always_sensitive: true,
+        never_extractable: true,
+        local: true,
+        key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
+        owner_session: None,
+        material: KeyMaterial::YubiHsm {
+            id: 2,
+            object_type: YUBIHSM_SYMMETRIC_KEY,
+            algorithm: YUBIHSM_ALGO_AES128,
+            length: 16,
+            capabilities: yubihsm_capabilities(&[0x32, 0x33]),
+            public_key: Vec::new(),
+        },
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_nist_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    const NIST_AES_KEY_ID: u16 = 3;
+    let mut object = abi_test_yubihsm_aes_object(slot_id);
+    object.unique_id = b"abi-yubihsm-aes-nist".to_vec();
+    object.label = b"ABI YubiHSM NIST AES key".to_vec();
+    object.id = NIST_AES_KEY_ID.to_be_bytes().to_vec();
+    if let KeyMaterial::YubiHsm {
+        id, capabilities, ..
+    } = &mut object.material
+    {
+        *id = NIST_AES_KEY_ID;
+        *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
+    }
+    object
 }
 
 #[cfg(feature = "abi-tests")]
@@ -3452,7 +3552,15 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        Ok(vec![abi_test_yubihsm_object(slot_id)])
+        Ok(vec![
+            abi_test_yubihsm_object(slot_id),
+            abi_test_yubihsm_aes_object(slot_id),
+            abi_test_yubihsm_nist_aes_object(slot_id),
+        ])
+    }
+
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        yubihsm_mechanisms(&[1, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_AES128, 53, 54])
     }
 
     fn is_yubihsm(&self) -> bool {
@@ -4547,6 +4655,13 @@ struct SignatureOperation {
 }
 
 #[derive(Debug, Clone)]
+struct GcmParameters {
+    iv: Vec<u8>,
+    aad: Vec<u8>,
+    tag_bits: usize,
+}
+
+#[derive(Debug, Clone)]
 struct CryptOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
@@ -4554,6 +4669,7 @@ struct CryptOperation {
     context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
     iv: Option<[u8; 16]>,
+    gcm: Option<GcmParameters>,
     oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
     piv_pin_policy: Option<u8>,
 }
@@ -5239,6 +5355,8 @@ fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), Error> {
         context.insert_object(object);
     }
     context.insert_object(abi_test_yubihsm_object(ABI_TEST_YUBIHSM_SLOT_ID));
+    context.insert_object(abi_test_yubihsm_aes_object(ABI_TEST_YUBIHSM_SLOT_ID));
+    context.insert_object(abi_test_yubihsm_nist_aes_object(ABI_TEST_YUBIHSM_SLOT_ID));
     Ok(())
 }
 
@@ -6155,7 +6273,7 @@ const MECHANISMS: [MechanismDetails; 5] = [
     },
 ];
 
-const YUBIHSM_MECHANISMS: [MechanismDetails; 18] = [
+const YUBIHSM_MECHANISMS: [MechanismDetails; 19] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -6230,6 +6348,12 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 18] = [
     },
     MechanismDetails {
         type_: CKM_AES_CBC as CK_MECHANISM_TYPE,
+        min_key_size: 16,
+        max_key_size: 32,
+        flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_AES_GCM as CK_MECHANISM_TYPE,
         min_key_size: 16,
         max_key_size: 32,
         flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
@@ -6346,7 +6470,8 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 y if y == CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE => &derive_sizes,
                 y if y == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
                     || y == CKM_AES_ECB as CK_MECHANISM_TYPE
-                    || y == CKM_AES_CBC as CK_MECHANISM_TYPE =>
+                    || y == CKM_AES_CBC as CK_MECHANISM_TYPE
+                    || y == CKM_AES_GCM as CK_MECHANISM_TYPE =>
                 {
                     &aes_sizes
                 }
@@ -6385,6 +6510,7 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 ]),
                 x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => algorithms.contains(&53),
                 x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => algorithms.contains(&54),
+                x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => algorithms.contains(&53),
                 x if x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE => any(&[19, 20, 21, 22]),
                 x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => algorithms.contains(&19),
                 x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => algorithms.contains(&20),
@@ -7742,6 +7868,35 @@ pub extern "C" fn C_Decrypt(
     ))
 }
 
+fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParameters, Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_GCM_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = _as_ref(mechanism.pParameter as CK_GCM_PARAMS_PTR)?;
+    let iv_len = usize::try_from(parameters.ulIvLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let aad_len = usize::try_from(parameters.ulAADLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let tag_bits = usize::try_from(parameters.ulTagBits)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if iv_len == 0
+        || iv_len > u32::MAX as usize
+        || aad_len > u32::MAX as usize
+        || tag_bits > 128
+        || parameters.pIv.is_null()
+        || (aad_len != 0 && parameters.pAAD.is_null())
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    Ok(GcmParameters {
+        iv: from_raw_parts(parameters.pIv as *const u8, iv_len)?.to_vec(),
+        aad: from_raw_parts(parameters.pAAD as *const u8, aad_len)?.to_vec(),
+        tag_bits,
+    })
+}
+
 fn crypt_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -7759,7 +7914,7 @@ fn crypt_init(
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         let mechanism = _as_ref(mechanism)?;
-        let (iv, oaep) = match mechanism.mechanism {
+        let (iv, gcm, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                 || x == CKM_AES_ECB as CK_MECHANISM_TYPE =>
@@ -7767,7 +7922,7 @@ fn crypt_init(
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                (None, None)
+                (None, None, None)
             }
             x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => {
                 if mechanism.ulParameterLen != 16 || mechanism.pParameter.is_null() {
@@ -7777,7 +7932,11 @@ fn crypt_init(
                 (
                     Some(bytes.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?),
                     None,
+                    None,
                 )
+            }
+            x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
+                (None, Some(parse_gcm_parameters(mechanism)?), None)
             }
             x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
                 if mechanism.ulParameterLen as usize
@@ -7808,6 +7967,7 @@ fn crypt_init(
                 )?;
                 (
                     None,
+                    None,
                     Some((mgf, parameters.hashAlg, hash(digest, label)?.to_vec())),
                 )
             }
@@ -7831,6 +7991,7 @@ fn crypt_init(
             (mechanism, true) if mechanism == CKM_AES_ECB as CK_MECHANISM_TYPE => 0x33,
             (mechanism, false) if mechanism == CKM_AES_CBC as CK_MECHANISM_TYPE => 0x34,
             (mechanism, true) if mechanism == CKM_AES_CBC as CK_MECHANISM_TYPE => 0x35,
+            (mechanism, _) if mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE => 0x33,
             _ => 0,
         };
         if required_capability != 0
@@ -7873,6 +8034,7 @@ fn crypt_init(
             ),
             mechanism: mechanism.mechanism,
             iv,
+            gcm,
             oaep,
             piv_pin_policy: match &object.material {
                 KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
@@ -7895,6 +8057,189 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
         YUBIHSM_ALGO_RSA_4096 => Ok(512),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
+}
+
+const AES_BLOCK_LENGTH: usize = 16;
+const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
+
+fn ghash_multiply(left: u128, right: u128) -> u128 {
+    const REDUCTION: u128 = 0xe1000000000000000000000000000000;
+    let mut product = 0;
+    let mut factor = right;
+    for bit in 0..128 {
+        if left & (1u128 << (127 - bit)) != 0 {
+            product ^= factor;
+        }
+        factor = if factor & 1 == 0 {
+            factor >> 1
+        } else {
+            (factor >> 1) ^ REDUCTION
+        };
+    }
+    product
+}
+
+fn ghash_update(mut hash: u128, key: u128, data: &[u8]) -> u128 {
+    for chunk in data.chunks(AES_BLOCK_LENGTH) {
+        let mut block = [0; AES_BLOCK_LENGTH];
+        block[..chunk.len()].copy_from_slice(chunk);
+        hash = ghash_multiply(hash ^ u128::from_be_bytes(block), key);
+    }
+    hash
+}
+
+fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
+    let aad_bits = u64::try_from(aad.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
+        .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+    let ciphertext_bits = u64::try_from(ciphertext.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
+        .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+    let key = u128::from_be_bytes(key);
+    let mut hash = ghash_update(0, key, aad);
+    hash = ghash_update(hash, key, ciphertext);
+    let mut lengths = [0; AES_BLOCK_LENGTH];
+    lengths[..8].copy_from_slice(&aad_bits.to_be_bytes());
+    lengths[8..].copy_from_slice(&ciphertext_bits.to_be_bytes());
+    Ok(ghash_multiply(hash ^ u128::from_be_bytes(lengths), key).to_be_bytes())
+}
+
+fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) {
+    let value = u32::from_be_bytes(counter[12..].try_into().unwrap()).wrapping_add(1);
+    counter[12..].copy_from_slice(&value.to_be_bytes());
+}
+
+fn gcm_tag(full_tag: [u8; AES_BLOCK_LENGTH], tag_bits: usize) -> Vec<u8> {
+    let tag_length = tag_bits.div_ceil(8);
+    let mut tag = full_tag[..tag_length].to_vec();
+    if !tag_bits.is_multiple_of(8) {
+        let mask = 0xff << (8 - tag_bits % 8);
+        if let Some(last) = tag.last_mut() {
+            *last &= mask;
+        }
+    }
+    tag
+}
+
+fn aes_gcm<F>(
+    parameters: &GcmParameters,
+    input: &[u8],
+    encrypting: bool,
+    mut encrypt_blocks: F,
+) -> Result<Vec<u8>, Error>
+where
+    F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+{
+    if parameters.iv.is_empty() || parameters.tag_bits > 128 {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let tag_length = parameters.tag_bits.div_ceil(8);
+    let (payload, supplied_tag) = if encrypting {
+        (input, None)
+    } else {
+        if input.len() < tag_length {
+            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+        }
+        let split = input.len() - tag_length;
+        (&input[..split], Some(&input[split..]))
+    };
+    let block_count = payload.len().div_ceil(AES_BLOCK_LENGTH);
+    if block_count > u32::MAX as usize - 2 {
+        return Err(if encrypting {
+            CKR_DATA_LEN_RANGE.into()
+        } else {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+        });
+    }
+
+    let hash_subkey = encrypt_blocks(&[0; AES_BLOCK_LENGTH])?;
+    let hash_subkey: [u8; AES_BLOCK_LENGTH] = hash_subkey
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut initial_counter = if parameters.iv.len() == 12 {
+        let mut counter = [0; AES_BLOCK_LENGTH];
+        counter[..12].copy_from_slice(&parameters.iv);
+        counter[15] = 1;
+        counter
+    } else {
+        ghash(hash_subkey, &[], &parameters.iv)?
+    };
+
+    let counter_capacity = (block_count + 1)
+        .checked_mul(AES_BLOCK_LENGTH)
+        .ok_or_else(|| {
+            if encrypting {
+                Error::from(CKR_DATA_LEN_RANGE)
+            } else {
+                Error::from(CKR_ENCRYPTED_DATA_LEN_RANGE)
+            }
+        })?;
+    let mut counter_blocks = Vec::with_capacity(counter_capacity);
+    counter_blocks.extend_from_slice(&initial_counter);
+    for _ in 0..block_count {
+        increment_gcm_counter(&mut initial_counter);
+        counter_blocks.extend_from_slice(&initial_counter);
+    }
+    let encrypted_counters = encrypt_blocks(&counter_blocks)?;
+    if encrypted_counters.len() != counter_blocks.len() {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    let mut transformed = Vec::with_capacity(payload.len());
+    for (block, key_stream) in payload
+        .chunks(AES_BLOCK_LENGTH)
+        .zip(encrypted_counters[AES_BLOCK_LENGTH..].chunks(AES_BLOCK_LENGTH))
+    {
+        transformed.extend(
+            block
+                .iter()
+                .zip(key_stream)
+                .map(|(left, right)| left ^ right),
+        );
+    }
+    let ciphertext = if encrypting { &transformed } else { payload };
+    let hash = ghash(hash_subkey, &parameters.aad, ciphertext)?;
+    let mut full_tag = [0; AES_BLOCK_LENGTH];
+    for ((output, mask), value) in full_tag
+        .iter_mut()
+        .zip(&encrypted_counters[..AES_BLOCK_LENGTH])
+        .zip(hash)
+    {
+        *output = mask ^ value;
+    }
+    let expected_tag = gcm_tag(full_tag, parameters.tag_bits);
+    if let Some(supplied_tag) = supplied_tag {
+        if !openssl::memcmp::eq(&expected_tag, supplied_tag) {
+            transformed.fill(0);
+            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+        }
+        Ok(transformed)
+    } else {
+        transformed.extend_from_slice(&expected_tag);
+        Ok(transformed)
+    }
+}
+
+fn yubihsm_encrypt_ecb_blocks(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    blocks: &[u8],
+) -> Result<Vec<u8>, Error> {
+    if !blocks.len().is_multiple_of(AES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut encrypted = Vec::with_capacity(blocks.len());
+    for chunk in blocks.chunks(YUBIHSM_ECB_CHUNK_LENGTH) {
+        let command = YubiHsmCommand::key_data(YubiHsmCommandCode::EncryptEcb, key_id, chunk)?;
+        let response = ctx
+            ._get_session(session_handle)?
+            .1
+            .yubihsm_command(&command)?;
+        if response.len() != chunk.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        encrypted.extend_from_slice(&response);
+    }
+    Ok(encrypted)
 }
 
 fn crypt(
@@ -7937,22 +8282,46 @@ fn crypt(
                 return Err(error);
             }
         };
-        let required = match &operation.key {
-            KeyMaterial::RsaPublic(key) => key.size() as usize,
-            KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
-            KeyMaterial::OpenPgpPrivate { modulus, .. } if !encrypting => modulus.len(),
-            KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
-                match yubihsm_rsa_length(*algorithm) {
-                    Ok(length) => length,
-                    Err(error) => {
-                        ctx.encrypt_operations.remove(&session_handle);
-                        ctx.decrypt_operations.remove(&session_handle);
-                        return Err(error);
+        let required = if operation.mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE {
+            let Some(parameters) = operation.gcm.as_ref() else {
+                ctx.encrypt_operations.remove(&session_handle);
+                ctx.decrypt_operations.remove(&session_handle);
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            };
+            let tag_length = parameters.tag_bits.div_ceil(8);
+            let required = if encrypting {
+                input.len().checked_add(tag_length)
+            } else {
+                input.len().checked_sub(tag_length)
+            };
+            let Some(required) = required else {
+                ctx.encrypt_operations.remove(&session_handle);
+                ctx.decrypt_operations.remove(&session_handle);
+                return Err(if encrypting {
+                    CKR_DATA_LEN_RANGE.into()
+                } else {
+                    CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+                });
+            };
+            required
+        } else {
+            match &operation.key {
+                KeyMaterial::RsaPublic(key) => key.size() as usize,
+                KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
+                KeyMaterial::OpenPgpPrivate { modulus, .. } if !encrypting => modulus.len(),
+                KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
+                    match yubihsm_rsa_length(*algorithm) {
+                        Ok(length) => length,
+                        Err(error) => {
+                            ctx.encrypt_operations.remove(&session_handle);
+                            ctx.decrypt_operations.remove(&session_handle);
+                            return Err(error);
+                        }
                     }
                 }
+                KeyMaterial::YubiHsm { .. } => input.len(),
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }
-            KeyMaterial::YubiHsm { .. } => input.len(),
-            _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
         if output.is_null() {
             *output_len = required as CK_ULONG;
@@ -8069,6 +8438,16 @@ fn crypt(
                             operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
                             input,
                         )?,
+                        x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
+                            return aes_gcm(
+                                operation.gcm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                input,
+                                encrypting,
+                                |blocks| {
+                                    yubihsm_encrypt_ecb_blocks(ctx, session_handle, *id, blocks)
+                                },
+                            );
+                        }
                         _ => return Err(CKR_MECHANISM_INVALID.into()),
                     };
                     ctx._get_session(session_handle)?

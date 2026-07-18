@@ -79,6 +79,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     );
     assert!(mechanisms.contains(&(CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE)));
     assert!(mechanisms.contains(&(CKM_AES_CBC as CK_MECHANISM_TYPE)));
+    assert!(mechanisms.contains(&(CKM_AES_GCM as CK_MECHANISM_TYPE)));
     let mut mechanism_info = CK_MECHANISM_INFO {
         ulMinKeySize: 0,
         ulMaxKeySize: 0,
@@ -432,10 +433,524 @@ fn yubihsm_secret_key_sign_capability_matches_key_type() {
         label,
         delegated_capabilities: [0; 8],
     };
-    let objects = crate::yubihsm_token_objects(99, info, None).unwrap();
+    let objects = crate::yubihsm_token_objects(99, info.clone(), None).unwrap();
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
     assert!(!objects[0].sign);
+
+    let mut gcm_info = info;
+    gcm_info.capabilities = crate::yubihsm_capabilities(&[0x33]);
+    let objects = crate::yubihsm_token_objects(99, gcm_info.clone(), None).unwrap();
+    assert!(objects[0].encrypt);
+    assert!(!objects[0].decrypt);
+    gcm_info.capabilities = crate::yubihsm_capabilities(&[0x32, 0x33]);
+    let objects = crate::yubihsm_token_objects(99, gcm_info, None).unwrap();
+    assert!(objects[0].decrypt);
+}
+
+fn test_hex(value: &str) -> Vec<u8> {
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
+fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error> {
+    let cipher = match key.len() {
+        16 => openssl::symm::Cipher::aes_128_ecb(),
+        24 => openssl::symm::Cipher::aes_192_ecb(),
+        32 => openssl::symm::Cipher::aes_256_ecb(),
+        _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+    };
+    let mut crypter = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Encrypt, key, None)?;
+    crypter.pad(false);
+    let mut output = vec![0; input.len() + 16];
+    let written = crypter.update(input, &mut output)?;
+    let final_written = crypter.finalize(&mut output[written..])?;
+    output.truncate(written + final_written);
+    Ok(output)
+}
+
+fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {
+    let object = crate::TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: format!("test-aes-{key_id}").into_bytes(),
+        class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_AES as CK_KEY_TYPE,
+        label: b"Test AES key".to_vec(),
+        id: key_id.to_be_bytes().to_vec(),
+        token: true,
+        private: true,
+        encrypt: true,
+        decrypt: true,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: true,
+        extractable: false,
+        always_sensitive: true,
+        never_extractable: true,
+        local: true,
+        key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
+        owner_session: None,
+        material: crate::KeyMaterial::YubiHsm {
+            id: key_id,
+            object_type: crate::YUBIHSM_SYMMETRIC_KEY,
+            algorithm: crate::YUBIHSM_ALGO_AES128,
+            length: 16,
+            capabilities: crate::yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]),
+            public_key: Vec::new(),
+        },
+    };
+    let mut context = crate::lock_context().unwrap();
+    context.as_mut().unwrap().insert_object(object)
+}
+
+fn assert_pkcs11_aes_vector(
+    session: CK_SESSION_HANDLE,
+    key: CK_OBJECT_HANDLE,
+    mechanism_type: CK_MECHANISM_TYPE,
+    iv: Option<&mut [u8; 16]>,
+    plaintext: &[u8],
+    ciphertext: &[u8],
+) {
+    let (parameter, parameter_len) = match iv {
+        Some(iv) => (iv.as_mut_ptr().cast(), iv.len() as CK_ULONG),
+        None => (std::ptr::null_mut(), 0),
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: mechanism_type,
+        pParameter: parameter,
+        ulParameterLen: parameter_len,
+    };
+    let mut input = plaintext.to_vec();
+    let mut output = vec![0; ciphertext.len()];
+    let mut output_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Encrypt(
+            session,
+            input.as_mut_ptr(),
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&output[..output_len as usize], ciphertext);
+
+    let mut input = ciphertext.to_vec();
+    let mut output = vec![0; plaintext.len()];
+    let mut output_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            input.as_mut_ptr(),
+            input.len() as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut output_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&output[..output_len as usize], plaintext);
+}
+
+#[test]
+fn aes_gcm_matches_nist_vectors_and_rejects_modified_tags() {
+    let zero_key = [0; 16];
+    let zero_parameters = crate::GcmParameters {
+        iv: vec![0; 12],
+        aad: Vec::new(),
+        tag_bits: 128,
+    };
+    let encrypted = crate::aes_gcm(&zero_parameters, &[0; 16], true, |blocks| {
+        test_aes_ecb(&zero_key, blocks)
+    })
+    .unwrap();
+    assert_eq!(
+        encrypted,
+        test_hex("0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")
+    );
+    assert_eq!(
+        crate::aes_gcm(&zero_parameters, &encrypted, false, |blocks| {
+            test_aes_ecb(&zero_key, blocks)
+        })
+        .unwrap(),
+        [0; 16]
+    );
+    let mut modified = encrypted;
+    *modified.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        CK_RV::from(
+            crate::aes_gcm(&zero_parameters, &modified, false, |blocks| {
+                test_aes_ecb(&zero_key, blocks)
+            })
+            .unwrap_err()
+        ),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+
+    let key = test_hex("feffe9928665731c6d6a8f9467308308");
+    let plaintext = test_hex(concat!(
+        "d9313225f88406e5a55909c5aff5269a",
+        "86a7a9531534f7da2e4c303d8a318a72",
+        "1c3c0c95956809532fcf0e2449a6b525",
+        "b16aedf5aa0de657ba637b39"
+    ));
+    let parameters = crate::GcmParameters {
+        iv: test_hex("cafebabefacedbad"),
+        aad: test_hex("feedfacedeadbeeffeedfacedeadbeefabaddad2"),
+        tag_bits: 128,
+    };
+    let encrypted = crate::aes_gcm(&parameters, &plaintext, true, |blocks| {
+        test_aes_ecb(&key, blocks)
+    })
+    .unwrap();
+    assert_eq!(
+        encrypted,
+        test_hex(concat!(
+            "61353b4c2806934a777ff51fa22a4755",
+            "699b2a714fcdc6f83766e5f97b6c7423",
+            "73806900e49f24b22b097544d4896b42",
+            "4989b5e1ebac0f07c23f4598",
+            "3612d2e79e3b0785561be14aaca2fccb"
+        ))
+    );
+    assert_eq!(
+        crate::aes_gcm(&parameters, &encrypted, false, |blocks| {
+            test_aes_ecb(&key, blocks)
+        })
+        .unwrap(),
+        plaintext
+    );
+
+    let short_tag_parameters = crate::GcmParameters {
+        tag_bits: 96,
+        ..zero_parameters
+    };
+    let encrypted = crate::aes_gcm(&short_tag_parameters, &[0; 16], true, |blocks| {
+        test_aes_ecb(&zero_key, blocks)
+    })
+    .unwrap();
+    assert_eq!(encrypted.len(), 16 + 12);
+    assert_eq!(
+        crate::aes_gcm(&short_tag_parameters, &encrypted, false, |blocks| {
+            test_aes_ecb(&zero_key, blocks)
+        })
+        .unwrap(),
+        [0; 16]
+    );
+}
+
+#[test]
+fn aes_gcm_matches_rfc_9180_vector() {
+    // RFC 9180, Appendix A.1.3.1, sequence number 0 (AEAD_AES_128_GCM).
+    let key = test_hex("b062cb2c4dd4bca0ad7c7a12bbc341e6");
+    let plaintext = test_hex("4265617574792069732074727574682c20747275746820626561757479");
+    let parameters = crate::GcmParameters {
+        iv: test_hex("a1bc314c1942ade7051ffed0"),
+        aad: test_hex("436f756e742d30"),
+        tag_bits: 128,
+    };
+    let expected = test_hex(concat!(
+        "5fd92cc9d46dbf8943e72a07e42f363e",
+        "d5f721212cd90bcfd072bfd9f44e06b8",
+        "0fd17824947496e21b680c141b"
+    ));
+
+    let encrypted = crate::aes_gcm(&parameters, &plaintext, true, |blocks| {
+        test_aes_ecb(&key, blocks)
+    })
+    .unwrap();
+    assert_eq!(encrypted, expected);
+    assert_eq!(
+        crate::aes_gcm(&parameters, &encrypted, false, |blocks| {
+            test_aes_ecb(&key, blocks)
+        })
+        .unwrap(),
+        plaintext
+    );
+}
+
+#[test]
+fn aes_gcm_parameters_are_validated_and_copied_at_init() {
+    let mut iv = [0x11; 12];
+    let mut aad = [0x22; 7];
+    let mut parameters = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 1,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 96,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_GCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    let parsed = crate::parse_gcm_parameters(&mechanism).unwrap();
+    iv.fill(0);
+    aad.fill(0);
+    assert_eq!(parsed.iv, [0x11; 12]);
+    assert_eq!(parsed.aad, [0x22; 7]);
+    assert_eq!(parsed.tag_bits, 96);
+
+    let mut invalid_parameters = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: 0,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 129,
+    };
+    let invalid_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM as CK_MECHANISM_TYPE,
+        pParameter: (&mut invalid_parameters as *mut CK_GCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        CK_RV::from(crate::parse_gcm_parameters(&invalid_mechanism).unwrap_err()),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    let missing = CK_MECHANISM {
+        mechanism: CKM_AES_GCM as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        CK_RV::from(crate::parse_gcm_parameters(&missing).unwrap_err()),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+}
+
+#[test]
+fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, _, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let key = insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::NIST_AES_KEY_ID);
+
+    // NIST SP 800-38A, Appendices F.1.1/F.1.2 and F.2.1/F.2.2.
+    let plaintext = test_hex(concat!(
+        "6bc1bee22e409f96e93d7e117393172a",
+        "ae2d8a571e03ac9c9eb76fac45af8e51",
+        "30c81c46a35ce411e5fbc1191a0a52ef",
+        "f69f2445df4f9b17ad2b417be66c3710"
+    ));
+    let ecb_ciphertext = test_hex(concat!(
+        "3ad77bb40d7a3660a89ecaf32466ef97",
+        "f5d3d58503b9699de785895a96fdbaaf",
+        "43b1cd7f598ece23881b00e3ed030688",
+        "7b0c785e27e8ad3f8223207104725dd4"
+    ));
+    assert_pkcs11_aes_vector(
+        session,
+        key,
+        CKM_AES_ECB as CK_MECHANISM_TYPE,
+        None,
+        &plaintext,
+        &ecb_ciphertext,
+    );
+
+    let mut iv = test_hex("000102030405060708090a0b0c0d0e0f")
+        .try_into()
+        .unwrap();
+    let cbc_ciphertext = test_hex(concat!(
+        "7649abac8119b246cee98e9b12e9197d",
+        "5086cb9b507219ee95db113a917678b2",
+        "73bed6b8e3c1743b7116e69e22229516",
+        "3ff1caa1681fac09120eca307586e1a7"
+    ));
+    assert_pkcs11_aes_vector(
+        session,
+        key,
+        CKM_AES_CBC as CK_MECHANISM_TYPE,
+        Some(&mut iv),
+        &plaintext,
+        &cbc_ciphertext,
+    );
+
+    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    const KEY_ID: u16 = 0x1235;
+    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let key = insert_yubihsm_aes_test_object(SLOT_ID, KEY_ID);
+
+    let mut iv = [0; 12];
+    let mut aad = *b"authenticated data";
+    let mut parameters = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: (iv.len() * 8) as CK_ULONG,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_GCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    let mut plaintext: Vec<u8> = (0..5003).map(|index| index as u8).collect();
+    let mut encrypted_len = 0;
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Encrypt(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut encrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(encrypted_len as usize, plaintext.len() + 16);
+    let mut encrypted = vec![0; encrypted_len as usize];
+    assert_eq!(
+        crate::C_Encrypt(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            encrypted.as_mut_ptr(),
+            &mut encrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    encrypted.truncate(encrypted_len as usize);
+    assert_eq!(encrypted.len(), plaintext.len() + 16);
+
+    let mut decrypted_len = 0;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            encrypted.as_mut_ptr(),
+            encrypted.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut decrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(decrypted_len as usize, plaintext.len());
+    let mut decrypted = vec![0; decrypted_len as usize];
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            encrypted.as_mut_ptr(),
+            encrypted.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut decrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&decrypted[..decrypted_len as usize], plaintext);
+
+    *encrypted.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            encrypted.as_mut_ptr(),
+            encrypted.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut decrypted_len,
+        ),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+    let commands = commands.borrow();
+    let ecb_commands: Vec<&Vec<u8>> = commands
+        .iter()
+        .filter_map(|(command, data)| {
+            (*command == crate::yubihsm::CommandCode::EncryptEcb as u8).then_some(data)
+        })
+        .collect();
+    assert!(ecb_commands.len() > 3);
+    assert!(ecb_commands
+        .iter()
+        .all(|data| data.len() <= 2018 && (data.len() - 2).is_multiple_of(16)));
+    drop(ecb_commands);
+    drop(commands);
+
+    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 
 #[test]
@@ -1078,6 +1593,12 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!(rsa.flags & (CKF_SIGN | CKF_DECRYPT) as CK_FLAGS, 0);
     let aes = mechanism(CKM_AES_ECB as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((aes.min_key_size, aes.max_key_size), (16, 16));
+    let gcm = mechanism(CKM_AES_GCM as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((gcm.min_key_size, gcm.max_key_size), (16, 16));
+    assert_eq!(
+        gcm.flags & (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
     let hmac = mechanism(CKM_SHA_1_HMAC as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 64));
     let hmac = mechanism(CKM_SHA512_HMAC as CK_MECHANISM_TYPE).unwrap();
@@ -1099,6 +1620,14 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
+
+    let without_ecb = crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_AES128, 54]);
+    assert!(without_ecb
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_AES_CBC as CK_MECHANISM_TYPE));
+    assert!(!without_ecb
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_AES_GCM as CK_MECHANISM_TYPE));
 
     let without_x25519 = crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_EC_P256]);
     assert!(!without_x25519

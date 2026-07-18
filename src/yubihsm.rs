@@ -423,17 +423,22 @@ fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
 }
 
 fn aes_block(key: &[u8], block: &[u8; AES_BLOCK_SIZE]) -> Result<[u8; 16], Error> {
-    let mut crypter = Crypter::new(Cipher::aes_128_ecb(), Mode::Encrypt, key, None)?;
-    crypter.pad(false);
-    let mut output = [0u8; AES_BLOCK_SIZE * 2];
-    let written = crypter.update(block, &mut output)?;
-    let final_written = crypter.finalize(&mut output[written..])?;
-    if written + final_written != AES_BLOCK_SIZE {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    output[..AES_BLOCK_SIZE]
+    aes_ecb(key, block, Mode::Encrypt)?
         .try_into()
         .map_err(|_| CKR_DEVICE_ERROR.into())
+}
+
+fn aes_ecb(key: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
+    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut crypter = Crypter::new(Cipher::aes_128_ecb(), mode, key, None)?;
+    crypter.pad(false);
+    let mut output = vec![0; data.len() + AES_BLOCK_SIZE];
+    let written = crypter.update(data, &mut output)?;
+    let final_written = crypter.finalize(&mut output[written..])?;
+    output.truncate(written + final_written);
+    Ok(output)
 }
 
 fn aes_cbc(key: &[u8], iv: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
@@ -509,6 +514,12 @@ pub(crate) mod tests {
     const PASSWORD: &[u8] = b"password";
     const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    pub(crate) const TEST_AES_KEY: [u8; 16] = [0; 16];
+    pub(crate) const NIST_AES_KEY_ID: u16 = 3;
+    const NIST_AES_128_KEY: [u8; 16] = [
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c,
+    ];
     const RFC7748_ALICE_PRIVATE_KEY: [u8; 32] = [
         0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66,
         0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9,
@@ -607,6 +618,14 @@ pub(crate) mod tests {
             let mut deriver = Deriver::new(&private_key)?;
             deriver.set_peer(&public_key)?;
             deriver.derive_to_vec().map_err(Error::from)
+        }
+
+        fn aes_key(id: u16) -> &'static [u8; 16] {
+            if id == NIST_AES_KEY_ID {
+                &NIST_AES_128_KEY
+            } else {
+                &TEST_AES_KEY
+            }
         }
 
         fn reply(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
@@ -838,6 +857,47 @@ pub(crate) mod tests {
                     } else {
                         (inner.command | RESPONSE_BIT, vec![0x42; 32])
                     }
+                }
+                value
+                    if value == CommandCode::EncryptEcb as u8
+                        || value == CommandCode::DecryptEcb as u8 =>
+                {
+                    if inner.data.len() < 2 || !(inner.data.len() - 2).is_multiple_of(16) {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let mode = if value == CommandCode::EncryptEcb as u8 {
+                        Mode::Encrypt
+                    } else {
+                        Mode::Decrypt
+                    };
+                    (
+                        inner.command | RESPONSE_BIT,
+                        aes_ecb(Self::aes_key(id), &inner.data[2..], mode)?,
+                    )
+                }
+                value
+                    if value == CommandCode::EncryptCbc as u8
+                        || value == CommandCode::DecryptCbc as u8 =>
+                {
+                    if inner.data.len() < 18 || !(inner.data.len() - 18).is_multiple_of(16) {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let mode = if value == CommandCode::EncryptCbc as u8 {
+                        Mode::Encrypt
+                    } else {
+                        Mode::Decrypt
+                    };
+                    (
+                        inner.command | RESPONSE_BIT,
+                        aes_cbc(
+                            Self::aes_key(id),
+                            &inner.data[2..18],
+                            &inner.data[18..],
+                            mode,
+                        )?,
+                    )
                 }
                 value if value == CommandCode::ResetDevice as u8 && inner.data == [0xde] => {
                     (COMMAND_ERROR, vec![0x0b])
@@ -1117,6 +1177,10 @@ pub(crate) mod tests {
                         | CommandCode::DeleteObject
                         | CommandCode::SignPkcs1
                         | CommandCode::DecryptPkcs1
+                        | CommandCode::DecryptEcb
+                        | CommandCode::EncryptEcb
+                        | CommandCode::DecryptCbc
+                        | CommandCode::EncryptCbc
                 )
         }) {
             let data = [code as u8, 0xa5];
