@@ -1,6 +1,7 @@
 use crate::{
     error::Error,
-    scp03::{aes_cmac, environment_byte, parse_hex, transmit, CommandApdu, Scp03Session},
+    scp03::{environment_byte, parse_hex, transmit, CommandApdu, Scp03Session},
+    secure_channel_crypto::aes_cmac,
     Connector, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
     CKR_USER_PIN_NOT_INITIALIZED,
 };

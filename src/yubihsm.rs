@@ -1,8 +1,15 @@
+#[cfg(test)]
+use crate::secure_channel_crypto::aes_ecb;
 use crate::{
-    error::Error, Connector, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_ENCRYPTED_DATA_INVALID, CKR_FUNCTION_FAILED,
-    CKR_FUNCTION_REJECTED, CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
-    CKR_SESSION_CLOSED, CKR_SESSION_COUNT,
+    error::Error,
+    secure_channel_crypto::{
+        aes_cbc, aes_cmac, aes_encrypt_block as aes_block, pad_iso7816 as pad, scp03_kdf,
+        unpad_iso7816 as unpad, AES_BLOCK_SIZE,
+    },
+    Connector, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
+    CKR_DEVICE_MEMORY, CKR_ENCRYPTED_DATA_INVALID, CKR_FUNCTION_FAILED, CKR_FUNCTION_REJECTED,
+    CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, CKR_SESSION_CLOSED,
+    CKR_SESSION_COUNT,
 };
 #[cfg(test)]
 use openssl::pkey::Id;
@@ -16,8 +23,7 @@ use openssl::{
     pkey::{PKey, Private},
     rand::rand_bytes,
     sha::sha256,
-    sign::Signer,
-    symm::{Cipher, Crypter, Mode},
+    symm::Mode,
 };
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -34,7 +40,6 @@ const COMMAND_AUTHENTICATE_SESSION: u8 = CommandCode::AuthenticateSession as u8;
 const COMMAND_SESSION_MESSAGE: u8 = CommandCode::SessionMessage as u8;
 const COMMAND_ERROR: u8 = 0x7f;
 const RESPONSE_BIT: u8 = 0x80;
-const AES_BLOCK_SIZE: usize = 16;
 const MAC_LENGTH: usize = 8;
 const CHALLENGE_LENGTH: usize = 8;
 const P256_PRIVATE_KEY_LENGTH: usize = 32;
@@ -569,90 +574,15 @@ fn maximum_message_size(major: u8, minor: u8) -> usize {
 }
 
 fn derive_key(key: &[u8], constant: u8, context: &[u8]) -> Result<[u8; 16], Error> {
-    let mut input = Vec::with_capacity(32);
-    input.extend_from_slice(&[0; 11]);
-    input.push(constant);
-    input.push(0);
-    input.extend_from_slice(&128u16.to_be_bytes());
-    input.push(1);
-    input.extend_from_slice(context);
-    aes_cmac(key, &input)
+    scp03_kdf(key, constant, context, 128)?
+        .try_into()
+        .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 fn derive_cryptogram(key: &[u8], constant: u8, context: &[u8]) -> Result<[u8; 8], Error> {
-    let mut input = Vec::with_capacity(32);
-    input.extend_from_slice(&[0; 11]);
-    input.push(constant);
-    input.push(0);
-    input.extend_from_slice(&64u16.to_be_bytes());
-    input.push(1);
-    input.extend_from_slice(context);
-    Ok(aes_cmac(key, &input)?[..MAC_LENGTH]
-        .try_into()
-        .map_err(|_| CKR_DEVICE_ERROR)?)
-}
-
-fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
-    let pkey = PKey::cmac(&Cipher::aes_128_cbc(), key)?;
-    let mut signer = Signer::new_without_digest(&pkey)?;
-    signer.update(data)?;
-    signer
-        .sign_to_vec()?
+    scp03_kdf(key, constant, context, 64)?
         .try_into()
         .map_err(|_| CKR_DEVICE_ERROR.into())
-}
-
-fn aes_block(key: &[u8], block: &[u8; AES_BLOCK_SIZE]) -> Result<[u8; 16], Error> {
-    aes_ecb(key, block, Mode::Encrypt)?
-        .try_into()
-        .map_err(|_| CKR_DEVICE_ERROR.into())
-}
-
-fn aes_ecb(key: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
-    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let mut crypter = Crypter::new(Cipher::aes_128_ecb(), mode, key, None)?;
-    crypter.pad(false);
-    let mut output = vec![0; data.len() + AES_BLOCK_SIZE];
-    let written = crypter.update(data, &mut output)?;
-    let final_written = crypter.finalize(&mut output[written..])?;
-    output.truncate(written + final_written);
-    Ok(output)
-}
-
-fn aes_cbc(key: &[u8], iv: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
-    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let mut crypter = Crypter::new(Cipher::aes_128_cbc(), mode, key, Some(iv))?;
-    crypter.pad(false);
-    let mut output = vec![0; data.len() + AES_BLOCK_SIZE];
-    let written = crypter.update(data, &mut output)?;
-    let final_written = crypter.finalize(&mut output[written..])?;
-    output.truncate(written + final_written);
-    Ok(output)
-}
-
-fn pad(data: &[u8]) -> Vec<u8> {
-    let length = (data.len() + 1).div_ceil(AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
-    let mut padded = Vec::with_capacity(length);
-    padded.extend_from_slice(data);
-    padded.push(0x80);
-    padded.resize(length, 0);
-    padded
-}
-
-fn unpad(mut data: Vec<u8>) -> Result<Vec<u8>, Error> {
-    let marker = data
-        .iter()
-        .rposition(|byte| *byte != 0)
-        .ok_or(CKR_ENCRYPTED_DATA_INVALID)?;
-    if data[marker] != 0x80 {
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    data.truncate(marker);
-    Ok(data)
 }
 
 fn increment_counter(counter: &mut [u8; AES_BLOCK_SIZE]) {
