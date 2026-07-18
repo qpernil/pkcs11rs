@@ -24,9 +24,8 @@ applets should be exposed:
 PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-Accepted names are `piv`, `openpgp` (or `pgp`), `hsmauth` (or
-`yubihsm-auth`), and `globalplatform` (or `global-platform` or `gp`). Names
-are case-insensitive and duplicates are ignored.
+Accepted names are `piv`, `openpgp`, `hsmauth`, and `globalplatform`. Names are
+case-insensitive and duplicates are ignored.
 
 ## Secure channels
 
@@ -52,5 +51,5 @@ log level:
 - `1`: initialization and applet-discovery failures only;
 - `2`: all diagnostic output, including API and transport tracing.
 
-Invalid non-empty values are treated as level `2` for compatibility with the
-previous boolean setting, where any value enabled diagnostics.
+Other values are invalid and cause `C_Initialize` to return
+`CKR_ARGUMENTS_BAD`.

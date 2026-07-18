@@ -8,7 +8,9 @@ fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
-    initialize_debug_logging();
+    if let Err(rv) = initialize_debug_logging() {
+        return rv;
+    }
     log!(2, "C_Initialize called with {:?}", init_args);
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
@@ -226,4 +228,3 @@ pub extern "C" fn C_WaitForSlotEvent(
 ) -> CK_RV {
     CKR_FUNCTION_NOT_SUPPORTED.into()
 }
-

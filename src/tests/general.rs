@@ -63,7 +63,7 @@ pub fn bindgen_test_layout_CK_INFO() {
 }
 
 #[test]
-pub fn all_legacy_function_list_entries_are_present() {
+pub fn all_pkcs11_2_40_function_list_entries_are_present() {
     let mut function_list: CK_FUNCTION_LIST_PTR = ::std::ptr::null_mut();
 
     assert_eq!(
@@ -72,7 +72,7 @@ pub fn all_legacy_function_list_entries_are_present() {
     );
     assert_eq!(unsafe { (*function_list).version.major }, 2);
     assert_eq!(unsafe { (*function_list).version.minor }, 40);
-    assert_function_slots_present(function_list, LEGACY_FUNCTION_COUNT);
+    assert_function_slots_present(function_list, PKCS11_2_40_FUNCTION_COUNT);
 }
 
 #[test]
@@ -116,7 +116,7 @@ pub fn all_supported_interfaces_are_discoverable() {
     assert!(unsafe { (*function_list).C_EncapsulateKey.is_some() });
     assert_function_slots_present(
         function_list,
-        LEGACY_FUNCTION_COUNT + PKCS11_3_0_FUNCTION_COUNT + PKCS11_3_2_FUNCTION_COUNT,
+        PKCS11_2_40_FUNCTION_COUNT + PKCS11_3_0_FUNCTION_COUNT + PKCS11_3_2_FUNCTION_COUNT,
     );
 }
 
@@ -275,12 +275,31 @@ pub fn yubikey_login_preserves_connector_errors() {
 }
 
 #[test]
-fn applet_configuration_rejects_removed_transport_aliases() {
+fn applet_configuration_accepts_only_canonical_names() {
     assert_eq!(
         crate::parse_ccid_application("globalplatform").unwrap(),
         crate::CcidApplication::GlobalPlatform
     );
-    assert!(crate::parse_ccid_application("scp03").is_err());
+    for invalid in ["pgp", "yubihsm-auth", "global-platform", "gp", "scp03"] {
+        assert!(crate::parse_ccid_application(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn secure_channel_configuration_accepts_only_explicit_protocols() {
+    assert_eq!(
+        crate::parse_secure_channel("scp03").unwrap(),
+        crate::SecureChannelProtocol::Scp03
+    );
+    assert_eq!(
+        crate::parse_secure_channel("scp11a").unwrap(),
+        crate::SecureChannelProtocol::Scp11a
+    );
+    assert_eq!(
+        crate::parse_secure_channel("scp11b").unwrap(),
+        crate::SecureChannelProtocol::Scp11b
+    );
+    assert!(crate::parse_secure_channel("scp11").is_err());
 }
 
 #[test]
