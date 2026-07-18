@@ -1,0 +1,950 @@
+#[derive(Debug, Clone)]
+struct TokenObject {
+    slot_id: Option<CK_SLOT_ID>,
+    unique_id: Vec<u8>,
+    class: CK_OBJECT_CLASS,
+    key_type: CK_KEY_TYPE,
+    label: Vec<u8>,
+    id: Vec<u8>,
+    token: bool,
+    private: bool,
+    encrypt: bool,
+    decrypt: bool,
+    sign: bool,
+    verify: bool,
+    derive: bool,
+    sensitive: bool,
+    extractable: bool,
+    always_sensitive: bool,
+    never_extractable: bool,
+    local: bool,
+    key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
+    owner_session: Option<CK_SESSION_HANDLE>,
+    material: KeyMaterial,
+}
+
+#[derive(Clone)]
+#[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
+enum KeyMaterial {
+    None,
+    RsaPrivate(Rsa<Private>),
+    RsaPublic(Rsa<Public>),
+    PivPrivate {
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        modulus: Vec<u8>,
+        public_exponent: Vec<u8>,
+        pin_policy: u8,
+        touch_policy: u8,
+    },
+    PivPublic {
+        algorithm: piv::Algorithm,
+        public_key: Vec<u8>,
+    },
+    OpenPgpPrivate {
+        key_ref: OpenPgpKeyRef,
+        algorithm: OpenPgpAlgorithm,
+        modulus: Vec<u8>,
+        public_exponent: Vec<u8>,
+        #[allow(dead_code)]
+        public_key: Vec<u8>,
+        pin_policy: u8,
+    },
+    OpenPgpPublic {
+        algorithm: OpenPgpAlgorithm,
+        public_key: Vec<u8>,
+    },
+    PivCertificate {
+        algorithm: piv::Algorithm,
+        value: Vec<u8>,
+        attestation: bool,
+    },
+    PivAttestation {
+        connector: Rc<dyn Connector>,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        value: Rc<RefCell<Option<Vec<u8>>>>,
+        attempted: Rc<Cell<bool>>,
+    },
+    OpenPgpCertificate {
+        value: Vec<u8>,
+    },
+    YubiHsm {
+        id: u16,
+        object_type: u8,
+        algorithm: u8,
+        length: usize,
+        #[allow(dead_code)]
+        domains: u16,
+        capabilities: [u8; 8],
+        #[allow(dead_code)]
+        delegated_capabilities: [u8; 8],
+        public_key: Vec<u8>,
+        value: Rc<RefCell<Option<Vec<u8>>>>,
+    },
+    Secret(Zeroizing<Vec<u8>>),
+    DerivedSecret(Zeroizing<Vec<u8>>),
+}
+
+impl std::fmt::Debug for KeyMaterial {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => fmt.write_str("None"),
+            Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
+            Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
+            Self::PivPrivate {
+                slot,
+                algorithm,
+                modulus,
+                public_exponent: _,
+                touch_policy,
+                ..
+            } => fmt
+                .debug_struct("PivPrivate")
+                .field("slot", slot)
+                .field("algorithm", algorithm)
+                .field("size", &modulus.len())
+                .field("touch_policy", touch_policy)
+                .finish(),
+            Self::PivPublic {
+                algorithm,
+                public_key,
+            } => fmt
+                .debug_struct("PivPublic")
+                .field("algorithm", algorithm)
+                .field("size", &public_key.len())
+                .finish(),
+            Self::OpenPgpPrivate {
+                key_ref,
+                algorithm,
+                modulus,
+                pin_policy,
+                ..
+            } => fmt
+                .debug_struct("OpenPgpPrivate")
+                .field("key_ref", key_ref)
+                .field("algorithm", algorithm)
+                .field("size", &modulus.len())
+                .field("pin_policy", pin_policy)
+                .finish(),
+            Self::OpenPgpPublic {
+                algorithm,
+                public_key,
+            } => fmt
+                .debug_struct("OpenPgpPublic")
+                .field("algorithm", algorithm)
+                .field("size", &public_key.len())
+                .finish(),
+            Self::YubiHsm {
+                id,
+                object_type,
+                algorithm,
+                length,
+                ..
+            } => fmt
+                .debug_struct("YubiHsm")
+                .field("id", id)
+                .field("object_type", object_type)
+                .field("algorithm", algorithm)
+                .field("length", length)
+                .finish(),
+            Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
+            Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
+            Self::PivCertificate {
+                value,
+                algorithm,
+                attestation,
+            } => fmt
+                .debug_struct("PivCertificate")
+                .field("algorithm", algorithm)
+                .field("attestation", attestation)
+                .field("size", &value.len())
+                .finish(),
+            Self::PivAttestation {
+                slot,
+                algorithm,
+                value,
+                ..
+            } => fmt
+                .debug_struct("PivAttestation")
+                .field("slot", slot)
+                .field("algorithm", algorithm)
+                .field("cached", &value.borrow().is_some())
+                .finish(),
+            Self::OpenPgpCertificate { value } => fmt
+                .debug_struct("OpenPgpCertificate")
+                .field("size", &value.len())
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TokenObjectTemplate {
+    class: Option<CK_OBJECT_CLASS>,
+    key_type: Option<CK_KEY_TYPE>,
+    label: Vec<u8>,
+    id: Vec<u8>,
+    token: bool,
+    private: bool,
+    encrypt: bool,
+    decrypt: bool,
+    sign: bool,
+    verify: bool,
+    derive: bool,
+    sensitive: Option<bool>,
+    extractable: Option<bool>,
+}
+
+#[derive(Debug)]
+struct FindOperation {
+    objects: Vec<CK_OBJECT_HANDLE>,
+    next: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SignatureOperation {
+    key: KeyMaterial,
+    slot_id: CK_SLOT_ID,
+    requires_login: bool,
+    context_specific_extended: bool,
+    mechanism: CK_MECHANISM_TYPE,
+    pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    piv_pin_policy: Option<u8>,
+    buffer: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct GcmParameters {
+    iv: Vec<u8>,
+    aad: Vec<u8>,
+    tag_bits: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CryptOperation {
+    key: KeyMaterial,
+    slot_id: CK_SLOT_ID,
+    requires_login: bool,
+    context_specific_extended: bool,
+    mechanism: CK_MECHANISM_TYPE,
+    iv: Option<[u8; 16]>,
+    gcm: Option<GcmParameters>,
+    oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
+    piv_pin_policy: Option<u8>,
+}
+
+
+fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
+    value.to_ne_bytes().to_vec()
+}
+
+fn bool_attribute(value: bool) -> Vec<u8> {
+    vec![if value {
+        CK_TRUE as CK_BBOOL
+    } else {
+        CK_FALSE as CK_BBOOL
+    }]
+}
+
+fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+    match attribute_type {
+        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => Some(value.to_vec()),
+        x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE => {
+            Some(ulong_attribute(CKC_X_509 as CK_ULONG))
+        }
+        x if x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(0)),
+        x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE => {
+            Some(hash(MessageDigest::sha1(), value).ok()?.as_ref()[..3].to_vec())
+        }
+        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .subject_name()
+            .to_der()
+            .ok(),
+        x if x == CKA_ISSUER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .issuer_name()
+            .to_der()
+            .ok(),
+        x if x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .serial_number()
+            .to_bn()
+            .ok()
+            .map(|serial| serial.to_vec()),
+        x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
+            .ok()?
+            .public_key()
+            .ok()?
+            .public_key_to_der()
+            .ok(),
+        _ => None,
+    }
+}
+
+fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
+            || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+            || x == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+            || x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn lazy_piv_attestation_certificate(
+    connector: &dyn Connector,
+    slot: piv::Slot,
+    algorithm: piv::Algorithm,
+    value: &RefCell<Option<Vec<u8>>>,
+    attempted: &Cell<bool>,
+) -> Option<Vec<u8>> {
+    if attempted.replace(true) {
+        return value.borrow().clone();
+    }
+
+    let certificate = PivClient.attestation(connector, slot).ok()?;
+    if piv_algorithm_from_certificate(&certificate)? != algorithm {
+        return None;
+    }
+    piv_public_key_from_certificate(algorithm, &certificate).ok()?;
+    *value.borrow_mut() = Some(certificate.clone());
+    Some(certificate)
+}
+
+impl TokenObject {
+    fn has_sensitive_attributes(&self) -> bool {
+        self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
+    fn is_visible_to(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+        slot_id: CK_SLOT_ID,
+        logged_in: bool,
+    ) -> bool {
+        self.slot_id == Some(slot_id)
+            && (!self.private || logged_in)
+            && self
+                .owner_session
+                .map(|owner| owner == session_handle)
+                .unwrap_or(true)
+    }
+
+    fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
+        self.slot_id = Some(slot_id);
+        self.owner_session = (!self.token).then_some(session_handle);
+    }
+
+    fn size(&self) -> CK_ULONG {
+        let defer_certificate_attributes = matches!(
+            &self.material,
+            KeyMaterial::PivAttestation { attempted, .. } if !attempted.get()
+        );
+        [
+            CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            CKA_LABEL as CK_ATTRIBUTE_TYPE,
+            CKA_ID as CK_ATTRIBUTE_TYPE,
+            CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+            CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
+            CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+            CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN as CK_ATTRIBUTE_TYPE,
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+            CKA_WRAP as CK_ATTRIBUTE_TYPE,
+            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+            CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
+            CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE,
+            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+            CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE,
+            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+            CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE,
+            CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
+            CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+            CKA_LOCAL as CK_ATTRIBUTE_TYPE,
+            CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
+            CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+            CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE,
+            CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE,
+            CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE,
+            CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
+            CKA_ISSUER as CK_ATTRIBUTE_TYPE,
+            CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
+            CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
+            CKA_TRUSTED as CK_ATTRIBUTE_TYPE,
+        ]
+        .iter()
+        .filter(|&&attribute_type| {
+            !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
+        })
+        .filter_map(|&attribute_type| self.attribute_value(attribute_type))
+        .map(|value| value.len() as CK_ULONG)
+        .sum()
+    }
+
+    fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+        match attribute_type {
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
+            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Some(self.unique_id.clone()),
+            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(ulong_attribute(self.key_type))
+            }
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.clone()),
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
+                && self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
+            {
+                Some(bool_attribute(match &self.material {
+                    KeyMaterial::PivPrivate {
+                        slot, pin_policy, ..
+                    } => piv_effective_pin_policy(*slot, *pin_policy) == 3,
+                    KeyMaterial::OpenPgpPrivate {
+                        key_ref,
+                        pin_policy,
+                        ..
+                    } => openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy),
+                    _ => false,
+                }))
+            }
+            x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.encrypt))
+            }
+            x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.decrypt))
+            }
+            x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.sign))
+            }
+            x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.verify))
+            }
+            x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.derive))
+            }
+            x if x == CKA_WRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.can_wrap()))
+            }
+            x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.can_unwrap()))
+            }
+            x if self.is_key_object()
+                && (x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+                    || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
+                    || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
+                Some(bool_attribute(true))
+            }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
+            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
+                && (self.is_certificate_object() || self.is_yubihsm_opaque()) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
+                Some(b"Opaque object".to_vec())
+            }
+            x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
+                Some(Vec::new())
+            }
+            x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
+                Some(ulong_attribute(CKC_X_509 as CK_ULONG))
+            }
+            x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
+                    Some(ulong_attribute(value.len() as CK_ULONG))
+                }
+                KeyMaterial::YubiHsm { length, .. }
+                    if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+                {
+                    Some(ulong_attribute(*length as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
+                    Some(ulong_attribute((value.len() * 8) as CK_ULONG))
+                }
+                KeyMaterial::YubiHsm { length, .. }
+                    if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+                {
+                    Some(ulong_attribute((*length * 8) as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE && self.has_sensitive_attributes() => {
+                Some(bool_attribute(self.sensitive))
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE && self.has_sensitive_attributes() => {
+                Some(bool_attribute(
+                    self.extractable && !self.is_nonextractable_key_object(),
+                ))
+            }
+            x if x == CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE
+                && self.has_sensitive_attributes() =>
+            {
+                Some(bool_attribute(self.always_sensitive))
+            }
+            x if x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+                && self.has_sensitive_attributes() =>
+            {
+                Some(bool_attribute(
+                    self.never_extractable || self.is_nonextractable_key_object(),
+                ))
+            }
+            x if x == CKA_LOCAL as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.local))
+            }
+            x if x == CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(ulong_attribute(
+                    self.key_gen_mechanism
+                        .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                ))
+            }
+            x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(key.n().to_vec()),
+                KeyMaterial::RsaPublic(key) => Some(key.n().to_vec()),
+                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(modulus.clone())
+                }
+                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(modulus.clone())
+                }
+                KeyMaterial::YubiHsm {
+                    algorithm,
+                    public_key,
+                    ..
+                } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+                    Some(public_key.clone())
+                }
+                _ => None,
+            },
+            x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(key.e().to_vec()),
+                KeyMaterial::RsaPublic(key) => Some(key.e().to_vec()),
+                KeyMaterial::PivPrivate {
+                    public_exponent, ..
+                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
+                KeyMaterial::OpenPgpPrivate {
+                    public_exponent, ..
+                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
+                KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
+                    Some(vec![0x01, 0x00, 0x01])
+                }
+                _ => None,
+            },
+            x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
+                KeyMaterial::RsaPublic(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
+                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+                }
+                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
+                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+                }
+                KeyMaterial::YubiHsm {
+                    algorithm,
+                    public_key,
+                    ..
+                } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+                    Some(ulong_attribute((public_key.len() * 8) as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::YubiHsm { algorithm, .. } => {
+                    yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
+                }
+                KeyMaterial::PivPrivate { algorithm, .. }
+                | KeyMaterial::PivPublic { algorithm, .. } => {
+                    piv_ec_parameters(*algorithm).map(<[u8]>::to_vec)
+                }
+                KeyMaterial::OpenPgpPrivate { algorithm, .. }
+                | KeyMaterial::OpenPgpPublic { algorithm, .. } => openpgp_ec_params(*algorithm),
+                _ => None,
+            },
+            x if x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+                && self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS =>
+            {
+                match &self.material {
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if is_yubihsm_ec(*algorithm) && !public_key.is_empty() => {
+                        let mut point = Vec::with_capacity(public_key.len() + 1);
+                        point.push(0x04);
+                        point.extend_from_slice(public_key);
+                        der_octet_string(&point)
+                    }
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
+                        der_octet_string(public_key)
+                    }
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if is_yubihsm_x25519(*algorithm) && !public_key.is_empty() => {
+                        der_octet_string(public_key)
+                    }
+                    KeyMaterial::PivPublic {
+                        algorithm,
+                        public_key,
+                    } if !public_key.is_empty() => {
+                        let point = if piv_ec_coordinate_length(*algorithm).is_some() {
+                            let mut point = Vec::with_capacity(public_key.len() + 1);
+                            point.push(0x04);
+                            point.extend_from_slice(public_key);
+                            point
+                        } else {
+                            public_key.clone()
+                        };
+                        der_octet_string(&point)
+                    }
+                    KeyMaterial::OpenPgpPublic {
+                        algorithm,
+                        public_key,
+                    } if !public_key.is_empty() => {
+                        let point = if matches!(
+                            algorithm,
+                            OpenPgpAlgorithm::Ecdsa(_) | OpenPgpAlgorithm::Ecdh(_)
+                        ) {
+                            let mut point = Vec::with_capacity(public_key.len() + 1);
+                            point.push(0x04);
+                            point.extend_from_slice(public_key);
+                            point
+                        } else {
+                            public_key.clone()
+                        };
+                        der_octet_string(&point)
+                    }
+                    _ => None,
+                }
+            }
+            x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
+                || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+                || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+                || x == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+                || x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
+            {
+                match &self.material {
+                    KeyMaterial::DerivedSecret(value) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                        Some(value.to_vec())
+                    }
+                    KeyMaterial::PivCertificate { value, .. }
+                    | KeyMaterial::OpenPgpCertificate { value } => {
+                        piv_certificate_attribute(value, x)
+                    }
+                    KeyMaterial::PivAttestation {
+                        connector,
+                        slot,
+                        algorithm,
+                        value,
+                        attempted,
+                    } => lazy_piv_attestation_certificate(
+                        connector.as_ref(),
+                        *slot,
+                        *algorithm,
+                        value,
+                        attempted,
+                    )
+                    .and_then(|value| piv_certificate_attribute(&value, x)),
+                    KeyMaterial::YubiHsm {
+                        object_type,
+                        algorithm,
+                        ..
+                    } if *object_type == YUBIHSM_OPAQUE
+                        && *algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
+                        && matches!(
+                            x,
+                            value if value == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+                                || value == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+                                || value == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+                        ) =>
+                    {
+                        Some(Vec::new())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn is_key_object(&self) -> bool {
+        self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    }
+
+    fn can_wrap(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_WRAP_KEY | YUBIHSM_PUBLIC_WRAP_KEY,
+                capabilities,
+                ..
+            } if yubihsm_capability(capabilities, 0x0c)
+        )
+    }
+
+    fn can_unwrap(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_WRAP_KEY,
+                capabilities,
+                ..
+            } if yubihsm_capability(capabilities, 0x0d)
+        )
+    }
+
+    fn is_nonextractable_key_object(&self) -> bool {
+        (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
+            && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
+    }
+
+    fn is_certificate_object(&self) -> bool {
+        self.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
+    }
+
+    fn is_yubihsm_opaque(&self) -> bool {
+        matches!(
+            self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_OPAQUE,
+                ..
+            }
+        )
+    }
+
+    fn is_immutable_object(&self) -> bool {
+        matches!(
+            &self.material,
+            KeyMaterial::PivPrivate { .. }
+                | KeyMaterial::PivPublic { .. }
+                | KeyMaterial::PivCertificate { .. }
+                | KeyMaterial::PivAttestation { .. }
+                | KeyMaterial::OpenPgpPrivate { .. }
+                | KeyMaterial::OpenPgpPublic { .. }
+                | KeyMaterial::OpenPgpCertificate { .. }
+                | KeyMaterial::YubiHsm { .. }
+                | KeyMaterial::DerivedSecret(_)
+        )
+    }
+
+    fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        let value = read_attribute_value(attribute)?;
+        match attribute.type_ {
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
+                self.label = value;
+                Ok(())
+            }
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                self.id = value;
+                Ok(())
+            }
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
+                if !self.has_sensitive_attributes() {
+                    return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+                let requested = read_bool_template_attribute(attribute)?;
+                if self.sensitive && !requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
+                self.sensitive = requested;
+                Ok(())
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE => {
+                if !self.has_sensitive_attributes() {
+                    return Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                }
+                let requested = read_bool_template_attribute(attribute)?;
+                if self.is_nonextractable_key_object() && requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
+                if !self.extractable && requested {
+                    return Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV);
+                }
+                self.extractable = requested;
+                Ok(())
+            }
+            x if self.attribute_value(x).is_some() => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
+            _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
+        }
+    }
+
+    fn set_copy_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        match attribute.type_ {
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => {
+                self.token = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => {
+                self.private = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            _ => self.set_attribute_value(attribute),
+        }
+    }
+
+    fn matches_template(&self, templ: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
+        templ.iter().all(|(type_, expected)| {
+            self.attribute_value(*type_)
+                .map(|value| expected == &value)
+                .unwrap_or(false)
+        })
+    }
+}
+
+fn validate_new_object_access(
+    object: &TokenObject,
+    session_flags: CK_FLAGS,
+    logged_in: bool,
+) -> Result<(), Error> {
+    if object.private && !logged_in {
+        return Err(CKR_USER_NOT_LOGGED_IN.into());
+    }
+    if object.token && session_flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+        return Err(CKR_SESSION_READ_ONLY.into());
+    }
+    Ok(())
+}
+
+impl TokenObjectTemplate {
+    fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+        match attribute.type_ {
+            x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => {
+                self.class = Some(read_ulong_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE => {
+                self.key_type = Some(read_ulong_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
+                self.label = read_attribute_value(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                self.id = read_attribute_value(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => {
+                self.token = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => {
+                self.private = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE => {
+                self.encrypt = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE => {
+                self.decrypt = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_SIGN as CK_ATTRIBUTE_TYPE => {
+                self.sign = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_VERIFY as CK_ATTRIBUTE_TYPE => {
+                self.verify = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE => {
+                self.derive = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
+                self.sensitive = Some(read_bool_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE => {
+                self.extractable = Some(read_bool_template_attribute(attribute)?);
+                Ok(())
+            }
+            _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
+        }
+    }
+
+    fn into_object(self) -> Result<TokenObject, CK_RV> {
+        let sensitive = self.sensitive.unwrap_or(false);
+        let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
+        let nonextractable_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
+        let extractable = self.extractable.unwrap_or(!nonextractable_key);
+        if nonextractable_key && extractable {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+        }
+        Ok(TokenObject {
+            slot_id: None,
+            unique_id: Vec::new(),
+            class,
+            key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
+            label: self.label,
+            id: self.id,
+            token: self.token,
+            private: self.private,
+            encrypt: self.encrypt,
+            decrypt: self.decrypt,
+            sign: self.sign,
+            verify: self.verify,
+            derive: self.derive,
+            sensitive,
+            extractable,
+            always_sensitive: sensitive,
+            never_extractable: !extractable || nonextractable_key,
+            local: false,
+            key_gen_mechanism: None,
+            owner_session: None,
+            material: KeyMaterial::None,
+        })
+    }
+}
+
