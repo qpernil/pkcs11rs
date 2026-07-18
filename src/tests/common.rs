@@ -2365,7 +2365,7 @@ fn assert_function_slots_present<T>(function_list: *const T, function_count: usi
         };
         assert!(
             !unsafe { *slot }.is_null(),
-            "function slot {index} should be stubbed"
+            "function slot {index} should be present"
         );
     }
 }
@@ -2926,4 +2926,3 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
         )
     );
 }
-

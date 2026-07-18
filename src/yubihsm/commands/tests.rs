@@ -167,7 +167,7 @@ fn all_sample_commands() -> Vec<Command> {
 }
 
 #[test]
-fn every_official_command_has_a_typed_request() {
+fn every_official_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
     assert_eq!(commands.len(), 63);
     assert_eq!(commands.len(), ALL_COMMAND_CODES.len());
@@ -230,7 +230,7 @@ fn optional_fields_use_the_canonical_wire_layout() {
 }
 
 #[test]
-fn crypto_and_management_commands_match_wire_vectors() {
+fn crypto_commands_match_wire_vectors() {
     assert_eq!(
         Command::key_data(CommandCode::SignPkcs1, 0x1234, &[0xaa, 0xbb])
             .unwrap()
@@ -250,21 +250,29 @@ fn crypto_and_management_commands_match_wire_vectors() {
         [&[0x12, 0x34][..], &[0x11; 16], &[0x22; 16],].concat()
     );
     assert_eq!(
-        Command::set_option(3, &[0x47, 1, 0x48, 0]).unwrap().data(),
-        [3, 0, 4, 0x47, 1, 0x48, 0]
-    );
-    assert_eq!(
         Command::sign_ssh_certificate(0x1234, 0x5678, 0x09, &[0xaa, 0xbb])
             .unwrap()
             .data(),
         [0x12, 0x34, 0x56, 0x78, 0x09, 0xaa, 0xbb]
     );
+}
+
+#[test]
+fn crypto_commands_reject_non_block_aligned_input() {
     assert!(Command::key_data(CommandCode::EncryptEcb, 1, &[0; 15]).is_err());
     assert!(Command::crypt_cbc(CommandCode::DecryptCbc, 1, &[0; 16], &[0; 15]).is_err());
 }
 
 #[test]
-fn otp_and_rsa_wrap_commands_match_wire_vectors() {
+fn set_option_command_matches_wire_vector() {
+    assert_eq!(
+        Command::set_option(3, &[0x47, 1, 0x48, 0]).unwrap().data(),
+        [3, 0, 4, 0x47, 1, 0x48, 0]
+    );
+}
+
+#[test]
+fn otp_aead_key_commands_use_little_endian_nonce_and_validate_key_lengths() {
     let otp = Command::otp_aead_key(
         CommandCode::PutOtpAeadKey,
         &object_with_algorithm(b"otp", ALGORITHM_AES128_YUBICO_OTP),
@@ -303,7 +311,10 @@ fn otp_and_rsa_wrap_commands_match_wire_vectors() {
         &[],
     )
     .is_err());
+}
 
+#[test]
+fn change_authentication_key_validates_algorithm_and_key_length() {
     assert!(Command::change_authentication_key(
         1,
         ALGORITHM_AES128_YUBICO_AUTHENTICATION,
@@ -317,7 +328,10 @@ fn otp_and_rsa_wrap_commands_match_wire_vectors() {
     )
     .is_ok());
     assert!(Command::change_authentication_key(1, 0xff, &[0; 32]).is_err());
+}
 
+#[test]
+fn rsa_wrap_commands_match_wire_vectors_and_validate_digest_lengths() {
     let rsa = Command::rsa_wrap(
         CommandCode::ExportRsaWrapped,
         &RsaWrapParameters {
@@ -385,19 +399,8 @@ fn command_data_is_bounded_and_debug_output_is_redacted() {
 }
 
 #[test]
-fn structured_response_parsers_reject_bad_lengths() {
-    assert_eq!(
-        StorageInfo::parse(&[0, 1, 0, 2, 0, 3, 0, 4, 0, 5]).unwrap(),
-        StorageInfo {
-            total_records: 1,
-            free_records: 2,
-            total_pages: 3,
-            free_pages: 4,
-            page_size: 5,
-        }
-    );
+fn structured_response_parsers_reject_malformed_responses() {
     assert!(StorageInfo::parse(&[0; 9]).is_err());
-    assert_eq!(parse_object_id(&[0x12, 0x34]).unwrap(), 0x1234);
     assert!(parse_object_list(&[0; 3]).is_err());
     assert!(parse_object_list(&vec![0; (MAX_OBJECT_COUNT + 1) * 4]).is_err());
     assert!(LogEntries::parse(&[0, 0, 0, 0, 1]).is_err());
@@ -409,6 +412,18 @@ fn structured_response_parsers_reject_bad_lengths() {
 
 #[test]
 fn structured_response_parsers_decode_success_vectors() {
+    assert_eq!(
+        StorageInfo::parse(&[0, 1, 0, 2, 0, 3, 0, 4, 0, 5]).unwrap(),
+        StorageInfo {
+            total_records: 1,
+            free_records: 2,
+            total_pages: 3,
+            free_pages: 4,
+            page_size: 5,
+        }
+    );
+    assert_eq!(parse_object_id(&[0x12, 0x34]).unwrap(), 0x1234);
+
     let mut object = vec![0x11; 8];
     object.extend_from_slice(&[0x12, 0x34, 0x00, 0x20, 0x56, 0x78, 3, 12, 4, 2]);
     object.extend_from_slice(&[0x41; 40]);

@@ -1337,7 +1337,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         for attribute_type in (CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER):
             self.assertEqual(bytes_attribute(certificate, attribute_type), b"")
 
-    def test_legacy_function_list_entries_are_stubbed(self) -> None:
+    def test_legacy_function_list_entries_are_present(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
 
         self.assertEqual(self.lib.C_GetFunctionList(ctypes.byref(function_list)), CKR_OK)
@@ -1346,7 +1346,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(function_list.contents.version.minor, 40)
         self.assert_function_entries_present(function_list.contents, LEGACY_FUNCTIONS)
 
-    def test_3_2_interface_function_list_entries_are_stubbed(self) -> None:
+    def test_3_2_interface_function_list_entries_are_present(self) -> None:
         version = CK_VERSION(3, 2)
         interface = ctypes.POINTER(CK_INTERFACE)()
 
@@ -1747,7 +1747,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertNotEqual(bytes(random_data), bytes(len(random_data)))
 
-    def test_find_objects_validate_session_handles(self) -> None:
+    def test_find_objects_validates_session_handles(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         count = CK_ULONG()
 

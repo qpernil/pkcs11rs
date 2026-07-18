@@ -63,7 +63,7 @@ pub fn bindgen_test_layout_CK_INFO() {
 }
 
 #[test]
-pub fn all_legacy_function_list_entries_are_stubbed() {
+pub fn all_legacy_function_list_entries_are_present() {
     let mut function_list: CK_FUNCTION_LIST_PTR = ::std::ptr::null_mut();
 
     assert_eq!(
@@ -615,7 +615,7 @@ fn globalplatform_token_model_identifies_the_applet() {
 }
 
 #[test]
-fn yubikey_application_list_is_an_allowlist() {
+fn ccid_application_list_is_an_allowlist() {
     assert_eq!(
         crate::parse_ccid_application_list("openpgp, piv, openpgp").unwrap(),
         vec![crate::CcidApplication::OpenPgp, crate::CcidApplication::Piv,]
@@ -1848,4 +1848,3 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
-
