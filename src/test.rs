@@ -398,6 +398,165 @@ fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
 }
 
 #[test]
+fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
+    let capabilities =
+        crate::yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x16, 0x32, 0x33, 0x34, 0x35]);
+    let delegated_capabilities = crate::yubihsm_capabilities(&[0x04, 0x32]);
+    for (algorithm, length) in [
+        (crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, 32),
+        (crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, 64),
+    ] {
+        let mut label = [0u8; 40];
+        label[..12].copy_from_slice(b"session-auth");
+        let info = crate::yubihsm::ObjectInfo {
+            capabilities,
+            id: 1,
+            length,
+            domains: 0x0003,
+            object_type: crate::YUBIHSM_AUTHENTICATION_KEY,
+            algorithm,
+            sequence: 1,
+            origin: 1,
+            label,
+            delegated_capabilities,
+        };
+
+        let objects = crate::yubihsm_token_objects(99, info, None).unwrap();
+        assert_eq!(objects.len(), 1);
+        let object = &objects[0];
+        assert_eq!(object.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+        assert_eq!(object.key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
+        assert!(!object.encrypt);
+        assert!(!object.decrypt);
+        assert!(!object.sign);
+        assert!(!object.verify);
+        assert!(!object.derive);
+        assert_eq!(
+            object.attribute_value(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE),
+            Some(crate::ulong_attribute(length as CK_ULONG))
+        );
+        assert_eq!(
+            object.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+            Some(crate::ulong_attribute(
+                CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE,
+            ))
+        );
+        match &object.material {
+            crate::KeyMaterial::YubiHsm {
+                algorithm: stored_algorithm,
+                domains,
+                capabilities: stored_capabilities,
+                delegated_capabilities: stored_delegated_capabilities,
+                ..
+            } => {
+                assert_eq!(*stored_algorithm, algorithm);
+                assert_eq!(*domains, 0x0003);
+                assert_eq!(*stored_capabilities, capabilities);
+                assert_eq!(*stored_delegated_capabilities, delegated_capabilities);
+            }
+            _ => panic!("expected YubiHSM key material"),
+        }
+    }
+}
+
+#[test]
+fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
+    let opaque = |id, algorithm, name: &[u8]| {
+        let mut label = [0u8; 40];
+        label[..name.len()].copy_from_slice(name);
+        crate::yubihsm::ObjectInfo {
+            capabilities: [0; 8],
+            id,
+            length: 12,
+            domains: 1,
+            object_type: crate::YUBIHSM_OPAQUE,
+            algorithm,
+            sequence: 1,
+            origin: 1,
+            label,
+            delegated_capabilities: [0; 8],
+        }
+    };
+
+    let data = crate::yubihsm_token_objects(
+        99,
+        opaque(5, crate::YUBIHSM_ALGO_OPAQUE_DATA, b"opaque-data"),
+        None,
+    )
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(data.class, CKO_DATA as CK_OBJECT_CLASS);
+    assert_eq!(
+        data.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+        Some(b"Opaque object".to_vec())
+    );
+    assert_eq!(
+        data.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        data.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
+        Some(crate::bool_attribute(true))
+    );
+    assert_eq!(
+        data.attribute_value(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE),
+        Some(crate::bool_attribute(false))
+    );
+    assert!(data
+        .attribute_value(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+        .is_none());
+    assert!(data
+        .attribute_value(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE)
+        .is_none());
+
+    let certificate = crate::yubihsm_token_objects(
+        99,
+        opaque(
+            6,
+            crate::YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+            b"opaque-cert",
+        ),
+        None,
+    )
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
+    assert_eq!(
+        certificate.attribute_value(CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE),
+        Some(crate::ulong_attribute(CKC_X_509 as CK_ULONG))
+    );
+    for attribute in [CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER] {
+        assert_eq!(
+            certificate.attribute_value(attribute as CK_ATTRIBUTE_TYPE),
+            Some(Vec::new())
+        );
+    }
+}
+
+#[test]
+fn yubihsm_internal_metadata_opaque_objects_are_hidden() {
+    let mut label = [0u8; 40];
+    label[..16].copy_from_slice(b"Meta object 0001");
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: [0; 8],
+        id: 7,
+        length: 12,
+        domains: 1,
+        object_type: crate::YUBIHSM_OPAQUE,
+        algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 1,
+        origin: 1,
+        label,
+        delegated_capabilities: [0; 8],
+    };
+    assert!(crate::yubihsm_token_objects(99, info, None)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn yubihsm_secret_key_sign_capability_matches_key_type() {
     let mut label = [0u8; 40];
     label[..11].copy_from_slice(b"hmac-secret");
@@ -499,8 +658,11 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
             object_type: crate::YUBIHSM_SYMMETRIC_KEY,
             algorithm: crate::YUBIHSM_ALGO_AES128,
             length: 16,
+            domains: 0xffff,
             capabilities: crate::yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]),
+            delegated_capabilities: [0; 8],
             public_key: Vec::new(),
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
     };
     let mut context = crate::lock_context().unwrap();
@@ -1579,7 +1741,7 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         crate::YUBIHSM_ALGO_HMAC_SHA512,
         crate::YUBIHSM_ALGO_ED25519,
         crate::YUBIHSM_ALGO_X25519,
-        53,
+        crate::YUBIHSM_ALGO_AES_ECB,
     ]);
     let mechanism = |type_| {
         mechanisms
@@ -1621,7 +1783,8 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
 
-    let without_ecb = crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_AES128, 54]);
+    let without_ecb =
+        crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_AES128, crate::YUBIHSM_ALGO_AES_CBC]);
     assert!(without_ecb
         .iter()
         .any(|mechanism| mechanism.type_ == CKM_AES_CBC as CK_MECHANISM_TYPE));
@@ -5314,8 +5477,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
             algorithm: crate::YUBIHSM_ALGO_EC_P256,
             length: 32,
+            domains: 0xffff,
             capabilities: crate::yubihsm_capabilities(&[0x07]),
+            delegated_capabilities: [0; 8],
             public_key: public_key.clone(),
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
         crate::KeyMaterial::OpenPgpPublic {
             algorithm: crate::OpenPgpAlgorithm::Ecdsa(crate::openpgp::Curve::P256),
@@ -5366,8 +5532,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
             algorithm: crate::YUBIHSM_ALGO_ED25519,
             length: 32,
+            domains: 0xffff,
             capabilities: crate::yubihsm_capabilities(&[0x16]),
+            delegated_capabilities: [0; 8],
             public_key: public_key.clone(),
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
         crate::KeyMaterial::OpenPgpPublic {
             algorithm: crate::OpenPgpAlgorithm::Ed25519,
