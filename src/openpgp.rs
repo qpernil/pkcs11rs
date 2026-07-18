@@ -601,7 +601,7 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
         u32::from_be_bytes(aid[10..14].try_into().unwrap()).to_string()
     };
     let discretionary = field_value(&fields, 0x73)
-        .map(|value| parse_tlvs(value))
+        .map(parse_tlvs)
         .transpose()?
         .unwrap_or_else(|| fields.clone());
     let pin_status = field_value(&discretionary, 0xc4).ok_or(CKR_DATA_INVALID)?;
@@ -734,7 +734,7 @@ fn bcd(value: u8) -> u8 {
     (value >> 4) * 10 + (value & 0x0f)
 }
 
-fn field_value<'a>(fields: &'a [(u32, Vec<u8>)], tag: u32) -> Option<&'a [u8]> {
+fn field_value(fields: &[(u32, Vec<u8>)], tag: u32) -> Option<&[u8]> {
     fields
         .iter()
         .find_map(|(candidate, value)| (*candidate == tag).then_some(value.as_slice()))
