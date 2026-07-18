@@ -63,6 +63,8 @@ macro_rules! log {
 pub mod error;
 use error::*;
 
+mod secure_channel_crypto;
+
 mod scp03;
 use scp03::{
     configured_security_level, parse_hex, select_application, CommandApdu, ResponseApdu,
