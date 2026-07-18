@@ -12,7 +12,7 @@ static TEST_SLOT_LOGOUT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static TEST_SLOT_FAIL_LOGOUT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-const LEGACY_FUNCTION_COUNT: usize = 68;
+const PKCS11_2_40_FUNCTION_COUNT: usize = 68;
 const PKCS11_3_0_FUNCTION_COUNT: usize = 24;
 const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
@@ -20,11 +20,18 @@ const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
 #[test]
 fn debug_level_configuration_has_three_modes() {
-    assert_eq!(crate::parse_debug_level(None), 0);
-    assert_eq!(crate::parse_debug_level(Some("0")), 0);
-    assert_eq!(crate::parse_debug_level(Some("1")), 1);
-    assert_eq!(crate::parse_debug_level(Some("2")), 2);
-    assert_eq!(crate::parse_debug_level(Some("enabled")), 2);
+    assert_eq!(crate::parse_debug_level(None), Ok(0));
+    assert_eq!(crate::parse_debug_level(Some("0")), Ok(0));
+    assert_eq!(crate::parse_debug_level(Some("1")), Ok(1));
+    assert_eq!(crate::parse_debug_level(Some("2")), Ok(2));
+    assert_eq!(
+        crate::parse_debug_level(Some("enabled")),
+        Err(CKR_ARGUMENTS_BAD as CK_RV)
+    );
+    assert_eq!(
+        crate::parse_debug_level(Some("")),
+        Err(CKR_ARGUMENTS_BAD as CK_RV)
+    );
 }
 
 fn finalize_for_test() {

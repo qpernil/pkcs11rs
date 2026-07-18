@@ -51,7 +51,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_SALT: &[u8] = b"Yubico";
 const DEFAULT_ITERATIONS: usize = 10_000;
 const MODERN_MESSAGE_SIZE: usize = 3136;
-const LEGACY_MESSAGE_SIZE: usize = 2048;
+const PRE_2_4_MESSAGE_SIZE: usize = 2048;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceInfo {
@@ -567,7 +567,7 @@ fn secure_message_length(data_length: usize) -> usize {
 
 fn maximum_message_size(major: u8, minor: u8) -> usize {
     if major < 2 || (major == 2 && minor < 4) {
-        LEGACY_MESSAGE_SIZE
+        PRE_2_4_MESSAGE_SIZE
     } else {
         MODERN_MESSAGE_SIZE
     }

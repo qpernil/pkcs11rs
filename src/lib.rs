@@ -37,18 +37,24 @@ use zeroize::Zeroizing;
 
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
 
-fn parse_debug_level(value: Option<&str>) -> u8 {
+fn parse_debug_level(value: Option<&str>) -> Result<u8, CK_RV> {
     match value {
-        None | Some("0") => 0,
-        Some("1") => 1,
-        Some("2") => 2,
-        Some(_) => 2,
+        None | Some("0") => Ok(0),
+        Some("1") => Ok(1),
+        Some("2") => Ok(2),
+        Some(_) => Err(CKR_ARGUMENTS_BAD as CK_RV),
     }
 }
 
-fn initialize_debug_logging() {
-    let level = parse_debug_level(std::env::var("PKCS11RS_DEBUG").ok().as_deref());
+fn initialize_debug_logging() -> Result<(), CK_RV> {
+    let value = match std::env::var("PKCS11RS_DEBUG") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD as CK_RV),
+    };
+    let level = parse_debug_level(value.as_deref())?;
     DEBUG_LEVEL.store(level, Ordering::Relaxed);
+    Ok(())
 }
 
 /// Emit diagnostic output when the configured level includes the message.

@@ -298,7 +298,7 @@ message_stub!(C_UnwrapKeyAuthenticated(
     key: *mut CK_OBJECT_HANDLE,
 ));
 
-const fn legacy_function_list(version: CK_VERSION) -> CK_FUNCTION_LIST {
+const fn function_list_2_40(version: CK_VERSION) -> CK_FUNCTION_LIST {
     CK_FUNCTION_LIST {
         version,
 
@@ -651,7 +651,7 @@ const fn function_list_3_2(version: CK_VERSION) -> CK_FUNCTION_LIST_3_2 {
     }
 }
 
-static G_FUNCTION_LIST: CK_FUNCTION_LIST = legacy_function_list(CK_VERSION {
+static G_FUNCTION_LIST: CK_FUNCTION_LIST = function_list_2_40(CK_VERSION {
     major: 2,
     minor: 40,
 });

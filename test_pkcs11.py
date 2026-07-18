@@ -294,7 +294,7 @@ class CK_INTERFACE(ctypes.Structure):
     ]
 
 
-LEGACY_FUNCTIONS = [
+PKCS11_2_40_FUNCTIONS = [
     "C_Initialize",
     "C_Finalize",
     "C_GetInfo",
@@ -410,13 +410,13 @@ V3_2_FUNCTIONS = [
 
 class CK_FUNCTION_LIST(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
-        (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS
+        (name, ctypes.c_void_p) for name in PKCS11_2_40_FUNCTIONS
     ]
 
 
 class CK_FUNCTION_LIST_3_0(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
-        (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS
+        (name, ctypes.c_void_p) for name in PKCS11_2_40_FUNCTIONS + V3_0_FUNCTIONS
     ]
 
 
@@ -427,7 +427,8 @@ CK_FUNCTION_LIST_3_1 = CK_FUNCTION_LIST_3_0
 
 class CK_FUNCTION_LIST_3_2(ctypes.Structure):
     _fields_ = [("version", CK_VERSION)] + [
-        (name, ctypes.c_void_p) for name in LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS
+        (name, ctypes.c_void_p)
+        for name in PKCS11_2_40_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS
     ]
 
 
@@ -1337,14 +1338,16 @@ class Pkcs11AbiTests(unittest.TestCase):
         for attribute_type in (CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER):
             self.assertEqual(bytes_attribute(certificate, attribute_type), b"")
 
-    def test_legacy_function_list_entries_are_present(self) -> None:
+    def test_pkcs11_2_40_function_list_entries_are_present(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
 
         self.assertEqual(self.lib.C_GetFunctionList(ctypes.byref(function_list)), CKR_OK)
         self.assertTrue(function_list)
         self.assertEqual(function_list.contents.version.major, 2)
         self.assertEqual(function_list.contents.version.minor, 40)
-        self.assert_function_entries_present(function_list.contents, LEGACY_FUNCTIONS)
+        self.assert_function_entries_present(
+            function_list.contents, PKCS11_2_40_FUNCTIONS
+        )
 
     def test_3_2_interface_function_list_entries_are_present(self) -> None:
         version = CK_VERSION(3, 2)
@@ -1362,7 +1365,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         ).contents
         self.assert_function_entries_present(
             function_list,
-            LEGACY_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS,
+            PKCS11_2_40_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS,
         )
 
     def test_representative_session_stubs_validate_initialization_and_session(self) -> None:
@@ -1578,7 +1581,7 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def test_layout_ck_function_list(self) -> None:
         self.assert_layout(CK_FUNCTION_LIST, 552, 8, {"version": 0})
-        for index, name in enumerate(LEGACY_FUNCTIONS):
+        for index, name in enumerate(PKCS11_2_40_FUNCTIONS):
             self.assertEqual(
                 getattr(CK_FUNCTION_LIST, name).offset,
                 8 + index * ctypes.sizeof(ctypes.c_void_p),

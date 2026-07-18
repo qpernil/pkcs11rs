@@ -74,9 +74,9 @@ fn default_ccid_applications() -> Vec<CcidApplication> {
 fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
     match value.to_ascii_lowercase().as_str() {
         "piv" => Ok(CcidApplication::Piv),
-        "openpgp" | "pgp" => Ok(CcidApplication::OpenPgp),
-        "hsmauth" | "yubihsm-auth" => Ok(CcidApplication::HsmAuth),
-        "globalplatform" | "global-platform" | "gp" => Ok(CcidApplication::GlobalPlatform),
+        "openpgp" => Ok(CcidApplication::OpenPgp),
+        "hsmauth" => Ok(CcidApplication::HsmAuth),
+        "globalplatform" => Ok(CcidApplication::GlobalPlatform),
         _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }
@@ -123,17 +123,18 @@ fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
 
 fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>, Error> {
     match std::env::var("PKCS11RS_CCID_SECURE_CHANNEL") {
-        Ok(value) if value.eq_ignore_ascii_case("scp03") => Ok(Some(SecureChannelProtocol::Scp03)),
-        Ok(value) if value.eq_ignore_ascii_case("scp11a") => {
-            Ok(Some(SecureChannelProtocol::Scp11a))
-        }
-        Ok(value)
-            if value.eq_ignore_ascii_case("scp11") || value.eq_ignore_ascii_case("scp11b") =>
-        {
-            Ok(Some(SecureChannelProtocol::Scp11b))
-        }
-        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
+        Ok(value) => parse_secure_channel(&value).map(Some),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
         Err(std::env::VarError::NotPresent) => Ok(None),
+    }
+}
+
+fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
+    match value.to_ascii_lowercase().as_str() {
+        "scp03" => Ok(SecureChannelProtocol::Scp03),
+        "scp11a" => Ok(SecureChannelProtocol::Scp11a),
+        "scp11b" => Ok(SecureChannelProtocol::Scp11b),
+        _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }
 
