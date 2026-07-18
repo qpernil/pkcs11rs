@@ -5,12 +5,17 @@ use crate::{
     CKR_SESSION_CLOSED, CKR_SESSION_COUNT,
 };
 #[cfg(test)]
-use openssl::{derive::Deriver, pkey::Id};
+use openssl::pkey::Id;
 use openssl::{
+    bn::{BigNum, BigNumContext},
+    derive::Deriver,
+    ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
     hash::MessageDigest,
     memcmp,
-    pkey::PKey,
+    nid::Nid,
+    pkey::{PKey, Private},
     rand::rand_bytes,
+    sha::sha256,
     sign::Signer,
     symm::{Cipher, Crypter, Mode},
 };
@@ -32,6 +37,11 @@ const RESPONSE_BIT: u8 = 0x80;
 const AES_BLOCK_SIZE: usize = 16;
 const MAC_LENGTH: usize = 8;
 const CHALLENGE_LENGTH: usize = 8;
+const P256_PRIVATE_KEY_LENGTH: usize = 32;
+const P256_PUBLIC_KEY_LENGTH: usize = 65;
+const ASYMMETRIC_RECEIPT_LENGTH: usize = 16;
+const EC_P256_ALGORITHM: u8 = 12;
+const SCP11_SHARED_INFO: [u8; 3] = [0x3c, 0x88, 0x10];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_SALT: &[u8] = b"Yubico";
 const DEFAULT_ITERATIONS: usize = 10_000;
@@ -102,6 +112,13 @@ pub(crate) fn parse_pin(pin: &[u8]) -> Result<(u16, &[u8]), Error> {
         .and_then(|value| u16::from_str_radix(value, 16).ok())
         .ok_or(CKR_PIN_INCORRECT)?;
     Ok((id, &pin[4..]))
+}
+
+pub(crate) fn parse_asymmetric_pin(pin: &[u8]) -> Result<(u16, &[u8]), Error> {
+    if pin.first() != Some(&b'@') {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    parse_pin(&pin[1..])
 }
 
 pub(crate) fn get_device_info(connector: &dyn Connector) -> Result<DeviceInfo, Error> {
@@ -252,6 +269,73 @@ impl SecureSession {
         Ok(session)
     }
 
+    pub(crate) fn authenticate_asymmetric(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+    ) -> Result<Self, Error> {
+        let host_static_key = derive_p256_key(password)?;
+        let device_static_key = device_public_key(connector)?;
+        let group = p256_group()?;
+        let host_ephemeral_key = EcKey::generate(&group)?;
+        let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
+
+        let mut create_data = Vec::with_capacity(2 + P256_PUBLIC_KEY_LENGTH);
+        create_data.extend_from_slice(&authkey_id.to_be_bytes());
+        create_data.extend_from_slice(&host_ephemeral_public);
+        let response = send_plain_protocol(connector, COMMAND_CREATE_SESSION, &create_data)
+            .map_err(map_authentication_error)?;
+        if response.len() != 1 + P256_PUBLIC_KEY_LENGTH + ASYMMETRIC_RECEIPT_LENGTH {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+
+        let sid = response[0];
+        let device_ephemeral_public: [u8; P256_PUBLIC_KEY_LENGTH] = response
+            [1..1 + P256_PUBLIC_KEY_LENGTH]
+            .try_into()
+            .map_err(|_| CKR_DEVICE_ERROR)?;
+        let receipt: [u8; ASYMMETRIC_RECEIPT_LENGTH] = response[1 + P256_PUBLIC_KEY_LENGTH..]
+            .try_into()
+            .map_err(|_| CKR_DEVICE_ERROR)?;
+        let device_ephemeral_key = parse_p256_public_key(&device_ephemeral_public)?;
+
+        let ephemeral_secret = p256_ecdh(&host_ephemeral_key, &device_ephemeral_key)?;
+        let static_secret = p256_ecdh(&host_static_key, &device_static_key)?;
+        let session_keys = x963_session_keys(&ephemeral_secret, &static_secret);
+
+        let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
+        receipt_input.extend_from_slice(&device_ephemeral_public);
+        receipt_input.extend_from_slice(&host_ephemeral_public);
+        let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
+        if !memcmp::eq(&expected_receipt, &receipt) {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+
+        let mut counter = [0; AES_BLOCK_SIZE];
+        increment_counter(&mut counter);
+        Ok(Self {
+            sid,
+            s_enc: Zeroizing::new(
+                session_keys[16..32]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            ),
+            s_mac: Zeroizing::new(
+                session_keys[32..48]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            ),
+            s_rmac: Zeroizing::new(
+                session_keys[48..64]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            ),
+            counter,
+            mac_chaining_value: receipt,
+            valid: true,
+        })
+    }
+
     pub(crate) fn send_command(
         &mut self,
         connector: &dyn Connector,
@@ -372,6 +456,102 @@ impl SecureSession {
         }
         Frame::new(response.command, response.data[..payload_length].to_vec())
     }
+}
+
+fn p256_group() -> Result<EcGroup, Error> {
+    EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(Error::from)
+}
+
+fn derive_p256_key(password: &[u8]) -> Result<EcKey<Private>, Error> {
+    let group = p256_group()?;
+    let mut input = Zeroizing::new(Vec::with_capacity(password.len() + 1));
+    input.extend_from_slice(password);
+    input.push(0);
+    for perturbation in 0..=u8::MAX {
+        *input.last_mut().unwrap() = perturbation;
+        let mut private = Zeroizing::new([0; P256_PRIVATE_KEY_LENGTH]);
+        openssl::pkcs5::pbkdf2_hmac(
+            &input,
+            DEFAULT_SALT,
+            DEFAULT_ITERATIONS,
+            MessageDigest::sha256(),
+            private.as_mut(),
+        )?;
+        if let Ok(key) = p256_private_key(&group, &private[..]) {
+            return Ok(key);
+        }
+    }
+    Err(CKR_FUNCTION_FAILED.into())
+}
+
+fn p256_private_key(group: &EcGroup, private: &[u8]) -> Result<EcKey<Private>, Error> {
+    let private = BigNum::from_slice(private)?;
+    let mut context = BigNumContext::new()?;
+    let mut public = EcPoint::new(group)?;
+    public.mul_generator2(group, &private, &mut context)?;
+    let key = EcKey::from_private_components(group, &private, &public)?;
+    key.check_key()?;
+    Ok(key)
+}
+
+fn p256_public_key(key: &EcKeyRef<Private>) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
+    let group = p256_group()?;
+    let mut context = BigNumContext::new()?;
+    key.public_key()
+        .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)?
+        .try_into()
+        .map_err(|_| CKR_DEVICE_ERROR.into())
+}
+
+fn parse_p256_public_key(encoded: &[u8]) -> Result<EcKey<openssl::pkey::Public>, Error> {
+    if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != 0x04 {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    let group = p256_group()?;
+    let mut context = BigNumContext::new()?;
+    let point = EcPoint::from_bytes(&group, encoded, &mut context)?;
+    let key = EcKey::from_public_key(&group, &point)?;
+    key.check_key()?;
+    Ok(key)
+}
+
+fn device_public_key(connector: &dyn Connector) -> Result<EcKey<openssl::pkey::Public>, Error> {
+    let mut encoded = send_plain(connector, &Command::get_device_public_key())?;
+    if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != EC_P256_ALGORITHM {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    encoded[0] = 0x04;
+    parse_p256_public_key(&encoded)
+}
+
+fn p256_ecdh(
+    private: &EcKeyRef<Private>,
+    public: &EcKeyRef<openssl::pkey::Public>,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let private = PKey::from_ec_key(private.to_owned())?;
+    let public = PKey::from_ec_key(public.to_owned())?;
+    let mut deriver = Deriver::new(&private)?;
+    deriver.set_peer(&public)?;
+    let secret = Zeroizing::new(deriver.derive_to_vec()?);
+    if secret.len() != P256_PRIVATE_KEY_LENGTH {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    Ok(secret)
+}
+
+fn x963_session_keys(ephemeral: &[u8], static_secret: &[u8]) -> Zeroizing<[u8; 64]> {
+    let mut output = Zeroizing::new([0; 64]);
+    for (index, chunk) in output.chunks_mut(32).enumerate() {
+        let mut input = Zeroizing::new(Vec::with_capacity(
+            ephemeral.len() + static_secret.len() + 4 + SCP11_SHARED_INFO.len(),
+        ));
+        input.extend_from_slice(ephemeral);
+        input.extend_from_slice(static_secret);
+        input.extend_from_slice(&((index + 1) as u32).to_be_bytes());
+        input.extend_from_slice(&SCP11_SHARED_INFO);
+        chunk.copy_from_slice(&sha256(&input));
+    }
+    output
 }
 
 fn secure_message_length(data_length: usize) -> usize {
@@ -514,6 +694,14 @@ pub(crate) mod tests {
     const PASSWORD: &[u8] = b"password";
     const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
     const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    const DEVICE_STATIC_PRIVATE_KEY: [u8; 32] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 1,
+    ];
+    const DEVICE_EPHEMERAL_PRIVATE_KEY: [u8; 32] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 2,
+    ];
     pub(crate) const TEST_AES_KEY: [u8; 16] = [0; 16];
     pub(crate) const NIST_AES_KEY_ID: u16 = 3;
     const NIST_AES_128_KEY: [u8; 16] = [
@@ -639,16 +827,37 @@ pub(crate) mod tests {
                     vec![2, 4, 1, 0x01, 0x02, 0x03, 0x04, 62, 3, 0x01, 0x02],
                 )
                 .map(|frame| frame.encode()),
+                Some(value) if value == CommandCode::GetDevicePublicKey as u8 => {
+                    let group = p256_group()?;
+                    let key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
+                    let mut public = p256_public_key(&key)?;
+                    public[0] = EC_P256_ALGORITHM;
+                    Frame::new(
+                        CommandCode::GetDevicePublicKey as u8 | RESPONSE_BIT,
+                        public.to_vec(),
+                    )
+                    .map(|frame| frame.encode())
+                }
                 _ => Err(CKR_DEVICE_ERROR.into()),
             }
         }
 
         fn create_session(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
             let frame = Frame::parse(request)?;
-            if frame.data.len() != 10 || frame.data[..2] != 1u16.to_be_bytes() {
+            if frame.data.get(..2) != Some(&1u16.to_be_bytes()) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
-            let host_challenge: [u8; 8] = frame.data[2..].try_into().unwrap();
+            match frame.data.len() {
+                10 => self.create_symmetric_session(&frame.data),
+                length if length == 2 + P256_PUBLIC_KEY_LENGTH => {
+                    self.create_asymmetric_session(&frame.data)
+                }
+                _ => Err(CKR_DEVICE_ERROR.into()),
+            }
+        }
+
+        fn create_symmetric_session(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+            let host_challenge: [u8; 8] = data[2..].try_into().unwrap();
             let mut context = [0u8; 16];
             context[..8].copy_from_slice(&host_challenge);
             context[8..].copy_from_slice(&CARD_CHALLENGE);
@@ -683,6 +892,47 @@ pub(crate) mod tests {
             }
             data.extend_from_slice(&card);
             Frame::new(COMMAND_CREATE_SESSION | RESPONSE_BIT, data).map(|frame| frame.encode())
+        }
+
+        fn create_asymmetric_session(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
+            let host_ephemeral_public = parse_p256_public_key(&data[2..])?;
+            let host_static_key = derive_p256_key(PASSWORD)?;
+            let host_static_public = parse_p256_public_key(&p256_public_key(&host_static_key)?)?;
+            let group = p256_group()?;
+            let device_static_key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
+            let device_ephemeral_key = p256_private_key(&group, &DEVICE_EPHEMERAL_PRIVATE_KEY)?;
+            let device_ephemeral_public = p256_public_key(&device_ephemeral_key)?;
+
+            let ephemeral_secret = p256_ecdh(&device_ephemeral_key, &host_ephemeral_public)?;
+            let static_secret = p256_ecdh(&device_static_key, &host_static_public)?;
+            let session_keys = x963_session_keys(&ephemeral_secret, &static_secret);
+            let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
+            receipt_input.extend_from_slice(&device_ephemeral_public);
+            receipt_input.extend_from_slice(&data[2..]);
+            let receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
+
+            let mut counter = [0; AES_BLOCK_SIZE];
+            increment_counter(&mut counter);
+            *self.session.borrow_mut() = Some(PeerSession {
+                sid: 7,
+                s_enc: session_keys[16..32]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+                s_mac: session_keys[32..48]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+                s_rmac: session_keys[48..64]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+                counter,
+                mac_chaining_value: receipt,
+                expected_host_cryptogram: [0; MAC_LENGTH],
+            });
+
+            let mut response = vec![7];
+            response.extend_from_slice(&device_ephemeral_public);
+            response.extend_from_slice(&receipt);
+            Frame::new(COMMAND_CREATE_SESSION | RESPONSE_BIT, response).map(|frame| frame.encode())
         }
 
         fn authenticate_session(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
@@ -1005,6 +1255,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn asymmetric_pin_uses_at_prefixed_authentication_key_id() {
+        let (id, password) = parse_asymmetric_pin(b"@00fFpassword").unwrap();
+        assert_eq!(id, 0xff);
+        assert_eq!(password, PASSWORD);
+        assert!(parse_asymmetric_pin(b"00ffpassword").is_err());
+        assert!(parse_asymmetric_pin(b"@xyz1password").is_err());
+    }
+
+    #[test]
     fn password_derivation_matches_yubihsm_defaults() {
         let mut keys = [0u8; 32];
         openssl::pkcs5::pbkdf2_hmac(
@@ -1059,6 +1318,31 @@ pub(crate) mod tests {
             .send_command(&peer, &Command::close_session())
             .unwrap();
         assert_eq!(peer.commands.borrow().len(), 5);
+    }
+
+    #[test]
+    fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
+        let peer = ProtocolPeer::new();
+        let mut session = SecureSession::authenticate_asymmetric(&peer, 1, PASSWORD).unwrap();
+        assert_eq!(
+            session
+                .send_command(&peer, &Command::get_storage_info())
+                .unwrap(),
+            [0xaa, 0xbb, 0xcc]
+        );
+        session
+            .send_command(&peer, &Command::close_session())
+            .unwrap();
+        assert_eq!(peer.commands.borrow().len(), 4);
+    }
+
+    #[test]
+    fn asymmetric_authentication_rejects_the_wrong_password() {
+        let peer = ProtocolPeer::new();
+        assert!(matches!(
+            SecureSession::authenticate_asymmetric(&peer, 1, b"wrong-password"),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        ));
     }
 
     #[test]

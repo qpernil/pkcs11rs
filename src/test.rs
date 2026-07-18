@@ -311,6 +311,48 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 }
 
 #[test]
+fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"@0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert!(commands
+        .borrow()
+        .iter()
+        .any(|(command, _)| *command == crate::yubihsm::CommandCode::ListObjects as u8));
+    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
     let mut label = [0u8; 40];
     label[..8].copy_from_slice(b"p521-key");
@@ -457,6 +499,125 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
             _ => panic!("expected YubiHSM key material"),
         }
     }
+}
+
+#[test]
+fn yubihsm_wrap_key_object_types_match_the_reference_module() {
+    let info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
+        let mut label = [0; 40];
+        label[..name.len()].copy_from_slice(name);
+        crate::yubihsm::ObjectInfo {
+            capabilities: crate::yubihsm_capabilities(capabilities),
+            id,
+            length,
+            domains: 1,
+            object_type,
+            algorithm,
+            sequence: 1,
+            origin: 1,
+            label,
+            delegated_capabilities: [0; 8],
+        }
+    };
+
+    let ccm_info = info(
+        8,
+        crate::YUBIHSM_WRAP_KEY,
+        crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+        16,
+        &[0x0c, 0x0d, 0x25, 0x26],
+        b"ccm-wrap",
+    );
+    assert!(!crate::yubihsm_object_has_public_key(&ccm_info));
+    let ccm = crate::yubihsm_token_objects(99, ccm_info, None).unwrap();
+    assert_eq!(ccm.len(), 1);
+    assert_eq!(ccm[0].class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert_eq!(ccm[0].key_type, crate::CKK_YUBICO_AES128_CCM_WRAP);
+    assert!(ccm[0].encrypt);
+    assert!(ccm[0].decrypt);
+    assert_eq!(
+        ccm[0].attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert_eq!(
+        ccm[0].attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+
+    let rsa_public = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+        key: vec![0xa5; 256],
+    };
+    let rsa_info = info(
+        9,
+        crate::YUBIHSM_WRAP_KEY,
+        crate::YUBIHSM_ALGO_RSA_2048,
+        256,
+        &[0x0c, 0x0d],
+        b"rsa-wrap",
+    );
+    assert!(crate::yubihsm_object_has_public_key(&rsa_info));
+    let rsa = crate::yubihsm_token_objects(99, rsa_info, Some(rsa_public.clone())).unwrap();
+    assert_eq!(rsa.len(), 2);
+    let private = rsa
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let public = rsa
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.key_type, CKK_RSA as CK_KEY_TYPE);
+    assert!(!private.sign && !private.decrypt);
+    assert_eq!(
+        private.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert_eq!(
+        private.attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert!(!public.encrypt && !public.verify);
+    assert_eq!(
+        public.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
+    assert!(matches!(
+        public.material,
+        crate::KeyMaterial::YubiHsm {
+            object_type: crate::YUBIHSM_WRAP_KEY_PUBLIC,
+            ..
+        }
+    ));
+
+    let public_wrap = crate::yubihsm_token_objects(
+        99,
+        info(
+            10,
+            crate::YUBIHSM_PUBLIC_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            256,
+            &[0x0c],
+            b"public-wrap",
+        ),
+        Some(rsa_public),
+    )
+    .unwrap();
+    assert_eq!(public_wrap.len(), 1);
+    assert_eq!(public_wrap[0].class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    assert_eq!(public_wrap[0].key_type, CKK_RSA as CK_KEY_TYPE);
+    assert_eq!(
+        public_wrap[0].attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert_eq!(
+        public_wrap[0].attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
+    assert_eq!(
+        public_wrap[0].attribute_value(CKA_MODULUS as CK_ATTRIBUTE_TYPE),
+        Some(vec![0xa5; 256])
+    );
 }
 
 #[test]

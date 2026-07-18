@@ -11,6 +11,7 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
+ABI_TARGET = ROOT / "target" / "abi-tests"
 CKR_OK = 0
 CKR_SLOT_ID_INVALID = 3
 CKR_CANT_LOCK = 0xA
@@ -55,10 +56,13 @@ CKM_AES_CBC = 0x00001082
 CKM_AES_GCM = 0x00001087
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
+CKO_PUBLIC_KEY = 0x00000002
 CKO_DATA = 0x00000000
 CKO_CERTIFICATE = 0x00000001
 CKC_X_509 = 0x00000000
 CKK_GENERIC_SECRET = 0x00000010
+CKK_RSA = 0x00000000
+CKK_YUBICO_AES128_CCM_WRAP = 0xD955421D
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
 CKA_PRIVATE = 0x00000002
@@ -76,9 +80,13 @@ CKA_ID = 0x00000102
 CKA_SENSITIVE = 0x00000103
 CKA_ENCRYPT = 0x00000104
 CKA_DECRYPT = 0x00000105
+CKA_WRAP = 0x00000106
+CKA_UNWRAP = 0x00000107
 CKA_SIGN = 0x00000108
 CKA_VERIFY = 0x0000010A
 CKA_DERIVE = 0x0000010C
+CKA_MODULUS = 0x00000120
+CKA_MODULUS_BITS = 0x00000121
 CKA_VALUE_LEN = 0x00000161
 CKA_EXTRACTABLE = 0x00000162
 CKA_LOCAL = 0x00000163
@@ -110,12 +118,23 @@ def library_path() -> pathlib.Path:
         name = "pkcs11rs.dll"
     else:
         name = "libpkcs11rs.so"
-    return ROOT / "target" / "debug" / name
+    return ABI_TARGET / "debug" / name
 
 
 def load_library() -> ctypes.CDLL:
     path = library_path()
-    subprocess.run(["cargo", "build", "--features", "abi-tests"], cwd=ROOT, check=True)
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--features",
+            "abi-tests",
+            "--target-dir",
+            str(ABI_TARGET),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
     return ctypes.CDLL(str(path))
 
 
@@ -1119,6 +1138,112 @@ class Pkcs11AbiTests(unittest.TestCase):
                 (encrypt.value, decrypt.value, sign.value, verify.value, derive.value),
                 (0, 0, 0, 0, 0),
             )
+
+    def test_abi_yubihsm_wrap_key_object_types_match_reference(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        def find_one(object_id: int, object_class: int) -> int:
+            encoded_id = (CK_BYTE * 2)(*object_id.to_bytes(2, "big"))
+            encoded_class = CK_ULONG(object_class)
+            template = (CK_ATTRIBUTE * 2)(
+                CK_ATTRIBUTE(CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), 2),
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(encoded_class), CK_VOID_PTR),
+                    ctypes.sizeof(encoded_class),
+                ),
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handle = CK_ULONG()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session, ctypes.byref(handle), 1, ctypes.byref(found)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            return handle.value
+
+        def scalars(handle: int, *attribute_types: int) -> tuple[int, ...]:
+            values = [CK_ULONG() for _ in attribute_types]
+            attributes = (CK_ATTRIBUTE * len(attribute_types))(
+                *[
+                    CK_ATTRIBUTE(
+                        attribute_type,
+                        ctypes.cast(ctypes.byref(value), CK_VOID_PTR),
+                        ctypes.sizeof(value),
+                    )
+                    for attribute_type, value in zip(attribute_types, values)
+                ]
+            )
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, attributes, len(attributes)
+                ),
+                CKR_OK,
+            )
+            return tuple(value.value for value in values)
+
+        ccm = find_one(8, CKO_SECRET_KEY)
+        self.assertEqual(
+            scalars(
+                ccm,
+                CKA_KEY_TYPE,
+                CKA_VALUE_LEN,
+                CKA_ENCRYPT,
+                CKA_DECRYPT,
+                CKA_WRAP,
+                CKA_UNWRAP,
+            ),
+            (CKK_YUBICO_AES128_CCM_WRAP, 16, 1, 1, 1, 1),
+        )
+
+        rsa_private = find_one(9, CKO_PRIVATE_KEY)
+        self.assertEqual(
+            scalars(
+                rsa_private,
+                CKA_KEY_TYPE,
+                CKA_ENCRYPT,
+                CKA_DECRYPT,
+                CKA_SIGN,
+                CKA_WRAP,
+                CKA_UNWRAP,
+            ),
+            (CKK_RSA, 0, 0, 0, 1, 1),
+        )
+        rsa_public = find_one(9, CKO_PUBLIC_KEY)
+        self.assertEqual(
+            scalars(
+                rsa_public,
+                CKA_KEY_TYPE,
+                CKA_MODULUS_BITS,
+                CKA_ENCRYPT,
+                CKA_VERIFY,
+                CKA_WRAP,
+                CKA_UNWRAP,
+            ),
+            (CKK_RSA, 2048, 0, 0, 0, 0),
+        )
+
+        public_wrap = find_one(10, CKO_PUBLIC_KEY)
+        self.assertEqual(
+            scalars(
+                public_wrap,
+                CKA_KEY_TYPE,
+                CKA_MODULUS_BITS,
+                CKA_ENCRYPT,
+                CKA_VERIFY,
+                CKA_WRAP,
+                CKA_UNWRAP,
+            ),
+            (CKK_RSA, 2048, 0, 0, 1, 0),
+        )
 
     def test_abi_yubihsm_opaque_objects_match_reference_attributes(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
