@@ -6260,6 +6260,75 @@ pub fn destroy_object_removes_object_from_store_and_search() {
 }
 
 #[test]
+pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let handles: Vec<_> = [crate::YUBIHSM_PUBLIC_KEY, crate::YUBIHSM_WRAP_KEY_PUBLIC]
+        .into_iter()
+        .map(|object_type| {
+            let object = crate::TokenObject {
+                slot_id: Some(TEST_SLOT_ID),
+                unique_id: format!("pseudo-public-{object_type:02x}").into_bytes(),
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_EC as CK_KEY_TYPE,
+                label: b"YubiHSM pseudo-public key".to_vec(),
+                id: vec![0, object_type],
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: true,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: true,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: crate::KeyMaterial::YubiHsm {
+                    id: object_type as u16,
+                    object_type,
+                    algorithm: crate::YUBIHSM_ALGO_EC_P256,
+                    length: 32,
+                    domains: 1,
+                    capabilities: [0; 8],
+                    delegated_capabilities: [0; 8],
+                    public_key: vec![0x04; 65],
+                    value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                },
+            };
+            let mut context = crate::lock_context().unwrap();
+            context.as_mut().unwrap().insert_object(object)
+        })
+        .collect();
+
+    for handle in handles {
+        assert_eq!(
+            crate::C_DestroyObject(TEST_SESSION_HANDLE, handle),
+            CKR_OK as CK_RV
+        );
+        let mut class = 0 as CK_OBJECT_CLASS;
+        let mut attribute = CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut class as *mut CK_OBJECT_CLASS).cast(),
+            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        };
+        assert_eq!(
+            crate::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    }
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn destroy_object_updates_active_search_results() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

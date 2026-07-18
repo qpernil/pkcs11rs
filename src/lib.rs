@@ -7816,6 +7816,9 @@ fn destroy_object(
             id, object_type, ..
         } = stored_object.material
         {
+            if matches!(object_type, YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC) {
+                return Ok(());
+            }
             ctx._get_session(session_handle)?
                 .1
                 .yubihsm_command(&YubiHsmCommand::delete_object(id, object_type & !0x80))?;
