@@ -29,6 +29,20 @@ local to the token. Public key material is read from the applet, while an
 available certificate is exposed as a `CKO_CERTIFICATE` object with its DER
 value and standard X.509 attributes when they can be parsed.
 
+On YubiKeys that advertise the optional attestation key reference (`81`), the
+slot also exposes its public key, private-key identity, and attestation
+certificate. Like the other private keys, the attestation private object uses
+`CKA_PRIVATE=true` and is visible after login. It remains sensitive and
+non-extractable, with all ordinary cryptographic capabilities disabled because
+actual attestation uses the applet-specific command. Cards without this
+extension continue to expose only the three standard key references.
+
+Key Information (`DE`) distinguishes empty, device-generated, and imported
+keys. Device-generated keys report `CKA_LOCAL=true` and their corresponding
+PKCS #11 key-pair generation mechanism. Imported keys report
+`CKA_LOCAL=false`; when status is unavailable, the client uses the same
+conservative non-local value.
+
 The applet version and serial number are reported in the slot and token
 information. PIN minimum and maximum lengths come from the applet metadata.
 
@@ -58,25 +72,37 @@ OpenPGP applet's DER form to PKCS #11's fixed-width `r || s` form.
 
 ## PIN handling
 
-`C_Login` selects the applet, establishes the configured secure channel if
-needed, and verifies the user PIN. When the applet publishes an OpenPGP KDF
-Data Object (`F9`), the client derives the value sent to `VERIFY` using the
-advertised iterated salted S2K parameters. SHA-256 and SHA-512 KDF hashes are
-supported. The clear PIN is not sent to the applet when this KDF is active.
+`C_Login` selects the applet and establishes the configured secure channel if
+needed. `CKU_USER` verifies PW1, while `CKU_SO` verifies the OpenPGP
+administrator password PW3. SO login requires a read/write session and cannot
+coexist with read-only sessions. When the applet publishes an OpenPGP KDF Data
+Object (`F9`), the client derives PW1 and PW3 using their advertised salts
+before sending `VERIFY`. SHA-256 and SHA-512 KDF hashes are supported. The
+clear PIN is not sent to the applet when this KDF is active.
 
-Operations that require applet authentication re-verify the cached derived
-PIN as required by the OpenPGP PIN policy. `C_Logout` clears the applet's
-authentication state, cached PIN, and applet-scoped secure-channel state.
+No clear or derived PIN is cached. `CKU_CONTEXT_SPECIFIC` login supplies a PIN
+for an operation that needs a fresh PW1 verification. `C_Logout` clears the
+applet authentication state and applet-scoped secure-channel state.
+
+In a read/write session, `C_SetPIN` changes PW3 while SO is logged in and PW1
+otherwise, using `CHANGE REFERENCE DATA`. `C_InitPIN` resets PW1 under an
+existing SO login using `RESET RETRY COUNTER`. When KDF is active, values are
+derived for their respective password references before transmission. A
+successful or attempted OpenPGP `C_SetPIN` clears the module's login state
+because selecting the applet also resets its password-verification state.
 
 ## APDU capabilities
 
-The OpenPGP protocol layer supports short and extended APDUs. Large signing,
-RSA deciphering, and random-data requests use extended encoding where needed;
-the shared PC/SC transport also supports command and response chaining for
-protected applet traffic.
+The OpenPGP protocol layer supports short and extended APDUs, ISO command and
+response chaining, and all commands defined by OpenPGP Card 3.4.1. It also
+supports the YubiKey version, retry-configuration, and attestation commands.
+Administrative helpers cover PW3 verification and changes, PIN reset, even
+and odd data-object access, key generation and import, certificate instances,
+AES enciphering, MSE key rebinding, UIF and algorithm attributes through data
+objects, and application termination and activation.
 
-Internal helpers exist for changing the user PIN and writing OpenPGP data
-objects, but those helpers are not currently wired to exported PKCS #11
-`C_SetPIN` or general data-object management functions. Key generation,
-private-key import, attestation, and UIF administration are likewise outside
-the current PKCS #11 OpenPGP surface.
+These administrative helpers are deliberately not invoked during discovery.
+Key generation, private-key import, attestation, UIF administration, and
+general data-object management are not yet mapped onto exported PKCS #11
+operations because they still require object-template and vendor-policy
+mapping beyond the now-supported PW3/SO authentication.

@@ -470,6 +470,97 @@ fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
 }
 
 #[test]
+fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities() {
+    let generated = openssl::rsa::Rsa::generate(2048).unwrap();
+    let public_key = openssl::rsa::Rsa::from_public_components(
+        generated.n().to_owned().unwrap(),
+        generated.e().to_owned().unwrap(),
+    )
+    .unwrap();
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let slot = crate::OpenPgpSlot {
+        connector,
+        application_aid: Vec::new(),
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: (3, 4),
+        serial: String::from("TEST0001"),
+        pin_min: 6,
+        pin_max: 127,
+        admin_pin_min: 8,
+        admin_pin_max: 127,
+        kdf: None,
+        keys: vec![crate::openpgp::KeyInfo {
+            key_ref: crate::openpgp::KeyRef::Attestation,
+            algorithm: crate::openpgp::Algorithm::Rsa { bits: 2048 },
+            public_key: crate::openpgp::PublicKey::Rsa(public_key),
+            pin_policy: 0,
+            local: false,
+        }],
+        certificates: vec![crate::OpenPgpCertificate {
+            key_ref: crate::openpgp::KeyRef::Attestation,
+            key_type: CKK_RSA as CK_KEY_TYPE,
+            value: vec![0x30, 0],
+        }],
+    };
+
+    let objects = crate::Slot::token_objects(&slot, 7).unwrap();
+    assert_eq!(objects.len(), 3);
+
+    let public = objects
+        .iter()
+        .find(|object| object.unique_id == b"openpgp-81-public")
+        .unwrap();
+    assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    assert!(public.verify);
+
+    let private = objects
+        .iter()
+        .find(|object| object.unique_id == b"openpgp-81-private")
+        .unwrap();
+    assert_eq!(private.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
+    assert!(private.private);
+    assert!(private.sensitive);
+    assert!(!private.extractable);
+    assert!(!private.local);
+    assert_eq!(private.key_gen_mechanism, None);
+    assert!(!private.encrypt);
+    assert!(!private.decrypt);
+    assert!(!private.sign);
+    assert!(!private.verify);
+    assert!(!private.derive);
+
+    let certificate = objects
+        .iter()
+        .find(|object| object.unique_id == b"openpgp-81-certificate")
+        .unwrap();
+    assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
+}
+
+#[test]
+fn openpgp_generated_key_algorithms_report_key_pair_generation_mechanisms() {
+    assert_eq!(
+        crate::openpgp_key_generation_mechanism(crate::openpgp::Algorithm::Rsa { bits: 2048 }),
+        Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    );
+    assert_eq!(
+        crate::openpgp_key_generation_mechanism(crate::openpgp::Algorithm::Ecdsa(
+            crate::openpgp::Curve::P256,
+        )),
+        Some(CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    );
+    assert_eq!(
+        crate::openpgp_key_generation_mechanism(crate::openpgp::Algorithm::Ed25519),
+        Some(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    );
+    assert_eq!(
+        crate::openpgp_key_generation_mechanism(crate::openpgp::Algorithm::Ecdh(
+            crate::openpgp::Curve::X25519,
+        )),
+        Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+    );
+}
+
+#[test]
 fn openpgp_metadata_failure_does_not_hide_selected_applet() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
@@ -676,7 +767,9 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
                 connector,
             }),
         );
-        context.logged_in_slots.insert(TEST_SLOT_ID);
+        context
+            .logged_in_slots
+            .insert(TEST_SLOT_ID, crate::LoginRole::User);
     }
 
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
@@ -701,7 +794,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         .as_ref()
         .unwrap()
         .logged_in_slots
-        .contains(&TEST_SLOT_ID));
+        .contains_key(&TEST_SLOT_ID));
     drop(context);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -732,7 +825,9 @@ pub fn authentication_loss_cancels_active_private_signing() {
                 flags: CKF_SERIAL_SESSION as CK_FLAGS,
             }),
         );
-        context.logged_in_slots.insert(TEST_SLOT_ID);
+        context
+            .logged_in_slots
+            .insert(TEST_SLOT_ID, crate::LoginRole::User);
     }
 
     let mut mechanism = CK_MECHANISM {
@@ -858,7 +953,7 @@ pub fn login_controls_private_object_visibility_and_signing() {
             pin.as_mut_ptr(),
             pin.len() as CK_ULONG
         ),
-        CKR_USER_TYPE_INVALID as CK_RV
+        CKR_SESSION_READ_ONLY as CK_RV
     );
     let mut bad_pin = *b"9999";
     assert_eq!(
@@ -1463,14 +1558,14 @@ pub fn token_info_reports_current_session_counts() {
 }
 
 #[test]
-pub fn session_stub_entry_points_validate_initialization_and_session() {
+pub fn session_entry_points_validate_initialization_and_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    assert_unsupported_session_stubs_return(999, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    assert_session_entry_points_return(999, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
 
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
-    assert_unsupported_session_stubs_return(999, CKR_SESSION_HANDLE_INVALID as CK_RV);
+    assert_session_entry_points_return(999, CKR_SESSION_HANDLE_INVALID as CK_RV);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
@@ -1612,6 +1707,252 @@ pub fn open_session_validates_session_flags() {
 }
 
 #[test]
+pub fn set_pin_validates_session_and_changes_supported_token_pin() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::C_SetPIN(
+            999,
+            ::std::ptr::null_mut(),
+            1,
+            ::std::ptr::null_mut(),
+            1,
+        ),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+    assert_eq!(
+        crate::C_SetPIN(
+            999,
+            ::std::ptr::null_mut(),
+            1,
+            ::std::ptr::null_mut(),
+            1,
+        ),
+        CKR_SESSION_HANDLE_INVALID as CK_RV
+    );
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut old_pin = *b"1234";
+    let mut new_pin = *b"5678";
+    assert_eq!(
+        crate::C_SetPIN(
+            session,
+            old_pin.as_mut_ptr(),
+            old_pin.len() as CK_ULONG,
+            new_pin.as_mut_ptr(),
+            new_pin.len() as CK_ULONG,
+        ),
+        CKR_SESSION_READ_ONLY as CK_RV
+    );
+    assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut wrong_pin = *b"0000";
+    assert_eq!(
+        crate::C_SetPIN(
+            session,
+            wrong_pin.as_mut_ptr(),
+            wrong_pin.len() as CK_ULONG,
+            new_pin.as_mut_ptr(),
+            new_pin.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetPIN(
+            session,
+            old_pin.as_mut_ptr(),
+            old_pin.len() as CK_ULONG,
+            new_pin.as_mut_ptr(),
+            new_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+
+    let mut read_only_session = 0;
+    let mut read_write_session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut read_only_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut read_write_session,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut admin_pin = *b"12345678";
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_SESSION_READ_ONLY_EXISTS as CK_RV
+    );
+    assert_eq!(crate::C_CloseSession(read_only_session), CKR_OK as CK_RV);
+
+    let mut wrong_admin_pin = *b"00000000";
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            wrong_admin_pin.as_mut_ptr(),
+            wrong_admin_pin.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_USER_ALREADY_LOGGED_IN as CK_RV
+    );
+    let mut user_pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_USER as CK_USER_TYPE,
+            user_pin.as_mut_ptr(),
+            user_pin.len() as CK_ULONG,
+        ),
+        CKR_USER_ANOTHER_ALREADY_LOGGED_IN as CK_RV
+    );
+
+    let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(
+        crate::C_GetSessionInfo(read_write_session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
+    let mut object_size = 0;
+    assert_eq!(
+        crate::C_GetObjectSize(read_write_session, 2, &mut object_size),
+        CKR_OBJECT_HANDLE_INVALID as CK_RV
+    );
+
+    let mut another_read_only_session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut another_read_only_session,
+        ),
+        CKR_SESSION_READ_WRITE_SO_EXISTS as CK_RV
+    );
+    assert_eq!(
+        crate::C_InitPIN(
+            read_write_session,
+            user_pin.as_mut_ptr(),
+            user_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut new_admin_pin = *b"87654321";
+    assert_eq!(
+        crate::C_SetPIN(
+            read_write_session,
+            user_pin.as_mut_ptr(),
+            user_pin.len() as CK_ULONG,
+            new_admin_pin.as_mut_ptr(),
+            new_admin_pin.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::C_Login(
+            read_write_session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetPIN(
+            read_write_session,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+            new_admin_pin.as_mut_ptr(),
+            new_admin_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_GetSessionInfo(read_write_session, &mut info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(
+        crate::C_InitPIN(
+            read_write_session,
+            user_pin.as_mut_ptr(),
+            user_pin.len() as CK_ULONG,
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn open_session_refreshes_token_presence() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1664,7 +2005,7 @@ pub fn close_cleans_local_state_after_logout_failure() {
     {
         let context = crate::lock_context().unwrap();
         let context = context.as_ref().unwrap();
-        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
     }
 
@@ -1682,7 +2023,7 @@ pub fn close_cleans_local_state_after_logout_failure() {
     {
         let context = crate::lock_context().unwrap();
         let context = context.as_ref().unwrap();
-        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
         assert!(context
             .sessions
             .values()

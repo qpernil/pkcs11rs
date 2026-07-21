@@ -7,6 +7,8 @@ struct OpenPgpSlot {
     serial: String,
     pin_min: u8,
     pin_max: u8,
+    admin_pin_min: u8,
+    admin_pin_max: u8,
     kdf: Option<openpgp::KdfParams>,
     keys: Vec<openpgp::KeyInfo>,
     certificates: Vec<OpenPgpCertificate>,
@@ -34,6 +36,8 @@ impl OpenPgpSlot {
             serial,
             pin_min: 6,
             pin_max: 127,
+            admin_pin_min: 8,
+            admin_pin_max: 127,
             kdf: None,
             keys: Vec::new(),
             certificates: Vec::new(),
@@ -46,7 +50,24 @@ impl OpenPgpSlot {
         self.connector.set_device_identity(None, Some(&info.serial));
         self.pin_min = info.pin_min;
         self.pin_max = info.pin_max;
+        self.admin_pin_min = info.admin_pin_min;
+        self.admin_pin_max = info.admin_pin_max;
         self.kdf = info.kdf.clone();
+    }
+
+    fn validate_user_pin(&self, pin: &[u8]) -> Result<(), Error> {
+        Self::validate_pin_length(pin, self.pin_min, self.pin_max)
+    }
+
+    fn validate_admin_pin(&self, pin: &[u8]) -> Result<(), Error> {
+        Self::validate_pin_length(pin, self.admin_pin_min, self.admin_pin_max)
+    }
+
+    fn validate_pin_length(pin: &[u8], min: u8, max: u8) -> Result<(), Error> {
+        if !(min as usize..=max as usize).contains(&pin.len()) {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
     }
 
     fn reported_version(&self) -> (u8, u8) {
@@ -81,6 +102,32 @@ fn openpgp_key_can_sign(key_ref: OpenPgpKeyRef, algorithm: OpenPgpAlgorithm) -> 
         key_ref,
         OpenPgpKeyRef::Signature | OpenPgpKeyRef::Authentication
     ) && !matches!(algorithm, OpenPgpAlgorithm::Ecdh(_))
+}
+
+fn openpgp_key_can_verify(key_ref: OpenPgpKeyRef, algorithm: OpenPgpAlgorithm) -> bool {
+    matches!(
+        key_ref,
+        OpenPgpKeyRef::Signature
+            | OpenPgpKeyRef::Authentication
+            | OpenPgpKeyRef::Attestation
+    ) && !matches!(algorithm, OpenPgpAlgorithm::Ecdh(_))
+}
+
+fn openpgp_key_generation_mechanism(
+    algorithm: OpenPgpAlgorithm,
+) -> Option<CK_MECHANISM_TYPE> {
+    match algorithm {
+        OpenPgpAlgorithm::Rsa { .. } => Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
+        OpenPgpAlgorithm::Ed25519 => {
+            Some(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+        }
+        OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519) => {
+            Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+        }
+        OpenPgpAlgorithm::Ecdsa(_) | OpenPgpAlgorithm::Ecdh(_) => {
+            Some(CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
+        }
+    }
 }
 
 fn openpgp_signature_requires_context_specific_login(
@@ -140,6 +187,7 @@ impl Slot for OpenPgpSlot {
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        self.validate_user_pin(pin)?;
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
@@ -163,7 +211,90 @@ impl Slot for OpenPgpSlot {
         }
         result
     }
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+        self.validate_admin_pin(pin)?;
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_info(&info);
+            let pin = self
+                .kdf
+                .as_ref()
+                .map(|kdf| kdf.derive_pin(openpgp::PasswordRef::Admin, pin))
+                .transpose()?
+                .unwrap_or_else(|| pin.to_vec());
+            OpenPgpClient.verify_admin(self.connector.as_ref(), &pin)?;
+            self.authenticated.set(true);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connector.clear_secure_channel();
+        }
+        result
+    }
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        self.validate_user_pin(old_pin)?;
+        self.validate_user_pin(new_pin)?;
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_info(&info);
+            let derive = |input: &[u8]| {
+                if let Some(kdf) = &self.kdf {
+                    kdf.derive_user_pin(input)
+                } else {
+                    Ok(input.to_vec())
+                }
+            };
+            let old_pin = derive(old_pin)?;
+            let new_pin = derive(new_pin)?;
+            OpenPgpClient.change_user_pin(self.connector.as_ref(), &old_pin, &new_pin)
+        })();
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
+        result
+    }
+    fn set_so_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        self.validate_admin_pin(old_pin)?;
+        self.validate_admin_pin(new_pin)?;
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_info(&info);
+            let derive = |input: &[u8]| {
+                if let Some(kdf) = &self.kdf {
+                    kdf.derive_pin(openpgp::PasswordRef::Admin, input)
+                } else {
+                    Ok(input.to_vec())
+                }
+            };
+            let old_pin = derive(old_pin)?;
+            let new_pin = derive(new_pin)?;
+            OpenPgpClient.change_admin_pin(self.connector.as_ref(), &old_pin, &new_pin)
+        })();
+        self.authenticated.set(false);
+        self.connector.clear_secure_channel();
+        result
+    }
+    fn init_user_pin(&mut self, new_pin: &[u8]) -> Result<(), Error> {
+        self.validate_user_pin(new_pin)?;
+        let new_pin = self
+            .kdf
+            .as_ref()
+            .map(|kdf| kdf.derive_user_pin(new_pin))
+            .transpose()?
+            .unwrap_or_else(|| new_pin.to_vec());
+        let result = OpenPgpClient.reset_user_pin(self.connector.as_ref(), &new_pin, None);
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as CK_RV) {
+            self.authenticated.set(false);
+        }
+        result
+    }
     fn login_context_specific(&mut self, pin: &[u8], extended: bool) -> Result<(), Error> {
+        self.validate_user_pin(pin)?;
         let pin = self
             .kdf
             .as_ref()
@@ -178,6 +309,10 @@ impl Slot for OpenPgpSlot {
     fn logout(&mut self) -> Result<(), Error> {
         OpenPgpClient.unverify(self.connector.as_ref(), false);
         OpenPgpClient.unverify(self.connector.as_ref(), true);
+        let _ = OpenPgpClient.unverify_password(
+            self.connector.as_ref(),
+            openpgp::PasswordRef::Admin,
+        );
         self.authenticated.set(false);
         self.connector.clear_secure_channel();
         Ok(())
@@ -223,10 +358,40 @@ impl Slot for OpenPgpSlot {
                 algorithm,
                 public_key,
                 pin_policy: info.pin_policy,
+                local: info.key_is_local(key_ref),
             });
             if let Ok(value) = OpenPgpClient.certificate(self.connector.as_ref(), key_ref) {
                 self.certificates.push(OpenPgpCertificate {
                     key_ref,
+                    key_type: algorithm.key_type() as CK_KEY_TYPE,
+                    value,
+                });
+            }
+        }
+        if let Some(algorithm) = info.algorithm(OpenPgpKeyRef::Attestation) {
+            match OpenPgpClient.public_key(
+                self.connector.as_ref(),
+                OpenPgpKeyRef::Attestation,
+                algorithm,
+            ) {
+                Ok(public_key) => self.keys.push(openpgp::KeyInfo {
+                    key_ref: OpenPgpKeyRef::Attestation,
+                    algorithm,
+                    public_key,
+                    pin_policy: info.pin_policy,
+                    local: info.key_is_local(OpenPgpKeyRef::Attestation),
+                }),
+                Err(error) => log!(
+                    2,
+                    "OpenPGP attestation public-key discovery failed: {:?}",
+                    error
+                ),
+            }
+            if let Ok(value) = OpenPgpClient
+                .certificate(self.connector.as_ref(), OpenPgpKeyRef::Attestation)
+            {
+                self.certificates.push(OpenPgpCertificate {
+                    key_ref: OpenPgpKeyRef::Attestation,
                     key_type: algorithm.key_type() as CK_KEY_TYPE,
                     value,
                 });
@@ -326,7 +491,12 @@ impl Slot for OpenPgpSlot {
             let key_type = key.algorithm.key_type() as CK_KEY_TYPE;
             let (modulus, public_exponent) = openpgp_rsa_components(&key.public_key);
             let can_sign = openpgp_key_can_sign(key.key_ref, key.algorithm);
+            let can_verify = openpgp_key_can_verify(key.key_ref, key.algorithm);
             let can_decrypt = key.key_ref == OpenPgpKeyRef::Decipher && key.algorithm.is_rsa();
+            let key_gen_mechanism = key
+                .local
+                .then(|| openpgp_key_generation_mechanism(key.algorithm))
+                .flatten();
             let label = format!("OpenPGP {:?} key", key.key_ref).into_bytes();
             let id = vec![key.key_ref as u8];
             let public_material = match &key.public_key {
@@ -360,14 +530,14 @@ impl Slot for OpenPgpSlot {
                 encrypt: key.key_ref == OpenPgpKeyRef::Decipher && key.algorithm.is_rsa(),
                 decrypt: false,
                 sign: false,
-                verify: can_sign,
+                verify: can_verify,
                 derive: false,
                 sensitive: false,
                 extractable: true,
                 always_sensitive: false,
                 never_extractable: false,
-                local: true,
-                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                local: key.local,
+                key_gen_mechanism,
                 owner_session: None,
                 material: public_material,
             });
@@ -390,8 +560,8 @@ impl Slot for OpenPgpSlot {
                 extractable: false,
                 always_sensitive: true,
                 never_extractable: true,
-                local: true,
-                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                local: key.local,
+                key_gen_mechanism,
                 owner_session: None,
                 material: KeyMaterial::OpenPgpPrivate {
                     key_ref: key.key_ref,

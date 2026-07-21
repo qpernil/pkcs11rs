@@ -237,7 +237,7 @@ fn sign(
             .get(&session_handle)
             .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-        if operation.requires_login && !ctx.is_slot_logged_in(operation.slot_id) {
+        if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
             ctx.sign_operations.remove(&session_handle);
             return Err(CKR_USER_NOT_LOGGED_IN.into());

@@ -459,7 +459,7 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
         context.dynamic_slots.remove(&TEST_SLOT_ID);
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
         assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
-        assert!(!context.logged_in_slots.contains(&TEST_SLOT_ID));
+        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
         assert!(context
             .objects
             .values()
@@ -706,4 +706,3 @@ pub fn generate_random_validates_initialization_and_session() {
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
-

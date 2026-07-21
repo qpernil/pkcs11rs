@@ -56,6 +56,40 @@ impl Slot for AbiTestSlot {
         Ok(())
     }
 
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if pin != b"12345678" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        Ok(())
+    }
+
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        if old_pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        if new_pin.len() < 4 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
+    fn set_so_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        if old_pin != b"12345678" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        if new_pin.len() < 8 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
+    fn init_user_pin(&mut self, new_pin: &[u8]) -> Result<(), Error> {
+        if new_pin.len() < 4 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
     fn logout(&mut self) -> Result<(), Error> {
         Ok(())
     }
