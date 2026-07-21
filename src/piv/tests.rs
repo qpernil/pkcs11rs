@@ -1,5 +1,6 @@
 use super::*;
-use std::{cell::RefCell, collections::VecDeque};
+use crate::ApduCapabilities;
+use std::{cell::RefCell, collections::VecDeque, time::Duration};
 
 #[derive(Debug)]
 struct ScriptedConnector {
@@ -40,6 +41,9 @@ impl Connector for ScriptedConnector {
     }
     fn buffer_size(&self) -> usize {
         4096
+    }
+    fn apdu_capabilities(&self) -> ApduCapabilities {
+        ApduCapabilities::SHORT_ONLY
     }
     fn transmit<'a>(
         &self,
@@ -113,10 +117,7 @@ fn follows_response_chaining_and_retries_wrong_le() {
         connector.commands.borrow()[1],
         [0, INS_GET_VERSION, 0, 0, 3]
     );
-    assert_eq!(
-        connector.commands.borrow()[2],
-        [0, INS_GET_RESPONSE, 0, 0, 2]
-    );
+    assert_eq!(connector.commands.borrow()[2], [0, 0xc0, 0, 0, 2]);
 }
 
 #[test]

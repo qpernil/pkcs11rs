@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    scp03::{environment_byte, parse_hex, transmit, CommandApdu, Scp03Session},
+    scp03::{environment_byte, parse_hex, CommandApdu, Scp03Session},
     secure_channel_crypto::aes_cmac,
     Connector, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
     CKR_USER_PIN_NOT_INITIALIZED,
@@ -138,7 +138,9 @@ impl Scp11KeySet {
             le: Some(256),
             extended: false,
         };
-        let response = transmit(connector, &authenticate)?.require_success(&authenticate)?;
+        let response = connector
+            .send_apdu(&authenticate)?
+            .require_success(&authenticate)?;
         let authentication = parse_authentication_response(&response.data)?;
         let card_ephemeral_key = parse_public_point(authentication.card_ephemeral_point)?;
 
@@ -190,7 +192,7 @@ impl Scp11KeySet {
                 le: None,
                 extended: certificate.len() > u8::MAX as usize,
             };
-            transmit(connector, &upload)?.require_success(&upload)?;
+            connector.send_apdu(&upload)?.require_success(&upload)?;
         }
         Ok(())
     }

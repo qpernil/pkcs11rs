@@ -25,8 +25,7 @@ const MAX_SHORT_DATA_LENGTH: usize = u8::MAX as usize;
 const MAX_EXTENDED_DATA_LENGTH: usize = u16::MAX as usize;
 const MAX_SHORT_EXPECTED_LENGTH: u32 = 1 << 8;
 const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
-const MAX_CHAINED_RESPONSE_LENGTH: usize =
-    MAX_EXTENDED_EXPECTED_LENGTH as usize + AES_BLOCK_SIZE + MAC_LENGTH;
+#[cfg(test)]
 const MAX_RESPONSE_CHAIN_SEGMENTS: usize =
     MAX_EXTENDED_EXPECTED_LENGTH as usize / MAX_SHORT_EXPECTED_LENGTH as usize;
 const MORE_COMMANDS: u8 = 0x80;
@@ -750,7 +749,7 @@ impl Scp03Session {
         command: &CommandApdu,
     ) -> Result<ResponseApdu, Error> {
         let protected = self.protect_command(command)?;
-        let response = Self::collect_response_chain(connector, transmit(connector, &protected)?)?;
+        let response = crate::iso7816::transmit(connector, &protected)?;
         self.unprotect_response(response)
     }
 
@@ -802,53 +801,9 @@ impl Scp03Session {
 
     pub(crate) fn collect_response_chain(
         connector: &dyn Connector,
-        mut response: ResponseApdu,
+        response: ResponseApdu,
     ) -> Result<ResponseApdu, Error> {
-        if response.data.len() > MAX_CHAINED_RESPONSE_LENGTH {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let mut data = Vec::new();
-        let mut segments = 0usize;
-        while response.status & 0xff00 == 0x6100 {
-            segments += 1;
-            if segments > MAX_RESPONSE_CHAIN_SEGMENTS {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            if segments > 1 && response.data.is_empty() {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            let combined_len = data
-                .len()
-                .checked_add(response.data.len())
-                .filter(|length| *length <= MAX_CHAINED_RESPONSE_LENGTH)
-                .ok_or(CKR_DEVICE_ERROR)?;
-            data.reserve(combined_len - data.len());
-            data.extend_from_slice(&response.data);
-
-            let available = (response.status & 0x00ff) as u32;
-            let get_response = CommandApdu {
-                cla: 0x00,
-                ins: 0xc0,
-                p1: 0,
-                p2: 0,
-                data: vec![],
-                le: Some(if available == 0 { 256 } else { available }),
-                extended: false,
-            };
-            response = transmit(connector, &get_response)?;
-        }
-
-        let combined_len = data
-            .len()
-            .checked_add(response.data.len())
-            .filter(|length| *length <= MAX_CHAINED_RESPONSE_LENGTH)
-            .ok_or(CKR_DEVICE_ERROR)?;
-        data.reserve(combined_len - data.len());
-        data.extend_from_slice(&response.data);
-        Ok(ResponseApdu {
-            data,
-            status: response.status,
-        })
+        crate::iso7816::collect_response_chain(connector, response)
     }
 
     fn protect_command(&mut self, command: &CommandApdu) -> Result<CommandApdu, Error> {
@@ -972,8 +927,8 @@ pub(crate) fn select_application(connector: &dyn Connector, aid: &[u8]) -> Resul
     Ok(())
 }
 
-pub(crate) fn transmit(
-    connector: &dyn Connector,
+pub(crate) fn transmit<C: Connector + ?Sized>(
+    connector: &C,
     command: &CommandApdu,
 ) -> Result<ResponseApdu, Error> {
     ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)

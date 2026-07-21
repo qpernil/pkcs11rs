@@ -2,16 +2,16 @@
 
 use crate::{
     error::Error,
-    scp03::{select_application, transmit, CommandApdu, Scp03Session},
-    Connector, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
-    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    scp03::{select_application, CommandApdu},
+    Connector, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
+    CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED,
+    CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     bn::BigNum,
     hash::{Hasher, MessageDigest},
     rsa::Rsa,
 };
-use std::time::Duration;
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
 pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
@@ -19,15 +19,24 @@ pub(crate) const PW1_MULTIPLE_SIGNATURES: u8 = 0x01;
 
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE_DATA: u8 = 0x24;
+const INS_RESET_RETRY_COUNTER: u8 = 0x2c;
 const INS_PUT_DATA: u8 = 0xda;
+const INS_PUT_DATA_ODD: u8 = 0xdb;
 const INS_PSO: u8 = 0x2a;
 const INS_GET_DATA: u8 = 0xca;
+const INS_GET_DATA_ODD: u8 = 0xcb;
+const INS_GET_NEXT_DATA: u8 = 0xcc;
 const INS_INTERNAL_AUTHENTICATE: u8 = 0x88;
 const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_GET_CHALLENGE: u8 = 0x84;
+const INS_ACTIVATE_FILE: u8 = 0x44;
+const INS_TERMINATE_DF: u8 = 0xe6;
+const INS_MANAGE_SECURITY_ENVIRONMENT: u8 = 0x22;
+const INS_GET_VERSION: u8 = 0xf1;
+const INS_SET_PIN_RETRIES: u8 = 0xf2;
+const INS_GET_ATTESTATION: u8 = 0xfb;
 const SELECT_CERTIFICATE_DATA: [u8; 6] = [0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21];
 const STATUS_SUCCESS: u16 = 0x9000;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -35,16 +44,18 @@ pub(crate) enum KeyRef {
     Signature = 1,
     Decipher = 2,
     Authentication = 3,
+    Attestation = 0x81,
 }
 
 impl KeyRef {
     pub(crate) const ALL: [Self; 3] = [Self::Signature, Self::Decipher, Self::Authentication];
 
-    fn certificate_occurrence(self) -> u8 {
+    fn certificate_occurrence(self) -> Option<u8> {
         match self {
-            Self::Authentication => 0,
-            Self::Decipher => 1,
-            Self::Signature => 2,
+            Self::Authentication => Some(0),
+            Self::Decipher => Some(1),
+            Self::Signature => Some(2),
+            Self::Attestation => None,
         }
     }
 
@@ -53,6 +64,7 @@ impl KeyRef {
             Self::Signature => &[0xb6, 0x00],
             Self::Decipher => &[0xb8, 0x00],
             Self::Authentication => &[0xa4, 0x00],
+            Self::Attestation => &[0xb6, 0x03, 0x84, 0x01, 0x81],
         }
     }
 
@@ -61,7 +73,81 @@ impl KeyRef {
             Self::Signature => 0xc1,
             Self::Decipher => 0xc2,
             Self::Authentication => 0xc3,
+            Self::Attestation => 0xda,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PasswordRef {
+    UserSignature = 0x81,
+    UserOperations = 0x82,
+    Admin = 0x83,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SecurityOperation {
+    Authenticate,
+    Decipher,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub(crate) enum DataObject {
+    PrivateUse1 = 0x0101,
+    PrivateUse2 = 0x0102,
+    PrivateUse3 = 0x0103,
+    PrivateUse4 = 0x0104,
+    Aid = 0x004f,
+    Name = 0x005b,
+    LoginData = 0x005e,
+    Language = 0x5f2d,
+    Sex = 0x5f35,
+    Url = 0x5f50,
+    HistoricalBytes = 0x5f52,
+    CardholderRelatedData = 0x0065,
+    ApplicationRelatedData = 0x006e,
+    SecuritySupportTemplate = 0x007a,
+    CardholderCertificate = 0x7f21,
+    ExtendedLengthInformation = 0x7f66,
+    GeneralFeatureManagement = 0x7f74,
+    SignatureCounter = 0x0093,
+    ExtendedCapabilities = 0x00c0,
+    AlgorithmAttributesSignature = 0x00c1,
+    AlgorithmAttributesDecipher = 0x00c2,
+    AlgorithmAttributesAuthentication = 0x00c3,
+    PasswordStatus = 0x00c4,
+    Fingerprints = 0x00c5,
+    CaFingerprints = 0x00c6,
+    FingerprintSignature = 0x00c7,
+    FingerprintDecipher = 0x00c8,
+    FingerprintAuthentication = 0x00c9,
+    CaFingerprint1 = 0x00ca,
+    CaFingerprint2 = 0x00cb,
+    CaFingerprint3 = 0x00cc,
+    GenerationTimes = 0x00cd,
+    GenerationTimeSignature = 0x00ce,
+    GenerationTimeDecipher = 0x00cf,
+    GenerationTimeAuthentication = 0x00d0,
+    ResettingCode = 0x00d3,
+    UifSignature = 0x00d6,
+    UifDecipher = 0x00d7,
+    UifAuthentication = 0x00d8,
+    UifAttestation = 0x00d9,
+    AlgorithmAttributesAttestation = 0x00da,
+    FingerprintAttestation = 0x00db,
+    CaFingerprint4 = 0x00dc,
+    GenerationTimeAttestation = 0x00dd,
+    KeyInformation = 0x00de,
+    Kdf = 0x00f9,
+    AlgorithmInformation = 0x00fa,
+    AttestationCertificate = 0x00fc,
+}
+
+impl DataObject {
+    const fn tag(self) -> u16 {
+        self as u16
     }
 }
 
@@ -191,6 +277,14 @@ pub(crate) struct KeyInfo {
     pub(crate) algorithm: Algorithm,
     pub(crate) public_key: PublicKey,
     pub(crate) pin_policy: u8,
+    pub(crate) local: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KeyStatus {
+    None,
+    Generated,
+    Imported,
 }
 
 #[derive(Clone, Debug)]
@@ -200,8 +294,11 @@ pub(crate) struct ApplicationInfo {
     pub(crate) pin_policy: u8,
     pub(crate) pin_min: u8,
     pub(crate) pin_max: u8,
+    pub(crate) admin_pin_min: u8,
+    pub(crate) admin_pin_max: u8,
     pub(crate) kdf: Option<KdfParams>,
     algorithms: Vec<(KeyRef, Algorithm)>,
+    key_statuses: Vec<(KeyRef, KeyStatus)>,
 }
 
 #[derive(Clone, Debug)]
@@ -209,20 +306,38 @@ pub(crate) struct KdfParams {
     hash_algorithm: u8,
     iteration_count: u32,
     user_salt: Vec<u8>,
+    reset_salt: Option<Vec<u8>>,
+    admin_salt: Option<Vec<u8>>,
 }
 
 impl KdfParams {
     pub(crate) fn derive_user_pin(&self, pin: &[u8]) -> Result<Vec<u8>, Error> {
+        self.derive_pin(PasswordRef::UserSignature, pin)
+    }
+
+    pub(crate) fn derive_pin(&self, password: PasswordRef, pin: &[u8]) -> Result<Vec<u8>, Error> {
+        let salt = match password {
+            PasswordRef::UserSignature | PasswordRef::UserOperations => &self.user_salt,
+            PasswordRef::Admin => self.admin_salt.as_ref().unwrap_or(&self.user_salt),
+        };
+        self.derive_with_salt(salt, pin)
+    }
+
+    pub(crate) fn derive_reset_code(&self, code: &[u8]) -> Result<Vec<u8>, Error> {
+        self.derive_with_salt(self.reset_salt.as_ref().unwrap_or(&self.user_salt), code)
+    }
+
+    fn derive_with_salt(&self, salt: &[u8], pin: &[u8]) -> Result<Vec<u8>, Error> {
         let digest = match self.hash_algorithm {
             0x08 => MessageDigest::sha256(),
             0x0a => MessageDigest::sha512(),
             _ => return Err(CKR_DATA_INVALID.into()),
         };
-        if self.iteration_count == 0 || self.user_salt.is_empty() {
+        if self.iteration_count == 0 || salt.is_empty() {
             return Err(CKR_DATA_INVALID.into());
         }
-        let mut salted_pin = Vec::with_capacity(self.user_salt.len() + pin.len());
-        salted_pin.extend_from_slice(&self.user_salt);
+        let mut salted_pin = Vec::with_capacity(salt.len() + pin.len());
+        salted_pin.extend_from_slice(salt);
         salted_pin.extend_from_slice(pin);
         if salted_pin.is_empty() {
             return Err(CKR_DATA_INVALID.into());
@@ -247,6 +362,16 @@ impl ApplicationInfo {
         self.algorithms
             .iter()
             .find_map(|(reference, algorithm)| (*reference == key_ref).then_some(*algorithm))
+    }
+
+    pub(crate) fn key_status(&self, key_ref: KeyRef) -> Option<KeyStatus> {
+        self.key_statuses
+            .iter()
+            .find_map(|(reference, status)| (*reference == key_ref).then_some(*status))
+    }
+
+    pub(crate) fn key_is_local(&self, key_ref: KeyRef) -> bool {
+        self.key_status(key_ref) == Some(KeyStatus::Generated)
     }
 }
 
@@ -277,12 +402,31 @@ impl Client {
         key_ref: KeyRef,
         algorithm: Algorithm,
     ) -> Result<PublicKey, Error> {
+        self.read_or_generate_key(connector, key_ref, algorithm, false)
+    }
+
+    pub(crate) fn generate_key_pair(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+        algorithm: Algorithm,
+    ) -> Result<PublicKey, Error> {
+        self.read_or_generate_key(connector, key_ref, algorithm, true)
+    }
+
+    fn read_or_generate_key(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+        algorithm: Algorithm,
+        generate: bool,
+    ) -> Result<PublicKey, Error> {
         let response = self.transmit(
             connector,
             CommandApdu {
                 cla: 0,
                 ins: INS_GENERATE_ASYMMETRIC,
-                p1: 0x81,
+                p1: if generate { 0x80 } else { 0x81 },
                 p2: 0,
                 data: key_ref.crt().to_vec(),
                 le: Some(256),
@@ -341,19 +485,100 @@ impl Client {
         connector: &dyn Connector,
         key_ref: KeyRef,
     ) -> Result<Vec<u8>, Error> {
+        match key_ref.certificate_occurrence() {
+            Some(occurrence) => {
+                if connector
+                    .firmware_version()
+                    .is_some_and(|version| version < (5, 2, 0))
+                {
+                    if key_ref == KeyRef::Authentication {
+                        return self.get_data(connector, DataObject::CardholderCertificate.tag());
+                    }
+                    return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+                }
+                self.select_data(connector, occurrence, DataObject::CardholderCertificate)?;
+                self.get_data(connector, DataObject::CardholderCertificate.tag())
+            }
+            None => self.get_data(connector, DataObject::AttestationCertificate.tag()),
+        }
+    }
+
+    pub(crate) fn put_certificate(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+        certificate: &[u8],
+    ) -> Result<(), Error> {
+        match key_ref.certificate_occurrence() {
+            Some(occurrence) => {
+                if connector
+                    .firmware_version()
+                    .is_some_and(|version| version < (5, 2, 0))
+                {
+                    if key_ref == KeyRef::Authentication {
+                        return self.put_data(
+                            connector,
+                            DataObject::CardholderCertificate.tag(),
+                            certificate,
+                        );
+                    }
+                    return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+                }
+                self.select_data(connector, occurrence, DataObject::CardholderCertificate)?;
+                self.put_data(
+                    connector,
+                    DataObject::CardholderCertificate.tag(),
+                    certificate,
+                )
+            }
+            None => self.put_data(
+                connector,
+                DataObject::AttestationCertificate.tag(),
+                certificate,
+            ),
+        }
+    }
+
+    pub(crate) fn select_data(
+        &self,
+        connector: &dyn Connector,
+        occurrence: u8,
+        object: DataObject,
+    ) -> Result<(), Error> {
+        if occurrence > 2 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let mut data = if object == DataObject::CardholderCertificate {
+            SELECT_CERTIFICATE_DATA.to_vec()
+        } else {
+            let tag = object.tag();
+            let tag_bytes = if tag <= 0xff {
+                vec![tag as u8]
+            } else {
+                tag.to_be_bytes().to_vec()
+            };
+            encode_tlv(0x60, &encode_tlv(0x5c, &tag_bytes)?)?
+        };
+        if object == DataObject::CardholderCertificate
+            && connector
+                .firmware_version()
+                .is_some_and(|version| ((5, 2, 0)..=(5, 4, 3)).contains(&version))
+        {
+            data.insert(0, data.len() as u8);
+        }
         self.transmit(
             connector,
             CommandApdu {
                 cla: 0,
                 ins: 0xa5,
-                p1: key_ref.certificate_occurrence(),
+                p1: occurrence,
                 p2: 0x04,
-                data: SELECT_CERTIFICATE_DATA.to_vec(),
+                data,
                 le: Some(256),
                 extended: false,
             },
         )?;
-        self.get_data(connector, 0x7f21)
+        Ok(())
     }
 
     pub(crate) fn verify_pin(
@@ -362,14 +587,58 @@ impl Client {
         pin: &[u8],
         extended: bool,
     ) -> Result<(), Error> {
+        self.verify_password(
+            connector,
+            if extended {
+                PasswordRef::UserOperations
+            } else {
+                PasswordRef::UserSignature
+            },
+            pin,
+        )
+    }
+
+    pub(crate) fn verify_admin(&self, connector: &dyn Connector, pin: &[u8]) -> Result<(), Error> {
+        self.verify_password(connector, PasswordRef::Admin, pin)
+    }
+
+    pub(crate) fn verify_password(
+        &self,
+        connector: &dyn Connector,
+        password: PasswordRef,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        if value.is_empty() {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
         self.transmit(
             connector,
             CommandApdu {
                 cla: 0,
                 ins: INS_VERIFY,
                 p1: 0,
-                p2: if extended { 0x82 } else { 0x81 },
-                data: pin.to_vec(),
+                p2: password as u8,
+                data: value.to_vec(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn verification_status(
+        &self,
+        connector: &dyn Connector,
+        password: PasswordRef,
+    ) -> Result<(), Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_VERIFY,
+                p1: 0,
+                p2: password as u8,
+                data: Vec::new(),
                 le: None,
                 extended: false,
             },
@@ -383,6 +652,28 @@ impl Client {
         old_pin: &[u8],
         new_pin: &[u8],
     ) -> Result<(), Error> {
+        self.change_password(connector, PasswordRef::UserSignature, old_pin, new_pin)
+    }
+
+    pub(crate) fn change_admin_pin(
+        &self,
+        connector: &dyn Connector,
+        old_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), Error> {
+        self.change_password(connector, PasswordRef::Admin, old_pin, new_pin)
+    }
+
+    pub(crate) fn change_password(
+        &self,
+        connector: &dyn Connector,
+        password: PasswordRef,
+        old_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), Error> {
+        if password == PasswordRef::UserOperations {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
         if old_pin.is_empty() || new_pin.is_empty() {
             return Err(CKR_PIN_LEN_RANGE.into());
         }
@@ -395,28 +686,79 @@ impl Client {
                 cla: 0,
                 ins: INS_CHANGE_REFERENCE_DATA,
                 p1: 0,
-                p2: 0x81,
+                p2: password as u8,
                 data,
                 le: None,
-                extended: old_pin.len() + new_pin.len() > 255,
+                extended: false,
             },
         )?;
         Ok(())
     }
 
     pub(crate) fn unverify(&self, connector: &dyn Connector, extended: bool) {
-        let _ = self.transmit(
+        let password = if extended {
+            PasswordRef::UserOperations
+        } else {
+            PasswordRef::UserSignature
+        };
+        let _ = self.unverify_password(connector, password);
+    }
+
+    pub(crate) fn unverify_password(
+        &self,
+        connector: &dyn Connector,
+        password: PasswordRef,
+    ) -> Result<(), Error> {
+        self.transmit(
             connector,
             CommandApdu {
                 cla: 0,
                 ins: INS_VERIFY,
                 p1: 0xff,
-                p2: if extended { 0x82 } else { 0x81 },
+                p2: password as u8,
                 data: Vec::new(),
                 le: None,
                 extended: false,
             },
-        );
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn reset_user_pin(
+        &self,
+        connector: &dyn Connector,
+        new_pin: &[u8],
+        reset_code: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        if new_pin.is_empty() {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        let mut data = Vec::new();
+        let p1 = if let Some(reset_code) = reset_code {
+            if reset_code.is_empty() {
+                return Err(CKR_PIN_LEN_RANGE.into());
+            }
+            data.reserve(reset_code.len() + new_pin.len());
+            data.extend_from_slice(reset_code);
+            0x00
+        } else {
+            data.reserve(new_pin.len());
+            0x02
+        };
+        data.extend_from_slice(new_pin);
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_RESET_RETRY_COUNTER,
+                p1,
+                p2: PasswordRef::UserSignature as u8,
+                extended: false,
+                data,
+                le: None,
+            },
+        )?;
+        Ok(())
     }
 
     pub(crate) fn sign(
@@ -428,7 +770,9 @@ impl Client {
         let (ins, p1, p2) = match key_ref {
             KeyRef::Authentication => (INS_INTERNAL_AUTHENTICATE, 0, 0),
             KeyRef::Signature => (INS_PSO, 0x9e, 0x9a),
-            KeyRef::Decipher => return Err(crate::CKR_KEY_FUNCTION_NOT_PERMITTED.into()),
+            KeyRef::Decipher | KeyRef::Attestation => {
+                return Err(crate::CKR_KEY_FUNCTION_NOT_PERMITTED.into())
+            }
         };
         let response = self.transmit(
             connector,
@@ -439,7 +783,7 @@ impl Client {
                 p2,
                 data: input.to_vec(),
                 le: Some(256),
-                extended: input.len() > 255,
+                extended: false,
             },
         )?;
         Ok(response)
@@ -463,7 +807,7 @@ impl Client {
                 p2: 0x86,
                 data,
                 le: Some(256),
-                extended: input.len() >= 255,
+                extended: false,
             },
         )?;
         Ok(response)
@@ -490,11 +834,70 @@ impl Client {
         )
     }
 
+    pub(crate) fn encipher(
+        &self,
+        connector: &dyn Connector,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        if plaintext.is_empty() || !plaintext.len().is_multiple_of(16) {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let response_length = plaintext
+            .len()
+            .checked_add(1)
+            .and_then(|length| u32::try_from(length).ok())
+            .filter(|length| *length <= 65_536)
+            .ok_or(CKR_DATA_LEN_RANGE)?;
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_PSO,
+                p1: 0x86,
+                p2: 0x80,
+                data: plaintext.to_vec(),
+                le: Some(response_length.max(256)),
+                extended: false,
+            },
+        )
+    }
+
+    pub(crate) fn manage_security_environment(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+        operation: SecurityOperation,
+    ) -> Result<(), Error> {
+        if !matches!(key_ref, KeyRef::Decipher | KeyRef::Authentication) {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_MANAGE_SECURITY_ENVIRONMENT,
+                p1: 0x41,
+                p2: match operation {
+                    SecurityOperation::Authenticate => 0xa4,
+                    SecurityOperation::Decipher => 0xb8,
+                },
+                data: vec![0x83, 0x01, key_ref as u8],
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn challenge(
         &self,
         connector: &dyn Connector,
         length: usize,
     ) -> Result<Vec<u8>, Error> {
+        let length = u32::try_from(length)
+            .ok()
+            .filter(|length| (1..=65_536).contains(length))
+            .ok_or(CKR_DATA_LEN_RANGE)?;
         let response = self.transmit(
             connector,
             CommandApdu {
@@ -503,11 +906,11 @@ impl Client {
                 p1: 0,
                 p2: 0,
                 data: Vec::new(),
-                le: Some(length as u32),
-                extended: length > 256,
+                le: Some(length),
+                extended: false,
             },
         )?;
-        if response.len() != length {
+        if response.len() != length as usize {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(response)
@@ -522,6 +925,47 @@ impl Client {
                 p1: (tag >> 8) as u8,
                 p2: tag as u8,
                 data: Vec::new(),
+                le: Some(256),
+                extended: false,
+            },
+        )
+    }
+
+    pub(crate) fn get_next_data(
+        &self,
+        connector: &dyn Connector,
+        tag: u16,
+    ) -> Result<Vec<u8>, Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_GET_NEXT_DATA,
+                p1: (tag >> 8) as u8,
+                p2: tag as u8,
+                data: Vec::new(),
+                le: Some(256),
+                extended: false,
+            },
+        )
+    }
+
+    pub(crate) fn get_data_odd(
+        &self,
+        connector: &dyn Connector,
+        p1: u8,
+        p2: u8,
+        tag_list: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let data = encode_tlv(0x5c, tag_list)?;
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_GET_DATA_ODD,
+                p1,
+                p2,
+                data,
                 le: Some(256),
                 extended: false,
             },
@@ -543,15 +987,138 @@ impl Client {
                 p2: tag as u8,
                 data: value.to_vec(),
                 le: None,
-                extended: value.len() > 255,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn put_data_odd(
+        &self,
+        connector: &dyn Connector,
+        p1: u8,
+        p2: u8,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_PUT_DATA_ODD,
+                p1,
+                p2,
+                data: value.to_vec(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn import_private_key(
+        &self,
+        connector: &dyn Connector,
+        private_key_template: &[u8],
+    ) -> Result<(), Error> {
+        self.put_data_odd(connector, 0x3f, 0xff, private_key_template)
+    }
+
+    pub(crate) fn firmware_version(
+        &self,
+        connector: &dyn Connector,
+    ) -> Result<(u8, u8, u8), Error> {
+        let encoded = self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_GET_VERSION,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: Some(256),
+                extended: false,
+            },
+        )?;
+        match encoded.as_slice() {
+            [major, minor, patch] => Ok((bcd(*major), bcd(*minor), bcd(*patch))),
+            _ => Err(CKR_DATA_INVALID.into()),
+        }
+    }
+
+    pub(crate) fn set_pin_attempts(
+        &self,
+        connector: &dyn Connector,
+        user: u8,
+        reset: u8,
+        admin: u8,
+    ) -> Result<(), Error> {
+        if !(1..=99).contains(&user) || !(1..=99).contains(&reset) || !(1..=99).contains(&admin) {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_SET_PIN_RETRIES,
+                p1: 0,
+                p2: 0,
+                data: vec![user, reset, admin],
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn attest_key(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+    ) -> Result<(), Error> {
+        if key_ref == KeyRef::Attestation {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0x80,
+                ins: INS_GET_ATTESTATION,
+                p1: key_ref as u8,
+                p2: 0,
+                data: Vec::new(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn terminate(&self, connector: &dyn Connector) -> Result<(), Error> {
+        self.command_without_data(connector, INS_TERMINATE_DF)
+    }
+
+    pub(crate) fn activate(&self, connector: &dyn Connector) -> Result<(), Error> {
+        self.command_without_data(connector, INS_ACTIVATE_FILE)
+    }
+
+    fn command_without_data(&self, connector: &dyn Connector, ins: u8) -> Result<(), Error> {
+        self.transmit(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins,
+                p1: 0,
+                p2: 0,
+                data: Vec::new(),
+                le: None,
+                extended: false,
             },
         )?;
         Ok(())
     }
 
     fn transmit(&self, connector: &dyn Connector, command: CommandApdu) -> Result<Vec<u8>, Error> {
-        let response =
-            Scp03Session::collect_response_chain(connector, transmit(connector, &command)?)?;
+        let response = connector.send_apdu(&command)?;
         require_success(response.status, &command)?;
         Ok(response.data)
     }
@@ -563,6 +1130,10 @@ fn require_success(status: u16, command: &CommandApdu) -> Result<(), Error> {
         0x6983 => Err(CKR_PIN_LOCKED.into()),
         0x6982 | 0x6985 => Err(CKR_USER_NOT_LOGGED_IN.into()),
         0x63c0..=0x63cf => Err(CKR_PIN_INCORRECT.into()),
+        0x6700 => Err(CKR_DATA_LEN_RANGE.into()),
+        0x6a80 | 0x6a88 => Err(CKR_DATA_INVALID.into()),
+        0x6a86 | 0x6b00 => Err(CKR_ARGUMENTS_BAD.into()),
+        0x6d00 => Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         _ => {
             log!(
                 1,
@@ -614,15 +1185,51 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
             algorithms.push((key_ref, parse_algorithm(value)?));
         }
     }
+    if let Some(value) = field_value(&discretionary, KeyRef::Attestation.algorithm_tag()) {
+        if let Ok(algorithm) = parse_algorithm(value) {
+            algorithms.push((KeyRef::Attestation, algorithm));
+        }
+    }
+    let key_statuses = field_value(&discretionary, DataObject::KeyInformation.tag().into())
+        .map(parse_key_information)
+        .transpose()?
+        .unwrap_or_default();
     Ok(ApplicationInfo {
         version,
         serial,
         pin_policy: pin_status[0],
         pin_min: 6,
         pin_max: pin_status[1],
+        admin_pin_min: 8,
+        admin_pin_max: pin_status[3],
         kdf: None,
         algorithms,
+        key_statuses,
     })
+}
+
+fn parse_key_information(encoded: &[u8]) -> Result<Vec<(KeyRef, KeyStatus)>, Error> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    encoded
+        .chunks_exact(2)
+        .filter_map(|entry| {
+            let key_ref = match entry[0] {
+                0x01 => KeyRef::Signature,
+                0x02 => KeyRef::Decipher,
+                0x03 => KeyRef::Authentication,
+                0x81 => KeyRef::Attestation,
+                _ => return None,
+            };
+            Some(match entry[1] {
+                0 => Ok((key_ref, KeyStatus::None)),
+                1 => Ok((key_ref, KeyStatus::Generated)),
+                2 => Ok((key_ref, KeyStatus::Imported)),
+                _ => Err(CKR_DATA_INVALID.into()),
+            })
+        })
+        .collect()
 }
 
 fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
@@ -656,10 +1263,19 @@ fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
     if user_salt.is_empty() {
         return Err(CKR_DATA_INVALID.into());
     }
+    let reset_salt = field_value(&fields, 0x85).map(<[u8]>::to_vec);
+    let admin_salt = field_value(&fields, 0x86).map(<[u8]>::to_vec);
+    if reset_salt.as_ref().is_some_and(Vec::is_empty)
+        || admin_salt.as_ref().is_some_and(Vec::is_empty)
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
     Ok(Some(KdfParams {
         hash_algorithm,
         iteration_count: u32::from_be_bytes(iteration_bytes.try_into().unwrap()),
         user_salt,
+        reset_salt,
+        admin_salt,
     }))
 }
 

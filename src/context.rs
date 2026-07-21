@@ -384,6 +384,7 @@ impl Context {
                         card: RefCell::new(None),
                         firmware_version: Cell::new(None),
                         serial_number: OnceLock::new(),
+                        apdu_capabilities: Cell::new(ApduCapabilities::SHORT_ONLY),
                     };
                     let name = connector.name();
                     log!(2, "{}", name);
