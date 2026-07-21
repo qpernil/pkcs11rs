@@ -2,8 +2,8 @@
 
 use crate::{
     error::Error, CommandApdu, Connector, ResponseApdu, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE,
+    CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     memcmp,
@@ -18,6 +18,8 @@ const INS_VERIFY: u8 = 0x20;
 const INS_AUTHENTICATE: u8 = 0x87;
 const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_GET_DATA: u8 = 0xcb;
+const INS_PUT_DATA: u8 = 0xdb;
+const INS_IMPORT_KEY: u8 = 0xfe;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
@@ -239,6 +241,30 @@ pub(crate) enum MetadataPublicKey {
     Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
     Ec(Vec<u8>),
     Raw(Vec<u8>),
+}
+
+pub(crate) struct PrivateKeyImport {
+    pub(crate) algorithm: Algorithm,
+    pub(crate) components: Vec<(u32, Zeroizing<Vec<u8>>)>,
+    pub(crate) public_key: MetadataPublicKey,
+}
+
+impl std::fmt::Debug for PrivateKeyImport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PrivateKeyImport")
+            .field("algorithm", &self.algorithm)
+            .field(
+                "components",
+                &self
+                    .components
+                    .iter()
+                    .map(|(tag, value)| (*tag, value.len()))
+                    .collect::<Vec<_>>(),
+            )
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 pub(crate) fn parse_metadata_public_key(
@@ -548,6 +574,80 @@ impl Client {
         let fields = parse_tlvs(&response)?;
         let public_key = field(&fields, 0x7f49).ok_or(CKR_DATA_INVALID)?;
         parse_metadata_public_key(algorithm, public_key)
+    }
+
+    pub(crate) fn import_private_key(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+        key: &PrivateKeyImport,
+        pin_policy: u8,
+        touch_policy: u8,
+    ) -> Result<(), Error> {
+        if slot == Slot::Attestation || pin_policy > 5 || touch_policy > 3 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let element_length = match key.algorithm {
+            Algorithm::Rsa1024 => 64,
+            Algorithm::Rsa2048 => 128,
+            Algorithm::Rsa3072 => 192,
+            Algorithm::Rsa4096 => 256,
+            Algorithm::EccP256 | Algorithm::Ed25519 | Algorithm::X25519 => 32,
+            Algorithm::EccP384 => 48,
+        };
+        let mut request = Zeroizing::new(Vec::new());
+        for (tag, component) in &key.components {
+            if component.is_empty() || component.len() > element_length {
+                return Err(CKR_KEY_SIZE_RANGE.into());
+            }
+            let mut padded = Zeroizing::new(vec![0; element_length]);
+            padded[element_length - component.len()..].copy_from_slice(component);
+            request.extend_from_slice(&encode_tlv(*tag, &padded)?);
+        }
+        if pin_policy != 0 {
+            request.extend_from_slice(&encode_tlv(0xaa, &[pin_policy])?);
+        }
+        if touch_policy != 0 {
+            request.extend_from_slice(&encode_tlv(0xab, &[touch_policy])?);
+        }
+        self.command(
+            connector,
+            INS_IMPORT_KEY,
+            key.algorithm as u8,
+            slot as u8,
+            &request,
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn put_data(
+        &self,
+        connector: &dyn Connector,
+        object_id: u32,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        if object_id > 0x00ff_ffff {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let bytes = object_id.to_be_bytes();
+        let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
+        let mut request = encode_tlv(0x5c, &bytes[first..])?;
+        request.extend_from_slice(&encode_tlv(0x53, value)?);
+        self.command(connector, INS_PUT_DATA, 0x3f, 0xff, &request)?;
+        Ok(())
+    }
+
+    pub(crate) fn put_certificate(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+        certificate: &[u8],
+    ) -> Result<(), Error> {
+        openssl::x509::X509::from_der(certificate).map_err(|_| Error::from(CKR_DATA_INVALID))?;
+        let mut object = encode_tlv(0x70, certificate)?;
+        object.extend_from_slice(&encode_tlv(0x71, &[0])?);
+        object.extend_from_slice(&encode_tlv(0xfe, &[])?);
+        self.put_data(connector, slot.certificate_object(), &object)
     }
 
     pub(crate) fn certificate(
