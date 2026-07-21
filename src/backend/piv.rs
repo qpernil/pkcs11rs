@@ -4,6 +4,7 @@ struct PivSlot {
     application_aid: Vec<u8>,
     slot_description: Option<String>,
     authenticated: Rc<Cell<bool>>,
+    management_authenticated: Rc<Cell<bool>>,
     version: piv::Version,
     serial: String,
     keys: Vec<PivKey>,
@@ -292,6 +293,7 @@ impl PivSlot {
             application_aid,
             slot_description: None,
             authenticated: Rc::new(Cell::new(false)),
+            management_authenticated: Rc::new(Cell::new(false)),
             version,
             serial,
             keys: Vec::new(),
@@ -385,10 +387,12 @@ impl Slot for PivSlot {
             flags,
             connector: self.connector.clone(),
             authenticated: self.authenticated.clone(),
+            management_authenticated: self.management_authenticated.clone(),
         })
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
+        self.management_authenticated.set(false);
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
@@ -412,8 +416,28 @@ impl Slot for PivSlot {
         }
         result
     }
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.management_authenticated.set(false);
+        let key_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        let key = parse_hex(key_text).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
+            self.update_device_info(info);
+            PivClient.authenticate_management_key(self.connector.as_ref(), &key)?;
+            self.management_authenticated.set(true);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.connector.clear_secure_channel();
+        }
+        result
+    }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
+        self.management_authenticated.set(false);
         let result = PivClient.select(self.connector.as_ref(), &self.application_aid);
         if let Ok(info) = result.as_ref() {
             self.version = info.version;
@@ -429,6 +453,7 @@ impl Slot for PivSlot {
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
+        self.management_authenticated.set(false);
         let info = PivClient.select(self.connector.as_ref(), &self.application_aid)?;
         self.update_device_info(info);
         self.keys.clear();
@@ -611,10 +636,11 @@ impl Slot for PivSlot {
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
+        self.management_authenticated.set(false);
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get()
+        self.authenticated.get() || self.management_authenticated.get()
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
@@ -823,6 +849,7 @@ struct PivSession {
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     authenticated: Rc<Cell<bool>>,
+    management_authenticated: Rc<Cell<bool>>,
 }
 
 impl Session for PivSession {
@@ -836,6 +863,9 @@ impl Session for PivSession {
         self.flags
     }
     fn get_session_info(&self) -> Result<(), Error> {
+        if self.management_authenticated.get() {
+            return Ok(());
+        }
         let retries = PivClient.pin_retries(self.connector.as_ref())?;
         if self.authenticated.get() && retries != u8::MAX {
             self.authenticated.set(false);
