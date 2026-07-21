@@ -233,6 +233,35 @@ fn generate_key_pair(
     let private_handle = as_mut(private_key)?;
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        if ctx.get_slot(slot_id)?.is_piv() {
+            let generation = piv_generate_key_pair_parameters(
+                mechanism,
+                public_template,
+                private_template,
+            )?;
+            validate_new_object_access(&generation.public_object, flags, logged_in)?;
+            validate_new_object_access(&generation.private_object, flags, logged_in)?;
+            ctx._get_slot_mut(slot_id)?.piv_generate_key_pair(
+                generation.slot,
+                generation.algorithm,
+                generation.pin_policy,
+                generation.touch_policy,
+            )?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+            *private_handle = find_piv_key_handle(
+                ctx,
+                slot_id,
+                generation.slot,
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            )?;
+            *public_handle = find_piv_key_handle(
+                ctx,
+                slot_id,
+                generation.slot,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            )?;
+            return Ok(());
+        }
         if !ctx.get_slot(slot_id)?.is_yubihsm() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
@@ -267,6 +296,156 @@ fn generate_key_pair(
             .ok_or(CKR_DEVICE_ERROR)?;
         Ok(())
     })
+}
+
+struct PivGeneration {
+    slot: piv::Slot,
+    algorithm: piv::Algorithm,
+    pin_policy: u8,
+    touch_policy: u8,
+    public_object: TokenObject,
+    private_object: TokenObject,
+}
+
+fn piv_policy_attribute(
+    templ: &[CK_ATTRIBUTE],
+    attribute_type: CK_ATTRIBUTE_TYPE,
+    maximum: CK_ULONG,
+) -> Result<u8, Error> {
+    let Some(attribute) = template_attribute(templ, attribute_type) else {
+        return Ok(0);
+    };
+    let value = read_ulong_template_attribute(attribute).map_err(Error::from)?;
+    if value > maximum {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    Ok(value as u8)
+}
+
+fn piv_key_pair_object(
+    templ: &[CK_ATTRIBUTE],
+    class: CK_OBJECT_CLASS,
+    key_type: CK_KEY_TYPE,
+) -> Result<TokenObject, Error> {
+    let filtered = templ
+        .iter()
+        .filter(|attribute| {
+            !matches!(
+                attribute.type_,
+                CKA_YUBICO_TOUCH_POLICY | CKA_YUBICO_PIN_POLICY
+            )
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    key_pair_object(&filtered, class, key_type)
+}
+
+fn piv_generate_key_pair_parameters(
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<PivGeneration, Error> {
+    if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    validate_unique_template(public_template)?;
+    validate_unique_template(private_template)?;
+    let (key_type, algorithm) = match mechanism.mechanism {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let bits_attribute =
+                template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
+            if let Some(exponent) =
+                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+            {
+                if read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1] {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+            let algorithm = match bits {
+                1024 => piv::Algorithm::Rsa1024,
+                2048 => piv::Algorithm::Rsa2048,
+                3072 => piv::Algorithm::Rsa3072,
+                4096 => piv::Algorithm::Rsa4096,
+                _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+            };
+            (CKK_RSA as CK_KEY_TYPE, algorithm)
+        }
+        x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let params_attribute =
+                template_attribute(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let params = read_attribute_value(params_attribute).map_err(Error::from)?;
+            let algorithm = match params.as_slice() {
+                [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => {
+                    piv::Algorithm::EccP256
+                }
+                [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => piv::Algorithm::EccP384,
+                _ => return Err(CKR_CURVE_NOT_SUPPORTED.into()),
+            };
+            (CKK_EC as CK_KEY_TYPE, algorithm)
+        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            (CKK_EC_EDWARDS as CK_KEY_TYPE, piv::Algorithm::Ed25519)
+        }
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            (CKK_EC_MONTGOMERY as CK_KEY_TYPE, piv::Algorithm::X25519)
+        }
+        _ => return Err(CKR_MECHANISM_INVALID.into()),
+    };
+    let public_object = piv_key_pair_object(
+        public_template,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    let private_object = piv_key_pair_object(
+        private_template,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    if !public_object.token || !private_object.token {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let id = if private_object.id.is_empty() {
+        &public_object.id
+    } else {
+        &private_object.id
+    };
+    if id.len() != 1 || (!public_object.id.is_empty() && public_object.id != *id) {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let slot = piv::Slot::from_id(id[0]).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+    if slot == piv::Slot::Attestation {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    let pin_policy = piv_policy_attribute(private_template, CKA_YUBICO_PIN_POLICY, 5)?;
+    let touch_policy = piv_policy_attribute(private_template, CKA_YUBICO_TOUCH_POLICY, 3)?;
+    Ok(PivGeneration {
+        slot,
+        algorithm,
+        pin_policy,
+        touch_policy,
+        public_object,
+        private_object,
+    })
+}
+
+fn find_piv_key_handle(
+    ctx: &Context,
+    slot_id: CK_SLOT_ID,
+    piv_slot: piv::Slot,
+    class: CK_OBJECT_CLASS,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    ctx.objects
+        .iter()
+        .find(|(_, object)| {
+            object.slot_id == Some(slot_id)
+                && object.class == class
+                && object.id == [piv_slot as u8]
+        })
+        .map(|(handle, _)| *handle)
+        .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }
 
 fn key_pair_object(

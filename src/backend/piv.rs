@@ -642,6 +642,42 @@ impl Slot for PivSlot {
     fn login_is_active(&self) -> bool {
         self.authenticated.get() || self.management_authenticated.get()
     }
+    fn is_piv(&self) -> bool {
+        true
+    }
+    fn piv_generate_key_pair(
+        &mut self,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        pin_policy: u8,
+        touch_policy: u8,
+    ) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !piv_algorithm_supported(self.reported_version(), algorithm) {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        let public_key = PivClient.generate_key_pair(
+            self.connector.as_ref(),
+            slot,
+            algorithm,
+            pin_policy,
+            touch_policy,
+        )?;
+        let public_key = piv_public_key_from_metadata(algorithm, public_key)?;
+        self.keys.retain(|key| key.slot != slot);
+        self.keys.push(PivKey {
+            slot,
+            algorithm,
+            public_key,
+            attestation: Rc::new(RefCell::new(None)),
+            attestation_attempted: Rc::new(Cell::new(false)),
+            pin_policy,
+            touch_policy,
+        });
+        Ok(())
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {

@@ -16,6 +16,7 @@ pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
 const INS_AUTHENTICATE: u8 = 0x87;
+const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_GET_DATA: u8 = 0xcb;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
@@ -183,6 +184,10 @@ impl Slot {
 
     pub(crate) fn all() -> &'static [Self] {
         &Self::ALL
+    }
+
+    pub(crate) fn from_id(id: u8) -> Option<Self> {
+        Self::ALL.iter().copied().find(|slot| *slot as u8 == id)
     }
 
     pub(crate) fn is_retired(self) -> bool {
@@ -517,6 +522,34 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) fn generate_key_pair(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+        algorithm: Algorithm,
+        pin_policy: u8,
+        touch_policy: u8,
+    ) -> Result<MetadataPublicKey, Error> {
+        if slot == Slot::Attestation {
+            return Err(CKR_FUNCTION_REJECTED.into());
+        }
+        if pin_policy > 5 || touch_policy > 3 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let mut attributes = encode_tlv(0x80, &[algorithm as u8])?;
+        if pin_policy != 0 {
+            attributes.extend_from_slice(&encode_tlv(0xaa, &[pin_policy])?);
+        }
+        if touch_policy != 0 {
+            attributes.extend_from_slice(&encode_tlv(0xab, &[touch_policy])?);
+        }
+        let request = encode_tlv(0xac, &attributes)?;
+        let response = self.command(connector, INS_GENERATE_ASYMMETRIC, 0, slot as u8, &request)?;
+        let fields = parse_tlvs(&response)?;
+        let public_key = field(&fields, 0x7f49).ok_or(CKR_DATA_INVALID)?;
+        parse_metadata_public_key(algorithm, public_key)
+    }
+
     pub(crate) fn certificate(
         &self,
         connector: &dyn Connector,
@@ -770,11 +803,13 @@ fn parse_length(encoded: &[u8]) -> Result<(usize, usize), Error> {
 }
 
 fn encode_tlv(tag: u32, value: &[u8]) -> Result<Vec<u8>, Error> {
-    if tag > 0xff || value.len() > u16::MAX as usize {
+    if tag > 0x00ff_ffff || value.len() > u16::MAX as usize {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let mut encoded = Vec::with_capacity(4 + value.len());
-    encoded.push(tag as u8);
+    let tag_bytes = tag.to_be_bytes();
+    let first = tag_bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
+    encoded.extend_from_slice(&tag_bytes[first..]);
     if value.len() < 0x80 {
         encoded.push(value.len() as u8);
     } else if value.len() <= 0xff {

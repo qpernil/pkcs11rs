@@ -346,6 +346,41 @@ fn requests_dynamic_attestation_certificate() {
 }
 
 #[test]
+fn generates_a_piv_key_pair_with_requested_policies() {
+    let public_key = encode_tlv(0x86, &[0x04; 65]).unwrap();
+    let response_data = encode_tlv(0x7f49, &public_key).unwrap();
+    let connector = ScriptedConnector::new(vec![response(&response_data, STATUS_SUCCESS)]);
+    assert_eq!(
+        Client
+            .generate_key_pair(&connector, Slot::Signature, Algorithm::EccP256, 3, 2,)
+            .unwrap(),
+        MetadataPublicKey::Ec(vec![0x04; 65])
+    );
+    assert_eq!(
+        connector.commands.borrow()[0],
+        [
+            0,
+            INS_GENERATE_ASYMMETRIC,
+            0,
+            Slot::Signature as u8,
+            11,
+            0xac,
+            9,
+            0x80,
+            1,
+            Algorithm::EccP256 as u8,
+            0xaa,
+            1,
+            3,
+            0xab,
+            1,
+            2,
+            0
+        ]
+    );
+}
+
+#[test]
 fn performs_x25519_key_agreement_with_general_authenticate() {
     let response_data = encode_tlv(0x7c, &encode_tlv(0x82, &[0xa5; 32]).unwrap()).unwrap();
     let connector = ScriptedConnector::new(vec![response(&response_data, STATUS_SUCCESS)]);
