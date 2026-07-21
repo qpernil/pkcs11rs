@@ -1081,6 +1081,7 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
             attestation_attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
             pin_policy: 0,
             touch_policy: 0,
+            origin: crate::piv::ORIGIN_GENERATED,
         }],
         certificates: Vec::new(),
         data_objects: Vec::new(),

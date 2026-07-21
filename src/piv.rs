@@ -12,6 +12,8 @@ use openssl::{
 use zeroize::Zeroizing;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
+pub(crate) const ORIGIN_GENERATED: u8 = 1;
+pub(crate) const ORIGIN_IMPORTED: u8 = 2;
 
 pub(crate) const DATA_OBJECTS: &[(u32, &str)] = &[
     (0x5f_c107, "Card capability container"),

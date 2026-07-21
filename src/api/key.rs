@@ -387,10 +387,16 @@ fn piv_generate_key_pair_parameters(
             (CKK_EC as CK_KEY_TYPE, algorithm)
         }
         x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            (CKK_EC_EDWARDS as CK_KEY_TYPE, piv::Algorithm::Ed25519)
+            (
+                CKK_EC_EDWARDS as CK_KEY_TYPE,
+                piv_generation_25519_algorithm(public_template, piv::Algorithm::Ed25519)?,
+            )
         }
         x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            (CKK_EC_MONTGOMERY as CK_KEY_TYPE, piv::Algorithm::X25519)
+            (
+                CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+                piv_generation_25519_algorithm(public_template, piv::Algorithm::X25519)?,
+            )
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
@@ -429,6 +435,19 @@ fn piv_generate_key_pair_parameters(
         public_object,
         private_object,
     })
+}
+
+fn piv_generation_25519_algorithm(
+    public_template: &[CK_ATTRIBUTE],
+    algorithm: piv::Algorithm,
+) -> Result<piv::Algorithm, Error> {
+    let attribute = template_attribute(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let parameters = read_attribute_value(attribute).map_err(Error::from)?;
+    if piv_ec_parameters(algorithm) != Some(parameters.as_slice()) {
+        return Err(CKR_CURVE_NOT_SUPPORTED.into());
+    }
+    Ok(algorithm)
 }
 
 fn find_piv_key_handle(

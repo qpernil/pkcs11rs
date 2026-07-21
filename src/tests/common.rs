@@ -1952,6 +1952,69 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
     );
 }
 
+#[cfg(feature = "abi-tests")]
+#[test]
+fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
+    let mut slot = crate::abi_test_piv_slot().unwrap();
+    let objects = crate::Slot::token_objects(&slot, 7).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        private.attribute_value(CKA_PRIVATE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert_eq!(
+        private.attribute_value(CKA_LOCAL as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    assert_eq!(
+        private.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+        Some((CKM_RSA_PKCS_KEY_PAIR_GEN as CK_ULONG).to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        private.attribute_value(crate::CKA_YUBICO_PIN_POLICY),
+        Some(2u64.to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        private.attribute_value(crate::CKA_YUBICO_TOUCH_POLICY),
+        Some(1u64.to_ne_bytes().to_vec())
+    );
+
+    slot.keys[0].origin = crate::piv::ORIGIN_IMPORTED;
+    let imported = crate::Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        imported.attribute_value(CKA_LOCAL as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
+    assert_eq!(
+        imported.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
+        Some((CK_UNAVAILABLE_INFORMATION as CK_ULONG).to_ne_bytes().to_vec())
+    );
+
+    slot.version = crate::piv::Version {
+        major: 5,
+        minor: 6,
+        patch: 0,
+    };
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    assert!(!mechanisms
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
+    let rsa_generation = mechanisms
+        .iter()
+        .find(|mechanism| {
+            mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+        })
+        .unwrap();
+    assert_eq!((rsa_generation.min_key_size, rsa_generation.max_key_size), (1024, 2048));
+}
+
 #[test]
 fn piv_ecdsa_signatures_are_converted_to_fixed_width_values() {
     let der = [0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02];
