@@ -15,6 +15,8 @@ pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 
 const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
+const INS_CHANGE_REFERENCE: u8 = 0x24;
+const INS_RESET_RETRY: u8 = 0x2c;
 const INS_AUTHENTICATE: u8 = 0x87;
 const INS_GENERATE_ASYMMETRIC: u8 = 0x47;
 const INS_GET_DATA: u8 = 0xcb;
@@ -25,6 +27,8 @@ const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
 const INS_MOVE_KEY: u8 = 0xf6;
 const INS_ATTEST: u8 = 0xf9;
+const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
+const INS_SET_PIN_RETRIES: u8 = 0xfa;
 const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
 
@@ -447,6 +451,70 @@ impl Client {
             .map(|_| ())
     }
 
+    pub(crate) fn change_pin(
+        &self,
+        connector: &dyn Connector,
+        old_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), Error> {
+        self.change_reference(connector, INS_CHANGE_REFERENCE, 0x80, old_pin, new_pin)
+    }
+
+    pub(crate) fn change_puk(
+        &self,
+        connector: &dyn Connector,
+        old_puk: &[u8],
+        new_puk: &[u8],
+    ) -> Result<(), Error> {
+        self.change_reference(connector, INS_CHANGE_REFERENCE, 0x81, old_puk, new_puk)
+    }
+
+    pub(crate) fn unblock_pin(
+        &self,
+        connector: &dyn Connector,
+        puk: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), Error> {
+        self.change_reference(connector, INS_RESET_RETRY, 0x80, puk, new_pin)
+    }
+
+    fn change_reference(
+        &self,
+        connector: &dyn Connector,
+        instruction: u8,
+        reference: u8,
+        old_value: &[u8],
+        new_value: &[u8],
+    ) -> Result<(), Error> {
+        if !(6..=8).contains(&old_value.len()) || !(6..=8).contains(&new_value.len()) {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        let mut request = Zeroizing::new(vec![0xff; 16]);
+        request[..old_value.len()].copy_from_slice(old_value);
+        request[8..8 + new_value.len()].copy_from_slice(new_value);
+        self.command(connector, instruction, 0, reference, &request)?;
+        Ok(())
+    }
+
+    pub(crate) fn set_pin_retries(
+        &self,
+        connector: &dyn Connector,
+        pin_retries: u8,
+        puk_retries: u8,
+    ) -> Result<(), Error> {
+        if pin_retries == 0 || puk_retries == 0 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        self.command(
+            connector,
+            INS_SET_PIN_RETRIES,
+            pin_retries,
+            puk_retries,
+            &[],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn pin_retries(&self, connector: &dyn Connector) -> Result<u8, Error> {
         let response = self.transmit(
             connector,
@@ -546,6 +614,32 @@ impl Client {
         if !memcmp::eq(card_cryptogram, &expected) {
             return Err(CKR_PIN_INCORRECT.into());
         }
+        Ok(())
+    }
+
+    pub(crate) fn set_management_key(
+        &self,
+        connector: &dyn Connector,
+        new_key: &[u8],
+    ) -> Result<(), Error> {
+        let metadata = self.metadata_for_reference(connector, MANAGEMENT_KEY_REFERENCE)?;
+        let algorithm = metadata
+            .algorithm
+            .and_then(ManagementAlgorithm::from_id)
+            .ok_or(CKR_DATA_INVALID)?;
+        if new_key.len() != algorithm.key_length() {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        let touch_policy = metadata.touch_policy.unwrap_or(0);
+        let p2 = match touch_policy {
+            0 | 1 => 0xff,
+            2 => 0xfe,
+            _ => return Err(CKR_DATA_INVALID.into()),
+        };
+        let mut request = Zeroizing::new(vec![algorithm as u8, MANAGEMENT_KEY_REFERENCE]);
+        request.push(new_key.len() as u8);
+        request.extend_from_slice(new_key);
+        self.command(connector, INS_SET_MANAGEMENT_KEY, 0xff, p2, &request)?;
         Ok(())
     }
 
