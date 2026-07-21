@@ -212,6 +212,62 @@ fn pads_pin_and_reports_retry_failures() {
 }
 
 #[test]
+fn changes_and_unblocks_piv_pin_references() {
+    let connector = ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+    ]);
+    Client.change_pin(&connector, b"123456", b"654321").unwrap();
+    Client
+        .change_puk(&connector, b"12345678", b"87654321")
+        .unwrap();
+    Client
+        .unblock_pin(&connector, b"87654321", b"123456")
+        .unwrap();
+    Client.set_pin_retries(&connector, 5, 4).unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(&commands[0][..4], &[0, INS_CHANGE_REFERENCE, 0, 0x80]);
+    assert_eq!(&commands[1][..4], &[0, INS_CHANGE_REFERENCE, 0, 0x81]);
+    assert_eq!(&commands[2][..4], &[0, INS_RESET_RETRY, 0, 0x80]);
+    assert_eq!(commands[3], [0, INS_SET_PIN_RETRIES, 5, 4, 0]);
+    assert_eq!(&commands[0][5..13], b"123456\xff\xff");
+    assert_eq!(&commands[0][13..21], b"654321\xff\xff");
+}
+
+#[test]
+fn rotates_the_management_key_without_changing_its_policy() {
+    let connector = ScriptedConnector::new(vec![
+        response(
+            &[
+                0x01,
+                0x01,
+                ManagementAlgorithm::Aes128 as u8,
+                0x02,
+                0x02,
+                0,
+                2,
+            ],
+            STATUS_SUCCESS,
+        ),
+        response(&[], STATUS_SUCCESS),
+    ]);
+    Client.set_management_key(&connector, &[0x22; 16]).unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(&commands[0][..4], &[0, INS_GET_METADATA, 0, 0x9b]);
+    assert_eq!(
+        &commands[1][..5],
+        &[0, INS_SET_MANAGEMENT_KEY, 0xff, 0xfe, 19]
+    );
+    assert_eq!(
+        &commands[1][5..8],
+        &[ManagementAlgorithm::Aes128 as u8, 0x9b, 16]
+    );
+    assert_eq!(&commands[1][8..24], &[0x22; 16]);
+}
+
+#[test]
 fn follows_response_chaining_and_retries_wrong_le() {
     let connector = ScriptedConnector::new(vec![
         response(&[], 0x6c03),

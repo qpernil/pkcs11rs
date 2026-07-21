@@ -435,6 +435,36 @@ impl Slot for PivSlot {
         }
         result
     }
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = if let Some(old_puk) = old_pin.strip_prefix(b"puk:") {
+            if let Some(new_pin) = new_pin.strip_prefix(b"pin:") {
+                PivClient.unblock_pin(self.connector.as_ref(), old_puk, new_pin)
+            } else {
+                let new_puk = new_pin.strip_prefix(b"puk:").unwrap_or(new_pin);
+                PivClient.change_puk(self.connector.as_ref(), old_puk, new_puk)
+            }
+        } else {
+            PivClient.change_pin(self.connector.as_ref(), old_pin, new_pin)
+        };
+        self.authenticated.set(false);
+        self.management_authenticated.set(false);
+        self.connector.clear_secure_channel();
+        result
+    }
+    fn set_so_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        let old_text = std::str::from_utf8(old_pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        let new_text = std::str::from_utf8(new_pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        let old_key = parse_hex(old_text).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        let new_key = parse_hex(new_text).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        PivClient.authenticate_management_key(self.connector.as_ref(), &old_key)?;
+        let result = PivClient.set_management_key(self.connector.as_ref(), &new_key);
+        self.authenticated.set(false);
+        self.management_authenticated.set(false);
+        self.connector.clear_secure_channel();
+        result
+    }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
         self.management_authenticated.set(false);
