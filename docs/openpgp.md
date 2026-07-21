@@ -94,15 +94,20 @@ because selecting the applet also resets its password-verification state.
 ## APDU capabilities
 
 The OpenPGP protocol layer supports short and extended APDUs, ISO command and
-response chaining, and all commands defined by OpenPGP Card 3.4.1. It also
-supports the YubiKey version, retry-configuration, and attestation commands.
-Administrative helpers cover PW3 verification and changes, PIN reset, even
-and odd data-object access, key generation and import, certificate instances,
-AES enciphering, MSE key rebinding, UIF and algorithm attributes through data
-objects, and application termination and activation.
+response chaining, and the non-destructive commands needed for discovery,
+authentication, cryptographic operations, certificate access, attestation,
+and PIN management.
 
-These administrative helpers are deliberately not invoked during discovery.
-Key generation, private-key import, attestation, UIF administration, and
-general data-object management are not yet mapped onto exported PKCS #11
-operations because they still require object-template and vendor-policy
-mapping beyond the now-supported PW3/SO authentication.
+## Key preservation
+
+The module never deletes or replaces OpenPGP keys. `C_DestroyObject` returns
+`CKR_ACTION_PROHIBITED` for every OpenPGP object and leaves the object visible.
+The OpenPGP APDU client also rejects potentially key-destructive commands
+before transport, including application termination and activation, retry
+count changes, key generation, private-key import, and writes to key algorithm
+attributes. These commands return `CKR_ACTION_PROHIBITED` and no APDU is sent.
+
+Discovery and public-key retrieval remain read-only. Certificate, UIF, and
+general data-object helpers cannot bypass the key-preservation checks, while
+ordinary PIN changes and PIN unblocking remain available because they do not
+replace key material.

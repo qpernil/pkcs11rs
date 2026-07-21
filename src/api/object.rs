@@ -448,6 +448,9 @@ fn destroy_object(
                 | KeyMaterial::SecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
+                | KeyMaterial::OpenPgpPrivate { .. }
+                | KeyMaterial::OpenPgpPublic { .. }
+                | KeyMaterial::OpenPgpCertificate { .. }
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }

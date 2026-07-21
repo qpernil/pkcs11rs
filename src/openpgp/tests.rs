@@ -488,7 +488,7 @@ fn standard_password_commands_match_openpgp_card_encodings() {
 
 #[test]
 fn data_object_commands_cover_even_odd_and_repeated_objects() {
-    let connector = ScriptedConnector::new(vec![response(&[0xaa], STATUS_SUCCESS); 7]);
+    let connector = ScriptedConnector::new(vec![response(&[0xaa], STATUS_SUCCESS); 6]);
 
     assert_eq!(
         Client
@@ -511,9 +511,10 @@ fn data_object_commands_cover_even_odd_and_repeated_objects() {
     Client
         .put_data(&connector, DataObject::UifSignature.tag(), &[1, 0x20])
         .unwrap();
-    Client
-        .put_data_odd(&connector, 0x3f, 0xff, &[0x4d, 0x01, 0x00])
-        .unwrap();
+    assert!(matches!(
+        Client.put_data_odd(&connector, 0x3f, 0xff, &[0x4d, 0x01, 0x00]),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
     Client
         .select_data(&connector, 1, DataObject::CardholderCertificate)
         .unwrap();
@@ -526,12 +527,11 @@ fn data_object_commands_cover_even_odd_and_repeated_objects() {
     assert_eq!(commands[1], [0, 0xcc, 0x7f, 0x21, 0]);
     assert_eq!(commands[2], [0, 0xcb, 0x2f, 0, 3, 0x5c, 1, 0x4f, 0]);
     assert_eq!(commands[3], [0, 0xda, 0, 0xd6, 2, 1, 0x20]);
-    assert_eq!(commands[4], [0, 0xdb, 0x3f, 0xff, 3, 0x4d, 1, 0]);
     assert_eq!(
-        commands[5],
+        commands[4],
         [0, 0xa5, 1, 4, 6, 0x60, 4, 0x5c, 2, 0x7f, 0x21, 0]
     );
-    assert_eq!(commands[6], [0, 0xda, 0, 0xfc, 2, 0x30, 0]);
+    assert_eq!(commands[5], [0, 0xda, 0, 0xfc, 2, 0x30, 0]);
 }
 
 #[test]
@@ -590,42 +590,81 @@ fn cryptographic_commands_cover_all_openpgp_security_operations() {
 }
 
 #[test]
-fn yubikey_and_lifecycle_commands_match_reference_implementation() {
+fn yubikey_commands_refuse_key_destructive_lifecycle_operations() {
     let connector = ScriptedConnector::new(vec![
         response(&[0x05, 0x07, 0x02], STATUS_SUCCESS),
-        response(&[], STATUS_SUCCESS),
-        response(&[], STATUS_SUCCESS),
-        response(&[], STATUS_SUCCESS),
         response(&[], STATUS_SUCCESS),
         response(&[1, 2, 3, 4], STATUS_SUCCESS),
     ]);
 
     assert_eq!(Client.firmware_version(&connector).unwrap(), (5, 7, 2));
-    Client.set_pin_attempts(&connector, 3, 4, 5).unwrap();
+    assert!(matches!(
+        Client.set_pin_attempts(&connector, 3, 4, 5),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
     Client.attest_key(&connector, KeyRef::Signature).unwrap();
-    Client.terminate(&connector).unwrap();
-    Client.activate(&connector).unwrap();
+    assert!(matches!(
+        Client.terminate(&connector),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
+    assert!(matches!(
+        Client.put_data(&connector, 0x00c1, &[1, 8, 0, 32, 0, 0]),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
+    assert!(matches!(
+        Client.activate(&connector),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
     assert_eq!(Client.challenge(&connector, 4).unwrap(), [1, 2, 3, 4]);
 
     let commands = connector.commands.borrow();
     assert_eq!(commands[0], [0, 0xf1, 0, 0, 0]);
-    assert_eq!(commands[1], [0, 0xf2, 0, 0, 3, 3, 4, 5]);
-    assert_eq!(commands[2], [0x80, 0xfb, 1, 0]);
-    assert_eq!(commands[3], [0, 0xe6, 0, 0]);
-    assert_eq!(commands[4], [0, 0x44, 0, 0]);
-    assert_eq!(commands[5], [0, 0x84, 0, 0, 4]);
+    assert_eq!(commands[1], [0x80, 0xfb, 1, 0]);
+    assert_eq!(commands[2], [0, 0x84, 0, 0, 4]);
 }
 
 #[test]
-fn key_generation_read_and_import_use_the_required_templates() {
+fn key_destructive_apdus_are_classified_before_transport() {
+    for (ins, p1, p2) in [
+        (INS_TERMINATE_DF, 0, 0),
+        (INS_ACTIVATE_FILE, 0, 0),
+        (INS_SET_PIN_RETRIES, 0, 0),
+        (INS_GENERATE_ASYMMETRIC, 0x80, 0),
+        (INS_PUT_DATA_ODD, 0x3f, 0xff),
+        (INS_PUT_DATA, 0, 0xc1),
+        (INS_PUT_DATA, 0, 0xc2),
+        (INS_PUT_DATA, 0, 0xc3),
+        (INS_PUT_DATA, 0, 0xda),
+    ] {
+        assert!(command_may_delete_keys(&CommandApdu {
+            cla: 0,
+            ins,
+            p1,
+            p2,
+            data: Vec::new(),
+            le: None,
+            extended: false,
+        }));
+    }
+    assert!(!command_may_delete_keys(&CommandApdu {
+        cla: 0,
+        ins: INS_GENERATE_ASYMMETRIC,
+        p1: 0x81,
+        p2: 0,
+        data: Vec::new(),
+        le: Some(256),
+        extended: false,
+    }));
+}
+
+#[test]
+fn public_key_reads_work_but_key_generation_and_import_are_prohibited() {
     let mut public_key = encode_tlv(0x81, &[0x11; 128]).unwrap();
     public_key.extend_from_slice(&encode_tlv(0x82, &[0x01, 0x00, 0x01]).unwrap());
     let public_key = encode_tlv(0x7f49, &public_key).unwrap();
     let connector = ScriptedConnector::new(vec![
         response(&public_key, STATUS_SUCCESS),
         response(&public_key, STATUS_SUCCESS),
-        response(&public_key, STATUS_SUCCESS),
-        response(&[], STATUS_SUCCESS),
     ]);
 
     Client
@@ -638,16 +677,18 @@ fn key_generation_read_and_import_use_the_required_templates() {
             Algorithm::Rsa { bits: 1024 },
         )
         .unwrap();
-    Client
-        .generate_key_pair(
+    assert!(matches!(
+        Client.generate_key_pair(
             &connector,
             KeyRef::Attestation,
             Algorithm::Rsa { bits: 1024 },
-        )
-        .unwrap();
-    Client
-        .import_private_key(&connector, &[0x4d, 0x01, 0x00])
-        .unwrap();
+        ),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
+    assert!(matches!(
+        Client.import_private_key(&connector, &[0x4d, 0x01, 0x00]),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
 
     let commands = connector.commands.borrow();
     assert_eq!(commands[0], [0, 0x47, 0x81, 0, 2, 0xb6, 0, 0]);
@@ -655,11 +696,7 @@ fn key_generation_read_and_import_use_the_required_templates() {
         commands[1],
         [0, 0x47, 0x81, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]
     );
-    assert_eq!(
-        commands[2],
-        [0, 0x47, 0x80, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]
-    );
-    assert_eq!(commands[3], [0, 0xdb, 0x3f, 0xff, 3, 0x4d, 1, 0]);
+    assert_eq!(commands.len(), 2);
 }
 
 #[test]
