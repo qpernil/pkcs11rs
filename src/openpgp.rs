@@ -3,9 +3,9 @@
 use crate::{
     error::Error,
     scp03::{select_application, CommandApdu},
-    Connector, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
-    CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED,
-    CKR_USER_NOT_LOGGED_IN,
+    Connector, CKR_ACTION_PROHIBITED, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
+    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
+    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     bn::BigNum,
@@ -1118,10 +1118,31 @@ impl Client {
     }
 
     fn transmit(&self, connector: &dyn Connector, command: CommandApdu) -> Result<Vec<u8>, Error> {
+        if command_may_delete_keys(&command) {
+            log!(
+                2,
+                "OpenPGP refused potentially key-destructive command {:02x}{:02x}{:02x}{:02x}",
+                command.cla,
+                command.ins,
+                command.p1,
+                command.p2
+            );
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
         let response = connector.send_apdu(&command)?;
         require_success(response.status, &command)?;
         Ok(response.data)
     }
+}
+
+fn command_may_delete_keys(command: &CommandApdu) -> bool {
+    matches!(command.ins, INS_TERMINATE_DF | INS_ACTIVATE_FILE)
+        || command.ins == INS_SET_PIN_RETRIES
+        || (command.ins == INS_GENERATE_ASYMMETRIC && command.p1 == 0x80)
+        || (command.ins == INS_PUT_DATA_ODD && command.p1 == 0x3f && command.p2 == 0xff)
+        || (command.ins == INS_PUT_DATA
+            && command.p1 == 0
+            && matches!(command.p2, 0xc1 | 0xc2 | 0xc3 | 0xda))
 }
 
 fn require_success(status: u16, command: &CommandApdu) -> Result<(), Error> {

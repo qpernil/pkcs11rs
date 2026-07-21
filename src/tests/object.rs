@@ -291,6 +291,80 @@ pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
 }
 
 #[test]
+pub fn destroy_openpgp_objects_is_prohibited() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let base = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: "openpgp-01-certificate".to_owned(),
+        class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: "OpenPGP Signature certificate".to_owned(),
+        id: vec![1],
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: crate::KeyMaterial::OpenPgpCertificate {
+            value: vec![0x30, 0],
+        },
+    };
+    let mut public = base.clone();
+    public.unique_id = "openpgp-01-public".to_owned();
+    public.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    public.material = crate::KeyMaterial::OpenPgpPublic {
+        algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
+        public_key: vec![0x11; 256],
+    };
+    let mut private = base.clone();
+    private.unique_id = "openpgp-01-private".to_owned();
+    private.class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    private.private = true;
+    private.sensitive = true;
+    private.extractable = false;
+    private.material = crate::KeyMaterial::OpenPgpPrivate {
+        key_ref: crate::OpenPgpKeyRef::Signature,
+        algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
+        modulus: vec![0x11; 256],
+        public_exponent: vec![1, 0, 1],
+        public_key: Vec::new(),
+        pin_policy: 0,
+    };
+    let handles = {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        [base, public, private]
+            .into_iter()
+            .map(|object| context.insert_object(object))
+            .collect::<Vec<_>>()
+    };
+
+    for handle in handles {
+        assert_eq!(
+            crate::C_DestroyObject(TEST_SESSION_HANDLE, handle),
+            CKR_ACTION_PROHIBITED as CK_RV
+        );
+        let context = crate::lock_context().unwrap();
+        assert!(context.as_ref().unwrap().objects.contains_key(&handle));
+    }
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn destroy_object_updates_active_search_results() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
