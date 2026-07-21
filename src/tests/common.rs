@@ -1590,6 +1590,27 @@ fn yubihsm_x25519_two_way_derive(
         pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
         ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
     };
+    let mut token_object = CK_TRUE as CK_BBOOL;
+    let mut token_template = CK_ATTRIBUTE {
+        type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut token_object as *mut CK_BBOOL).cast(),
+        ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    let command_count = commands.borrow().len();
+    let mut invalid_derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_DeriveKey(
+            session,
+            &mut mechanism,
+            private_handle,
+            &mut token_template,
+            1,
+            &mut invalid_derived_key,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(commands.borrow().len(), command_count);
+
     let mut derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
         crate::C_DeriveKey(

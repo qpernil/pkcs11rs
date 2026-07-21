@@ -689,6 +689,50 @@ pub fn generate_key_reports_mechanism_and_template_errors() {
 }
 
 #[test]
+pub fn yubihsm_key_pair_generation_requires_token_objects() {
+    let mut modulus_bits = 2048 as CK_ULONG;
+    let mut session_object = CK_FALSE as CK_BBOOL;
+    let mut token_object = CK_TRUE as CK_BBOOL;
+    let modulus_attribute = CK_ATTRIBUTE {
+        type_: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut modulus_bits as *mut CK_ULONG).cast(),
+        ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    };
+    let session_attribute = CK_ATTRIBUTE {
+        type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut session_object as *mut CK_BBOOL).cast(),
+        ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    let token_attribute = CK_ATTRIBUTE {
+        type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut token_object as *mut CK_BBOOL).cast(),
+        ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    let session_public_template = [modulus_attribute, session_attribute];
+    let token_public_template = [modulus_attribute, token_attribute];
+    let session_private_template = [session_attribute];
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+
+    for (public_template, private_template) in [
+        (&session_public_template[..], &[][..]),
+        (&token_public_template[..], &session_private_template[..]),
+    ] {
+        let rv: CK_RV = crate::yubihsm_generate_key_pair_command(
+            &mechanism,
+            public_template,
+            private_template,
+        )
+        .unwrap_err()
+        .into();
+        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
+    }
+}
+
+#[test]
 pub fn generate_random_validates_initialization_and_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
