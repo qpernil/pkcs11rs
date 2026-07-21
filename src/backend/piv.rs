@@ -745,6 +745,26 @@ impl Slot for PivSlot {
         }
         Ok(())
     }
+    fn piv_delete_key(&mut self, slot: piv::Slot) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if (self.reported_version().major, self.reported_version().minor) < (5, 7) {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        PivClient.delete_key(self.connector.as_ref(), slot)?;
+        self.keys.retain(|key| key.slot != slot);
+        Ok(())
+    }
+    fn piv_delete_certificate(&mut self, slot: piv::Slot) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        PivClient.delete_certificate(self.connector.as_ref(), slot)?;
+        self.certificates
+            .retain(|certificate| certificate.slot != slot);
+        Ok(())
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {

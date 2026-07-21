@@ -23,6 +23,7 @@ const INS_IMPORT_KEY: u8 = 0xfe;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
+const INS_MOVE_KEY: u8 = 0xf6;
 const INS_ATTEST: u8 = 0xf9;
 const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
@@ -648,6 +649,22 @@ impl Client {
         object.extend_from_slice(&encode_tlv(0x71, &[0])?);
         object.extend_from_slice(&encode_tlv(0xfe, &[])?);
         self.put_data(connector, slot.certificate_object(), &object)
+    }
+
+    pub(crate) fn delete_certificate(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+    ) -> Result<(), Error> {
+        self.put_data(connector, slot.certificate_object(), &[])
+    }
+
+    pub(crate) fn delete_key(&self, connector: &dyn Connector, slot: Slot) -> Result<(), Error> {
+        if slot == Slot::Attestation {
+            return Err(CKR_FUNCTION_REJECTED.into());
+        }
+        self.command(connector, INS_MOVE_KEY, 0xff, slot as u8, &[])?;
+        Ok(())
     }
 
     pub(crate) fn certificate(

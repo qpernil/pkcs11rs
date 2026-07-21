@@ -780,6 +780,36 @@ fn destroy_object(
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
+        let piv_action = match &stored_object.material {
+            KeyMaterial::PivPrivate { slot, .. } => Some((true, *slot)),
+            KeyMaterial::PivCertificate { .. } => {
+                let [id] = stored_object.id.as_slice() else {
+                    return Err(CKR_DEVICE_ERROR.into());
+                };
+                Some((false, piv::Slot::from_id(*id).ok_or(CKR_DEVICE_ERROR)?))
+            }
+            KeyMaterial::PivPublic { .. } | KeyMaterial::RsaPublic(_)
+                if ctx.get_slot(slot_id)?.is_piv() =>
+            {
+                return Err(CKR_ACTION_PROHIBITED.into());
+            }
+            KeyMaterial::PivAttestation { .. } => {
+                ctx.objects.remove(&object);
+                remove_object_from_find_operations(&mut ctx.find_operations, object);
+                return Ok(());
+            }
+            _ => None,
+        };
+        if let Some((delete_key, piv_slot)) = piv_action {
+            if delete_key {
+                ctx._get_slot_mut(slot_id)?.piv_delete_key(piv_slot)?;
+            } else {
+                ctx._get_slot_mut(slot_id)?
+                    .piv_delete_certificate(piv_slot)?;
+            }
+            ctx.refresh_slot_token_objects(slot_id)?;
+            return Ok(());
+        }
         if let KeyMaterial::YubiHsm {
             id, object_type, ..
         } = stored_object.material
