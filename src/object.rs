@@ -410,6 +410,8 @@ impl TokenObject {
             CKA_YUBICO_HSMAUTH_ALGORITHM,
             CKA_YUBICO_HSMAUTH_RETRIES,
             CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
+            CKA_YUBICO_TOUCH_POLICY,
+            CKA_YUBICO_PIN_POLICY,
             CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
             CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
@@ -769,6 +771,18 @@ impl TokenObject {
             x if x == CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED => match &self.material {
                 KeyMaterial::HsmAuthCredential { touch_required, .. } => {
                     Some(bool_attribute(*touch_required))
+                }
+                _ => None,
+            },
+            x if x == CKA_YUBICO_TOUCH_POLICY => match &self.material {
+                KeyMaterial::PivPrivate { touch_policy, .. } => {
+                    Some(ulong_attribute(*touch_policy as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_YUBICO_PIN_POLICY => match &self.material {
+                KeyMaterial::PivPrivate { pin_policy, .. } => {
+                    Some(ulong_attribute(*pin_policy as CK_ULONG))
                 }
                 _ => None,
             },

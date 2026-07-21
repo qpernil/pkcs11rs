@@ -21,6 +21,7 @@ struct PivKey {
     attestation_attempted: Rc<Cell<bool>>,
     pin_policy: u8,
     touch_policy: u8,
+    origin: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -562,6 +563,7 @@ impl Slot for PivSlot {
                 attestation_attempted: Rc::new(Cell::new(false)),
                 pin_policy: metadata.pin_policy.unwrap_or(0),
                 touch_policy: metadata.touch_policy.unwrap_or(0),
+                origin: metadata.origin.unwrap_or(0),
             });
         }
         for (object_id, _) in piv::DATA_OBJECTS {
@@ -592,7 +594,8 @@ impl Slot for PivSlot {
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = Vec::new();
-        let rsa_sizes = [1024, 2048, 3072, 4096];
+        let firmware_5_7 = (self.reported_version().major, self.reported_version().minor) >= (5, 7);
+        let rsa_max = if firmware_5_7 { 4096 } else { 2048 };
         let ec_sizes = [256, 384];
         let mut add = |type_, min_key_size, max_key_size, flags| {
             mechanisms.push(MechanismDetails {
@@ -631,14 +634,14 @@ impl Slot for PivSlot {
             } else if type_ == CKM_RSA_PKCS_OAEP {
                 (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
             } else if type_ == CKM_RSA_X_509 {
-                (CKF_ENCRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+                (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
             } else {
                 (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
             };
             add(
                 type_ as CK_MECHANISM_TYPE,
-                rsa_sizes[0],
-                rsa_sizes[3],
+                1024,
+                rsa_max,
                 flags,
             );
         }
@@ -661,21 +664,47 @@ impl Slot for PivSlot {
                 (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
             );
         }
-        mechanisms.push(MechanismDetails {
-            type_: CKM_EDDSA as CK_MECHANISM_TYPE,
-            min_key_size: 255,
-            max_key_size: 255,
-            flags: (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
-        });
+        add(
+            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            1024,
+            rsa_max,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
+        add(
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            ec_sizes[0],
+            ec_sizes[1],
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
+        if firmware_5_7 {
+            add(
+                CKM_EDDSA as CK_MECHANISM_TYPE,
+                255,
+                255,
+                (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            );
+            add(
+                CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                255,
+                255,
+                CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+            );
+            add(
+                CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                255,
+                255,
+                CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+            );
+        }
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 255,
+            min_key_size: if firmware_5_7 { 255 } else { 256 },
             max_key_size: 384,
             flags: CKF_DERIVE as CK_FLAGS,
         });
         mechanisms.push(MechanismDetails {
             type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 255,
+            min_key_size: if firmware_5_7 { 255 } else { 256 },
             max_key_size: 384,
             flags: CKF_DERIVE as CK_FLAGS,
         });
@@ -722,6 +751,7 @@ impl Slot for PivSlot {
             attestation_attempted: Rc::new(Cell::new(false)),
             pin_policy,
             touch_policy,
+            origin: piv::ORIGIN_GENERATED,
         });
         Ok(())
     }
@@ -755,6 +785,7 @@ impl Slot for PivSlot {
             attestation_attempted: Rc::new(Cell::new(false)),
             pin_policy,
             touch_policy,
+            origin: piv::ORIGIN_IMPORTED,
         });
         Ok(())
     }
@@ -788,6 +819,7 @@ impl Slot for PivSlot {
                 attestation_attempted: Rc::new(Cell::new(false)),
                 pin_policy: 0,
                 touch_policy: 0,
+                origin: 0,
             });
         }
         Ok(())
@@ -866,7 +898,19 @@ impl Slot for PivSlot {
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
             let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);
-            let private = piv_policy_requires_login(key.slot, key.pin_policy);
+            let private = true;
+            let local = key.origin == piv::ORIGIN_GENERATED;
+            let key_gen_mechanism = local.then_some(match key.algorithm {
+                piv::Algorithm::Rsa1024
+                | piv::Algorithm::Rsa2048
+                | piv::Algorithm::Rsa3072
+                | piv::Algorithm::Rsa4096 => CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
+                    CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                }
+                piv::Algorithm::Ed25519 => CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+                piv::Algorithm::X25519 => CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            });
             let can_decrypt = is_rsa
                 && matches!(
                     key.slot,
@@ -923,8 +967,8 @@ impl Slot for PivSlot {
                 extractable: true,
                 always_sensitive: false,
                 never_extractable: false,
-                local: true,
-                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                local,
+                key_gen_mechanism,
                 owner_session: None,
                 material: public_material,
             });
@@ -949,8 +993,8 @@ impl Slot for PivSlot {
                 extractable: false,
                 always_sensitive: true,
                 never_extractable: true,
-                local: true,
-                key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
+                local,
+                key_gen_mechanism,
                 owner_session: None,
                 material: KeyMaterial::PivPrivate {
                     slot: key.slot,

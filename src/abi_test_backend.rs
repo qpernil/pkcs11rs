@@ -220,6 +220,7 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             attestation_attempted: Rc::new(Cell::new(false)),
             pin_policy: 2,
             touch_policy: 1,
+            origin: piv::ORIGIN_GENERATED,
         }],
         certificates: Vec::new(),
         data_objects: Vec::new(),
