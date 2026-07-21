@@ -1640,6 +1640,77 @@ pub fn get_attribute_value_reads_certificate_values() {
 }
 
 #[test]
+pub fn security_domain_objects_expose_values_but_cannot_be_copied_or_destroyed() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let value = vec![0xb1, 32];
+    let object = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: b"issuer-sd-key-13-01".to_vec(),
+        class: CKO_DATA as CK_OBJECT_CLASS,
+        key_type: 0,
+        label: b"Issuer SD SCP11b KVN 1".to_vec(),
+        id: vec![0x13, 1],
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: crate::KeyMaterial::SecurityDomainData {
+            value: value.clone(),
+            application: b"GlobalPlatform Security Domain".to_vec(),
+            object_id: Vec::new(),
+        },
+    };
+    let object_handle = {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().insert_object(object)
+    };
+
+    let mut returned = [0u8; 2];
+    let mut value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: returned.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: returned.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(returned.as_slice(), value);
+
+    let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            object_handle,
+            ::std::ptr::null_mut(),
+            0,
+            &mut copied,
+        ),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+    assert_eq!(
+        crate::C_DestroyObject(TEST_SESSION_HANDLE, object_handle),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn get_attribute_value_reports_attribute_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -1805,4 +1876,3 @@ pub fn set_attribute_value_reports_attribute_errors() {
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
-

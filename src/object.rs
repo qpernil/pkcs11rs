@@ -69,6 +69,14 @@ enum KeyMaterial {
     OpenPgpCertificate {
         value: Vec<u8>,
     },
+    SecurityDomainData {
+        value: Vec<u8>,
+        application: Vec<u8>,
+        object_id: Vec<u8>,
+    },
+    SecurityDomainCertificate {
+        value: Vec<u8>,
+    },
     YubiHsm {
         id: u16,
         object_type: u8,
@@ -173,6 +181,20 @@ impl std::fmt::Debug for KeyMaterial {
                 .finish(),
             Self::OpenPgpCertificate { value } => fmt
                 .debug_struct("OpenPgpCertificate")
+                .field("size", &value.len())
+                .finish(),
+            Self::SecurityDomainData {
+                value,
+                application,
+                object_id,
+            } => fmt
+                .debug_struct("SecurityDomainData")
+                .field("size", &value.len())
+                .field("application", &String::from_utf8_lossy(application))
+                .field("object_id", object_id)
+                .finish(),
+            Self::SecurityDomainCertificate { value } => fmt
+                .debug_struct("SecurityDomainCertificate")
                 .field("size", &value.len())
                 .finish(),
         }
@@ -352,6 +374,8 @@ impl TokenObject {
             CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
             CKA_LABEL as CK_ATTRIBUTE_TYPE,
             CKA_ID as CK_ATTRIBUTE_TYPE,
+            CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
+            CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
             CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
             CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
@@ -477,12 +501,20 @@ impl TokenObject {
             {
                 Some(bool_attribute(false))
             }
-            x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
-                Some(b"Opaque object".to_vec())
-            }
-            x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
-                Some(Vec::new())
-            }
+            x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => {
+                    Some(b"Opaque object".to_vec())
+                }
+                KeyMaterial::SecurityDomainData { application, .. } => {
+                    Some(application.clone())
+                }
+                _ => None,
+            },
+            x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
+                KeyMaterial::SecurityDomainData { object_id, .. } => Some(object_id.clone()),
+                _ => None,
+            },
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
@@ -674,8 +706,14 @@ impl TokenObject {
                         Some(value.to_vec())
                     }
                     KeyMaterial::PivCertificate { value, .. }
-                    | KeyMaterial::OpenPgpCertificate { value } => {
+                    | KeyMaterial::OpenPgpCertificate { value }
+                    | KeyMaterial::SecurityDomainCertificate { value } => {
                         piv_certificate_attribute(value, x)
+                    }
+                    KeyMaterial::SecurityDomainData { value, .. }
+                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
+                    {
+                        Some(value.clone())
                     }
                     KeyMaterial::PivAttestation {
                         connector,
@@ -771,6 +809,8 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
+                | KeyMaterial::SecurityDomainData { .. }
+                | KeyMaterial::SecurityDomainCertificate { .. }
                 | KeyMaterial::YubiHsm { .. }
                 | KeyMaterial::DerivedSecret(_)
         )
@@ -947,4 +987,3 @@ impl TokenObjectTemplate {
         })
     }
 }
-

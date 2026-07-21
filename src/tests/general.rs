@@ -259,16 +259,15 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 pub fn yubikey_login_preserves_connector_errors() {
     let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
-    let mut slot = crate::GlobalPlatformSlot {
-        connector: std::rc::Rc::new(crate::PcscAppletConnector::new(
+    let mut slot = crate::GlobalPlatformSlot::new(
+        std::rc::Rc::new(crate::PcscAppletConnector::new(
             base,
             &application_aid,
             Some(crate::SecureChannelProtocol::Scp03),
             std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
         )),
         application_aid,
-        authenticated: std::cell::Cell::new(false),
-    };
+    );
 
     let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
@@ -712,16 +711,72 @@ fn globalplatform_token_model_identifies_the_applet() {
             None,
             std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
         ));
-    let slot = crate::GlobalPlatformSlot {
-        connector,
-        application_aid: aid,
-        authenticated: std::cell::Cell::new(false),
-    };
+    let slot = crate::GlobalPlatformSlot::new(connector, aid);
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());
     assert_eq!(&token_info.model[..9], b"Issuer SD");
     assert_eq!(&token_info.label[..21], b"Issuer SD #SELECT0001");
+    assert!(crate::Slot::mechanisms(&slot).is_empty());
+}
+
+#[test]
+fn security_domain_metadata_becomes_read_only_pkcs11_objects() {
+    let info = crate::SecurityDomainInfo {
+        keys: vec![crate::security_domain::KeyInfo {
+            key_ref: crate::security_domain::KeyRef {
+                kid: crate::security_domain::KID_SCP11B,
+                kvn: 1,
+            },
+            components: vec![crate::security_domain::KeyComponent {
+                key_type: 0xb1,
+                length: 32,
+            }],
+        }],
+        card_recognition_data: Some(vec![1, 2]),
+        cplc: Some(vec![0x40, 0x90]),
+        ca_identifiers: vec![crate::security_domain::CaIdentifier {
+            kind: crate::security_domain::CaIdentifierKind::Klcc,
+            key_ref: crate::security_domain::KeyRef { kid: 0x20, kvn: 1 },
+            subject_key_identifier: vec![0xaa, 0xbb],
+        }],
+        certificate_bundles: vec![crate::security_domain::CertificateBundle {
+            key_ref: crate::security_domain::KeyRef {
+                kid: crate::security_domain::KID_SCP11B,
+                kvn: 1,
+            },
+            certificates: vec![vec![0x30, 0]],
+        }],
+    };
+
+    let objects = crate::security_domain_token_objects(TEST_SLOT_ID, &info);
+    assert_eq!(objects.len(), 5);
+    let key = &objects[0];
+    assert_eq!(key.class, CKO_DATA as CK_OBJECT_CLASS);
+    assert_eq!(key.id, vec![0x13, 1]);
+    assert_eq!(
+        key.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+        Some(b"GlobalPlatform Security Domain".to_vec())
+    );
+    assert_eq!(
+        key.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(vec![0xb1, 32])
+    );
+    assert_eq!(
+        key.attribute_value(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_FALSE as CK_BBOOL])
+    );
+
+    let certificate = objects.last().unwrap();
+    assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
+    assert_eq!(
+        certificate.attribute_value(CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE),
+        Some((CKC_X_509 as CK_ULONG).to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        certificate.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x30, 0])
+    );
 }
 
 #[test]
@@ -753,11 +808,10 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         let context = context.as_mut().unwrap();
         context.slots.insert(
             TEST_SLOT_ID,
-            Box::new(crate::GlobalPlatformSlot {
-                connector: connector.clone(),
+            Box::new(crate::GlobalPlatformSlot::new(
+                connector.clone(),
                 application_aid,
-                authenticated: std::cell::Cell::new(false),
-            }),
+            )),
         );
         context.sessions.insert(
             TEST_SESSION_HANDLE,

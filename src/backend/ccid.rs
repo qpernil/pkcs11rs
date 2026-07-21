@@ -246,6 +246,26 @@ struct GlobalPlatformSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
+    info: RefCell<Option<SecurityDomainInfo>>,
+}
+
+impl GlobalPlatformSlot {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        Self {
+            connector,
+            application_aid,
+            authenticated: Cell::new(false),
+            info: RefCell::new(None),
+        }
+    }
+
+    fn discovered_info(&self) -> Result<SecurityDomainInfo, Error> {
+        let mut info = self.info.try_borrow_mut()?;
+        if info.is_none() {
+            *info = Some(SecurityDomainClient.discover(self.connector.as_ref())?);
+        }
+        info.clone().ok_or(CKR_DEVICE_ERROR.into())
+    }
 }
 
 impl Slot for GlobalPlatformSlot {
@@ -329,6 +349,172 @@ impl Slot for GlobalPlatformSlot {
         }
         Ok(())
     }
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        Ok(security_domain_token_objects(
+            slot_id,
+            &self.discovered_info()?,
+        ))
+    }
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        Vec::new()
+    }
+}
+
+const SECURITY_DOMAIN_APPLICATION: &[u8] = b"GlobalPlatform Security Domain";
+
+fn security_domain_data_object(
+    slot_id: CK_SLOT_ID,
+    unique_id: String,
+    label: String,
+    id: Vec<u8>,
+    value: Vec<u8>,
+) -> TokenObject {
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: unique_id.into_bytes(),
+        class: CKO_DATA as CK_OBJECT_CLASS,
+        key_type: 0,
+        label: label.into_bytes(),
+        id,
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::SecurityDomainData {
+            value,
+            application: SECURITY_DOMAIN_APPLICATION.to_vec(),
+            object_id: Vec::new(),
+        },
+    }
+}
+
+fn security_domain_key_name(kid: u8) -> String {
+    match kid {
+        security_domain::KID_SCP03 => "SCP03 K-ENC".to_string(),
+        0x02 => "SCP03 K-MAC".to_string(),
+        0x03 => "SCP03 K-DEK".to_string(),
+        0x10 => "SCP11 CA-KLOC".to_string(),
+        security_domain::KID_SCP11A => "SCP11a".to_string(),
+        security_domain::KID_SCP11B => "SCP11b".to_string(),
+        security_domain::KID_SCP11C => "SCP11c".to_string(),
+        0x20..=0x2f => format!("SCP11 CA-KLCC {kid:02X}"),
+        _ => format!("key {kid:02X}"),
+    }
+}
+
+fn security_domain_token_objects(
+    slot_id: CK_SLOT_ID,
+    info: &SecurityDomainInfo,
+) -> Vec<TokenObject> {
+    let mut objects = Vec::new();
+    for key in &info.keys {
+        let value = key
+            .components
+            .iter()
+            .flat_map(|component| [component.key_type, component.length])
+            .collect();
+        let name = security_domain_key_name(key.key_ref.kid);
+        objects.push(security_domain_data_object(
+            slot_id,
+            format!("issuer-sd-key-{:02x}-{:02x}", key.key_ref.kid, key.key_ref.kvn),
+            format!("Issuer SD {name} KVN {}", key.key_ref.kvn),
+            vec![key.key_ref.kid, key.key_ref.kvn],
+            value,
+        ));
+    }
+    if let Some(value) = &info.card_recognition_data {
+        objects.push(security_domain_data_object(
+            slot_id,
+            "issuer-sd-card-recognition".to_string(),
+            "Issuer SD card recognition data".to_string(),
+            vec![0x66],
+            value.clone(),
+        ));
+    }
+    if let Some(value) = &info.cplc {
+        objects.push(security_domain_data_object(
+            slot_id,
+            "issuer-sd-cplc".to_string(),
+            "Issuer SD CPLC".to_string(),
+            vec![0x9f, 0x7f],
+            value.clone(),
+        ));
+    }
+    for ca in &info.ca_identifiers {
+        let kind = match ca.kind {
+            security_domain::CaIdentifierKind::Kloc => "KLOC",
+            security_domain::CaIdentifierKind::Klcc => "KLCC",
+        };
+        objects.push(security_domain_data_object(
+            slot_id,
+            format!(
+                "issuer-sd-ca-{}-{:02x}-{:02x}",
+                kind.to_ascii_lowercase(),
+                ca.key_ref.kid,
+                ca.key_ref.kvn
+            ),
+            format!(
+                "Issuer SD {kind} CA for KID {:02X} KVN {}",
+                ca.key_ref.kid, ca.key_ref.kvn
+            ),
+            vec![ca.key_ref.kid, ca.key_ref.kvn],
+            ca.subject_key_identifier.clone(),
+        ));
+    }
+    for bundle in &info.certificate_bundles {
+        let name = security_domain_key_name(bundle.key_ref.kid);
+        for (index, certificate) in bundle.certificates.iter().enumerate() {
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!(
+                    "issuer-sd-certificate-{:02x}-{:02x}-{index}",
+                    bundle.key_ref.kid, bundle.key_ref.kvn
+                )
+                .into_bytes(),
+                class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                key_type: CKK_EC as CK_KEY_TYPE,
+                label: format!(
+                    "Issuer SD {name} KVN {} certificate {}",
+                    bundle.key_ref.kvn,
+                    index + 1
+                )
+                .into_bytes(),
+                id: [
+                    vec![bundle.key_ref.kid, bundle.key_ref.kvn],
+                    (index as u16).to_be_bytes().to_vec(),
+                ]
+                .concat(),
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::SecurityDomainCertificate {
+                    value: certificate.clone(),
+                },
+            });
+        }
+    }
+    objects
 }
 
 #[derive(Debug)]

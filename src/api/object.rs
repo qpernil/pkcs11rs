@@ -382,6 +382,13 @@ fn copy_object(
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?
             .clone();
+        if matches!(
+            copied_object.material,
+            KeyMaterial::SecurityDomainData { .. }
+                | KeyMaterial::SecurityDomainCertificate { .. }
+        ) {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
         if matches!(copied_object.material, KeyMaterial::YubiHsm { .. }) {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
@@ -432,6 +439,13 @@ fn destroy_object(
             .clone();
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        if matches!(
+            stored_object.material,
+            KeyMaterial::SecurityDomainData { .. }
+                | KeyMaterial::SecurityDomainCertificate { .. }
+        ) {
+            return Err(CKR_ACTION_PROHIBITED.into());
         }
         if let KeyMaterial::YubiHsm {
             id, object_type, ..
@@ -572,7 +586,9 @@ fn get_attribute_value(
                     }
                     KeyMaterial::PivCertificate { .. }
                     | KeyMaterial::PivAttestation { .. }
-                    | KeyMaterial::OpenPgpCertificate { .. } => {
+                    | KeyMaterial::OpenPgpCertificate { .. }
+                    | KeyMaterial::SecurityDomainData { .. }
+                    | KeyMaterial::SecurityDomainCertificate { .. } => {
                         match object.attribute_value(attribute.type_) {
                             Some(value) => {
                                 if let Err(e) = write_attribute_value(attribute, &value) {
@@ -883,4 +899,3 @@ fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
             .ok_or(CKR_OPERATION_NOT_INITIALIZED.into())
     })
 }
-
