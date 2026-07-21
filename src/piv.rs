@@ -789,6 +789,22 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) fn move_key(
+        &self,
+        connector: &dyn Connector,
+        from: Slot,
+        to: Slot,
+    ) -> Result<(), Error> {
+        if from == Slot::Attestation || to == Slot::Attestation {
+            return Err(CKR_FUNCTION_REJECTED.into());
+        }
+        if from == to {
+            return Ok(());
+        }
+        self.command(connector, INS_MOVE_KEY, to as u8, from as u8, &[])?;
+        Ok(())
+    }
+
     pub(crate) fn certificate(
         &self,
         connector: &dyn Connector,

@@ -513,18 +513,32 @@ fn deletes_piv_keys_and_certificates_on_hardware() {
     let connector = ScriptedConnector::new(vec![
         response(&[], STATUS_SUCCESS),
         response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
     ]);
+    Client
+        .move_key(&connector, Slot::Authentication, Slot::Signature)
+        .unwrap();
     Client.delete_key(&connector, Slot::Signature).unwrap();
     Client
         .delete_certificate(&connector, Slot::Signature)
         .unwrap();
     let commands = connector.commands.borrow();
     assert_eq!(
-        commands[0],
+        commands[1],
         [0, INS_MOVE_KEY, 0xff, Slot::Signature as u8, 0]
     );
-    assert_eq!(&commands[1][..4], &[0, INS_PUT_DATA, 0x3f, 0xff]);
-    assert!(commands[1].ends_with(&[0x53, 0, 0]));
+    assert_eq!(
+        commands[0],
+        [
+            0,
+            INS_MOVE_KEY,
+            Slot::Signature as u8,
+            Slot::Authentication as u8,
+            0
+        ]
+    );
+    assert_eq!(&commands[2][..4], &[0, INS_PUT_DATA, 0x3f, 0xff]);
+    assert!(commands[2].ends_with(&[0x53, 0, 0]));
 }
 
 #[test]
