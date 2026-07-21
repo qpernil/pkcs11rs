@@ -5,7 +5,6 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_PIN_INCORRECT,
     CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
-use std::time::Duration;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 
@@ -13,16 +12,11 @@ const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
 const INS_AUTHENTICATE: u8 = 0x87;
 const INS_GET_DATA: u8 = 0xcb;
-const INS_GET_RESPONSE: u8 = 0xc0;
 const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
 const INS_ATTEST: u8 = 0xf9;
 const STATUS_SUCCESS: u16 = 0x9000;
-const MAX_COMMAND_CHUNK: usize = 0xff;
-const MAX_RESPONSE_SEGMENTS: usize = 256;
-const MAX_OBJECT_SIZE: usize = 3072;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Version {
@@ -557,87 +551,7 @@ impl Client {
         connector: &dyn Connector,
         command: CommandApdu,
     ) -> Result<ResponseApdu, Error> {
-        if command.data.len() <= MAX_COMMAND_CHUNK || command.extended {
-            return self.transmit_one(connector, command);
-        }
-
-        let mut chunks = command.data.chunks(MAX_COMMAND_CHUNK).peekable();
-        while let Some(chunk) = chunks.next() {
-            let final_chunk = chunks.peek().is_none();
-            let response = self.transmit_one(
-                connector,
-                CommandApdu {
-                    cla: if final_chunk {
-                        command.cla
-                    } else {
-                        command.cla | 0x10
-                    },
-                    ins: command.ins,
-                    p1: command.p1,
-                    p2: command.p2,
-                    data: chunk.to_vec(),
-                    le: final_chunk.then_some(command.le).flatten(),
-                    extended: false,
-                },
-            )?;
-            if final_chunk {
-                return Ok(response);
-            }
-            require_success(response.status)?;
-            if !response.data.is_empty() {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-        }
-        Err(CKR_DEVICE_ERROR.into())
-    }
-
-    fn transmit_one(
-        &self,
-        connector: &dyn Connector,
-        mut command: CommandApdu,
-    ) -> Result<ResponseApdu, Error> {
-        let mut response =
-            ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)?;
-        if response.status & 0xff00 == 0x6c00 {
-            command.le = Some(match response.status as u8 {
-                0 => 256,
-                length => length as u32,
-            });
-            response = ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)?;
-        }
-
-        let mut segments = 0;
-        while response.status & 0xff00 == 0x6100 {
-            if segments == MAX_RESPONSE_SEGMENTS {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            segments += 1;
-            let expected = match response.status as u8 {
-                0 => 256,
-                length => length as u32,
-            };
-            let continuation = ResponseApdu::parse(
-                &connector.send(
-                    &CommandApdu {
-                        cla: 0,
-                        ins: INS_GET_RESPONSE,
-                        p1: 0,
-                        p2: 0,
-                        data: Vec::new(),
-                        le: Some(expected),
-                        extended: false,
-                    }
-                    .encode()?,
-                    DEFAULT_TIMEOUT,
-                )?,
-            )?;
-            response.data.extend_from_slice(&continuation.data);
-            response.status = continuation.status;
-            if response.data.len() > MAX_OBJECT_SIZE + 1024 {
-                return Err(CKR_DATA_LEN_RANGE.into());
-            }
-        }
-        Ok(response)
+        connector.send_apdu(&command)
     }
 }
 

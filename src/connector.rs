@@ -16,11 +16,17 @@ pub(crate) trait Connector {
     fn set_device_identity(&self, _firmware: Option<(u8, u8, u8)>, _serial: Option<&str>) {}
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
+    fn apdu_capabilities(&self) -> ApduCapabilities {
+        ApduCapabilities::EXTENDED
+    }
+    fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        crate::iso7816::transmit(self, command)
+    }
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
         receive_buffer: &'a mut [u8],
-        timeout: Duration,
+        _timeout: Duration,
     ) -> Result<&'a [u8], Error>;
     fn refresh(&self) -> Result<(), Error> {
         Ok(())
@@ -180,6 +186,25 @@ impl Connector for PcscAppletConnector {
         self.base.buffer_size()
     }
 
+    fn apdu_capabilities(&self) -> ApduCapabilities {
+        self.base.apdu_capabilities()
+    }
+
+    fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        self.ensure_selected()?;
+        if self.protocol.is_none() || !self.enabled.get() {
+            return self.base.send_apdu(command);
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let result = channel.transmit(self.base.as_ref(), command);
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        result
+    }
+
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
@@ -190,18 +215,8 @@ impl Connector for PcscAppletConnector {
         if self.protocol.is_none() || !self.enabled.get() {
             return self.base.transmit(send_buffer, receive_buffer, timeout);
         }
-        let mut state = self.state.try_borrow_mut()?;
-        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
-        let result: Result<Vec<u8>, Error> = (|| {
-            let command = CommandApdu::decode(send_buffer)?;
-            let response = channel.transmit(self.base.as_ref(), &command)?;
-            Ok(response.encode())
-        })();
-        if result.is_err() {
-            state.session = None;
-            state.application_aid.clear();
-        }
-        let encoded = result?;
+        let command = CommandApdu::decode(send_buffer)?;
+        let encoded = self.send_apdu(&command)?.encode();
         if encoded.len() > receive_buffer.len() {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -403,6 +418,7 @@ pub(crate) struct PcscConnector {
     pub(crate) card: RefCell<Option<pcsc::Card>>,
     pub(crate) firmware_version: Cell<Option<(u8, u8, u8)>>,
     pub(crate) serial_number: OnceLock<String>,
+    pub(crate) apdu_capabilities: Cell<ApduCapabilities>,
 }
 
 impl std::fmt::Debug for PcscConnector {
@@ -453,6 +469,9 @@ impl Connector for PcscConnector {
     fn buffer_size(&self) -> usize {
         pcsc::MAX_BUFFER_SIZE_EXTENDED
     }
+    fn apdu_capabilities(&self) -> ApduCapabilities {
+        self.apdu_capabilities.get()
+    }
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
@@ -475,13 +494,12 @@ impl Connector for PcscConnector {
         }
     }
     fn refresh(&self) -> Result<(), Error> {
-        if self
-            .card
-            .borrow()
-            .as_ref()
-            .is_some_and(|card| card.status2_owned().is_ok())
-        {
-            return Ok(());
+        if let Some(card) = self.card.borrow().as_ref() {
+            if card.status2_owned().is_ok() {
+                self.apdu_capabilities
+                    .set(detect_pcsc_apdu_capabilities(card));
+                return Ok(());
+            }
         }
         *self.card.borrow_mut() = None;
         let card = self.context.connect(
@@ -489,9 +507,84 @@ impl Connector for PcscConnector {
             pcsc::ShareMode::Exclusive,
             pcsc::Protocols::T0 | pcsc::Protocols::T1,
         )?;
+        self.apdu_capabilities
+            .set(detect_pcsc_apdu_capabilities(&card));
         *self.card.borrow_mut() = Some(card);
         Ok(())
     }
+}
+
+fn detect_pcsc_apdu_capabilities(card: &pcsc::Card) -> ApduCapabilities {
+    let Ok(status) = card.status2_owned() else {
+        return ApduCapabilities::SHORT_ONLY;
+    };
+    if pcsc_transport_is_nfc(card, status.atr()) {
+        log!(2, "PCSC transport detected as NFC; using short APDUs");
+        return ApduCapabilities::SHORT_ONLY;
+    }
+    let card_capabilities = crate::iso7816::atr_apdu_capabilities(status.atr());
+    let max_input = card
+        .get_attribute_owned(pcsc::Attribute::Maxinput)
+        .ok()
+        .and_then(|encoded| pcsc_dword(&encoded))
+        .map(|length| length as usize);
+    let reader_supports_extended = status.protocol2() == Some(pcsc::Protocol::T1)
+        && max_input.is_none_or(|length| length > 261);
+    let capabilities = card_capabilities.unwrap_or(ApduCapabilities::SHORT_ONLY);
+    ApduCapabilities {
+        command_chaining: capabilities.command_chaining,
+        extended: capabilities.extended && reader_supports_extended,
+    }
+}
+
+const PCSC_CHANNEL_TYPE_NFC: u16 = 0x0100;
+const PCSC_READER_CONTACTLESS: u32 = 0x0000_0008;
+const PCSC_ICC_TYPE_14443_A: u8 = 5;
+const PCSC_ICC_TYPE_14443_B: u8 = 6;
+const PCSC_ICC_TYPE_15693: u8 = 7;
+
+fn pcsc_transport_is_nfc(card: &pcsc::Card, atr: &[u8]) -> bool {
+    let channel_is_nfc = card
+        .get_attribute_owned(pcsc::Attribute::ChannelId)
+        .ok()
+        .is_some_and(|encoded| pcsc_channel_is_nfc(&encoded));
+    let reader_is_contactless = card
+        .get_attribute_owned(pcsc::Attribute::Characteristics)
+        .ok()
+        .is_some_and(|encoded| pcsc_reader_is_contactless(&encoded));
+    let icc_is_contactless = card
+        .get_attribute_owned(pcsc::Attribute::IccTypePerAtr)
+        .ok()
+        .is_some_and(|encoded| pcsc_icc_is_contactless(&encoded));
+
+    channel_is_nfc || reader_is_contactless || icc_is_contactless || yubikey_atr_is_nfc(atr)
+}
+
+fn pcsc_dword(encoded: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = encoded.try_into().ok()?;
+    Some(u32::from_ne_bytes(bytes))
+}
+
+fn pcsc_channel_is_nfc(encoded: &[u8]) -> bool {
+    pcsc_dword(encoded).is_some_and(|channel| (channel >> 16) as u16 == PCSC_CHANNEL_TYPE_NFC)
+}
+
+fn pcsc_reader_is_contactless(encoded: &[u8]) -> bool {
+    pcsc_dword(encoded)
+        .is_some_and(|characteristics| characteristics & PCSC_READER_CONTACTLESS != 0)
+}
+
+fn pcsc_icc_is_contactless(encoded: &[u8]) -> bool {
+    encoded.first().is_some_and(|icc_type| {
+        matches!(
+            *icc_type,
+            PCSC_ICC_TYPE_14443_A | PCSC_ICC_TYPE_14443_B | PCSC_ICC_TYPE_15693
+        )
+    })
+}
+
+fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
+    atr.get(1).is_some_and(|t0| t0 & 0xf0 != 0xf0)
 }
 
 impl PcscConnector {
@@ -607,5 +700,45 @@ impl CurlConnector {
         curl.post(true)?;
         self.connected = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_nfc_pcsc_channel() {
+        assert!(pcsc_channel_is_nfc(&0x0100_0000u32.to_ne_bytes()));
+        assert!(!pcsc_channel_is_nfc(&0x0020_0000u32.to_ne_bytes()));
+        assert!(!pcsc_channel_is_nfc(&[0x00, 0x01]));
+    }
+
+    #[test]
+    fn detects_contactless_pcsc_characteristic() {
+        assert!(pcsc_reader_is_contactless(
+            &PCSC_READER_CONTACTLESS.to_ne_bytes()
+        ));
+        assert!(!pcsc_reader_is_contactless(&0u32.to_ne_bytes()));
+    }
+
+    #[test]
+    fn detects_contactless_icc_types() {
+        for icc_type in [
+            PCSC_ICC_TYPE_14443_A,
+            PCSC_ICC_TYPE_14443_B,
+            PCSC_ICC_TYPE_15693,
+        ] {
+            assert!(pcsc_icc_is_contactless(&[icc_type]));
+        }
+        assert!(!pcsc_icc_is_contactless(&[0]));
+        assert!(!pcsc_icc_is_contactless(&[]));
+    }
+
+    #[test]
+    fn detects_yubico_nfc_atr_convention() {
+        assert!(yubikey_atr_is_nfc(&[0x3b, 0x8d]));
+        assert!(!yubikey_atr_is_nfc(&[0x3b, 0xfd]));
+        assert!(!yubikey_atr_is_nfc(&[]));
     }
 }

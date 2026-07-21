@@ -71,6 +71,9 @@ use error::*;
 
 mod secure_channel_crypto;
 
+mod iso7816;
+use iso7816::ApduCapabilities;
+
 mod scp03;
 use scp03::{
     configured_security_level, parse_hex, select_application, CommandApdu, ResponseApdu,
