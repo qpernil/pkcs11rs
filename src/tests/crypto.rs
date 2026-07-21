@@ -1083,6 +1083,7 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
             touch_policy: 0,
         }],
         certificates: Vec::new(),
+        data_objects: Vec::new(),
     };
 
     assert!(crate::Slot::token_objects(&slot, 1)

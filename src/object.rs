@@ -59,6 +59,10 @@ enum KeyMaterial {
         value: Vec<u8>,
         attestation: bool,
     },
+    PivData {
+        object_id: u32,
+        value: Vec<u8>,
+    },
     PivAttestation {
         connector: Rc<dyn Connector>,
         slot: piv::Slot,
@@ -186,6 +190,11 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("slot", slot)
                 .field("algorithm", algorithm)
                 .field("cached", &value.borrow().is_some())
+                .finish(),
+            Self::PivData { object_id, value } => fmt
+                .debug_struct("PivData")
+                .field("object_id", object_id)
+                .field("size", &value.len())
                 .finish(),
             Self::OpenPgpCertificate { value } => fmt
                 .debug_struct("OpenPgpCertificate")
@@ -522,7 +531,9 @@ impl TokenObject {
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
                 && matches!(
                     self.material,
-                    KeyMaterial::PivPrivate { .. } | KeyMaterial::PivCertificate { .. }
+                    KeyMaterial::PivPrivate { .. }
+                        | KeyMaterial::PivCertificate { .. }
+                        | KeyMaterial::PivData { .. }
                 ) =>
             {
                 Some(bool_attribute(true))
@@ -543,11 +554,17 @@ impl TokenObject {
                 KeyMaterial::SecurityDomainData { application, .. } => {
                     Some(application.as_bytes().to_vec())
                 }
+                KeyMaterial::PivData { .. } => Some(b"PIV".to_vec()),
                 _ => None,
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
                 KeyMaterial::SecurityDomainData { object_id, .. } => Some(object_id.clone()),
+                KeyMaterial::PivData { object_id, .. } => {
+                    let bytes = object_id.to_be_bytes();
+                    let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
+                    Some(bytes[first..].to_vec())
+                }
                 _ => None,
             },
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
@@ -777,6 +794,9 @@ impl TokenObject {
                     {
                         Some(value.clone())
                     }
+                    KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                        Some(value.clone())
+                    }
                     KeyMaterial::PivAttestation {
                         connector,
                         slot,
@@ -868,6 +888,7 @@ impl TokenObject {
                 | KeyMaterial::PivPublic { .. }
                 | KeyMaterial::PivCertificate { .. }
                 | KeyMaterial::PivAttestation { .. }
+                | KeyMaterial::PivData { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }

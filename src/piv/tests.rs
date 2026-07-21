@@ -389,6 +389,16 @@ fn enumerates_all_piv_slots_and_certificate_objects() {
 }
 
 #[test]
+fn restricts_general_data_writes_to_piv_and_vendor_objects() {
+    assert!(data_object_allowed(0x5f_c102));
+    assert!(data_object_allowed(0x5f_ff10));
+    assert!(!data_object_allowed(0x5f_ff01));
+    assert!(!data_object_allowed(Slot::Signature.certificate_object()));
+    assert_eq!(data_object_name(0x5f_c102), "Cardholder unique identifier");
+    assert_eq!(data_object_name(0x5f_ff10), "PIV data 5FFF10");
+}
+
+#[test]
 fn requests_dynamic_attestation_certificate() {
     let connector = ScriptedConnector::new(vec![response(&[0x30, 0x00], STATUS_SUCCESS)]);
     assert_eq!(

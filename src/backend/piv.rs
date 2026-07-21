@@ -9,6 +9,7 @@ struct PivSlot {
     serial: String,
     keys: Vec<PivKey>,
     certificates: Vec<PivCertificate>,
+    data_objects: Vec<PivDataObject>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,12 @@ struct PivCertificate {
     algorithm: piv::Algorithm,
     value: Vec<u8>,
     attestation: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PivDataObject {
+    object_id: u32,
+    value: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +305,7 @@ impl PivSlot {
             serial,
             keys: Vec::new(),
             certificates: Vec::new(),
+            data_objects: Vec::new(),
         }
     }
 
@@ -488,6 +496,7 @@ impl Slot for PivSlot {
         self.update_device_info(info);
         self.keys.clear();
         self.certificates.clear();
+        self.data_objects.clear();
         for slot in piv::Slot::all().iter().copied() {
             let metadata = if slot == piv::Slot::Attestation {
                 None
@@ -554,6 +563,14 @@ impl Slot for PivSlot {
                 pin_policy: metadata.pin_policy.unwrap_or(0),
                 touch_policy: metadata.touch_policy.unwrap_or(0),
             });
+        }
+        for (object_id, _) in piv::DATA_OBJECTS {
+            if let Ok(value) = PivClient.get_data(self.connector.as_ref(), *object_id) {
+                self.data_objects.push(PivDataObject {
+                    object_id: *object_id,
+                    value,
+                });
+            }
         }
         Ok(())
     }
@@ -795,6 +812,34 @@ impl Slot for PivSlot {
             .retain(|certificate| certificate.slot != slot);
         Ok(())
     }
+    fn piv_write_data(&mut self, object_id: u32, value: &[u8]) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !piv::data_object_allowed(object_id) {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+        PivClient.put_data(self.connector.as_ref(), object_id, value)?;
+        self.data_objects
+            .retain(|object| object.object_id != object_id);
+        self.data_objects.push(PivDataObject {
+            object_id,
+            value: value.to_vec(),
+        });
+        Ok(())
+    }
+    fn piv_delete_data(&mut self, object_id: u32) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !piv::data_object_allowed(object_id) {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+        PivClient.put_data(self.connector.as_ref(), object_id, &[])?;
+        self.data_objects
+            .retain(|object| object.object_id != object_id);
+        Ok(())
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {
@@ -980,6 +1025,34 @@ impl Slot for PivSlot {
                     algorithm: key.algorithm,
                     value: key.attestation.clone(),
                     attempted: key.attestation_attempted.clone(),
+                },
+            });
+        }
+        for data in &self.data_objects {
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("piv-data-{:06x}", data.object_id),
+                class: CKO_DATA as CK_OBJECT_CLASS,
+                key_type: 0,
+                label: piv::data_object_name(data.object_id),
+                id: Vec::new(),
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::PivData {
+                    object_id: data.object_id,
+                    value: data.value.clone(),
                 },
             });
         }
