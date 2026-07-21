@@ -28,6 +28,7 @@ CKR_MECHANISM_INVALID = 0x70
 CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_PIN_INCORRECT = 0xA0
+CKR_PIN_INVALID = 0xA1
 CKR_PIN_LEN_RANGE = 0xA2
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_SESSION_PARALLEL_NOT_SUPPORTED = 0xB4
@@ -1752,6 +1753,81 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(
             self.lib.C_SetPIN(session.value, old_pin, len(old_pin), new_pin, len(new_pin)),
             CKR_OK,
+        )
+
+    def test_pin_entry_points_require_valid_utf8(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+
+        invalid_utf8 = (CK_BYTE * 1)(0xFF)
+        self.assertEqual(
+            self.lib.C_Login(
+                session.value,
+                CKU_USER,
+                invalid_utf8,
+                len(invalid_utf8),
+            ),
+            CKR_PIN_INVALID,
+        )
+
+        encoded = "räka".encode()
+        valid_utf8 = (CK_BYTE * len(encoded))(*encoded)
+        self.assertEqual(
+            self.lib.C_Login(
+                session.value,
+                CKU_USER,
+                valid_utf8,
+                len(valid_utf8),
+            ),
+            CKR_PIN_INCORRECT,
+        )
+
+        old_pin = (CK_BYTE * 4)(*b"1234")
+        new_pin = (CK_BYTE * 4)(*b"5678")
+        self.assertEqual(
+            self.lib.C_SetPIN(
+                session.value,
+                invalid_utf8,
+                len(invalid_utf8),
+                new_pin,
+                len(new_pin),
+            ),
+            CKR_PIN_INVALID,
+        )
+        self.assertEqual(
+            self.lib.C_SetPIN(
+                session.value,
+                old_pin,
+                len(old_pin),
+                invalid_utf8,
+                len(invalid_utf8),
+            ),
+            CKR_PIN_INVALID,
+        )
+
+        admin_pin = (CK_BYTE * 8)(*b"12345678")
+        self.assertEqual(
+            self.lib.C_Login(
+                session.value,
+                CKU_SO,
+                admin_pin,
+                len(admin_pin),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_InitPIN(session.value, invalid_utf8, len(invalid_utf8)),
+            CKR_PIN_INVALID,
         )
 
     def test_so_login_enforces_session_rules_and_initializes_user_pin(self) -> None:

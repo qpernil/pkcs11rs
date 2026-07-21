@@ -1904,6 +1904,92 @@ pub fn set_pin_validates_session_and_changes_supported_token_pin() {
 }
 
 #[test]
+pub fn pin_entry_points_require_valid_utf8() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_slot(TEST_SLOT_ID);
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            TEST_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut invalid_utf8 = [0xff];
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            invalid_utf8.as_mut_ptr(),
+            invalid_utf8.len() as CK_ULONG,
+        ),
+        CKR_PIN_INVALID as CK_RV
+    );
+
+    let mut valid_utf8 = "räka".as_bytes().to_vec();
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            valid_utf8.as_mut_ptr(),
+            valid_utf8.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+
+    let mut old_pin = *b"1234";
+    let mut new_pin = *b"5678";
+    assert_eq!(
+        crate::C_SetPIN(
+            session,
+            invalid_utf8.as_mut_ptr(),
+            invalid_utf8.len() as CK_ULONG,
+            new_pin.as_mut_ptr(),
+            new_pin.len() as CK_ULONG,
+        ),
+        CKR_PIN_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_SetPIN(
+            session,
+            old_pin.as_mut_ptr(),
+            old_pin.len() as CK_ULONG,
+            invalid_utf8.as_mut_ptr(),
+            invalid_utf8.len() as CK_ULONG,
+        ),
+        CKR_PIN_INVALID as CK_RV
+    );
+
+    let mut admin_pin = *b"12345678";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            admin_pin.as_mut_ptr(),
+            admin_pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_InitPIN(
+            session,
+            invalid_utf8.as_mut_ptr(),
+            invalid_utf8.len() as CK_ULONG,
+        ),
+        CKR_PIN_INVALID as CK_RV
+    );
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
