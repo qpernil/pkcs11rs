@@ -408,6 +408,9 @@ fn yubihsm_generate_key_pair_command(
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
+    if !public_object.token || !private_object.token {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
     if is_montgomery_key_type(key_type)
         && (public_object.encrypt
             || public_object.decrypt
@@ -620,85 +623,94 @@ fn derive_key(
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let derived =
-            match source {
-                DeriveSource::Piv {
-                    slot,
-                    algorithm,
-                    pin_policy,
-                } => ctx._get_session(session_handle)?.1.piv_decipher(
-                    slot,
-                    algorithm,
-                    public_data,
-                    pin_policy,
-                )?,
-                DeriveSource::OpenPgp {
-                    key_ref,
-                    algorithm,
-                    pin_policy,
-                } => ctx._get_session(session_handle)?.1.openpgp_derive(
-                    key_ref,
-                    algorithm,
-                    public_data,
-                    pin_policy,
-                )?,
-                DeriveSource::YubiHsm { id, .. } => {
-                    ctx._get_session(session_handle)?.1.yubihsm_command(
-                        &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
-                    )?
-                }
-            };
+        let (mut derived_object, requested_length) =
+            derived_secret_object(templ, expected_length)?;
+        validate_new_object_access(&derived_object, flags, logged_in)?;
+
+        let derived = match source {
+            DeriveSource::Piv {
+                slot,
+                algorithm,
+                pin_policy,
+            } => ctx._get_session(session_handle)?.1.piv_decipher(
+                slot,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?,
+            DeriveSource::OpenPgp {
+                key_ref,
+                algorithm,
+                pin_policy,
+            } => ctx._get_session(session_handle)?.1.openpgp_derive(
+                key_ref,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?,
+            DeriveSource::YubiHsm { id, .. } => {
+                ctx._get_session(session_handle)?.1.yubihsm_command(
+                    &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
+                )?
+            }
+        };
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
-
-        let mut object_template = TokenObjectTemplate {
-            class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
-            key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
-            private: true,
-            sensitive: Some(true),
-            extractable: Some(false),
-            ..TokenObjectTemplate::default()
-        };
-        let mut requested_length = None;
-        for attribute in templ {
-            if attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE {
-                requested_length =
-                    Some(read_ulong_template_attribute(attribute).map_err(Error::from)? as usize);
-            } else {
-                object_template
-                    .apply_attribute(attribute)
-                    .map_err(Error::from)?;
-            }
-        }
-        let requested_length = requested_length.unwrap_or(expected_length);
-        if requested_length == 0 || requested_length > derived.len() {
-            return Err(CKR_KEY_SIZE_RANGE.into());
-        }
-        let mut derived_object = object_template.into_object().map_err(Error::from)?;
-        if derived_object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-            || derived_object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
-        {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-        derived_object.private = false;
-        derived_object.sensitive = false;
-        derived_object.extractable = true;
-        derived_object.always_sensitive = false;
-        derived_object.never_extractable = false;
-        derived_object.encrypt = false;
-        derived_object.decrypt = false;
-        derived_object.sign = false;
-        derived_object.verify = false;
-        derived_object.derive = false;
         derived_object.material =
             KeyMaterial::DerivedSecret(Zeroizing::new(derived[..requested_length].to_vec()));
         derived_object.local = false;
-        validate_new_object_access(&derived_object, flags, logged_in)?;
         derived_object.set_owner(session_handle, slot_id);
         *key_handle = ctx.insert_object(derived_object);
         Ok(())
     })
+}
+
+fn derived_secret_object(
+    templ: &[CK_ATTRIBUTE],
+    expected_length: usize,
+) -> Result<(TokenObject, usize), Error> {
+    let mut object_template = TokenObjectTemplate {
+        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+        key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        private: true,
+        sensitive: Some(true),
+        extractable: Some(false),
+        ..TokenObjectTemplate::default()
+    };
+    let mut requested_length = None;
+    for attribute in templ {
+        if attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE {
+            requested_length =
+                Some(read_ulong_template_attribute(attribute).map_err(Error::from)? as usize);
+        } else {
+            object_template
+                .apply_attribute(attribute)
+                .map_err(Error::from)?;
+        }
+    }
+    let requested_length = requested_length.unwrap_or(expected_length);
+    if requested_length == 0 || requested_length > expected_length {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    let mut object = object_template.into_object().map_err(Error::from)?;
+    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+        || object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+        || object.token
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    object.private = false;
+    object.sensitive = false;
+    object.extractable = true;
+    object.always_sensitive = false;
+    object.never_extractable = false;
+    object.encrypt = false;
+    object.decrypt = false;
+    object.sign = false;
+    object.verify = false;
+    object.derive = false;
+    Ok((object, requested_length))
 }
 
 #[no_mangle]
@@ -728,4 +740,3 @@ pub extern "C" fn C_GenerateRandom(
     });
     map(result)
 }
-

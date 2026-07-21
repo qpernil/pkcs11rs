@@ -873,6 +873,41 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
+    def test_yubihsm_key_pair_generation_requires_token_objects(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        modulus_bits = CK_ULONG(2048)
+        session_object = CK_BYTE(0)
+        public_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_MODULUS_BITS,
+                ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
+                ctypes.sizeof(modulus_bits),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                ctypes.sizeof(session_object),
+            ),
+        )
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
+        public_key = CK_ULONG()
+        private_key = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_GenerateKeyPair(
+                session,
+                ctypes.byref(mechanism),
+                public_template,
+                len(public_template),
+                None,
+                0,
+                ctypes.byref(public_key),
+                ctypes.byref(private_key),
+            ),
+            CKR_TEMPLATE_INCONSISTENT,
+        )
+
     def test_abi_yubihsm_fixture_exercises_aes_gcm(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
