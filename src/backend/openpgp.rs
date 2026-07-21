@@ -332,6 +332,10 @@ impl Slot for OpenPgpSlot {
         self.keys.clear();
         self.certificates.clear();
         for key_ref in OpenPgpKeyRef::ALL {
+            if info.key_status(key_ref) == Some(openpgp::KeyStatus::None) {
+                log!(2, "OpenPGP key reference {:?} is empty", key_ref);
+                continue;
+            }
             let Some(algorithm) = info.algorithm(key_ref) else {
                 log!(
                     1,
@@ -369,32 +373,43 @@ impl Slot for OpenPgpSlot {
             }
         }
         if let Some(algorithm) = info.algorithm(OpenPgpKeyRef::Attestation) {
-            match OpenPgpClient.public_key(
-                self.connector.as_ref(),
-                OpenPgpKeyRef::Attestation,
-                algorithm,
-            ) {
-                Ok(public_key) => self.keys.push(openpgp::KeyInfo {
-                    key_ref: OpenPgpKeyRef::Attestation,
+            if info.key_status(OpenPgpKeyRef::Attestation) == Some(openpgp::KeyStatus::None) {
+                log!(2, "OpenPGP attestation key reference is empty");
+            } else {
+                match OpenPgpClient.public_key(
+                    self.connector.as_ref(),
+                    OpenPgpKeyRef::Attestation,
                     algorithm,
-                    public_key,
-                    pin_policy: info.pin_policy,
-                    local: info.key_is_local(OpenPgpKeyRef::Attestation),
-                }),
-                Err(error) => log!(
-                    2,
-                    "OpenPGP attestation public-key discovery failed: {:?}",
-                    error
-                ),
+                ) {
+                    Ok(public_key) => self.keys.push(openpgp::KeyInfo {
+                        key_ref: OpenPgpKeyRef::Attestation,
+                        algorithm,
+                        public_key,
+                        pin_policy: info.pin_policy,
+                        local: info.key_is_local(OpenPgpKeyRef::Attestation),
+                    }),
+                    Err(error) => log!(
+                        2,
+                        "OpenPGP attestation public-key discovery failed: {:?}",
+                        error
+                    ),
+                }
             }
             if let Ok(value) = OpenPgpClient
                 .certificate(self.connector.as_ref(), OpenPgpKeyRef::Attestation)
             {
-                self.certificates.push(OpenPgpCertificate {
-                    key_ref: OpenPgpKeyRef::Attestation,
-                    key_type: algorithm.key_type() as CK_KEY_TYPE,
-                    value,
-                });
+                if !value.is_empty() {
+                    self.certificates.push(OpenPgpCertificate {
+                        key_ref: OpenPgpKeyRef::Attestation,
+                        key_type: algorithm.key_type() as CK_KEY_TYPE,
+                        value,
+                    });
+                } else {
+                    log!(
+                    2,
+                        "OpenPGP attestation certificate data object is empty"
+                    );
+                }
             }
         }
         Ok(())

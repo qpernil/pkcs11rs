@@ -113,6 +113,18 @@ fn app_data_with_attestation() -> Vec<u8> {
     data
 }
 
+fn app_data_with_empty_keys() -> Vec<u8> {
+    let mut data = app_data_with_attestation();
+    let key_information = data
+        .windows(2)
+        .position(|window| window == [0xde, 0x08])
+        .unwrap();
+    for status in [3, 5, 7, 9] {
+        data[key_information + status] = 0;
+    }
+    data
+}
+
 fn app_data_with_generated_attestation_only() -> Vec<u8> {
     vec![
         0x6e, 0x27, 0x4f, 0x0e, 0xd2, 0x76, 0x00, 0x01, 0x24, 0x01, 0x03, 0x04, 0x00, 0x06, 0x12,
@@ -201,6 +213,26 @@ fn generated_attestation_status_sets_discovered_key_provenance() {
         connector.commands.borrow()[3],
         [0, 0x47, 0x81, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]
     );
+}
+
+#[test]
+fn empty_key_information_skips_public_key_discovery() {
+    let connector = std::rc::Rc::new(ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&app_data_with_empty_keys(), STATUS_SUCCESS),
+        response(&[], 0x6a88),
+        response(&[], STATUS_SUCCESS),
+    ]));
+    let connector_trait: std::rc::Rc<dyn Connector> = connector.clone();
+    let mut slot = crate::OpenPgpSlot::new(connector_trait, OPENPGP_AID.to_vec());
+
+    crate::Slot::init_slot(&mut slot).unwrap();
+    assert!(crate::Slot::token_objects(&slot, 7).unwrap().is_empty());
+    assert!(connector
+        .commands
+        .borrow()
+        .iter()
+        .all(|command| command.get(1) != Some(&INS_GENERATE_ASYMMETRIC)));
 }
 
 #[test]
