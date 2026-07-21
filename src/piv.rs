@@ -5,6 +5,11 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_PIN_INCORRECT,
     CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
+use openssl::{
+    memcmp,
+    symm::{Cipher, Crypter, Mode},
+};
+use zeroize::Zeroizing;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 
@@ -16,6 +21,7 @@ const INS_GET_VERSION: u8 = 0xfd;
 const INS_GET_SERIAL: u8 = 0xf8;
 const INS_GET_METADATA: u8 = 0xf7;
 const INS_ATTEST: u8 = 0xf9;
+const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +48,44 @@ pub(crate) enum Algorithm {
     EccP384 = 0x14,
     Ed25519 = 0xe0,
     X25519 = 0xe1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ManagementAlgorithm {
+    TripleDes = 0x03,
+    Aes128 = 0x08,
+    Aes192 = 0x0a,
+    Aes256 = 0x0c,
+}
+
+impl ManagementAlgorithm {
+    fn from_id(id: u8) -> Option<Self> {
+        match id {
+            0x03 => Some(Self::TripleDes),
+            0x08 => Some(Self::Aes128),
+            0x0a => Some(Self::Aes192),
+            0x0c => Some(Self::Aes256),
+            _ => None,
+        }
+    }
+
+    fn cipher(self) -> Cipher {
+        match self {
+            Self::TripleDes => Cipher::des_ede3_ecb(),
+            Self::Aes128 => Cipher::aes_128_ecb(),
+            Self::Aes192 => Cipher::aes_192_ecb(),
+            Self::Aes256 => Cipher::aes_256_ecb(),
+        }
+    }
+
+    fn key_length(self) -> usize {
+        match self {
+            Self::TripleDes | Self::Aes192 => 24,
+            Self::Aes128 => 16,
+            Self::Aes256 => 32,
+        }
+    }
 }
 
 impl Algorithm {
@@ -397,7 +441,15 @@ impl Client {
         connector: &dyn Connector,
         slot: Slot,
     ) -> Result<Metadata, Error> {
-        let data = self.command(connector, INS_GET_METADATA, 0, slot as u8, &[])?;
+        self.metadata_for_reference(connector, slot as u8)
+    }
+
+    fn metadata_for_reference(
+        &self,
+        connector: &dyn Connector,
+        reference: u8,
+    ) -> Result<Metadata, Error> {
+        let data = self.command(connector, INS_GET_METADATA, 0, reference, &[])?;
         let fields = parse_tlvs(&data)?;
         let policy = field(&fields, 0x02);
         Ok(Metadata {
@@ -407,6 +459,62 @@ impl Client {
             origin: field(&fields, 0x03).and_then(|value| value.first().copied()),
             public_key: field(&fields, 0x04).map(<[u8]>::to_vec),
         })
+    }
+
+    pub(crate) fn authenticate_management_key(
+        &self,
+        connector: &dyn Connector,
+        key: &[u8],
+    ) -> Result<(), Error> {
+        let algorithm = self
+            .metadata_for_reference(connector, MANAGEMENT_KEY_REFERENCE)
+            .ok()
+            .and_then(|metadata| metadata.algorithm)
+            .and_then(ManagementAlgorithm::from_id)
+            .unwrap_or(ManagementAlgorithm::TripleDes);
+        if key.len() != algorithm.key_length() {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+
+        let request = encode_tlv(0x7c, &encode_tlv(0x80, &[])?)?;
+        let response = self.command(
+            connector,
+            INS_AUTHENTICATE,
+            algorithm as u8,
+            MANAGEMENT_KEY_REFERENCE,
+            &request,
+        )?;
+        let outer = parse_tlvs(&response)?;
+        let dynamic = field(&outer, 0x7c).ok_or(CKR_DATA_INVALID)?;
+        let fields = parse_tlvs(dynamic)?;
+        let card_challenge = field(&fields, 0x80).ok_or(CKR_DATA_INVALID)?;
+        if card_challenge.len() != algorithm.cipher().block_size() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+
+        let card_response = crypt_management_block(algorithm, key, card_challenge, Mode::Decrypt)?;
+        let mut host_challenge = Zeroizing::new(vec![0; algorithm.cipher().block_size()]);
+        openssl::rand::rand_bytes(&mut host_challenge)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let mut dynamic = encode_tlv(0x80, &card_response)?;
+        dynamic.extend_from_slice(&encode_tlv(0x81, &host_challenge)?);
+        let request = encode_tlv(0x7c, &dynamic)?;
+        let response = self.command(
+            connector,
+            INS_AUTHENTICATE,
+            algorithm as u8,
+            MANAGEMENT_KEY_REFERENCE,
+            &request,
+        )?;
+        let outer = parse_tlvs(&response)?;
+        let dynamic = field(&outer, 0x7c).ok_or(CKR_DATA_INVALID)?;
+        let fields = parse_tlvs(dynamic)?;
+        let card_cryptogram = field(&fields, 0x82).ok_or(CKR_DATA_INVALID)?;
+        let expected = crypt_management_block(algorithm, key, &host_challenge, Mode::Encrypt)?;
+        if !memcmp::eq(card_cryptogram, &expected) {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        Ok(())
     }
 
     pub(crate) fn certificate(
@@ -553,6 +661,27 @@ impl Client {
     ) -> Result<ResponseApdu, Error> {
         connector.send_apdu(&command)
     }
+}
+
+fn crypt_management_block(
+    algorithm: ManagementAlgorithm,
+    key: &[u8],
+    input: &[u8],
+    mode: Mode,
+) -> Result<Vec<u8>, Error> {
+    let cipher = algorithm.cipher();
+    if key.len() != algorithm.key_length() || input.len() != cipher.block_size() {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut crypter = Crypter::new(cipher, mode, key, None).map_err(Error::from)?;
+    crypter.pad(false);
+    let mut output = vec![0; input.len() + cipher.block_size()];
+    let mut length = crypter.update(input, &mut output).map_err(Error::from)?;
+    length += crypter
+        .finalize(&mut output[length..])
+        .map_err(Error::from)?;
+    output.truncate(length);
+    Ok(output)
 }
 
 fn require_success(status: u16) -> Result<(), Error> {

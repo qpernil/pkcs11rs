@@ -205,6 +205,7 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
         application_aid: piv::PIV_AID.to_vec(),
         slot_description: Some(String::from("PKCS11RS ABI PIV test slot")),
         authenticated: Rc::new(Cell::new(false)),
+        management_authenticated: Rc::new(Cell::new(false)),
         version: piv::Version {
             major: 5,
             minor: 7,

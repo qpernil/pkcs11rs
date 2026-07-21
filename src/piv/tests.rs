@@ -68,6 +68,115 @@ fn response(data: &[u8], status: u16) -> Vec<u8> {
     response
 }
 
+#[derive(Debug)]
+struct ManagementConnector {
+    commands: RefCell<Vec<Vec<u8>>>,
+}
+
+impl Connector for ManagementConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiKey"
+    }
+    fn serial(&self) -> &str {
+        "1"
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        7
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn transmit<'a>(
+        &self,
+        command: &[u8],
+        receive: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        self.commands.borrow_mut().push(command.to_vec());
+        let key = [1u8; 24];
+        let response = match (command[1], command[4]) {
+            (INS_GET_METADATA, _) => response(&[0x01, 0x01, 0x03], STATUS_SUCCESS),
+            (INS_AUTHENTICATE, 4) => {
+                let challenge = crypt_management_block(
+                    ManagementAlgorithm::TripleDes,
+                    &key,
+                    &[0x5a; 8],
+                    Mode::Encrypt,
+                )?;
+                response(
+                    &encode_tlv(0x7c, &encode_tlv(0x80, &challenge)?)?,
+                    STATUS_SUCCESS,
+                )
+            }
+            (INS_AUTHENTICATE, _) => {
+                let host_tag = command
+                    .windows(2)
+                    .position(|window| window == [0x81, 0x08])
+                    .ok_or(CKR_DATA_INVALID)?;
+                let host = command
+                    .get(host_tag + 2..host_tag + 10)
+                    .ok_or(CKR_DATA_INVALID)?;
+                let cryptogram = crypt_management_block(
+                    ManagementAlgorithm::TripleDes,
+                    &key,
+                    host,
+                    Mode::Encrypt,
+                )?;
+                response(
+                    &encode_tlv(0x7c, &encode_tlv(0x82, &cryptogram)?)?,
+                    STATUS_SUCCESS,
+                )
+            }
+            _ => response(&[], 0x6d00),
+        };
+        receive[..response.len()].copy_from_slice(&response);
+        Ok(&receive[..response.len()])
+    }
+}
+
+#[test]
+fn authenticates_the_piv_management_key_mutually() {
+    let connector = ManagementConnector {
+        commands: RefCell::new(Vec::new()),
+    };
+    Client
+        .authenticate_management_key(&connector, &[1; 24])
+        .unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(&commands[0][..4], &[0, INS_GET_METADATA, 0, 0x9b]);
+    assert_eq!(
+        commands[1],
+        [
+            0,
+            INS_AUTHENTICATE,
+            ManagementAlgorithm::TripleDes as u8,
+            0x9b,
+            4,
+            0x7c,
+            2,
+            0x80,
+            0,
+            0
+        ]
+    );
+    assert_eq!(&commands[2][..4], &[0, INS_AUTHENTICATE, 0x03, 0x9b]);
+    assert!(commands[2]
+        .windows(4)
+        .any(|window| window == [0x80, 8, 0x5a, 0x5a]));
+}
+
 #[test]
 fn selects_piv_and_reads_version_and_serial() {
     let connector = ScriptedConnector::new(vec![

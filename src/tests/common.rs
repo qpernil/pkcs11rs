@@ -1838,6 +1838,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: crate::piv::Version {
             major: 5,
             minor: 7,

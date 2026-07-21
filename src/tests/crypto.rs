@@ -1066,6 +1066,7 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: crate::piv::Version {
             major: 5,
             minor: 7,
