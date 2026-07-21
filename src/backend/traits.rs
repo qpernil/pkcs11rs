@@ -54,6 +54,18 @@ trait Slot {
     fn is_yubihsm(&self) -> bool {
         false
     }
+    fn is_piv(&self) -> bool {
+        false
+    }
+    fn piv_generate_key_pair(
+        &mut self,
+        _slot: piv::Slot,
+        _algorithm: piv::Algorithm,
+        _pin_policy: u8,
+        _touch_policy: u8,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_is_active(&self) -> bool {
         true
     }
