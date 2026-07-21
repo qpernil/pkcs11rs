@@ -497,7 +497,7 @@ impl Slot for OpenPgpSlot {
                 .local
                 .then(|| openpgp_key_generation_mechanism(key.algorithm))
                 .flatten();
-            let label = format!("OpenPGP {:?} key", key.key_ref).into_bytes();
+            let label = format!("OpenPGP {:?} key", key.key_ref);
             let id = vec![key.key_ref as u8];
             let public_material = match &key.public_key {
                 OpenPgpPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
@@ -520,7 +520,7 @@ impl Slot for OpenPgpSlot {
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8).into_bytes(),
+                unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label: label.clone(),
@@ -543,7 +543,7 @@ impl Slot for OpenPgpSlot {
             });
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-private", key.key_ref as u8).into_bytes(),
+                unique_id: format!("openpgp-{:02x}-private", key.key_ref as u8),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label,
@@ -576,11 +576,10 @@ impl Slot for OpenPgpSlot {
         for certificate in &self.certificates {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("openpgp-{:02x}-certificate", certificate.key_ref as u8)
-                    .into_bytes(),
+                unique_id: format!("openpgp-{:02x}-certificate", certificate.key_ref as u8),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type: certificate.key_type,
-                label: format!("OpenPGP {:?} certificate", certificate.key_ref).into_bytes(),
+                label: format!("OpenPGP {:?} certificate", certificate.key_ref),
                 id: vec![certificate.key_ref as u8],
                 token: true,
                 private: false,

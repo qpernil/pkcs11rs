@@ -99,7 +99,7 @@ fn ccid_application_aid(
         CcidApplication::OpenPgp => ("PKCS11RS_OPENPGP_AID", &openpgp::OPENPGP_AID[..]),
         CcidApplication::HsmAuth => (
             "PKCS11RS_HSMAUTH_AID",
-            &[0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x07, 0x01][..],
+            &hsmauth::AID[..],
         ),
         CcidApplication::GlobalPlatform => (
             "PKCS11RS_GLOBALPLATFORM_AID",
@@ -140,36 +140,57 @@ fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
 
 
 #[derive(Debug)]
-struct GenericPcscSlot {
+struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
-    label: &'static str,
     authenticated: Cell<bool>,
+    info: RefCell<Option<HsmAuthInfo>>,
 }
 
-impl GenericPcscSlot {
-    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>, label: &'static str) -> Self {
+impl HsmAuthSlot {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
             application_aid,
-            label,
             authenticated: Cell::new(false),
+            info: RefCell::new(None),
         }
+    }
+
+    fn discovered_info(&self) -> Result<HsmAuthInfo, Error> {
+        let mut info = self.info.try_borrow_mut()?;
+        if info.is_none() {
+            *info = Some(HsmAuthClient.discover(self.connector.as_ref())?);
+        }
+        info.clone().ok_or(CKR_DEVICE_ERROR.into())
+    }
+
+    fn providers(&self) -> Result<Vec<HsmAuthProvider>, Error> {
+        let info = self.discovered_info()?;
+        Ok(info
+            .credentials
+            .into_iter()
+            .map(|credential| HsmAuthProvider {
+                connector: self.connector.clone(),
+                credential,
+                version: info.version,
+            })
+            .collect())
     }
 }
 
-impl Slot for GenericPcscSlot {
+impl Slot for HsmAuthSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn name(&self) -> String {
-        format!("{} {}", self.connector.name(), self.label)
+        format!("{} YubiHSM Auth", self.connector.name())
     }
     fn manufacturer(&self) -> &str {
         self.connector.manufacturer()
     }
     fn product(&self) -> &str {
-        self.label
+        "YubiHSM Auth"
     }
     fn serial(&self) -> &str {
         self.connector.serial()
@@ -223,10 +244,11 @@ impl Slot for GenericPcscSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        if let Some((major, minor, patch)) = self.connector.firmware_version() {
-            info.firmwareVersion.major = major;
-            info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
-        }
+        let version = self.discovered_info()?.version;
+        info.firmwareVersion.major = version.0;
+        info.firmwareVersion.minor = version.1.saturating_mul(10) + version.2;
+        info.ulMaxPinLen = 16;
+        info.ulMinPinLen = 0;
         Ok(())
     }
     fn clear_session(&mut self) {
@@ -239,6 +261,80 @@ impl Slot for GenericPcscSlot {
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let info = self.discovered_info()?;
+        let objects = hsmauth_token_objects(slot_id, &info);
+        log!(
+            2,
+            "YubiHSM Auth slot {} exposed {} PKCS11 objects from {} credentials",
+            slot_id,
+            objects.len(),
+            info.credentials.len()
+        );
+        Ok(objects)
+    }
+}
+
+fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenObject> {
+    let mut objects = Vec::new();
+    for credential in &info.credentials {
+        let id = credential.label.as_bytes().to_vec();
+        objects.push(TokenObject {
+            slot_id: Some(slot_id),
+            unique_id: format!("hsmauth-credential:{}", credential.label),
+            class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
+            key_type: CKK_GENERIC_SECRET as CK_KEY_TYPE,
+            label: credential.label.clone(),
+            id: id.clone(),
+            token: true,
+            private: false,
+            encrypt: false,
+            decrypt: false,
+            sign: false,
+            verify: false,
+            derive: false,
+            sensitive: true,
+            extractable: false,
+            always_sensitive: true,
+            never_extractable: true,
+            local: false,
+            key_gen_mechanism: None,
+            owner_session: None,
+            material: KeyMaterial::HsmAuthCredential {
+                algorithm: credential.algorithm,
+                retries: credential.retries,
+                touch_required: credential.touch_required,
+            },
+        });
+        if let Some(public_key) = &credential.public_key {
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("hsmauth-public:{}", credential.label),
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type: CKK_EC as CK_KEY_TYPE,
+                label: format!("{} public key", credential.label),
+                id: id.clone(),
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::HsmAuthPublic {
+                    public_key: public_key.clone(),
+                },
+            });
+        }
+    }
+    objects
 }
 
 #[derive(Debug)]
@@ -360,7 +456,7 @@ impl Slot for GlobalPlatformSlot {
     }
 }
 
-const SECURITY_DOMAIN_APPLICATION: &[u8] = b"GlobalPlatform Security Domain";
+const SECURITY_DOMAIN_APPLICATION: &str = "GlobalPlatform Security Domain";
 
 fn security_domain_data_object(
     slot_id: CK_SLOT_ID,
@@ -371,10 +467,10 @@ fn security_domain_data_object(
 ) -> TokenObject {
     TokenObject {
         slot_id: Some(slot_id),
-        unique_id: unique_id.into_bytes(),
+        unique_id,
         class: CKO_DATA as CK_OBJECT_CLASS,
         key_type: 0,
-        label: label.into_bytes(),
+        label,
         id,
         token: true,
         private: false,
@@ -392,7 +488,7 @@ fn security_domain_data_object(
         owner_session: None,
         material: KeyMaterial::SecurityDomainData {
             value,
-            application: SECURITY_DOMAIN_APPLICATION.to_vec(),
+            application: SECURITY_DOMAIN_APPLICATION.to_owned(),
             object_id: Vec::new(),
         },
     }
@@ -479,16 +575,14 @@ fn security_domain_token_objects(
                 unique_id: format!(
                     "issuer-sd-certificate-{:02x}-{:02x}-{index}",
                     bundle.key_ref.kid, bundle.key_ref.kvn
-                )
-                .into_bytes(),
+                ),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type: CKK_EC as CK_KEY_TYPE,
                 label: format!(
                     "Issuer SD {name} KVN {} certificate {}",
                     bundle.key_ref.kvn,
                     index + 1
-                )
-                .into_bytes(),
+                ),
                 id: [
                     vec![bundle.key_ref.kid, bundle.key_ref.kvn],
                     (index as u16).to_be_bytes().to_vec(),

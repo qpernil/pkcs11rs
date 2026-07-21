@@ -1,7 +1,7 @@
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectParameters<'a> {
     pub(crate) id: u16,
-    pub(crate) label: &'a [u8],
+    pub(crate) label: &'a str,
     pub(crate) domains: u16,
     pub(crate) capabilities: [u8; CAPABILITIES_LENGTH],
     pub(crate) algorithm: u8,
@@ -14,7 +14,7 @@ impl ObjectParameters<'_> {
         }
         let mut data = Vec::with_capacity(2 + LABEL_LENGTH + 2 + CAPABILITIES_LENGTH + 1);
         data.extend_from_slice(&self.id.to_be_bytes());
-        data.extend_from_slice(self.label);
+        data.extend_from_slice(self.label.as_bytes());
         data.resize(2 + LABEL_LENGTH, 0);
         data.extend_from_slice(&self.domains.to_be_bytes());
         data.extend_from_slice(&self.capabilities);

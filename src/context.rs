@@ -195,7 +195,7 @@ impl Context {
         let handle = self.next_object_handle;
         self.next_object_handle += 1;
         if object.unique_id.is_empty() {
-            object.unique_id = handle.to_string().into_bytes();
+            object.unique_id = handle.to_string();
         }
         self.objects.insert(handle, object);
         handle
@@ -319,6 +319,7 @@ impl Context {
             return;
         }
         let mut seen_dynamic_slots = HashSet::new();
+        let hsmauth_providers = Rc::new(RefCell::new(Vec::new()));
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
@@ -370,12 +371,12 @@ impl Context {
                                         continue;
                                     }
                                     let slot_id = next_key(&self.slots, 0);
-                                    let mut slot = Box::new(YubiHsmSlot {
-                                        connector: Rc::new(connector),
-                                        session: Rc::new(RefCell::new(None)),
-                                        version: (0, 0, 0),
-                                        algorithms: Vec::new(),
-                                    });
+                                    let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers(
+                                        Rc::new(connector),
+                                        (0, 0, 0),
+                                        Vec::new(),
+                                        hsmauth_providers.clone(),
+                                    ));
                                     if let Err(error) = slot.init_slot() {
                                         log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
@@ -580,11 +581,21 @@ impl Context {
                                 application_connector,
                                 application_aid.clone(),
                             )),
-                            CcidApplication::HsmAuth => Box::new(GenericPcscSlot::new(
-                                application_connector,
-                                application_aid,
-                                "YubiHSM Auth",
-                            )),
+                            CcidApplication::HsmAuth => {
+                                let hsmauth_slot =
+                                    HsmAuthSlot::new(application_connector, application_aid);
+                                match hsmauth_slot.providers() {
+                                    Ok(providers) => {
+                                        if let Ok(mut registry) = hsmauth_providers.try_borrow_mut() {
+                                            registry.extend(providers);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        log!(2, "YubiHSM Auth credential discovery: {:?}", error)
+                                    }
+                                }
+                                Box::new(hsmauth_slot)
+                            }
                             CcidApplication::GlobalPlatform => Box::new(GlobalPlatformSlot::new(
                                 application_connector,
                                 application_aid,
@@ -655,10 +666,10 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
             1,
             TokenObject {
                 slot_id: Some(ABI_TEST_SLOT_ID),
-                unique_id: b"1".to_vec(),
+                unique_id: "1".to_owned(),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
-                label: b"Test RSA public key".to_vec(),
+                label: "Test RSA public key".to_owned(),
                 id: vec![1],
                 token: true,
                 private: false,
@@ -681,10 +692,10 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
             2,
             TokenObject {
                 slot_id: Some(ABI_TEST_SLOT_ID),
-                unique_id: b"2".to_vec(),
+                unique_id: "2".to_owned(),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
-                label: b"Test RSA private key".to_vec(),
+                label: "Test RSA private key".to_owned(),
                 id: vec![1],
                 token: true,
                 private: true,

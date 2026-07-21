@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::BTreeSet;
 
-fn object<'a>(label: &'a [u8]) -> ObjectParameters<'a> {
+fn object(label: &str) -> ObjectParameters<'_> {
     ObjectParameters {
         id: 0x1234,
         label,
@@ -11,14 +11,14 @@ fn object<'a>(label: &'a [u8]) -> ObjectParameters<'a> {
     }
 }
 
-fn object_with_algorithm<'a>(label: &'a [u8], algorithm: u8) -> ObjectParameters<'a> {
+fn object_with_algorithm(label: &str, algorithm: u8) -> ObjectParameters<'_> {
     ObjectParameters {
         algorithm,
         ..object(label)
     }
 }
 
-fn delegated<'a>(label: &'a [u8]) -> DelegatedObjectParameters<'a> {
+fn delegated(label: &str) -> DelegatedObjectParameters<'_> {
     DelegatedObjectParameters {
         object: object(label),
         delegated_capabilities: [0x33; 8],
@@ -40,21 +40,21 @@ fn all_sample_commands() -> Vec<Command> {
         Command::get_device_public_key(),
         Command::close_session(),
         Command::get_storage_info(),
-        Command::put_object(CommandCode::PutOpaque, &object(b"opaque"), b"value").unwrap(),
+        Command::put_object(CommandCode::PutOpaque, &object("opaque"), b"value").unwrap(),
         Command::get_object(CommandCode::GetOpaque, 1).unwrap(),
         Command::put_delegated_object(
             CommandCode::PutAuthenticationKey,
-            &delegated(b"auth"),
+            &delegated("auth"),
             &[0; 32],
         )
         .unwrap(),
         Command::put_object(
             CommandCode::PutAsymmetricKey,
-            &object(b"asymmetric"),
+            &object("asymmetric"),
             &[0; 32],
         )
         .unwrap(),
-        Command::generate_object(CommandCode::GenerateAsymmetricKey, &object(b"asym-gen")).unwrap(),
+        Command::generate_object(CommandCode::GenerateAsymmetricKey, &object("asym-gen")).unwrap(),
         Command::key_data(CommandCode::SignPkcs1, 1, b"digest").unwrap(),
         Command::list_objects(&[
             ObjectFilter::Id(1),
@@ -68,14 +68,14 @@ fn all_sample_commands() -> Vec<Command> {
         Command::key_data(CommandCode::DecryptPkcs1, 1, b"ciphertext").unwrap(),
         Command::export_wrapped(1, 2, 3, None),
         Command::import_wrapped(1, b"wrapped").unwrap(),
-        Command::put_delegated_object(CommandCode::PutWrapKey, &delegated(b"wrap"), &[0; 16])
+        Command::put_delegated_object(CommandCode::PutWrapKey, &delegated("wrap"), &[0; 16])
             .unwrap(),
         Command::get_log_entries(),
         Command::get_object_info(1, 2),
         Command::set_option(1, &[2]).unwrap(),
         Command::get_option(1),
         Command::get_pseudo_random(32),
-        Command::put_object(CommandCode::PutHmacKey, &object(b"hmac"), &[0; 32]).unwrap(),
+        Command::put_object(CommandCode::PutHmacKey, &object("hmac"), &[0; 32]).unwrap(),
         Command::key_data(CommandCode::SignHmac, 1, b"data").unwrap(),
         Command::get_public_key(1, None),
         Command::sign_pss(1, 32, 32, &[0; 32]).unwrap(),
@@ -83,11 +83,11 @@ fn all_sample_commands() -> Vec<Command> {
         Command::key_data(CommandCode::DeriveEcdh, 1, &[0; 65]).unwrap(),
         Command::delete_object(1, 2),
         Command::decrypt_oaep(1, 32, &[0; 256], &[0; 32]).unwrap(),
-        Command::generate_object(CommandCode::GenerateHmacKey, &object(b"hmac-gen")).unwrap(),
-        Command::generate_wrap_key(&delegated(b"wrap-gen")).unwrap(),
+        Command::generate_object(CommandCode::GenerateHmacKey, &object("hmac-gen")).unwrap(),
+        Command::generate_wrap_key(&delegated("wrap-gen")).unwrap(),
         Command::verify_hmac(1, &[0; 32], b"data").unwrap(),
         Command::sign_ssh_certificate(1, 2, 3, b"request").unwrap(),
-        Command::put_object(CommandCode::PutTemplate, &object(b"template"), b"template").unwrap(),
+        Command::put_object(CommandCode::PutTemplate, &object("template"), b"template").unwrap(),
         Command::get_object(CommandCode::GetTemplate, 1).unwrap(),
         Command::decrypt_otp(1, &aead, &otp),
         Command::create_otp_aead(1, &otp, &private_id),
@@ -96,14 +96,14 @@ fn all_sample_commands() -> Vec<Command> {
         Command::sign_attestation_certificate(1, 2),
         Command::otp_aead_key(
             CommandCode::PutOtpAeadKey,
-            &object_with_algorithm(b"otp", ALGORITHM_AES128_YUBICO_OTP),
+            &object_with_algorithm("otp", ALGORITHM_AES128_YUBICO_OTP),
             4,
             &[0; 16],
         )
         .unwrap(),
         Command::otp_aead_key(
             CommandCode::GenerateOtpAeadKey,
-            &object_with_algorithm(b"otp-gen", ALGORITHM_AES128_YUBICO_OTP),
+            &object_with_algorithm("otp-gen", ALGORITHM_AES128_YUBICO_OTP),
             4,
             &[],
         )
@@ -114,13 +114,8 @@ fn all_sample_commands() -> Vec<Command> {
         Command::key_data(CommandCode::SignEddsa, 1, b"data").unwrap(),
         Command::blink_device(10),
         Command::change_authentication_key(1, 38, &[0; 32]).unwrap(),
-        Command::put_object(
-            CommandCode::PutSymmetricKey,
-            &object(b"symmetric"),
-            &[0; 16],
-        )
-        .unwrap(),
-        Command::generate_object(CommandCode::GenerateSymmetricKey, &object(b"symmetric-gen"))
+        Command::put_object(CommandCode::PutSymmetricKey, &object("symmetric"), &[0; 16]).unwrap(),
+        Command::generate_object(CommandCode::GenerateSymmetricKey, &object("symmetric-gen"))
             .unwrap(),
         Command::key_data(CommandCode::DecryptEcb, 1, &[0; 16]).unwrap(),
         Command::key_data(CommandCode::EncryptEcb, 1, &[0; 16]).unwrap(),
@@ -128,7 +123,7 @@ fn all_sample_commands() -> Vec<Command> {
         Command::crypt_cbc(CommandCode::EncryptCbc, 1, &iv, &[0; 16]).unwrap(),
         Command::put_delegated_object(
             CommandCode::PutPublicWrapKey,
-            &delegated(b"public-wrap"),
+            &delegated("public-wrap"),
             &[0; 256],
         )
         .unwrap(),
@@ -145,7 +140,7 @@ fn all_sample_commands() -> Vec<Command> {
             },
         )
         .unwrap(),
-        Command::put_rsa_wrapped_key(1, 3, &object(b"rsa-wrapped"), 26, 33, b"key", &[0; 32])
+        Command::put_rsa_wrapped_key(1, 3, &object("rsa-wrapped"), 26, 33, b"key", &[0; 32])
             .unwrap(),
         Command::rsa_wrap(
             CommandCode::ExportRsaWrapped,
@@ -193,7 +188,7 @@ fn every_official_command_code_has_a_sample_request() {
 
 #[test]
 fn object_parameters_match_the_documented_wire_layout() {
-    let encoded = object(b"abc").encode().unwrap();
+    let encoded = object("abc").encode().unwrap();
     assert_eq!(encoded.len(), 53);
     assert_eq!(&encoded[0..2], &[0x12, 0x34]);
     assert_eq!(&encoded[2..5], b"abc");
@@ -201,7 +196,7 @@ fn object_parameters_match_the_documented_wire_layout() {
     assert_eq!(&encoded[42..44], &[0x56, 0x78]);
     assert_eq!(&encoded[44..52], &[0x11; 8]);
     assert_eq!(encoded[52], 0x22);
-    assert!(object(&[0; 41]).encode().is_err());
+    assert!(object(&"x".repeat(41)).encode().is_err());
 }
 
 #[test]
@@ -275,7 +270,7 @@ fn set_option_command_matches_wire_vector() {
 fn otp_aead_key_commands_use_little_endian_nonce_and_validate_key_lengths() {
     let otp = Command::otp_aead_key(
         CommandCode::PutOtpAeadKey,
-        &object_with_algorithm(b"otp", ALGORITHM_AES128_YUBICO_OTP),
+        &object_with_algorithm("otp", ALGORITHM_AES128_YUBICO_OTP),
         0x0102_0304,
         &[0x55; 16],
     )
@@ -288,7 +283,7 @@ fn otp_aead_key_commands_use_little_endian_nonce_and_validate_key_lengths() {
         (ALGORITHM_AES192_YUBICO_OTP, 24),
         (ALGORITHM_AES256_YUBICO_OTP, 32),
     ] {
-        let parameters = object_with_algorithm(b"otp", algorithm);
+        let parameters = object_with_algorithm("otp", algorithm);
         assert!(Command::otp_aead_key(
             CommandCode::PutOtpAeadKey,
             &parameters,
@@ -306,7 +301,7 @@ fn otp_aead_key_commands_use_little_endian_nonce_and_validate_key_lengths() {
     }
     assert!(Command::otp_aead_key(
         CommandCode::GenerateOtpAeadKey,
-        &object_with_algorithm(b"otp", 0xff),
+        &object_with_algorithm("otp", 0xff),
         0,
         &[],
     )
@@ -382,9 +377,9 @@ fn list_filters_and_delegated_objects_match_wire_vectors() {
         ]
     );
 
-    let encoded = delegated(b"key").encode().unwrap();
+    let encoded = delegated("key").encode().unwrap();
     assert_eq!(encoded.len(), 61);
-    assert_eq!(&encoded[..53], object(b"key").encode().unwrap());
+    assert_eq!(&encoded[..53], object("key").encode().unwrap());
     assert_eq!(&encoded[53..], &[0x33; 8]);
 }
 
@@ -432,7 +427,7 @@ fn structured_response_parsers_decode_success_vectors() {
     assert_eq!(parsed.id, 0x1234);
     assert_eq!(parsed.length, 32);
     assert_eq!(parsed.domains, 0x5678);
-    assert_eq!(parsed.label, [0x41; 40]);
+    assert_eq!(parsed.label, "A".repeat(40));
 
     assert_eq!(
         parse_object_list(&[0x12, 0x34, 3, 4, 0x56, 0x78, 5, 6]).unwrap(),

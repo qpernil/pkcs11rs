@@ -1,10 +1,10 @@
 #[derive(Debug, Clone)]
 struct TokenObject {
     slot_id: Option<CK_SLOT_ID>,
-    unique_id: Vec<u8>,
+    unique_id: String,
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
-    label: Vec<u8>,
+    label: String,
     id: Vec<u8>,
     token: bool,
     private: bool,
@@ -71,11 +71,19 @@ enum KeyMaterial {
     },
     SecurityDomainData {
         value: Vec<u8>,
-        application: Vec<u8>,
+        application: String,
         object_id: Vec<u8>,
     },
     SecurityDomainCertificate {
         value: Vec<u8>,
+    },
+    HsmAuthCredential {
+        algorithm: HsmAuthAlgorithm,
+        retries: u8,
+        touch_required: bool,
+    },
+    HsmAuthPublic {
+        public_key: Vec<u8>,
     },
     YubiHsm {
         id: u16,
@@ -190,12 +198,26 @@ impl std::fmt::Debug for KeyMaterial {
             } => fmt
                 .debug_struct("SecurityDomainData")
                 .field("size", &value.len())
-                .field("application", &String::from_utf8_lossy(application))
+                .field("application", application)
                 .field("object_id", object_id)
                 .finish(),
             Self::SecurityDomainCertificate { value } => fmt
                 .debug_struct("SecurityDomainCertificate")
                 .field("size", &value.len())
+                .finish(),
+            Self::HsmAuthCredential {
+                algorithm,
+                retries,
+                touch_required,
+            } => fmt
+                .debug_struct("HsmAuthCredential")
+                .field("algorithm", algorithm)
+                .field("retries", retries)
+                .field("touch_required", touch_required)
+                .finish(),
+            Self::HsmAuthPublic { public_key } => fmt
+                .debug_struct("HsmAuthPublic")
+                .field("size", &public_key.len())
                 .finish(),
         }
     }
@@ -205,7 +227,7 @@ impl std::fmt::Debug for KeyMaterial {
 struct TokenObjectTemplate {
     class: Option<CK_OBJECT_CLASS>,
     key_type: Option<CK_KEY_TYPE>,
-    label: Vec<u8>,
+    label: String,
     id: Vec<u8>,
     token: bool,
     private: bool,
@@ -376,6 +398,9 @@ impl TokenObject {
             CKA_ID as CK_ATTRIBUTE_TYPE,
             CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
             CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+            CKA_YUBICO_HSMAUTH_ALGORITHM,
+            CKA_YUBICO_HSMAUTH_RETRIES,
+            CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
             CKA_TOKEN as CK_ATTRIBUTE_TYPE,
             CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
             CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
@@ -427,11 +452,13 @@ impl TokenObject {
     fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
-            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => Some(self.unique_id.clone()),
+            x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => {
+                Some(self.unique_id.as_bytes().to_vec())
+            }
             x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(ulong_attribute(self.key_type))
             }
-            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.clone()),
+            x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes().to_vec()),
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
@@ -506,7 +533,7 @@ impl TokenObject {
                     Some(b"Opaque object".to_vec())
                 }
                 KeyMaterial::SecurityDomainData { application, .. } => {
-                    Some(application.clone())
+                    Some(application.as_bytes().to_vec())
                 }
                 _ => None,
             },
@@ -522,6 +549,7 @@ impl TokenObject {
                 KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
                     Some(ulong_attribute(value.len() as CK_ULONG))
                 }
+                KeyMaterial::HsmAuthCredential { .. } => Some(ulong_attribute(32)),
                 KeyMaterial::YubiHsm { length, .. }
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
@@ -629,6 +657,9 @@ impl TokenObject {
                 }
                 KeyMaterial::OpenPgpPrivate { algorithm, .. }
                 | KeyMaterial::OpenPgpPublic { algorithm, .. } => openpgp_ec_params(*algorithm),
+                KeyMaterial::HsmAuthPublic { .. } => {
+                    piv_ec_parameters(piv::Algorithm::EccP256).map(<[u8]>::to_vec)
+                }
                 _ => None,
             },
             x if x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
@@ -690,9 +721,32 @@ impl TokenObject {
                         };
                         der_octet_string(&point)
                     }
+                    KeyMaterial::HsmAuthPublic { public_key }
+                        if public_key.len() == 65 && public_key[0] == 0x04 =>
+                    {
+                        der_octet_string(public_key)
+                    }
                     _ => None,
                 }
             }
+            x if x == CKA_YUBICO_HSMAUTH_ALGORITHM => match &self.material {
+                KeyMaterial::HsmAuthCredential { algorithm, .. } => {
+                    Some(ulong_attribute(*algorithm as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_YUBICO_HSMAUTH_RETRIES => match &self.material {
+                KeyMaterial::HsmAuthCredential { retries, .. } => {
+                    Some(ulong_attribute(*retries as CK_ULONG))
+                }
+                _ => None,
+            },
+            x if x == CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED => match &self.material {
+                KeyMaterial::HsmAuthCredential { touch_required, .. } => {
+                    Some(bool_attribute(*touch_required))
+                }
+                _ => None,
+            },
             x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
                 || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
@@ -811,6 +865,8 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpCertificate { .. }
                 | KeyMaterial::SecurityDomainData { .. }
                 | KeyMaterial::SecurityDomainCertificate { .. }
+                | KeyMaterial::HsmAuthCredential { .. }
+                | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsm { .. }
                 | KeyMaterial::DerivedSecret(_)
         )
@@ -820,7 +876,8 @@ impl TokenObject {
         let value = read_attribute_value(attribute)?;
         match attribute.type_ {
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
-                self.label = value;
+                self.label = String::from_utf8(value)
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;
                 Ok(())
             }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
@@ -906,7 +963,8 @@ impl TokenObjectTemplate {
                 Ok(())
             }
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
-                self.label = read_attribute_value(attribute)?;
+                self.label = String::from_utf8(read_attribute_value(attribute)?)
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;
                 Ok(())
             }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
@@ -964,7 +1022,7 @@ impl TokenObjectTemplate {
         }
         Ok(TokenObject {
             slot_id: None,
-            unique_id: Vec::new(),
+            unique_id: String::new(),
             class,
             key_type: self.key_type.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?,
             label: self.label,
