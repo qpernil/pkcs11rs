@@ -519,6 +519,14 @@ impl TokenObject {
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
                 Some(bool_attribute(true))
             }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+                && matches!(
+                    self.material,
+                    KeyMaterial::PivPrivate { .. } | KeyMaterial::PivCertificate { .. }
+                ) =>
+            {
+                Some(bool_attribute(true))
+            }
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }

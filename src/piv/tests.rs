@@ -443,6 +443,25 @@ fn writes_piv_data_objects_with_tag_list_and_value_wrappers() {
 }
 
 #[test]
+fn deletes_piv_keys_and_certificates_on_hardware() {
+    let connector = ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&[], STATUS_SUCCESS),
+    ]);
+    Client.delete_key(&connector, Slot::Signature).unwrap();
+    Client
+        .delete_certificate(&connector, Slot::Signature)
+        .unwrap();
+    let commands = connector.commands.borrow();
+    assert_eq!(
+        commands[0],
+        [0, INS_MOVE_KEY, 0xff, Slot::Signature as u8, 0]
+    );
+    assert_eq!(&commands[1][..4], &[0, INS_PUT_DATA, 0x3f, 0xff]);
+    assert!(commands[1].ends_with(&[0x53, 0, 0]));
+}
+
+#[test]
 fn performs_x25519_key_agreement_with_general_authenticate() {
     let response_data = encode_tlv(0x7c, &encode_tlv(0x82, &[0xa5; 32]).unwrap()).unwrap();
     let connector = ScriptedConnector::new(vec![response(&response_data, STATUS_SUCCESS)]);
