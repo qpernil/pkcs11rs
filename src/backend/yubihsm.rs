@@ -1,9 +1,183 @@
+#[derive(Clone, Debug)]
+struct HsmAuthProvider {
+    connector: Rc<dyn Connector>,
+    credential: HsmAuthCredential,
+    version: (u8, u8, u8),
+}
+
+impl HsmAuthProvider {
+    fn source_identifier(&self) -> String {
+        let serial = self.connector.serial();
+        if serial.is_empty() {
+            self.connector.name()
+        } else {
+            serial.to_owned()
+        }
+    }
+
+    fn authenticate(
+        &self,
+        yubihsm_connector: &dyn Connector,
+        authkey_id: u16,
+        credential_password: &[u8],
+    ) -> Result<YubiHsmSecureSession, Error> {
+        match self.credential.algorithm {
+            HsmAuthAlgorithm::Aes128YubicoAuthentication => {
+                log!(
+                    2,
+                    "YubiHSM Auth starting symmetric session on {} with authentication key {:04x}",
+                    yubihsm_connector.name(),
+                    authkey_id
+                );
+                let mut challenge = [0; 8];
+                openssl::rand::rand_bytes(&mut challenge)
+                    .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+                let handshake = YubiHsmSecureSession::begin_symmetric(
+                    yubihsm_connector,
+                    authkey_id,
+                    challenge,
+                )?;
+                log!(
+                    2,
+                    "YubiHSM Auth target {} created symmetric session {}",
+                    yubihsm_connector.name(),
+                    handshake.sid
+                );
+                log!(
+                    2,
+                    "YubiHSM Auth requesting symmetric session keys for credential {:?}",
+                    self.credential.label
+                );
+                let keys = HsmAuthClient.calculate_session_keys_symmetric(
+                    self.connector.as_ref(),
+                    &self.credential.label,
+                    &handshake.context,
+                    &handshake.card_cryptogram,
+                    credential_password,
+                )?;
+                log!(
+                    2,
+                    "YubiHSM Auth received symmetric session keys for target session {}",
+                    handshake.sid
+                );
+                let session_id = handshake.sid;
+                let session = YubiHsmSecureSession::complete_symmetric_with_session_keys(
+                    yubihsm_connector,
+                    handshake,
+                    keys.enc,
+                    keys.mac,
+                    keys.rmac,
+                )?;
+                log!(
+                    2,
+                    "YubiHSM Auth authenticated symmetric target session {}",
+                    session_id
+                );
+                Ok(session)
+            }
+            HsmAuthAlgorithm::EcP256YubicoAuthentication => {
+                let challenge_password =
+                    (self.version.0 == 0 || self.version >= (5, 7, 1))
+                        .then_some(credential_password);
+                log!(
+                    2,
+                    "YubiHSM Auth requesting an asymmetric challenge for credential {:?}{}",
+                    self.credential.label,
+                    if challenge_password.is_some() {
+                        " with credential-password authentication"
+                    } else {
+                        " without credential-password authentication"
+                    }
+                );
+                let host_public_key = HsmAuthClient.get_challenge(
+                    self.connector.as_ref(),
+                    &self.credential.label,
+                    challenge_password,
+                )?;
+                log!(
+                    2,
+                    "YubiHSM Auth starting asymmetric session on {} with authentication key {:04x}",
+                    yubihsm_connector.name(),
+                    authkey_id
+                );
+                let handshake = YubiHsmSecureSession::begin_asymmetric(
+                    yubihsm_connector,
+                    authkey_id,
+                    &host_public_key,
+                )?;
+                log!(
+                    2,
+                    "YubiHSM Auth target {} created asymmetric session {}",
+                    yubihsm_connector.name(),
+                    handshake.sid
+                );
+                log!(
+                    2,
+                    "YubiHSM Auth reading the target YubiHSM device public key for session {}",
+                    handshake.sid
+                );
+                let device_public_key = get_yubihsm_device_public_key(yubihsm_connector)?;
+                log!(
+                    2,
+                    "YubiHSM Auth requesting asymmetric session keys for credential {:?}",
+                    self.credential.label
+                );
+                let keys = HsmAuthClient.calculate_session_keys_asymmetric(
+                    self.connector.as_ref(),
+                    &self.credential.label,
+                    &handshake.context,
+                    &device_public_key,
+                    &handshake.receipt,
+                    credential_password,
+                )?;
+                let session_id = handshake.sid;
+                let session = YubiHsmSecureSession::complete_asymmetric_with_session_keys(
+                    handshake,
+                    keys.enc,
+                    keys.mac,
+                    keys.rmac,
+                );
+                log!(
+                    2,
+                    "YubiHSM Auth accepted the asymmetric receipt for target session {}",
+                    session_id
+                );
+                Ok(session)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
     version: (u8, u8, u8),
     algorithms: Vec<u8>,
+    hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+}
+
+impl YubiHsmSlot {
+    fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
+        Self {
+            connector,
+            session: Rc::new(RefCell::new(None)),
+            version,
+            algorithms,
+            hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn with_hsmauth_providers(
+        connector: Rc<dyn Connector>,
+        version: (u8, u8, u8),
+        algorithms: Vec<u8>,
+        hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+    ) -> Self {
+        let mut slot = Self::new(connector, version, algorithms);
+        slot.hsmauth_providers = hsmauth_providers;
+        slot
+    }
 }
 
 fn send_yubihsm_secure_command(
@@ -110,15 +284,10 @@ fn yubihsm_token_objects(
     public_key: Option<YubiHsmPublicKey>,
 ) -> Result<Vec<TokenObject>, Error> {
     let key_type = yubihsm_key_type(info.algorithm);
-    let label = info
-        .label
-        .split(|byte| *byte == 0)
-        .next()
-        .unwrap_or_default()
-        .to_vec();
+    let label = info.label.clone();
     if info.object_type == YUBIHSM_OPAQUE
         && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
-        && label.starts_with(b"Meta object")
+        && label.starts_with("Meta object")
     {
         return Ok(Vec::new());
     }
@@ -195,7 +364,7 @@ fn yubihsm_token_objects(
         class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS && class != CKO_DATA as CK_OBJECT_CLASS;
     let mut objects = vec![TokenObject {
         slot_id: Some(slot_id),
-        unique_id: unique.as_bytes().to_vec(),
+        unique_id: unique.clone(),
         class,
         key_type,
         label: label.clone(),
@@ -245,7 +414,7 @@ fn yubihsm_token_objects(
         };
         objects.push(TokenObject {
             slot_id: Some(slot_id),
-            unique_id: format!("{unique}-public").into_bytes(),
+            unique_id: format!("{unique}-public"),
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             key_type,
             label,
@@ -320,7 +489,85 @@ impl Slot for YubiHsmSlot {
     }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
-        let session = if pin.first() == Some(&b'@') {
+        let session = if pin.first() == Some(&b':') {
+            let login = parse_hsmauth_pin(pin)?;
+            log!(
+                2,
+                "YubiHSM login requested through YubiHSM Auth credential {:?}, source {:?}, authentication key {:04x}",
+                login.label,
+                login.source,
+                login.authkey_id
+            );
+            let provider = {
+                let providers = self
+                    .hsmauth_providers
+                    .try_borrow()
+                    .map_err(|_| CKR_CANT_LOCK)?;
+                log!(
+                    2,
+                    "YubiHSM Auth searching {} discovered credential providers",
+                    providers.len()
+                );
+                let mut matches = providers
+                    .iter()
+                    .filter(|provider| {
+                        provider.credential.label == login.label.as_str()
+                            && login
+                                .source
+                                .as_ref()
+                                .is_none_or(|source| provider.source_identifier() == source.as_str())
+                    });
+                let provider = match matches.next().cloned() {
+                    Some(provider) => provider,
+                    None => {
+                        log!(
+                            2,
+                            "YubiHSM Auth found no credential matching label {:?} and source {:?}",
+                            login.label,
+                            login.source
+                        );
+                        return Err(CKR_PIN_INCORRECT.into());
+                    }
+                };
+                if matches.next().is_some() {
+                    log!(
+                        2,
+                        "YubiHSM Auth credential label is ambiguous; add the source serial postfix"
+                    );
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                provider
+            };
+            log!(
+                2,
+                "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
+                provider.credential.label,
+                provider.source_identifier(),
+                provider.credential.algorithm
+            );
+            let session = match provider.authenticate(
+                self.connector.as_ref(),
+                login.authkey_id,
+                login.credential_password,
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    log!(
+                        2,
+                        "YubiHSM Auth secure-session authentication failed: {:?}",
+                        error
+                    );
+                    return Err(error);
+                }
+            };
+            log!(
+                2,
+                "YubiHSM Auth established a secure session with {} using authentication key {:04x}",
+                self.connector.name(),
+                login.authkey_id
+            );
+            session
+        } else if pin.first() == Some(&b'@') {
             let (authkey_id, password) = parse_yubihsm_asymmetric_pin(pin)?;
             YubiHsmSecureSession::authenticate_asymmetric(
                 self.connector.as_ref(),
@@ -362,8 +609,18 @@ impl Slot for YubiHsmSlot {
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
-        info.ulMaxPinLen = 69;
-        info.ulMinPinLen = 12;
+        let has_hsmauth = !self
+            .hsmauth_providers
+            .try_borrow()
+            .map_err(|_| CKR_CANT_LOCK)?
+            .is_empty();
+        if has_hsmauth {
+            info.ulMaxPinLen = 216;
+            info.ulMinPinLen = 8;
+        } else {
+            info.ulMaxPinLen = 69;
+            info.ulMinPinLen = 12;
+        }
         Ok(())
     }
     fn clear_session(&mut self) {
@@ -407,6 +664,68 @@ impl Slot for YubiHsmSlot {
     fn is_yubihsm(&self) -> bool {
         true
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct HsmAuthLogin<'a> {
+    label: String,
+    source: Option<String>,
+    authkey_id: u16,
+    credential_password: &'a [u8],
+}
+
+fn parse_hsmauth_pin(pin: &[u8]) -> Result<HsmAuthLogin<'_>, Error> {
+    if pin.first() != Some(&b':') {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    let separator = pin[1..]
+        .iter()
+        .position(|byte| *byte == b':')
+        .map(|position| position + 1)
+        .ok_or(CKR_PIN_INCORRECT)?;
+    let selector = &pin[1..separator];
+    let (label, source) = match selector.iter().position(|byte| *byte == b'@') {
+        Some(position) => (&selector[..position], Some(&selector[position + 1..])),
+        None => (selector, None),
+    };
+    let label = parse_hsmauth_selector_part(label, 64)?;
+    let source = source
+        .map(|source| parse_hsmauth_selector_part(source, 128))
+        .transpose()?;
+    let authkey_separator = pin[separator + 1..]
+        .iter()
+        .rposition(|byte| *byte == b':')
+        .map(|position| position + separator + 1)
+        .ok_or(CKR_PIN_INCORRECT)?;
+    let credential_password = &pin[separator + 1..authkey_separator];
+    if credential_password.len() > 16 {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    let authkey_id = &pin[authkey_separator + 1..];
+    if authkey_id.len() != 4 {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    let id = std::str::from_utf8(authkey_id)
+        .ok()
+        .and_then(|value| u16::from_str_radix(value, 16).ok())
+        .ok_or(CKR_PIN_INCORRECT)?;
+    Ok(HsmAuthLogin {
+        label: label.to_owned(),
+        source: source.map(str::to_owned),
+        authkey_id: id,
+        credential_password,
+    })
+}
+
+fn parse_hsmauth_selector_part(value: &[u8], maximum_length: usize) -> Result<&str, Error> {
+    if value.is_empty() || value.len() > maximum_length {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    let value = std::str::from_utf8(value).map_err(|_| CKR_PIN_INCORRECT)?;
+    if value.chars().any(char::is_control) {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    Ok(value)
 }
 
 #[derive(Debug)]

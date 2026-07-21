@@ -487,14 +487,13 @@ pub(crate) fn make_yubihsm_test_slot(
     let commands = peer.inner_commands.clone();
     let corrupt_response_mac = peer.corrupt_response_mac.clone();
     (
-        Box::new(crate::YubiHsmSlot {
-            connector: peer,
-            session: std::rc::Rc::new(RefCell::new(None)),
-            version: (2, 4, 1),
-            algorithms: vec![
+        Box::new(crate::YubiHsmSlot::new(
+            peer,
+            (2, 4, 1),
+            vec![
                 1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
             ],
-        }),
+        )),
         commands,
         corrupt_response_mac,
     )
@@ -540,6 +539,216 @@ impl Connector for ProtocolPeer {
     }
 }
 
+#[derive(Debug)]
+struct SymmetricHsmAuthPeer {
+    serial: &'static str,
+}
+
+impl Connector for SymmetricHsmAuthPeer {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiKey"
+    }
+    fn serial(&self) -> &str {
+        self.serial
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        7
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn send_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        if command.ins != 0x03 {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let context = test_tlv_value(&command.data, 0x77)?;
+        let card_cryptogram = test_tlv_value(&command.data, 0x78)?;
+        let password = test_tlv_value(&command.data, 0x73)?;
+        if context.len() != 16
+            || card_cryptogram.len() != 8
+            || password != [PASSWORD, &[0; 8]].concat()
+        {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x63c7,
+            });
+        }
+        let mut static_keys = Zeroizing::new([0; 32]);
+        openssl::pkcs5::pbkdf2_hmac(
+            PASSWORD,
+            DEFAULT_SALT,
+            DEFAULT_ITERATIONS,
+            MessageDigest::sha256(),
+            static_keys.as_mut(),
+        )?;
+        let s_enc = derive_key(&static_keys[..16], 0x04, context)?;
+        let s_mac = derive_key(&static_keys[16..], 0x06, context)?;
+        let s_rmac = derive_key(&static_keys[16..], 0x07, context)?;
+        if card_cryptogram != derive_cryptogram(&s_mac, 0x00, context)? {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x6a80,
+            });
+        }
+        Ok(crate::ResponseApdu {
+            data: [s_enc, s_mac, s_rmac].concat(),
+            status: 0x9000,
+        })
+    }
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        _receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        Err(CKR_DEVICE_ERROR.into())
+    }
+}
+
+#[derive(Debug)]
+struct AsymmetricHsmAuthPeer {
+    ephemeral_key: EcKey<Private>,
+    public_key: Vec<u8>,
+}
+
+impl AsymmetricHsmAuthPeer {
+    fn new() -> Self {
+        let group = p256_group().unwrap();
+        let ephemeral_key = p256_private_key(
+            &group,
+            &[
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 3,
+            ],
+        )
+        .unwrap();
+        let public_key = p256_public_key(&ephemeral_key).unwrap().to_vec();
+        Self {
+            ephemeral_key,
+            public_key,
+        }
+    }
+}
+
+impl Connector for AsymmetricHsmAuthPeer {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiKey"
+    }
+    fn serial(&self) -> &str {
+        "87654321"
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        7
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn send_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        let password = test_tlv_value(&command.data, 0x73)?;
+        if password != [PASSWORD, &[0; 8]].concat() {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x63c7,
+            });
+        }
+        if command.ins == 0x04 {
+            return Ok(crate::ResponseApdu {
+                data: self.public_key.clone(),
+                status: 0x9000,
+            });
+        }
+        if command.ins != 0x03 {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let context = test_tlv_value(&command.data, 0x77)?;
+        let device_public_key = test_tlv_value(&command.data, 0x7c)?;
+        let receipt = test_tlv_value(&command.data, 0x78)?;
+        if context.len() != P256_PUBLIC_KEY_LENGTH * 2
+            || context[..P256_PUBLIC_KEY_LENGTH] != self.public_key
+            || receipt.len() != ASYMMETRIC_RECEIPT_LENGTH
+        {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let device_ephemeral = parse_p256_public_key(&context[P256_PUBLIC_KEY_LENGTH..])?;
+        let device_static = parse_p256_public_key(device_public_key)?;
+        let host_static = derive_p256_key(PASSWORD)?;
+        let ephemeral_secret = p256_ecdh(&self.ephemeral_key, &device_ephemeral)?;
+        let static_secret = p256_ecdh(&host_static, &device_static)?;
+        let keys = x963_session_keys(&ephemeral_secret, &static_secret);
+        let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
+        receipt_input.extend_from_slice(&context[P256_PUBLIC_KEY_LENGTH..]);
+        receipt_input.extend_from_slice(&context[..P256_PUBLIC_KEY_LENGTH]);
+        if !memcmp::eq(&aes_cmac(&keys[..16], &receipt_input)?, receipt) {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x6a80,
+            });
+        }
+        Ok(crate::ResponseApdu {
+            data: keys[16..].to_vec(),
+            status: 0x9000,
+        })
+    }
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        _receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        Err(CKR_DEVICE_ERROR.into())
+    }
+}
+
+fn test_tlv_value(encoded: &[u8], wanted: u8) -> Result<&[u8], Error> {
+    let mut offset = 0;
+    while offset < encoded.len() {
+        let tag = encoded[offset];
+        let first_length = *encoded.get(offset + 1).ok_or(CKR_DATA_INVALID)?;
+        let (length, header_length) = if first_length <= 0x7f {
+            (first_length as usize, 2)
+        } else if first_length == 0x81 {
+            (
+                *encoded.get(offset + 2).ok_or(CKR_DATA_INVALID)? as usize,
+                3,
+            )
+        } else {
+            return Err(CKR_DATA_INVALID.into());
+        };
+        let value = encoded
+            .get(offset + header_length..offset + header_length + length)
+            .ok_or(CKR_DATA_INVALID)?;
+        if tag == wanted {
+            return Ok(value);
+        }
+        offset += header_length + length;
+    }
+    Err(CKR_DATA_INVALID.into())
+}
+
 #[test]
 fn frame_parser_requires_exact_length() {
     assert_eq!(Frame::parse(&[0x81, 0, 1, 0xaa]).unwrap().data, [0xaa]);
@@ -563,6 +772,41 @@ fn asymmetric_pin_uses_at_prefixed_authentication_key_id() {
     assert_eq!(password, PASSWORD);
     assert!(parse_asymmetric_pin(b"00ffpassword").is_err());
     assert!(parse_asymmetric_pin(b"@xyz1password").is_err());
+}
+
+#[test]
+fn hsmauth_pin_encodes_the_credential_label_and_optional_source() {
+    let login = crate::parse_hsmauth_pin(b":default@12345678:password:00fF").unwrap();
+    assert_eq!(login.label, "default");
+    assert_eq!(login.source.as_deref(), Some("12345678"));
+    assert_eq!(login.authkey_id, 0xff);
+    assert_eq!(login.credential_password, PASSWORD);
+
+    let login = crate::parse_hsmauth_pin(":räksmörgås::0001".as_bytes()).unwrap();
+    assert_eq!(login.label, "räksmörgås");
+    assert!(login.source.is_none());
+    assert_eq!(login.authkey_id, 1);
+    assert!(login.credential_password.is_empty());
+
+    let login = crate::parse_hsmauth_pin(b":default:pass:word:0001").unwrap();
+    assert_eq!(login.credential_password, b"pass:word");
+    assert_eq!(login.authkey_id, 1);
+}
+
+#[test]
+fn hsmauth_pin_rejects_malformed_selectors() {
+    for pin in [
+        b"default:password:0001".as_slice(),
+        b"::0001",
+        b":default:0001",
+        b":default@:password:0001",
+        b":default:password:\xff001",
+        b":default:password:xyz1",
+        b":default:password:001",
+        b":default:passwordpasswordx:0001",
+    ] {
+        assert!(crate::parse_hsmauth_pin(pin).is_err(), "accepted {pin:?}");
+    }
 }
 
 #[test]
@@ -620,6 +864,77 @@ fn authenticates_and_exchanges_encrypted_session_messages() {
         .send_command(&peer, &Command::close_session())
         .unwrap();
     assert_eq!(peer.commands.borrow().len(), 5);
+}
+
+#[test]
+fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
+    let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
+    let provider = crate::HsmAuthProvider {
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        credential: crate::HsmAuthCredential {
+            label: "default key".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: None,
+        },
+        version: (5, 4, 3),
+    };
+    let duplicate = crate::HsmAuthProvider {
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "87654321" }),
+        ..provider.clone()
+    };
+    let mut slot = crate::YubiHsmSlot::with_hsmauth_providers(
+        yubihsm.clone(),
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_RSA_2048],
+        std::rc::Rc::new(std::cell::RefCell::new(vec![provider, duplicate])),
+    );
+
+    assert!(matches!(
+        crate::Slot::login(&mut slot, b":64656661756c74206b6579:password:0001"),
+        Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
+    ));
+    crate::Slot::login(&mut slot, b":default key@12345678:password:0001").unwrap();
+    let session =
+        crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
+    assert!(session.get_session_info().is_ok());
+    assert_eq!(
+        yubihsm.inner_commands.borrow().as_slice(),
+        [(CommandCode::GetStorageInfo as u8, Vec::new())]
+    );
+}
+
+#[test]
+fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
+    let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
+    let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
+    let provider = crate::HsmAuthProvider {
+        connector: hsmauth.clone(),
+        credential: crate::HsmAuthCredential {
+            label: "asymmetric".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
+            retries: 8,
+            touch_required: true,
+            public_key: Some(hsmauth.public_key.clone()),
+        },
+        version: (5, 7, 1),
+    };
+    let mut slot = crate::YubiHsmSlot::with_hsmauth_providers(
+        yubihsm.clone(),
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_RSA_2048],
+        std::rc::Rc::new(std::cell::RefCell::new(vec![provider])),
+    );
+
+    crate::Slot::login(&mut slot, b":asymmetric:password:0001").unwrap();
+    let session =
+        crate::Slot::open_session(&mut slot, 92, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
+    assert!(session.get_session_info().is_ok());
+    assert_eq!(
+        yubihsm.inner_commands.borrow().as_slice(),
+        [(CommandCode::GetStorageInfo as u8, Vec::new())]
+    );
 }
 
 #[test]

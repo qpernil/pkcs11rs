@@ -91,7 +91,7 @@ fn piv_policy_requires_login(slot: piv::Slot, policy: u8) -> bool {
     piv_effective_pin_policy(slot, policy) != 1
 }
 
-fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> Vec<u8> {
+fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> String {
     let kind = if attestation {
         "Attestation certificate"
     } else if certificate {
@@ -99,7 +99,7 @@ fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> Vec<
     } else {
         "PIV slot"
     };
-    format!("{kind} {:02X}", slot as u8).into_bytes()
+    format!("{kind} {:02X}", slot as u8)
 }
 
 fn piv_public_key_from_metadata(
@@ -623,7 +623,7 @@ impl Slot for PivSlot {
                 continue;
             }
             let id = vec![key.slot as u8];
-            let label = format!("PIV slot {:02X}", key.slot as u8).into_bytes();
+            let label = format!("PIV slot {:02X}", key.slot as u8);
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
             let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);
@@ -668,7 +668,7 @@ impl Slot for PivSlot {
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-public", key.slot as u8).into_bytes(),
+                unique_id: format!("piv-{:02x}-public", key.slot as u8),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label: label.clone(),
@@ -691,7 +691,7 @@ impl Slot for PivSlot {
             });
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-private", key.slot as u8).into_bytes(),
+                unique_id: format!("piv-{:02x}-private", key.slot as u8),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label,
@@ -743,8 +743,7 @@ impl Slot for PivSlot {
                     } else {
                         ""
                     }
-                )
-                .into_bytes(),
+                ),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type,
                 label: piv_slot_label(certificate.slot, true, certificate.attestation),
@@ -777,7 +776,7 @@ impl Slot for PivSlot {
             let key_type = key.public_key.key_type(key.algorithm);
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-attestation", key.slot as u8).into_bytes(),
+                unique_id: format!("piv-{:02x}-attestation", key.slot as u8),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type,
                 label: piv_slot_label(key.slot, true, true),

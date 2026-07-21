@@ -18,9 +18,10 @@ appropriate PKCS #11 error instead of being omitted.
   certificates, OpenPGP PIN KDFs, and random generation.
 - **YubiHSM 2** over USB, including authenticated sessions, hardware-backed
   asymmetric, symmetric, HMAC, wrapping, opaque, and authentication objects.
-- **YubiHSM Auth** and the **Issuer Security Domain** as discoverable CCID
-  applets, with read-only Security Domain key metadata, CA identifiers, CPLC,
-  and SCP11 certificate chains.
+- **YubiHSM Auth** as a discoverable CCID applet whose credentials can
+  authenticate sessions on YubiHSM USB slots.
+- **Issuer Security Domain** discovery with read-only key metadata, CA
+  identifiers, CPLC, and SCP11 certificate chains.
 - **SCP03, SCP11a, and SCP11b** secure messaging for selected CCID applets.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
@@ -99,6 +100,7 @@ export PKCS11RS_CCID_SECURE_CHANNEL=scp11b
 Detailed configuration:
 
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
+- [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)
 - [PIV backend](docs/piv.md)
 - [OpenPGP backend](docs/openpgp.md)
 - [SCP03](docs/scp03.md)

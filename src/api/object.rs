@@ -386,6 +386,8 @@ fn copy_object(
             copied_object.material,
             KeyMaterial::SecurityDomainData { .. }
                 | KeyMaterial::SecurityDomainCertificate { .. }
+                | KeyMaterial::HsmAuthCredential { .. }
+                | KeyMaterial::HsmAuthPublic { .. }
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
@@ -444,6 +446,8 @@ fn destroy_object(
             stored_object.material,
             KeyMaterial::SecurityDomainData { .. }
                 | KeyMaterial::SecurityDomainCertificate { .. }
+                | KeyMaterial::HsmAuthCredential { .. }
+                | KeyMaterial::HsmAuthPublic { .. }
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
@@ -581,6 +585,10 @@ fn get_attribute_value(
                         }
                     }
                     KeyMaterial::Secret(_) => {
+                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
+                    }
+                    KeyMaterial::HsmAuthCredential { .. } => {
                         attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
                         rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
                     }

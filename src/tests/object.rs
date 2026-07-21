@@ -233,10 +233,10 @@ pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
         .map(|object_type| {
             let object = crate::TokenObject {
                 slot_id: Some(TEST_SLOT_ID),
-                unique_id: format!("pseudo-public-{object_type:02x}").into_bytes(),
+                unique_id: format!("pseudo-public-{object_type:02x}"),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_EC as CK_KEY_TYPE,
-                label: b"YubiHSM pseudo-public key".to_vec(),
+                label: "YubiHSM pseudo-public key".to_owned(),
                 id: vec![0, object_type],
                 token: true,
                 private: false,
@@ -809,6 +809,22 @@ pub fn create_object_reports_template_errors() {
             TEST_SESSION_HANDLE,
             invalid_bool.as_mut_ptr(),
             invalid_bool.len() as CK_ULONG,
+            &mut object
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+
+    let mut invalid_utf8 = [0xff];
+    let mut invalid_label = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: invalid_utf8.as_mut_ptr() as CK_VOID_PTR,
+        ulValueLen: invalid_utf8.len() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            invalid_label.as_mut_ptr(),
+            invalid_label.len() as CK_ULONG,
             &mut object
         ),
         CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
@@ -1588,10 +1604,10 @@ pub fn get_attribute_value_reads_certificate_values() {
     let certificate = b"synthetic certificate".to_vec();
     let object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
-        unique_id: b"openpgp-certificate".to_vec(),
+        unique_id: "openpgp-certificate".to_owned(),
         class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
         key_type: CKK_RSA as CK_KEY_TYPE,
-        label: b"OpenPGP certificate".to_vec(),
+        label: "OpenPGP certificate".to_owned(),
         id: vec![1],
         token: true,
         private: false,
@@ -1649,10 +1665,10 @@ pub fn security_domain_objects_expose_values_but_cannot_be_copied_or_destroyed()
     let value = vec![0xb1, 32];
     let object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
-        unique_id: b"issuer-sd-key-13-01".to_vec(),
+        unique_id: "issuer-sd-key-13-01".to_owned(),
         class: CKO_DATA as CK_OBJECT_CLASS,
         key_type: 0,
-        label: b"Issuer SD SCP11b KVN 1".to_vec(),
+        label: "Issuer SD SCP11b KVN 1".to_owned(),
         id: vec![0x13, 1],
         token: true,
         private: false,
@@ -1670,7 +1686,7 @@ pub fn security_domain_objects_expose_values_but_cannot_be_copied_or_destroyed()
         owner_session: None,
         material: crate::KeyMaterial::SecurityDomainData {
             value: value.clone(),
-            application: b"GlobalPlatform Security Domain".to_vec(),
+            application: "GlobalPlatform Security Domain".to_owned(),
             object_id: Vec::new(),
         },
     };

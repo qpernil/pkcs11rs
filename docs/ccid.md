@@ -39,6 +39,12 @@ The reader connection is shared between all applet slots. The Issuer Security
 Domain is the Secure Domain management applet; it is not required to use PIV,
 OpenPGP, or YubiHSM Auth.
 
+The YubiHSM Auth applet exposes credential metadata in its own slot. Those
+credentials are also available as authentication providers to each ordinary
+USB YubiHSM slot. They do not create additional PKCS #11 slots. See
+[`yubihsm-auth.md`](yubihsm-auth.md) for the resulting slot layout and login
+syntax.
+
 ## Issuer SD objects
 
 The Issuer SD slot reads the GlobalPlatform key-information template, card

@@ -183,7 +183,7 @@ fn generated_attestation_status_sets_discovered_key_provenance() {
 
     crate::Slot::init_slot(&mut slot).unwrap();
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
-    for id in [b"openpgp-81-public".as_slice(), b"openpgp-81-private"] {
+    for id in ["openpgp-81-public", "openpgp-81-private"] {
         let object = objects
             .iter()
             .find(|object| object.unique_id == id)
@@ -196,7 +196,7 @@ fn generated_attestation_status_sets_discovered_key_provenance() {
     }
     assert!(objects
         .iter()
-        .any(|object| object.unique_id == b"openpgp-81-certificate"));
+        .any(|object| object.unique_id == "openpgp-81-certificate"));
     assert_eq!(
         connector.commands.borrow()[3],
         [0, 0x47, 0x81, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]

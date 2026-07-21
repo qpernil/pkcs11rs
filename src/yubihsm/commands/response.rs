@@ -32,7 +32,7 @@ pub(crate) struct ObjectInfo {
     pub(crate) algorithm: u8,
     pub(crate) sequence: u8,
     pub(crate) origin: u8,
-    pub(crate) label: [u8; LABEL_LENGTH],
+    pub(crate) label: String,
     pub(crate) delegated_capabilities: [u8; CAPABILITIES_LENGTH],
 }
 
@@ -50,7 +50,15 @@ impl ObjectInfo {
             algorithm: data[15],
             sequence: data[16],
             origin: data[17],
-            label: data[18..58].try_into().map_err(|_| CKR_DATA_INVALID)?,
+            label: {
+                let encoded = data[18..58]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .unwrap_or_default();
+                std::str::from_utf8(encoded)
+                    .map_err(|_| CKR_DATA_INVALID)?
+                    .to_owned()
+            },
             delegated_capabilities: data[58..66].try_into().map_err(|_| CKR_DATA_INVALID)?,
         })
     }

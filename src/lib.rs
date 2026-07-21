@@ -86,6 +86,12 @@ use scp11::{Scp11KeySet, Scp11Variant};
 mod security_domain;
 use security_domain::{Client as SecurityDomainClient, SecurityDomainInfo};
 
+mod hsmauth;
+use hsmauth::{
+    Algorithm as HsmAuthAlgorithm, Client as HsmAuthClient, Credential as HsmAuthCredential,
+    Info as HsmAuthInfo,
+};
+
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 
@@ -97,6 +103,7 @@ use openpgp::{
 
 mod yubihsm;
 use yubihsm::{
+    device_public_key_bytes as get_yubihsm_device_public_key,
     get_device_info as get_yubihsm_device_info,
     parse_asymmetric_pin as parse_yubihsm_asymmetric_pin,
     parse_object_id as parse_yubihsm_object_id, parse_object_list as parse_yubihsm_object_list,
@@ -191,6 +198,13 @@ const CKK_YUBICO_AES192_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYP
 const CKK_YUBICO_AES256_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE
     | YUBICO_BASE_VENDOR
     | YUBIHSM_ALGO_AES256_CCM_WRAP as CK_KEY_TYPE;
+
+const CKA_YUBICO_HSMAUTH_ALGORITHM: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5901;
+const CKA_YUBICO_HSMAUTH_RETRIES: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5902;
+const CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5903;
 
 fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(

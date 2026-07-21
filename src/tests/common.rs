@@ -361,8 +361,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
 
 #[test]
 fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
-    let mut label = [0u8; 40];
-    label[..8].copy_from_slice(b"p521-key");
+    let label = "p521-key".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x07]),
         id: 0x1234,
@@ -406,8 +405,7 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
 #[test]
 fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
     let unknown_algorithm = 0xfe;
-    let mut label = [0u8; 40];
-    label[..12].copy_from_slice(b"unknown-algo");
+    let label = "unknown-algo".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x05]),
         id: 0x1234,
@@ -455,8 +453,7 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
         (crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, 32),
         (crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, 64),
     ] {
-        let mut label = [0u8; 40];
-        label[..12].copy_from_slice(b"session-auth");
+        let label = "session-auth".to_owned();
         let info = crate::yubihsm::ObjectInfo {
             capabilities,
             id: 1,
@@ -511,8 +508,7 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
 #[test]
 fn yubihsm_wrap_key_object_types_match_the_reference_module() {
     let info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
-        let mut label = [0; 40];
-        label[..name.len()].copy_from_slice(name);
+        let label = std::str::from_utf8(name).unwrap().to_owned();
         crate::yubihsm::ObjectInfo {
             capabilities: crate::yubihsm_capabilities(capabilities),
             id,
@@ -630,8 +626,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
 #[test]
 fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
     let opaque = |id, algorithm, name: &[u8]| {
-        let mut label = [0u8; 40];
-        label[..name.len()].copy_from_slice(name);
+        let label = std::str::from_utf8(name).unwrap().to_owned();
         crate::yubihsm::ObjectInfo {
             capabilities: [0; 8],
             id,
@@ -705,8 +700,7 @@ fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
 
 #[test]
 fn yubihsm_internal_metadata_opaque_objects_are_hidden() {
-    let mut label = [0u8; 40];
-    label[..16].copy_from_slice(b"Meta object 0001");
+    let label = "Meta object 0001".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: [0; 8],
         id: 7,
@@ -726,8 +720,7 @@ fn yubihsm_internal_metadata_opaque_objects_are_hidden() {
 
 #[test]
 fn yubihsm_secret_key_sign_capability_matches_key_type() {
-    let mut label = [0u8; 40];
-    label[..11].copy_from_slice(b"hmac-secret");
+    let label = "hmac-secret".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x16]),
         id: 0x1234,
@@ -746,8 +739,7 @@ fn yubihsm_secret_key_sign_capability_matches_key_type() {
     assert_eq!(objects[0].class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
     assert!(objects[0].sign);
 
-    let mut label = [0u8; 40];
-    label[..10].copy_from_slice(b"aes-secret");
+    let label = "aes-secret".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x16]),
         id: 0x1235,
@@ -802,10 +794,10 @@ fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error
 fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {
     let object = crate::TokenObject {
         slot_id: Some(slot_id),
-        unique_id: format!("test-aes-{key_id}").into_bytes(),
+        unique_id: format!("test-aes-{key_id}"),
         class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
         key_type: CKK_AES as CK_KEY_TYPE,
-        label: b"Test AES key".to_vec(),
+        label: "Test AES key".to_owned(),
         id: key_id.to_be_bytes().to_vec(),
         token: true,
         private: true,
@@ -1305,8 +1297,7 @@ fn yubihsm_x25519_objects_use_montgomery_key_type() {
             .unwrap(),
         crate::YUBIHSM_ALGO_ED25519
     );
-    let mut label = [0u8; 40];
-    label[..6].copy_from_slice(b"x25519");
+    let label = "x25519".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x05, 0x07, 0x0b, 0x17]),
         id: 0x1234,
@@ -1378,8 +1369,7 @@ fn yubihsm_x25519_derive_returns_readable_session_object() {
 
 #[test]
 fn yubihsm_ed25519_objects_use_edwards_key_type() {
-    let mut label = [0u8; 40];
-    label[..7].copy_from_slice(b"ed25519");
+    let label = "ed25519".to_owned();
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x08]),
         id: 0x1236,
@@ -1753,10 +1743,10 @@ fn yubihsm_x25519_two_way_derive(
 fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
     let object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
-        unique_id: b"piv-9c-public".to_vec(),
+        unique_id: "piv-9c-public".to_owned(),
         class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         key_type: CKK_EC as CK_KEY_TYPE,
-        label: b"PIV slot 9C".to_vec(),
+        label: "PIV slot 9C".to_owned(),
         id: vec![0x9c],
         token: true,
         private: false,

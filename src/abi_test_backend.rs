@@ -516,10 +516,10 @@ const ABI_YUBIHSM_OPAQUE_CERTIFICATE: &[u8] = &[0x30, 0x03, 0x02, 0x01, 0x01];
 pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
     TokenObject {
         slot_id: Some(slot_id),
-        unique_id: b"abi-yubihsm-rsa".to_vec(),
+        unique_id: "abi-yubihsm-rsa".to_owned(),
         class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type: CKK_RSA as CK_KEY_TYPE,
-        label: b"ABI YubiHSM RSA key".to_vec(),
+        label: "ABI YubiHSM RSA key".to_owned(),
         id: 1u16.to_be_bytes().to_vec(),
         token: true,
         private: true,
@@ -553,10 +553,10 @@ pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
 pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
     TokenObject {
         slot_id: Some(slot_id),
-        unique_id: b"abi-yubihsm-aes".to_vec(),
+        unique_id: "abi-yubihsm-aes".to_owned(),
         class: CKO_SECRET_KEY as CK_OBJECT_CLASS,
         key_type: CKK_AES as CK_KEY_TYPE,
-        label: b"ABI YubiHSM AES key".to_vec(),
+        label: "ABI YubiHSM AES key".to_owned(),
         id: 2u16.to_be_bytes().to_vec(),
         token: true,
         private: true,
@@ -590,8 +590,8 @@ pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
 pub(super) fn abi_test_yubihsm_nist_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
     const NIST_AES_KEY_ID: u16 = 3;
     let mut object = abi_test_yubihsm_aes_object(slot_id);
-    object.unique_id = b"abi-yubihsm-aes-nist".to_vec();
-    object.label = b"ABI YubiHSM NIST AES key".to_vec();
+    object.unique_id = "abi-yubihsm-aes-nist".to_owned();
+    object.label = "ABI YubiHSM NIST AES key".to_owned();
     object.id = NIST_AES_KEY_ID.to_be_bytes().to_vec();
     if let KeyMaterial::YubiHsm {
         id, capabilities, ..
@@ -623,8 +623,7 @@ pub(super) fn abi_test_yubihsm_authentication_objects(
     ]
     .into_iter()
     .map(|(id, length, algorithm, name)| {
-        let mut label = [0; 40];
-        label[..name.len()].copy_from_slice(name);
+        let label = std::str::from_utf8(name).unwrap().to_owned();
         let info = YubiHsmObjectInfo {
             capabilities: yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x32, 0x33]),
             id,
@@ -647,8 +646,7 @@ pub(super) fn abi_test_yubihsm_authentication_objects(
 #[cfg(feature = "abi-tests")]
 fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
     let wrap_info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
-        let mut label = [0; 40];
-        label[..name.len()].copy_from_slice(name);
+        let label = std::str::from_utf8(name).unwrap().to_owned();
         YubiHsmObjectInfo {
             capabilities: yubihsm_capabilities(capabilities),
             id,
@@ -726,8 +724,7 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
     definitions
         .into_iter()
         .map(|(id, algorithm, name, length)| {
-            let mut label = [0; 40];
-            label[..name.len()].copy_from_slice(name);
+            let label = std::str::from_utf8(name).unwrap().to_owned();
             let info = YubiHsmObjectInfo {
                 capabilities: [0; 8],
                 id,

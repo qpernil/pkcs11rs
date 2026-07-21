@@ -507,14 +507,14 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
 
     let public = objects
         .iter()
-        .find(|object| object.unique_id == b"openpgp-81-public")
+        .find(|object| object.unique_id == "openpgp-81-public")
         .unwrap();
     assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     assert!(public.verify);
 
     let private = objects
         .iter()
-        .find(|object| object.unique_id == b"openpgp-81-private")
+        .find(|object| object.unique_id == "openpgp-81-private")
         .unwrap();
     assert_eq!(private.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
     assert!(private.private);
@@ -530,7 +530,7 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
 
     let certificate = objects
         .iter()
-        .find(|object| object.unique_id == b"openpgp-81-certificate")
+        .find(|object| object.unique_id == "openpgp-81-certificate")
         .unwrap();
     assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
 }
@@ -598,10 +598,10 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
 
     let mut object = crate::TokenObject {
         slot_id: Some(TEST_SLOT_ID),
-        unique_id: b"openpgp-private".to_vec(),
+        unique_id: "openpgp-private".to_owned(),
         class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type: CKK_RSA as CK_KEY_TYPE,
-        label: b"OpenPGP signature key".to_vec(),
+        label: "OpenPGP signature key".to_owned(),
         id: vec![1],
         token: true,
         private: true,
@@ -777,6 +777,63 @@ fn security_domain_metadata_becomes_read_only_pkcs11_objects() {
         certificate.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
         Some(vec![0x30, 0])
     );
+}
+
+#[test]
+fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
+    let info = crate::HsmAuthInfo {
+        version: (5, 7, 1),
+        management_key_retries: 8,
+        credentials: vec![
+            crate::HsmAuthCredential {
+                label: "symmetric".to_owned(),
+                algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
+                retries: 7,
+                touch_required: false,
+                public_key: None,
+            },
+            crate::HsmAuthCredential {
+                label: "asymmetric".to_owned(),
+                algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
+                retries: 6,
+                touch_required: true,
+                public_key: Some([vec![0x04], vec![0x11; 64]].concat()),
+            },
+        ],
+    };
+
+    let objects = crate::hsmauth_token_objects(TEST_SLOT_ID, &info);
+    assert_eq!(objects.len(), 3);
+
+    let symmetric = &objects[0];
+    assert_eq!(symmetric.class, CKO_SECRET_KEY as CK_OBJECT_CLASS);
+    assert_eq!(symmetric.key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
+    assert!(!symmetric.sign);
+    assert!(!symmetric.verify);
+    assert!(!symmetric.derive);
+    assert_eq!(
+        symmetric.attribute_value(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE),
+        Some((32 as CK_ULONG).to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        symmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_ALGORITHM),
+        Some((38 as CK_ULONG).to_ne_bytes().to_vec())
+    );
+    assert_eq!(
+        symmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_RETRIES),
+        Some((7 as CK_ULONG).to_ne_bytes().to_vec())
+    );
+
+    let asymmetric = &objects[1];
+    assert_eq!(
+        asymmetric.attribute_value(crate::CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED),
+        Some(vec![CK_TRUE as CK_BBOOL])
+    );
+    let public = &objects[2];
+    assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+    assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
+    assert!(!public.verify);
+    assert!(public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE).is_some());
 }
 
 #[test]

@@ -490,10 +490,10 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
             42,
             crate::TokenObject {
                 slot_id: Some(TEST_SLOT_ID),
-                unique_id: b"piv-9c-private".to_vec(),
+                unique_id: "piv-9c-private".to_owned(),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type: CKK_RSA as CK_KEY_TYPE,
-                label: b"PIV slot 9C".to_vec(),
+                label: "PIV slot 9C".to_owned(),
                 id: vec![0x9c],
                 token: true,
                 private: true,
@@ -1005,10 +1005,10 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
     });
     let object = crate::TokenObject {
         slot_id: Some(1),
-        unique_id: b"piv-attestation".to_vec(),
+        unique_id: "piv-attestation".to_owned(),
         class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
         key_type: CKK_EC as CK_KEY_TYPE,
-        label: b"PIV attestation".to_vec(),
+        label: "PIV attestation".to_owned(),
         id: vec![0x9c],
         token: false,
         private: false,
