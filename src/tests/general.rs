@@ -383,6 +383,26 @@ fn pcsc_applet_connector_reuses_selected_aid() {
 }
 
 #[test]
+fn passive_ccid_slots_do_not_repeat_presence_select() {
+    let connector = || -> std::rc::Rc<dyn crate::Connector> {
+        std::rc::Rc::new(SelectableConnector {
+            present: std::cell::Cell::new(true),
+            select_ok: std::cell::Cell::new(false),
+            serial: "SELECT0001",
+        })
+    };
+
+    let hsmauth_aid = crate::hsmauth::AID.to_vec();
+    let mut hsmauth = crate::HsmAuthSlot::new(connector(), hsmauth_aid);
+    assert!(crate::Slot::init_slot(&mut hsmauth).is_ok());
+
+    let globalplatform_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let mut globalplatform =
+        crate::GlobalPlatformSlot::new(connector(), globalplatform_aid);
+    assert!(crate::Slot::init_slot(&mut globalplatform).is_ok());
+}
+
+#[test]
 fn openpgp_slot_info_reports_application_version_and_serial() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),

@@ -235,7 +235,7 @@ impl Slot for HsmAuthSlot {
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        select_application(self.connector.as_ref(), &self.application_aid)
+        Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
@@ -430,7 +430,7 @@ impl Slot for GlobalPlatformSlot {
         Ok(())
     }
     fn init_slot(&mut self) -> Result<(), Error> {
-        select_application(self.connector.as_ref(), &self.application_aid)
+        Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
