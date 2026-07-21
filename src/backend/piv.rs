@@ -803,6 +803,21 @@ impl Slot for PivSlot {
         self.keys.retain(|key| key.slot != slot);
         Ok(())
     }
+    fn piv_move_key(&mut self, from: piv::Slot, to: piv::Slot) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if (self.reported_version().major, self.reported_version().minor) < (5, 7) {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
+        PivClient.move_key(self.connector.as_ref(), from, to)?;
+        if let Some(key) = self.keys.iter_mut().find(|key| key.slot == from) {
+            key.slot = to;
+            key.attestation = Rc::new(RefCell::new(None));
+            key.attestation_attempted = Rc::new(Cell::new(false));
+        }
+        Ok(())
+    }
     fn piv_delete_certificate(&mut self, slot: piv::Slot) -> Result<(), Error> {
         if !self.management_authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());

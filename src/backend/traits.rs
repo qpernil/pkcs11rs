@@ -85,6 +85,9 @@ trait Slot {
     fn piv_delete_key(&mut self, _slot: piv::Slot) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn piv_move_key(&mut self, _from: piv::Slot, _to: piv::Slot) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn piv_delete_certificate(&mut self, _slot: piv::Slot) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }

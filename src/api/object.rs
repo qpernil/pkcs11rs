@@ -1250,6 +1250,25 @@ fn set_attribute_value(
         if matches!(stored_object.material, KeyMaterial::YubiHsm { .. }) {
             return Err(CKR_ATTRIBUTE_READ_ONLY.into());
         }
+        if let KeyMaterial::PivPrivate { slot: from, .. } = stored_object.material {
+            let [attribute] = templ else {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            };
+            if attribute.type_ != CKA_ID as CK_ATTRIBUTE_TYPE {
+                return Err(CKR_ATTRIBUTE_READ_ONLY.into());
+            }
+            let id = read_attribute_value(attribute).map_err(Error::from)?;
+            let [id] = id.as_slice() else {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            };
+            let to = piv::Slot::from_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+            if to == piv::Slot::Attestation {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            ctx._get_slot_mut(slot_id)?.piv_move_key(from, to)?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+            return Ok(());
+        }
         let mut updated_object = stored_object.clone();
 
         let mut rv = CKR_OK as CK_RV;
