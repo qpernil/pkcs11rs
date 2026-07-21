@@ -66,6 +66,22 @@ trait Slot {
     ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn piv_import_private_key(
+        &mut self,
+        _slot: piv::Slot,
+        _key: &piv::PrivateKeyImport,
+        _pin_policy: u8,
+        _touch_policy: u8,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn piv_import_certificate(
+        &mut self,
+        _slot: piv::Slot,
+        _certificate: &[u8],
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_is_active(&self) -> bool {
         true
     }

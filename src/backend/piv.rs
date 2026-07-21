@@ -678,6 +678,73 @@ impl Slot for PivSlot {
         });
         Ok(())
     }
+    fn piv_import_private_key(
+        &mut self,
+        slot: piv::Slot,
+        key: &piv::PrivateKeyImport,
+        pin_policy: u8,
+        touch_policy: u8,
+    ) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !piv_algorithm_supported(self.reported_version(), key.algorithm) {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        PivClient.import_private_key(
+            self.connector.as_ref(),
+            slot,
+            key,
+            pin_policy,
+            touch_policy,
+        )?;
+        let public_key = piv_public_key_from_metadata(key.algorithm, key.public_key.clone())?;
+        self.keys.retain(|candidate| candidate.slot != slot);
+        self.keys.push(PivKey {
+            slot,
+            algorithm: key.algorithm,
+            public_key,
+            attestation: Rc::new(RefCell::new(None)),
+            attestation_attempted: Rc::new(Cell::new(false)),
+            pin_policy,
+            touch_policy,
+        });
+        Ok(())
+    }
+    fn piv_import_certificate(
+        &mut self,
+        slot: piv::Slot,
+        certificate: &[u8],
+    ) -> Result<(), Error> {
+        if !self.management_authenticated.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let algorithm = piv_algorithm_from_certificate(certificate).ok_or(CKR_DATA_INVALID)?;
+        if !piv_algorithm_supported(self.reported_version(), algorithm) {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        PivClient.put_certificate(self.connector.as_ref(), slot, certificate)?;
+        self.certificates.retain(|candidate| candidate.slot != slot);
+        self.certificates.push(PivCertificate {
+            slot,
+            algorithm,
+            value: certificate.to_vec(),
+            attestation: slot == piv::Slot::Attestation,
+        });
+        if slot != piv::Slot::Attestation && !self.keys.iter().any(|key| key.slot == slot) {
+            let public_key = piv_public_key_from_certificate(algorithm, certificate)?;
+            self.keys.push(PivKey {
+                slot,
+                algorithm,
+                public_key,
+                attestation: Rc::new(RefCell::new(None)),
+                attestation_attempted: Rc::new(Cell::new(false)),
+                pin_policy: 0,
+                touch_policy: 0,
+            });
+        }
+        Ok(())
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len() + 4);
         for key in &self.keys {

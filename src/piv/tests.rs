@@ -381,6 +381,68 @@ fn generates_a_piv_key_pair_with_requested_policies() {
 }
 
 #[test]
+fn imports_private_keys_using_the_documented_component_tags() {
+    let connector = ScriptedConnector::new(vec![response(&[], STATUS_SUCCESS)]);
+    let key = PrivateKeyImport {
+        algorithm: Algorithm::Ed25519,
+        components: vec![(0x07, Zeroizing::new(vec![0x44; 32]))],
+        public_key: MetadataPublicKey::Raw(vec![0x55; 32]),
+    };
+    Client
+        .import_private_key(&connector, Slot::Authentication, &key, 2, 3)
+        .unwrap();
+    let command = &connector.commands.borrow()[0];
+    assert_eq!(
+        &command[..5],
+        &[
+            0,
+            INS_IMPORT_KEY,
+            Algorithm::Ed25519 as u8,
+            Slot::Authentication as u8,
+            40
+        ]
+    );
+    assert_eq!(
+        &command[5..39],
+        &[&[0x07, 0x20][..], &[0x44; 32][..]].concat()
+    );
+    assert_eq!(&command[39..45], &[0xaa, 1, 2, 0xab, 1, 3]);
+}
+
+#[test]
+fn writes_piv_data_objects_with_tag_list_and_value_wrappers() {
+    let connector = ScriptedConnector::new(vec![response(&[], STATUS_SUCCESS)]);
+    Client
+        .put_data(
+            &connector,
+            Slot::Authentication.certificate_object(),
+            &[1, 2, 3],
+        )
+        .unwrap();
+    assert_eq!(
+        connector.commands.borrow()[0],
+        [
+            0,
+            INS_PUT_DATA,
+            0x3f,
+            0xff,
+            10,
+            0x5c,
+            3,
+            0x5f,
+            0xc1,
+            0x05,
+            0x53,
+            3,
+            1,
+            2,
+            3,
+            0
+        ]
+    );
+}
+
+#[test]
 fn performs_x25519_key_agreement_with_general_authenticate() {
     let response_data = encode_tlv(0x7c, &encode_tlv(0x82, &[0xa5; 32]).unwrap()).unwrap();
     let connector = ScriptedConnector::new(vec![response(&response_data, STATUS_SUCCESS)]);
