@@ -585,11 +585,10 @@ impl Context {
                                 application_aid,
                                 "YubiHSM Auth",
                             )),
-                            CcidApplication::GlobalPlatform => Box::new(GlobalPlatformSlot {
-                                connector: application_connector,
+                            CcidApplication::GlobalPlatform => Box::new(GlobalPlatformSlot::new(
+                                application_connector,
                                 application_aid,
-                                authenticated: Cell::new(false),
-                            }),
+                            )),
                         };
                         if slot.is_present() {
                             if let Err(error) = slot.init_slot() {

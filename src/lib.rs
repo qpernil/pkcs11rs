@@ -83,6 +83,9 @@ use scp03::{
 mod scp11;
 use scp11::{Scp11KeySet, Scp11Variant};
 
+mod security_domain;
+use security_domain::{Client as SecurityDomainClient, SecurityDomainInfo};
+
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 

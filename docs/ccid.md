@@ -39,6 +39,23 @@ The reader connection is shared between all applet slots. The Issuer Security
 Domain is the Secure Domain management applet; it is not required to use PIV,
 OpenPGP, or YubiHSM Auth.
 
+## Issuer SD objects
+
+The Issuer SD slot reads the GlobalPlatform key-information template, card
+recognition data, CPLC, supported CA identifiers, and available SCP11
+certificate chains. Installed key records, CA identifiers, card recognition,
+and CPLC are exposed as immutable `CKO_DATA` objects. Key records use the
+two-byte KID/KVN reference as `CKA_ID`; `CKA_VALUE` contains only the reported
+key-component type and length pairs, never key material. CA data-object values
+contain Subject Key Identifiers. SCP11 certificate-chain entries are exposed
+as immutable `CKO_CERTIFICATE` objects in the card's issuer-to-leaf order.
+
+The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
+supports random generation through the applet's `GET CHALLENGE` command and
+uses `C_Login` to establish the configured secure channel. Key import,
+generation, deletion, allowlist management, and Security Domain reset are not
+mapped to PKCS #11 operations.
+
 Protocol-specific key and certificate configuration is documented in
 [`scp03.md`](scp03.md) and [`scp11.md`](scp11.md).
 

@@ -19,7 +19,8 @@ appropriate PKCS #11 error instead of being omitted.
 - **YubiHSM 2** over USB, including authenticated sessions, hardware-backed
   asymmetric, symmetric, HMAC, wrapping, opaque, and authentication objects.
 - **YubiHSM Auth** and the **Issuer Security Domain** as discoverable CCID
-  applets.
+  applets, with read-only Security Domain key metadata, CA identifiers, CPLC,
+  and SCP11 certificate chains.
 - **SCP03, SCP11a, and SCP11b** secure messaging for selected CCID applets.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
