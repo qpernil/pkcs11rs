@@ -88,6 +88,12 @@ trait Slot {
     fn piv_delete_certificate(&mut self, _slot: piv::Slot) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn piv_write_data(&mut self, _object_id: u32, _value: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn piv_delete_data(&mut self, _object_id: u32) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_is_active(&self) -> bool {
         true
     }

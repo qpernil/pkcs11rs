@@ -1847,6 +1847,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         serial: String::from("TEST0001"),
         keys: Vec::new(),
         certificates: Vec::new(),
+        data_objects: Vec::new(),
     };
     let mechanism = |mechanisms: Vec<crate::MechanismDetails>, type_: CK_MECHANISM_TYPE| {
         mechanisms
@@ -1903,6 +1904,51 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
     assert_eq!(
         (openpgp_ecdh.min_key_size, openpgp_ecdh.max_key_size),
         (255, 521)
+    );
+}
+
+#[test]
+fn piv_general_data_objects_expose_pkcs11_data_attributes() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let piv = crate::PivSlot {
+        connector,
+        application_aid: crate::piv::PIV_AID.to_vec(),
+        slot_description: None,
+        authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        management_authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
+        version: crate::piv::Version {
+            major: 5,
+            minor: 7,
+            patch: 0,
+        },
+        serial: String::from("TEST0001"),
+        keys: Vec::new(),
+        certificates: Vec::new(),
+        data_objects: vec![crate::PivDataObject {
+            object_id: 0x5f_c102,
+            value: vec![1, 2, 3],
+        }],
+    };
+    let objects = crate::Slot::token_objects(&piv, 7).unwrap();
+    let object = objects
+        .iter()
+        .find(|object| object.class == CKO_DATA as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(
+        object.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+        Some(b"PIV".to_vec())
+    );
+    assert_eq!(
+        object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x5f, 0xc1, 0x02])
+    );
+    assert_eq!(
+        object.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(vec![1, 2, 3])
+    );
+    assert_eq!(
+        object.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
+        Some(vec![CK_TRUE as CK_BBOOL])
     );
 }
 

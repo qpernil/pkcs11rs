@@ -222,6 +222,7 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             touch_policy: 1,
         }],
         certificates: Vec::new(),
+        data_objects: Vec::new(),
     })
 }
 

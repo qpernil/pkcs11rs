@@ -13,6 +13,21 @@ use zeroize::Zeroizing;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 
+pub(crate) const DATA_OBJECTS: &[(u32, &str)] = &[
+    (0x5f_c107, "Card capability container"),
+    (0x5f_c102, "Cardholder unique identifier"),
+    (0x5f_c103, "Cardholder fingerprints"),
+    (0x5f_c106, "Security object"),
+    (0x5f_c108, "Facial image"),
+    (0x5f_c109, "Printed information"),
+    (0x7e, "Discovery object"),
+    (0x5f_c10c, "Key history object"),
+    (0x5f_c121, "Iris images"),
+    (0x7f61, "Biometric information templates group"),
+    (0x5f_c122, "Secure messaging signer certificate"),
+    (0x5f_c123, "Pairing code reference data"),
+];
+
 const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE: u8 = 0x24;
@@ -230,6 +245,19 @@ impl Slot {
             Self::Attestation => 0x5f_ff01,
         }
     }
+}
+
+pub(crate) fn data_object_allowed(object_id: u32) -> bool {
+    DATA_OBJECTS.iter().any(|(id, _)| *id == object_id)
+        || ((0x5f_ff00..=0x5f_ffff).contains(&object_id) && object_id != 0x5f_ff01)
+}
+
+pub(crate) fn data_object_name(object_id: u32) -> String {
+    DATA_OBJECTS
+        .iter()
+        .find_map(|(id, name)| (*id == object_id).then_some(*name))
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("PIV data {object_id:06X}"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

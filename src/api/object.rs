@@ -71,6 +71,31 @@ fn create_object(
                         .map(|(handle, _)| *handle)
                         .ok_or(CKR_DEVICE_ERROR)?;
                 }
+                PivImport::Data {
+                    object_id,
+                    value,
+                    object,
+                } => {
+                    validate_new_object_access(&object, flags, logged_in)?;
+                    ctx._get_slot_mut(slot_id)?
+                        .piv_write_data(object_id, &value)?;
+                    ctx.refresh_slot_token_objects(slot_id)?;
+                    *object_handle = ctx
+                        .objects
+                        .iter()
+                        .find(|(_, object)| {
+                            object.slot_id == Some(slot_id)
+                                && matches!(
+                                    object.material,
+                                    KeyMaterial::PivData {
+                                        object_id: candidate,
+                                        ..
+                                    } if candidate == object_id
+                                )
+                        })
+                        .map(|(handle, _)| *handle)
+                        .ok_or(CKR_DEVICE_ERROR)?;
+                }
             }
             return Ok(());
         }
@@ -114,6 +139,11 @@ enum PivImport {
     Certificate {
         slot: piv::Slot,
         certificate: Vec<u8>,
+        object: TokenObject,
+    },
+    Data {
+        object_id: u32,
+        value: Vec<u8>,
         object: TokenObject,
     },
 }
@@ -370,6 +400,87 @@ fn piv_certificate_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     })
 }
 
+fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
+    let allowed = [
+        CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
+        CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+        CKA_VALUE as CK_ATTRIBUTE_TYPE,
+    ];
+    if templ
+        .iter()
+        .any(|attribute| !allowed.contains(&attribute.type_))
+    {
+        return Err(CKR_ATTRIBUTE_TYPE_INVALID.into());
+    }
+    let object_id_bytes =
+        required_template_value(templ, CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE)?.to_vec();
+    if object_id_bytes.len() > 3 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    let object_id = object_id_bytes
+        .iter()
+        .fold(0u32, |value, byte| (value << 8) | *byte as u32);
+    if !piv::data_object_allowed(object_id) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    let value = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?.to_vec();
+    let token = template_attribute(templ, CKA_TOKEN as CK_ATTRIBUTE_TYPE)
+        .map(read_bool_template_attribute)
+        .transpose()
+        .map_err(Error::from)?
+        .unwrap_or(true);
+    if !token {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let private = template_attribute(templ, CKA_PRIVATE as CK_ATTRIBUTE_TYPE)
+        .map(read_bool_template_attribute)
+        .transpose()
+        .map_err(Error::from)?
+        .unwrap_or(false);
+    let label = template_attribute(templ, CKA_LABEL as CK_ATTRIBUTE_TYPE)
+        .map(|attribute| read_attribute_value(attribute).map_err(Error::from))
+        .transpose()?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+        .unwrap_or_else(|| piv::data_object_name(object_id));
+    let object = TokenObject {
+        slot_id: None,
+        unique_id: String::new(),
+        class: CKO_DATA as CK_OBJECT_CLASS,
+        key_type: 0,
+        label,
+        id: Vec::new(),
+        token: true,
+        private,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::PivData {
+            object_id,
+            value: value.clone(),
+        },
+    };
+    Ok(PivImport::Data {
+        object_id,
+        value,
+        object,
+    })
+}
+
 fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     validate_unique_template(templ)?;
     let class_attribute = template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE)
@@ -377,6 +488,7 @@ fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     match read_ulong_template_attribute(class_attribute).map_err(Error::from)? {
         class if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => piv_private_import(templ),
         class if class == CKO_CERTIFICATE as CK_OBJECT_CLASS => piv_certificate_import(templ),
+        class if class == CKO_DATA as CK_OBJECT_CLASS => piv_data_import(templ),
         _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
     }
 }
@@ -796,6 +908,11 @@ fn destroy_object(
             KeyMaterial::PivAttestation { .. } => {
                 ctx.objects.remove(&object);
                 remove_object_from_find_operations(&mut ctx.find_operations, object);
+                return Ok(());
+            }
+            KeyMaterial::PivData { object_id, .. } => {
+                ctx._get_slot_mut(slot_id)?.piv_delete_data(*object_id)?;
+                ctx.refresh_slot_token_objects(slot_id)?;
                 return Ok(());
             }
             _ => None,
