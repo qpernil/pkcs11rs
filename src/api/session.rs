@@ -11,21 +11,80 @@ pub extern "C" fn C_InitToken(
 #[no_mangle]
 pub extern "C" fn C_InitPIN(
     session_handle: CK_SESSION_HANDLE,
-    _pin: *mut ::std::os::raw::c_uchar,
-    _pin_len: ::std::os::raw::c_ulong,
+    pin: *mut ::std::os::raw::c_uchar,
+    pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(2, "C_InitPIN called with {:?}", (session_handle, pin, pin_len));
+    map(init_pin(session_handle, pin, pin_len))
+}
+
+fn init_pin(
+    session_handle: CK_SESSION_HANDLE,
+    pin: *const CK_UTF8CHAR,
+    pin_len: CK_ULONG,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        let (slot_id, flags, _) = ctx.session_details(session_handle)?;
+        if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+            return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        ctx.reconcile_login_state(slot_id);
+        if ctx.login_role(slot_id) != Some(LoginRole::So) {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let pin = from_raw_parts(pin, pin_len as usize)?;
+        ctx._get_slot_mut(slot_id)?.init_user_pin(pin)
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn C_SetPIN(
     session_handle: CK_SESSION_HANDLE,
-    _old_pin: *mut ::std::os::raw::c_uchar,
-    _old_len: ::std::os::raw::c_ulong,
-    _new_pin: *mut ::std::os::raw::c_uchar,
-    _new_len: ::std::os::raw::c_ulong,
+    old_pin: *mut ::std::os::raw::c_uchar,
+    old_len: ::std::os::raw::c_ulong,
+    new_pin: *mut ::std::os::raw::c_uchar,
+    new_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(
+        2,
+        "C_SetPIN called with {:?}",
+        (session_handle, old_pin, old_len, new_pin, new_len)
+    );
+    map(set_pin(
+        session_handle,
+        old_pin,
+        old_len,
+        new_pin,
+        new_len,
+    ))
+}
+
+fn set_pin(
+    session_handle: CK_SESSION_HANDLE,
+    old_pin: *const CK_UTF8CHAR,
+    old_len: CK_ULONG,
+    new_pin: *const CK_UTF8CHAR,
+    new_len: CK_ULONG,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        let (slot_id, flags, _) = ctx.session_details(session_handle)?;
+        if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+            return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        let old_pin = from_raw_parts(old_pin, old_len as usize)?;
+        let new_pin = from_raw_parts(new_pin, new_len as usize)?;
+        ctx.reconcile_login_state(slot_id);
+        let role = ctx.login_role(slot_id);
+        let result = match role {
+            Some(LoginRole::So) => ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin),
+            _ => ctx._get_slot_mut(slot_id)?.set_pin(old_pin, new_pin),
+        };
+        if !matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV)
+        {
+            ctx.clear_login_state(slot_id);
+        }
+        result
+    })
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -49,6 +108,12 @@ pub extern "C" fn C_OpenSession(
             }
             if flags & CKF_ASYNC_SESSION as CK_FLAGS != 0 {
                 return Ok(CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV);
+            }
+            ctx.reconcile_login_state(slotID);
+            if flags & CKF_RW_SESSION as CK_FLAGS == 0
+                && ctx.login_role(slotID) == Some(LoginRole::So)
+            {
+                return Ok(CKR_SESSION_READ_WRITE_SO_EXISTS as CK_RV);
             }
 
             match ctx.slots.get_mut(&slotID) {
@@ -209,7 +274,7 @@ fn get_session_info(
         }
         ctx.reconcile_login_state(slot_id);
         info.slotID = slot_id;
-        info.state = session_state(flags, ctx.is_slot_logged_in(slot_id));
+        info.state = session_state(flags, ctx.login_role(slot_id));
         info.flags = flags;
         info.ulDeviceError = 0;
         log!(2, "C_GetSessionInfo returning {:?}", info);
@@ -259,24 +324,45 @@ fn login(
             }
             let (slot_id, extended) = context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
             ctx.reconcile_login_state(slot_id);
-            if !ctx.is_slot_logged_in(slot_id) {
+            if !ctx.is_slot_user_logged_in(slot_id) {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             ctx._get_slot_mut(slot_id)?
                 .login_context_specific(pin, extended)?;
             return Ok(());
         }
-        if user_type != CKU_USER as CK_USER_TYPE {
-            return Err(CKR_USER_TYPE_INVALID.into());
-        }
+        let role = match user_type {
+            value if value == CKU_USER as CK_USER_TYPE => LoginRole::User,
+            value if value == CKU_SO as CK_USER_TYPE => LoginRole::So,
+            _ => return Err(CKR_USER_TYPE_INVALID.into()),
+        };
         ctx.reconcile_login_state(slot_id);
-        if ctx.is_slot_logged_in(slot_id) {
-            return Err(CKR_USER_ALREADY_LOGGED_IN.into());
+        if let Some(active_role) = ctx.login_role(slot_id) {
+            return Err(if active_role == role {
+                CKR_USER_ALREADY_LOGGED_IN.into()
+            } else {
+                CKR_USER_ANOTHER_ALREADY_LOGGED_IN.into()
+            });
+        }
+        if role == LoginRole::So {
+            let flags = ctx._get_session(session_handle)?.1.flags();
+            if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
+                return Err(CKR_SESSION_READ_ONLY.into());
+            }
+            if ctx.sessions.values().any(|session| {
+                session.slotID() == slot_id
+                    && session.flags() & CKF_RW_SESSION as CK_FLAGS == 0
+            }) {
+                return Err(CKR_SESSION_READ_ONLY_EXISTS.into());
+            }
         }
         let pin = from_raw_parts(pin, pin_len as usize)?;
-        ctx._get_slot_mut(slot_id)?.login(pin)?;
-        ctx.logged_in_slots.insert(slot_id);
-        if ctx.get_slot(slot_id)?.is_yubihsm() {
+        match role {
+            LoginRole::User => ctx._get_slot_mut(slot_id)?.login(pin)?,
+            LoginRole::So => ctx._get_slot_mut(slot_id)?.login_so(pin)?,
+        }
+        ctx.logged_in_slots.insert(slot_id, role);
+        if role == LoginRole::User && ctx.get_slot(slot_id)?.is_yubihsm() {
             if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
                 let _ = ctx._get_slot_mut(slot_id)?.logout();
                 ctx.clear_login_state(slot_id);
@@ -318,4 +404,3 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     log!(2, "C_Logout called with {:?}", session_handle);
     map(logout(session_handle))
 }
-

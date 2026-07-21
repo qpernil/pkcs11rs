@@ -74,7 +74,7 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
         Ok(mut guard) => match guard.as_mut() {
             Some(ctx) => {
                 let logged_in_slots: Vec<CK_SLOT_ID> =
-                    ctx.logged_in_slots.iter().copied().collect();
+                    ctx.logged_in_slots.keys().copied().collect();
                 let mut logout_failed = false;
                 for slot_id in logged_in_slots {
                     if ctx.logout_slot(slot_id).is_err() {

@@ -146,8 +146,9 @@ is not intended for a normal module build.
   on the selected backend, installed keys, device firmware, and policy.
 - The live-hardware suite is currently a discovery and metadata smoke test; it
   does not exercise every cryptographic operation against physical devices.
-- OpenPGP key generation, private-key import, UIF administration, and exported
-  `C_SetPIN` support are not currently implemented.
+- OpenPGP key generation, private-key import, UIF administration, and general
+  data-object management are implemented by the internal command layer but are
+  not yet mapped to exported PKCS #11 operations.
 - Secure-channel certificate-chain validation and credential provisioning are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader

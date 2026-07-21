@@ -5,7 +5,7 @@ struct Context {
     dynamic_slots: HashSet<CK_SLOT_ID>,
     slots_discovered: bool,
     sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
-    logged_in_slots: HashSet<CK_SLOT_ID>,
+    logged_in_slots: HashMap<CK_SLOT_ID, LoginRole>,
     objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     next_object_handle: CK_OBJECT_HANDLE,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
@@ -13,6 +13,12 @@ struct Context {
     decrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
     sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
     verify_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoginRole {
+    User,
+    So,
 }
 
 
@@ -86,7 +92,7 @@ impl Context {
             dynamic_slots: HashSet::new(),
             slots_discovered: false,
             sessions: HashMap::new(),
-            logged_in_slots: HashSet::new(),
+            logged_in_slots: HashMap::new(),
             objects,
             next_object_handle,
             find_operations: HashMap::new(),
@@ -156,19 +162,31 @@ impl Context {
     ) -> Result<(CK_SLOT_ID, CK_FLAGS, bool), Error> {
         let session = self._get_session(session_handle)?.1;
         let slot_id = session.slotID();
-        Ok((slot_id, session.flags(), self.is_slot_logged_in(slot_id)))
+        Ok((
+            slot_id,
+            session.flags(),
+            self.login_role(slot_id) == Some(LoginRole::User),
+        ))
+    }
+
+    fn login_role(&self, slot_id: CK_SLOT_ID) -> Option<LoginRole> {
+        self.logged_in_slots.get(&slot_id).copied().filter(|_| {
+            self.slots
+                .get(&slot_id)
+                .is_some_and(|slot| slot.login_is_active())
+        })
     }
 
     fn is_slot_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
-        self.logged_in_slots.contains(&slot_id)
-            && self
-                .slots
-                .get(&slot_id)
-                .is_some_and(|slot| slot.login_is_active())
+        self.login_role(slot_id).is_some()
+    }
+
+    fn is_slot_user_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
+        self.login_role(slot_id) == Some(LoginRole::User)
     }
 
     fn reconcile_login_state(&mut self, slot_id: CK_SLOT_ID) {
-        if self.logged_in_slots.contains(&slot_id) && !self.is_slot_logged_in(slot_id) {
+        if self.logged_in_slots.contains_key(&slot_id) && !self.is_slot_logged_in(slot_id) {
             self.clear_login_state(slot_id);
         }
     }
@@ -717,4 +735,3 @@ fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), Error> {
 unsafe impl Send for Context {}
 
 static G_CONTEXT: Mutex<Option<Context>> = Mutex::new(None);
-

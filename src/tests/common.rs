@@ -1861,6 +1861,8 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
         serial: String::from("TEST0001"),
         pin_min: 6,
         pin_max: 127,
+        admin_pin_min: 8,
+        admin_pin_max: 127,
         kdf: None,
         keys: vec![crate::openpgp::KeyInfo {
             key_ref: crate::openpgp::KeyRef::Decipher,
@@ -1870,6 +1872,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
                 key: vec![0; 32],
             },
             pin_policy: 0,
+            local: true,
         }],
         certificates: Vec::new(),
     };
@@ -2272,6 +2275,45 @@ impl crate::Slot for TestSlot {
         Ok(())
     }
 
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), crate::error::Error> {
+        if pin != b"12345678" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        TEST_SLOT_LOGGED_IN.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), crate::error::Error> {
+        if old_pin != b"1234" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        if new_pin.len() < 4 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
+    fn set_so_pin(
+        &mut self,
+        old_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), crate::error::Error> {
+        if old_pin != b"12345678" {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        if new_pin.len() < 8 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
+    fn init_user_pin(&mut self, new_pin: &[u8]) -> Result<(), crate::error::Error> {
+        if new_pin.len() < 4 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        Ok(())
+    }
+
     fn login_context_specific(
         &mut self,
         pin: &[u8],
@@ -2356,7 +2398,7 @@ fn install_test_session_with_state(
         .sessions
         .insert(session_handle, Box::new(TestSession { slot_id, flags }));
     if logged_in {
-        context.logged_in_slots.insert(slot_id);
+        context.logged_in_slots.insert(slot_id, crate::LoginRole::User);
     }
 }
 
@@ -2377,7 +2419,7 @@ fn assert_function_slots_present<T>(function_list: *const T, function_count: usi
     }
 }
 
-fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected: CK_RV) {
+fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_RV) {
     let mut data = [0u8; 8];
     let mut data_len = data.len() as CK_ULONG;
     let mut object = 0;
@@ -2393,7 +2435,7 @@ fn assert_unsupported_session_stubs_return(session: CK_SESSION_HANDLE, expected:
 
     macro_rules! assert_stub {
         ($name:literal, $call:expr) => {
-            assert_eq!($call, expected, "{} should behave as a stub", $name);
+            assert_eq!($call, expected, "{} should validate session state", $name);
         };
     }
 

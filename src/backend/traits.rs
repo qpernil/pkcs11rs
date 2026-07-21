@@ -15,6 +15,18 @@ trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
+    fn login_so(&mut self, _pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_USER_TYPE_INVALID.into())
+    }
+    fn set_pin(&mut self, _old_pin: &[u8], _new_pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn set_so_pin(&mut self, _old_pin: &[u8], _new_pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn init_user_pin(&mut self, _new_pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_context_specific(&mut self, _pin: &[u8], _extended: bool) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -167,12 +179,13 @@ trait Session {
     }
 }
 
-fn session_state(flags: CK_FLAGS, logged_in: bool) -> CK_STATE {
-    match (flags & CKF_RW_SESSION as CK_FLAGS != 0, logged_in) {
-        (false, false) => CKS_RO_PUBLIC_SESSION as CK_STATE,
-        (false, true) => CKS_RO_USER_FUNCTIONS as CK_STATE,
-        (true, false) => CKS_RW_PUBLIC_SESSION as CK_STATE,
-        (true, true) => CKS_RW_USER_FUNCTIONS as CK_STATE,
+fn session_state(flags: CK_FLAGS, role: Option<LoginRole>) -> CK_STATE {
+    match (flags & CKF_RW_SESSION as CK_FLAGS != 0, role) {
+        (_, Some(LoginRole::So)) => CKS_RW_SO_FUNCTIONS as CK_STATE,
+        (false, Some(LoginRole::User)) => CKS_RO_USER_FUNCTIONS as CK_STATE,
+        (true, Some(LoginRole::User)) => CKS_RW_USER_FUNCTIONS as CK_STATE,
+        (false, None) => CKS_RO_PUBLIC_SESSION as CK_STATE,
+        (true, None) => CKS_RW_PUBLIC_SESSION as CK_STATE,
     }
 }
 

@@ -28,9 +28,12 @@ CKR_MECHANISM_INVALID = 0x70
 CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_PIN_INCORRECT = 0xA0
+CKR_PIN_LEN_RANGE = 0xA2
 CKR_SESSION_HANDLE_INVALID = 0xB3
 CKR_SESSION_PARALLEL_NOT_SUPPORTED = 0xB4
 CKR_SESSION_READ_ONLY = 0xB5
+CKR_SESSION_READ_ONLY_EXISTS = 0xB7
+CKR_SESSION_READ_WRITE_SO_EXISTS = 0xB8
 CKR_SIGNATURE_INVALID = 0xC0
 CKR_SIGNATURE_LEN_RANGE = 0xC1
 CKR_TEMPLATE_INCOMPLETE = 0xD0
@@ -38,6 +41,7 @@ CKR_TEMPLATE_INCONSISTENT = 0xD1
 CKR_USER_ALREADY_LOGGED_IN = 0x100
 CKR_USER_NOT_LOGGED_IN = 0x101
 CKR_USER_TYPE_INVALID = 0x103
+CKR_USER_ANOTHER_ALREADY_LOGGED_IN = 0x104
 CKR_CRYPTOKI_NOT_INITIALIZED = 0x190
 CKR_SESSION_ASYNC_NOT_SUPPORTED = 0x205
 CKF_RW_SESSION = 0x00000002
@@ -102,6 +106,7 @@ CKS_RO_PUBLIC_SESSION = 0
 CKS_RO_USER_FUNCTIONS = 1
 CKS_RW_PUBLIC_SESSION = 2
 CKS_RW_USER_FUNCTIONS = 3
+CKS_RW_SO_FUNCTIONS = 4
 ABI_TEST_SLOT_ID = 77
 ABI_TEST_PIV_SLOT_ID = 78
 ABI_TEST_SCP03_SLOT_ID = 79
@@ -465,6 +470,14 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_ULONG,
         ]
         cls.lib.C_InitPIN.restype = CK_RV
+        cls.lib.C_SetPIN.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_SetPIN.restype = CK_RV
         cls.lib.C_WaitForSlotEvent.argtypes = [
             CK_FLAGS,
             ctypes.POINTER(CK_ULONG),
@@ -1368,10 +1381,10 @@ class Pkcs11AbiTests(unittest.TestCase):
             PKCS11_2_40_FUNCTIONS + V3_0_FUNCTIONS + V3_2_FUNCTIONS,
         )
 
-    def test_representative_session_stubs_validate_initialization_and_session(self) -> None:
+    def test_representative_session_entry_points_validate_initialization_and_session(self) -> None:
         flags = CK_FLAGS()
 
-        session_stubs = [
+        session_entry_points = [
             ("C_InitPIN", lambda: self.lib.C_InitPIN(999, None, 0)),
             ("C_GetFunctionStatus", lambda: self.lib.C_GetFunctionStatus(999)),
             ("C_MessageEncryptFinal", lambda: self.lib.C_MessageEncryptFinal(999)),
@@ -1381,11 +1394,11 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
         ]
 
-        for name, call in session_stubs:
+        for name, call in session_entry_points:
             self.assertEqual(call(), CKR_CRYPTOKI_NOT_INITIALIZED, name)
 
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        for name, call in session_stubs:
+        for name, call in session_entry_points:
             self.assertEqual(call(), CKR_SESSION_HANDLE_INVALID, name)
 
     def test_representative_non_session_stubs_report_unsupported(self) -> None:
@@ -1689,6 +1702,172 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.assertEqual(self.lib.C_CloseSession(session.value), CKR_OK)
             session.value = CK_ULONG(-1).value
 
+    def test_set_pin_validates_session_and_changes_supported_token_pin(self) -> None:
+        self.assertEqual(
+            self.lib.C_SetPIN(999, None, 1, None, 1),
+            CKR_CRYPTOKI_NOT_INITIALIZED,
+        )
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        self.assertEqual(
+            self.lib.C_SetPIN(999, None, 1, None, 1),
+            CKR_SESSION_HANDLE_INVALID,
+        )
+        old_pin = (CK_BYTE * 4)(*b"1234")
+        new_pin = (CK_BYTE * 4)(*b"5678")
+        wrong_pin = (CK_BYTE * 4)(*b"0000")
+        session = CK_ULONG()
+
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SetPIN(session.value, old_pin, len(old_pin), new_pin, len(new_pin)),
+            CKR_SESSION_READ_ONLY,
+        )
+        self.assertEqual(self.lib.C_CloseSession(session.value), CKR_OK)
+
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SetPIN(
+                session.value, wrong_pin, len(wrong_pin), new_pin, len(new_pin)
+            ),
+            CKR_PIN_INCORRECT,
+        )
+        self.assertEqual(
+            self.lib.C_SetPIN(session.value, old_pin, len(old_pin), new_pin, len(new_pin)),
+            CKR_OK,
+        )
+
+    def test_so_login_enforces_session_rules_and_initializes_user_pin(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        read_only = CK_ULONG()
+        read_write = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(read_only),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(read_write),
+            ),
+            CKR_OK,
+        )
+
+        admin_pin = (CK_BYTE * 8)(*b"12345678")
+        wrong_admin_pin = (CK_BYTE * 8)(*b"00000000")
+        self.assertEqual(
+            self.lib.C_Login(read_write.value, CKU_SO, admin_pin, len(admin_pin)),
+            CKR_SESSION_READ_ONLY_EXISTS,
+        )
+        self.assertEqual(self.lib.C_CloseSession(read_only.value), CKR_OK)
+        self.assertEqual(
+            self.lib.C_Login(
+                read_write.value, CKU_SO, wrong_admin_pin, len(wrong_admin_pin)
+            ),
+            CKR_PIN_INCORRECT,
+        )
+        self.assertEqual(
+            self.lib.C_Login(read_write.value, CKU_SO, admin_pin, len(admin_pin)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Login(read_write.value, CKU_SO, admin_pin, len(admin_pin)),
+            CKR_USER_ALREADY_LOGGED_IN,
+        )
+        user_pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_Login(read_write.value, CKU_USER, user_pin, len(user_pin)),
+            CKR_USER_ANOTHER_ALREADY_LOGGED_IN,
+        )
+
+        info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(read_write.value, ctypes.byref(info)), CKR_OK
+        )
+        self.assertEqual(info.state, CKS_RW_SO_FUNCTIONS)
+        object_size = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetObjectSize(
+                read_write.value, 2, ctypes.byref(object_size)
+            ),
+            CKR_OBJECT_HANDLE_INVALID,
+        )
+
+        another_read_only = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                ctypes.byref(another_read_only),
+            ),
+            CKR_SESSION_READ_WRITE_SO_EXISTS,
+        )
+        self.assertEqual(
+            self.lib.C_InitPIN(read_write.value, user_pin, len(user_pin)), CKR_OK
+        )
+
+        new_admin_pin = (CK_BYTE * 8)(*b"87654321")
+        self.assertEqual(
+            self.lib.C_SetPIN(
+                read_write.value,
+                user_pin,
+                len(user_pin),
+                new_admin_pin,
+                len(new_admin_pin),
+            ),
+            CKR_PIN_INCORRECT,
+        )
+        self.assertEqual(
+            self.lib.C_Login(read_write.value, CKU_SO, admin_pin, len(admin_pin)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SetPIN(
+                read_write.value,
+                admin_pin,
+                len(admin_pin),
+                new_admin_pin,
+                len(new_admin_pin),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(read_write.value, ctypes.byref(info)), CKR_OK
+        )
+        self.assertEqual(info.state, CKS_RW_PUBLIC_SESSION)
+        self.assertEqual(
+            self.lib.C_InitPIN(read_write.value, user_pin, len(user_pin)),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+
     def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         expected = [
@@ -1899,7 +2078,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         bad_pin = (CK_BYTE * 4)(*b"9999")
         self.assertEqual(
             self.lib.C_Login(session, CKU_SO, pin, len(pin)),
-            CKR_USER_TYPE_INVALID,
+            CKR_SESSION_READ_ONLY,
         )
         self.assertEqual(
             self.lib.C_Login(session, CKU_USER, bad_pin, len(bad_pin)),

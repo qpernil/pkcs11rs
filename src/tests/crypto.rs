@@ -483,7 +483,9 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 captured: captured.clone(),
             }),
         );
-        context.logged_in_slots.insert(TEST_SLOT_ID);
+        context
+            .logged_in_slots
+            .insert(TEST_SLOT_ID, crate::LoginRole::User);
         context.objects.insert(
             42,
             crate::TokenObject {
@@ -1255,4 +1257,3 @@ pub fn verify_operation_is_cleared_when_session_closes() {
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
-
