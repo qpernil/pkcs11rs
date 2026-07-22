@@ -46,6 +46,13 @@ type InnerCommands = std::rc::Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
 
 static NEXT_TRUST_ENTRY: AtomicU64 = AtomicU64::new(1);
 
+fn unused_trust_prefix() -> OsString {
+    let id = NEXT_TRUST_ENTRY.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join(format!("pkcs11rs-yubihsm-{id}-"))
+        .into_os_string()
+}
+
 pub(crate) struct TestTrustEntry {
     prefix: OsString,
     path: PathBuf,
@@ -61,10 +68,7 @@ impl TestTrustEntry {
             .unwrap()
             .public_key_to_pem()
             .unwrap();
-        let id = NEXT_TRUST_ENTRY.fetch_add(1, Ordering::Relaxed);
-        let prefix = std::env::temp_dir()
-            .join(format!("pkcs11rs-yubihsm-{id}-"))
-            .into_os_string();
+        let prefix = unused_trust_prefix();
         let path = trust::entry_path(&point, Some(&prefix)).unwrap();
         fs::write(&path, pem).unwrap();
         Self { prefix, path }
@@ -1023,8 +1027,8 @@ fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
 }
 
 #[test]
-fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
-    let trust = TestTrustEntry::new();
+fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
+    let trust_prefix = OsString::new();
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
     let provider = crate::HsmAuthProvider {
@@ -1037,7 +1041,7 @@ fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
             public_key: Some(hsmauth.public_key.clone()),
         },
         version: (5, 7, 1),
-        trust_prefix: Some(trust.prefix.clone()),
+        trust_prefix: Some(trust_prefix),
     };
     let mut slot = crate::YubiHsmSlot::with_hsmauth_providers(
         yubihsm.clone(),

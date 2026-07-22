@@ -70,15 +70,22 @@ those keys in zeroizing memory only for the life of the authenticated YubiHSM
 session. Credential passwords are not cached. The direct YubiHSM login forms
 remain available even when no YubiHSM Auth applet is connected.
 
-Asymmetric YubiHSM secure sessions require a locally pinned device key. Set
+Asymmetric YubiHSM secure sessions may use locally pinned device keys. Set
 `PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX` to the path prefix for trusted-device
-files; its default is the empty string. The module hashes the canonical DER
-SubjectPublicKeyInfo returned by the bare `GET DEVICE PUBLIC KEY` command and
-loads `<prefix><lowercase SHA-256>.pem`. The PEM file may contain either one
-P-256 `PUBLIC KEY` or one X.509 `CERTIFICATE` whose P-256 public key represents
-the trusted device. The stored key must exactly match the device response before
+files; its default is the empty string. An empty prefix disables device-key
+validation, allowing asymmetric authentication without prior provisioning. Any
+nonempty prefix enables validation and requires an exact entry for the
+connected device. Use `./` as the prefix to keep the trust files in the current
+directory while still enabling validation.
+
+The module hashes the canonical DER SubjectPublicKeyInfo returned by the bare
+`GET DEVICE PUBLIC KEY` command and loads
+`<prefix><lowercase SHA-256>.pem`. The PEM file may contain either one P-256
+`PUBLIC KEY` or one X.509 `CERTIFICATE` whose P-256 public key represents the
+trusted device. The stored key must exactly match the device response before
 the secure-session receipt is accepted. A missing, malformed, or mismatched
-entry rejects authentication.
+entry rejects authentication. Configure a nonempty prefix before calling a
+device-enrollment function.
 
 Certificate chains are not processed during login. Instead, `pkcs11rs.h`
 declares three explicit enrollment functions. They require a read/write session
