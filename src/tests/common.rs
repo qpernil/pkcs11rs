@@ -293,9 +293,21 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
     let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    find_template[0].pValue = (&mut public_class as *mut CK_OBJECT_CLASS).cast();
+    let mut rsa_key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut public_template = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut public_class as *mut CK_OBJECT_CLASS).cast(),
+            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: (&mut rsa_key_type as *mut CK_KEY_TYPE).cast(),
+            ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+    ];
     assert_eq!(
-        crate::C_FindObjectsInit(session, find_template.as_mut_ptr(), 1),
+        crate::C_FindObjectsInit(session, public_template.as_mut_ptr(), 2),
         CKR_OK as CK_RV
     );
     let mut public_key = 0;

@@ -978,6 +978,7 @@ fn destroy_object(
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
+                | KeyMaterial::YubiHsmDevicePublic { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
