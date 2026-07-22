@@ -287,6 +287,7 @@ fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
     ) || (info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm))
 }
 
+#[cfg(any(test, feature = "abi-tests"))]
 fn yubihsm_token_objects(
     slot_id: CK_SLOT_ID,
     info: YubiHsmObjectInfo,
