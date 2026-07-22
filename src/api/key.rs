@@ -40,14 +40,14 @@ fn generate_key(
             let id = parse_yubihsm_object_id(&response)?;
             ctx.refresh_slot_token_objects(slot_id)?;
             *key_handle = ctx
-                .objects
-                .iter()
+                .resolved_objects()?
+                .into_iter()
                 .find(|(_, object)| {
                     object.slot_id == Some(slot_id)
                         && object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
                         && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
                 })
-                .map(|(handle, _)| *handle)
+                .map(|(handle, _)| handle)
                 .ok_or(CKR_DEVICE_ERROR)?;
             return Ok(());
         }
@@ -241,12 +241,16 @@ fn generate_key_pair(
             )?;
             validate_new_object_access(&generation.public_object, flags, logged_in)?;
             validate_new_object_access(&generation.private_object, flags, logged_in)?;
+            let replaced = piv_key_object_handles(ctx, slot_id, generation.slot)?;
             ctx._get_slot_mut(slot_id)?.piv_generate_key_pair(
                 generation.slot,
                 generation.algorithm,
                 generation.pin_policy,
                 generation.touch_policy,
             )?;
+            for (handle, _, _) in replaced {
+                ctx.remove_object_handle(handle);
+            }
             ctx.refresh_slot_token_objects(slot_id)?;
             *private_handle = find_piv_key_handle(
                 ctx,
@@ -275,24 +279,24 @@ fn generate_key_pair(
         let id = parse_yubihsm_object_id(&response)?;
         ctx.refresh_slot_token_objects(slot_id)?;
         *private_handle = ctx
-            .objects
-            .iter()
+            .resolved_objects()?
+            .into_iter()
             .find(|(_, object)| {
                 object.slot_id == Some(slot_id)
                     && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                     && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
             })
-            .map(|(handle, _)| *handle)
+            .map(|(handle, _)| handle)
             .ok_or(CKR_DEVICE_ERROR)?;
         *public_handle = ctx
-            .objects
-            .iter()
+            .resolved_objects()?
+            .into_iter()
             .find(|(_, object)| {
                 object.slot_id == Some(slot_id)
                     && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
                     && object.id == id.to_be_bytes()
             })
-            .map(|(handle, _)| *handle)
+            .map(|(handle, _)| handle)
             .ok_or(CKR_DEVICE_ERROR)?;
         Ok(())
     })
@@ -456,14 +460,14 @@ fn find_piv_key_handle(
     piv_slot: piv::Slot,
     class: CK_OBJECT_CLASS,
 ) -> Result<CK_OBJECT_HANDLE, Error> {
-    ctx.objects
-        .iter()
+    ctx.resolved_objects()?
+        .into_iter()
         .find(|(_, object)| {
             object.slot_id == Some(slot_id)
                 && object.class == class
                 && object.id == [piv_slot as u8]
         })
-        .map(|(handle, _)| *handle)
+        .map(|(handle, _)| handle)
         .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }
 
@@ -609,6 +613,9 @@ fn yubihsm_generate_key_pair_command(
     if !public_object.token || !private_object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
+    if public_object.id != private_object.id {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
     if is_montgomery_key_type(key_type)
         && (public_object.encrypt
             || public_object.decrypt
@@ -621,9 +628,6 @@ fn yubihsm_generate_key_pair_command(
             || private_object.verify)
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
-    }
-    if private_object.id.is_empty() {
-        private_object.id = public_object.id;
     }
     if private_object.label.is_empty() {
         private_object.label = public_object.label;
@@ -720,8 +724,7 @@ fn derive_key(
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
-            .objects
-            .get(&base_key)
+            .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {

@@ -486,7 +486,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         context
             .logged_in_slots
             .insert(TEST_SLOT_ID, crate::LoginRole::User);
-        context.objects.insert(
+        context.memory_objects.insert(
             42,
             crate::TokenObject {
                 slot_id: Some(TEST_SLOT_ID),
@@ -873,7 +873,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     ] {
         {
             let mut context = crate::lock_context().unwrap();
-            let object = context.as_mut().unwrap().objects.get_mut(&1).unwrap();
+            let object = context
+                .as_mut()
+                .unwrap()
+                .memory_objects
+                .get_mut(&1)
+                .unwrap();
             object.key_type = CKK_EC as CK_KEY_TYPE;
             object.verify = true;
             object.material = material;
@@ -928,7 +933,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     ] {
         {
             let mut context = crate::lock_context().unwrap();
-            let object = context.as_mut().unwrap().objects.get_mut(&1).unwrap();
+            let object = context
+                .as_mut()
+                .unwrap()
+                .memory_objects
+                .get_mut(&1)
+                .unwrap();
             object.key_type = CKK_EC_EDWARDS as CK_KEY_TYPE;
             object.verify = true;
             object.material = material;

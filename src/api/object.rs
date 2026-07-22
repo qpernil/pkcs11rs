@@ -37,12 +37,16 @@ fn create_object(
                     object,
                 } => {
                     validate_new_object_access(&object, flags, logged_in)?;
+                    let replaced = piv_key_object_handles(ctx, slot_id, slot)?;
                     ctx._get_slot_mut(slot_id)?.piv_import_private_key(
                         slot,
                         &key,
                         pin_policy,
                         touch_policy,
                     )?;
+                    for (handle, _, _) in replaced {
+                        ctx.remove_object_handle(handle);
+                    }
                     ctx.refresh_slot_token_objects(slot_id)?;
                     *object_handle = find_piv_key_handle(
                         ctx,
@@ -57,18 +61,32 @@ fn create_object(
                     object,
                 } => {
                     validate_new_object_access(&object, flags, logged_in)?;
+                    let replaced = ctx
+                        .resolved_objects()?
+                        .into_iter()
+                        .filter_map(|(handle, candidate)| {
+                            (candidate.slot_id == Some(slot_id)
+                                && candidate.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
+                                && candidate.id == [slot as u8]
+                                && candidate.token)
+                                .then_some(handle)
+                        })
+                        .collect::<Vec<_>>();
                     ctx._get_slot_mut(slot_id)?
                         .piv_import_certificate(slot, &certificate)?;
+                    for handle in replaced {
+                        ctx.remove_object_handle(handle);
+                    }
                     ctx.refresh_slot_token_objects(slot_id)?;
                     *object_handle = ctx
-                        .objects
-                        .iter()
+                        .resolved_objects()?
+                        .into_iter()
                         .find(|(_, object)| {
                             object.slot_id == Some(slot_id)
                                 && object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
                                 && object.id == [slot as u8]
                         })
-                        .map(|(handle, _)| *handle)
+                        .map(|(handle, _)| handle)
                         .ok_or(CKR_DEVICE_ERROR)?;
                 }
                 PivImport::Data {
@@ -77,12 +95,30 @@ fn create_object(
                     object,
                 } => {
                     validate_new_object_access(&object, flags, logged_in)?;
+                    let replaced = ctx
+                        .resolved_objects()?
+                        .into_iter()
+                        .filter_map(|(handle, candidate)| {
+                            (candidate.slot_id == Some(slot_id)
+                                && matches!(
+                                candidate.material,
+                                KeyMaterial::PivData {
+                                    object_id: candidate,
+                                    ..
+                                } if candidate == object_id
+                            ))
+                            .then_some(handle)
+                        })
+                        .collect::<Vec<_>>();
                     ctx._get_slot_mut(slot_id)?
                         .piv_write_data(object_id, &value)?;
+                    for handle in replaced {
+                        ctx.remove_object_handle(handle);
+                    }
                     ctx.refresh_slot_token_objects(slot_id)?;
                     *object_handle = ctx
-                        .objects
-                        .iter()
+                        .resolved_objects()?
+                        .into_iter()
                         .find(|(_, object)| {
                             object.slot_id == Some(slot_id)
                                 && matches!(
@@ -93,7 +129,7 @@ fn create_object(
                                     } if candidate == object_id
                                 )
                         })
-                        .map(|(handle, _)| *handle)
+                        .map(|(handle, _)| handle)
                         .ok_or(CKR_DEVICE_ERROR)?;
                 }
             }
@@ -110,14 +146,14 @@ fn create_object(
             let id = parse_yubihsm_object_id(&response)?;
             ctx.refresh_slot_token_objects(slot_id)?;
             *object_handle = ctx
-                .objects
-                .iter()
+                .resolved_objects()?
+                .into_iter()
                 .find(|(_, object)| {
                     object.slot_id == Some(slot_id)
                         && object.class == expected_class
                         && matches!(object.material, KeyMaterial::YubiHsm { id: object_id, .. } if object_id == id)
                 })
-                .map(|(handle, _)| *handle)
+                .map(|(handle, _)| handle)
                 .ok_or(CKR_DEVICE_ERROR)?;
             return Ok(());
         }
@@ -126,6 +162,32 @@ fn create_object(
         *object_handle = handle;
         Ok(())
     })
+}
+
+fn piv_key_object_handles(
+    ctx: &Context,
+    slot_id: CK_SLOT_ID,
+    piv_slot: piv::Slot,
+) -> Result<Vec<(CK_OBJECT_HANDLE, CK_OBJECT_CLASS, bool)>, Error> {
+    Ok(ctx
+        .resolved_objects()?
+        .into_iter()
+        .filter_map(|(handle, candidate)| {
+            let key_object = candidate.slot_id == Some(slot_id)
+                && candidate.id == [piv_slot as u8]
+                && matches!(
+                    candidate.class,
+                    x if x == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                        || x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                );
+            let attestation = candidate.slot_id == Some(slot_id)
+                && matches!(
+                    candidate.material,
+                    KeyMaterial::PivAttestation { slot, .. } if slot == piv_slot
+                );
+            (key_object || attestation).then_some((handle, candidate.class, candidate.token))
+        })
+        .collect())
 }
 
 enum PivImport {
@@ -815,11 +877,9 @@ fn copy_object(
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
-            .objects
-            .get(&object)
+            .resolve_object(object)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?
-            .clone();
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if matches!(
             copied_object.material,
             KeyMaterial::SecurityDomainData { .. }
@@ -872,11 +932,9 @@ fn destroy_object(
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
-            .objects
-            .get(&object)
+            .resolve_object(object)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?
-            .clone();
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
@@ -906,8 +964,7 @@ fn destroy_object(
                 return Err(CKR_ACTION_PROHIBITED.into());
             }
             KeyMaterial::PivAttestation { .. } => {
-                ctx.objects.remove(&object);
-                remove_object_from_find_operations(&mut ctx.find_operations, object);
+                ctx.remove_object_handle(object);
                 return Ok(());
             }
             KeyMaterial::PivData { object_id, .. } => {
@@ -938,8 +995,8 @@ fn destroy_object(
                 .1
                 .yubihsm_command(&YubiHsmCommand::delete_object(id, object_type & !0x80))?;
             let removed: Vec<_> = ctx
-                .objects
-                .iter()
+                .resolved_objects()?
+                .into_iter()
                 .filter_map(|(handle, candidate)| match candidate.material {
                     KeyMaterial::YubiHsm {
                         id: candidate_id,
@@ -949,36 +1006,19 @@ fn destroy_object(
                         && candidate_id == id
                         && candidate_type & !0x80 == object_type & !0x80 =>
                     {
-                        Some(*handle)
+                        Some(handle)
                     }
                     _ => None,
                 })
                 .collect();
             for handle in removed {
-                ctx.objects.remove(&handle);
-                remove_object_from_find_operations(&mut ctx.find_operations, handle);
+                ctx.remove_object_handle(handle);
             }
             return Ok(());
         }
-        ctx.objects.remove(&object);
-        remove_object_from_find_operations(&mut ctx.find_operations, object);
+        ctx.remove_object_handle(object);
         Ok(())
     })
-}
-
-fn remove_object_from_find_operations(
-    find_operations: &mut HashMap<CK_SESSION_HANDLE, FindOperation>,
-    object: CK_OBJECT_HANDLE,
-) {
-    for operation in find_operations.values_mut() {
-        let already_returned = operation.next.min(operation.objects.len());
-        let removed_before_cursor = operation.objects[..already_returned]
-            .iter()
-            .filter(|&&handle| handle == object)
-            .count();
-        operation.objects.retain(|&handle| handle != object);
-        operation.next -= removed_before_cursor;
-    }
 }
 
 #[no_mangle]
@@ -1004,8 +1044,7 @@ fn get_object_size(
     with_context(|ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
-            .objects
-            .get(&object)
+            .resolve_object(object)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
@@ -1041,8 +1080,7 @@ fn get_attribute_value(
     with_context(|ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
-            .objects
-            .get(&object)
+            .resolve_object(object)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
@@ -1240,14 +1278,15 @@ fn set_attribute_value(
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
-            .objects
-            .get(&object)
+            .resolve_object(object)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
-        if matches!(stored_object.material, KeyMaterial::YubiHsm { .. }) {
+        if ctx.token_object_handles.contains_key(&object)
+            && !matches!(stored_object.material, KeyMaterial::PivPrivate { .. })
+        {
             return Err(CKR_ATTRIBUTE_READ_ONLY.into());
         }
         if let KeyMaterial::PivPrivate { slot: from, .. } = stored_object.material {
@@ -1265,11 +1304,43 @@ fn set_attribute_value(
             if to == piv::Slot::Attestation {
                 return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
+            let source_objects = piv_key_object_handles(ctx, slot_id, from)?;
+            let destination_objects = piv_key_object_handles(ctx, slot_id, to)?;
             ctx._get_slot_mut(slot_id)?.piv_move_key(from, to)?;
-            ctx.refresh_slot_token_objects(slot_id)?;
+            for (handle, _, _) in source_objects
+                .iter()
+                .chain(destination_objects.iter())
+                .copied()
+                .filter(|(_, _, token)| !token)
+            {
+                ctx.remove_object_handle(handle);
+            }
+            let token_objects = ctx.get_slot(slot_id)?.token_objects(slot_id)?;
+            let source_handles = source_objects
+                .into_iter()
+                .filter(|(_, _, token)| *token)
+                .map(|(handle, class, _)| (handle, class))
+                .collect::<Vec<_>>();
+            let mut rebindings = Vec::with_capacity(source_handles.len());
+            for (handle, class) in source_handles {
+                let target = token_objects
+                    .iter()
+                    .find(|candidate| {
+                        candidate.id == [to as u8]
+                            && candidate.class == class
+                            && candidate.token
+                    })
+                    .ok_or(CKR_DEVICE_ERROR)?;
+                rebindings.push((handle, target.unique_id.clone()));
+            }
+            ctx.reconcile_slot_token_objects_with_rebindings(
+                slot_id,
+                token_objects,
+                &rebindings,
+            )?;
             return Ok(());
         }
-        let mut updated_object = stored_object.clone();
+        let mut updated_object = stored_object;
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
@@ -1279,7 +1350,7 @@ fn set_attribute_value(
         }
 
         if rv == CKR_OK as CK_RV {
-            ctx.objects.insert(object, updated_object);
+            ctx.memory_objects.insert(object, updated_object);
             Ok(())
         } else {
             Err(rv.into())
@@ -1327,13 +1398,13 @@ fn find_objects_init(
         ctx.insert_session_objects(slot_id, session_handle)?;
         log!(2, "C_FindObjectsInit template {:?}", templ);
         let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
-            .objects
-            .iter()
+            .resolved_objects()?
+            .into_iter()
             .filter(|(_handle, object)| {
                 object.is_visible_to(session_handle, slot_id, logged_in)
                     && object.matches_template(&templ)
             })
-            .map(|(handle, _object)| *handle)
+            .map(|(handle, _object)| handle)
             .collect();
         objects.sort();
         ctx.find_operations

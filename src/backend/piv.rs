@@ -59,6 +59,25 @@ impl PivPublicKey {
     }
 }
 
+fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
+    let digest = hash(MessageDigest::sha256(), value).map_err(Error::from)?;
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
+    let mut encoded = vec![key.algorithm as u8];
+    match &key.public_key {
+        PivPublicKey::Rsa(public_key) => {
+            encoded.extend(public_key.n().to_vec());
+            encoded.extend(public_key.e().to_vec());
+        }
+        PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
+            encoded.extend_from_slice(public_key);
+        }
+    }
+    piv_object_fingerprint(&encoded)
+}
+
 fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
     match algorithm {
         piv::Algorithm::EccP256 => {
@@ -894,6 +913,7 @@ impl Slot for PivSlot {
                 continue;
             }
             let id = vec![key.slot as u8];
+            let fingerprint = piv_key_fingerprint(key)?;
             let label = format!("PIV slot {:02X}", key.slot as u8);
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
@@ -951,7 +971,7 @@ impl Slot for PivSlot {
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-public", key.slot as u8),
+                unique_id: format!("piv-{:02x}-{fingerprint}-public", key.slot as u8),
                 class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label: label.clone(),
@@ -974,7 +994,7 @@ impl Slot for PivSlot {
             });
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-private", key.slot as u8),
+                unique_id: format!("piv-{:02x}-{fingerprint}-private", key.slot as u8),
                 class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 key_type,
                 label,
@@ -1007,6 +1027,7 @@ impl Slot for PivSlot {
             });
         }
         for certificate in &self.certificates {
+            let fingerprint = piv_object_fingerprint(&certificate.value)?;
             let key_type = match certificate.algorithm {
                 piv::Algorithm::Rsa1024
                 | piv::Algorithm::Rsa2048
@@ -1019,7 +1040,7 @@ impl Slot for PivSlot {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!(
-                    "piv-{:02x}-{}certificate",
+                    "piv-{:02x}-{fingerprint}-{}certificate",
                     certificate.slot as u8,
                     if certificate.attestation {
                         "attestation-"
@@ -1057,9 +1078,10 @@ impl Slot for PivSlot {
                 continue;
             }
             let key_type = key.public_key.key_type(key.algorithm);
+            let fingerprint = piv_key_fingerprint(key)?;
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-{:02x}-attestation", key.slot as u8),
+                unique_id: format!("piv-{:02x}-{fingerprint}-attestation", key.slot as u8),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type,
                 label: piv_slot_label(key.slot, true, true),
@@ -1088,9 +1110,10 @@ impl Slot for PivSlot {
             });
         }
         for data in &self.data_objects {
+            let fingerprint = piv_object_fingerprint(&data.value)?;
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("piv-data-{:06x}", data.object_id),
+                unique_id: format!("piv-data-{:06x}-{fingerprint}", data.object_id),
                 class: CKO_DATA as CK_OBJECT_CLASS,
                 key_type: 0,
                 label: piv::data_object_name(data.object_id),

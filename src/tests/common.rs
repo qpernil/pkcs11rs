@@ -36,6 +36,7 @@ fn debug_level_configuration_has_three_modes() {
 
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
+    crate::reset_object_handles();
 }
 
 #[test]
@@ -1414,6 +1415,33 @@ fn yubihsm_ed25519_objects_use_edwards_key_type() {
     assert_eq!(
         public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
         Some([0x04, 0x20].into_iter().chain([0x5a; 32]).collect())
+    );
+}
+
+#[test]
+fn yubihsm_object_identity_survives_device_sequence_wraps() {
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: [0; 8],
+        id: 0x1234,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_AUTHENTICATION_KEY,
+        algorithm: crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+        sequence: 7,
+        origin: 1,
+        label: "authentication".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    let first = crate::yubihsm_token_objects_with_generation(99, info.clone(), None, 1).unwrap();
+    let wrapped = crate::yubihsm_token_objects_with_generation(99, info, None, 257).unwrap();
+    assert_ne!(first[0].unique_id, wrapped[0].unique_id);
+}
+
+#[test]
+fn piv_native_identity_changes_with_object_contents() {
+    assert_ne!(
+        crate::piv_object_fingerprint(b"first").unwrap(),
+        crate::piv_object_fingerprint(b"second").unwrap()
     );
 }
 

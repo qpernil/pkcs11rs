@@ -74,8 +74,7 @@ fn verify_init(
         }
 
         let object = ctx
-            .objects
-            .get(&key)
+            .resolve_object(key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if !object.verify {
