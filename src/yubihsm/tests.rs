@@ -191,6 +191,25 @@ impl ProtocolPeer {
         }
     }
 
+    fn attestation_certificate(id: u16) -> Result<Vec<u8>, Error> {
+        let key = PKey::from_rsa(openssl::rsa::Rsa::generate(2048)?)?;
+        let mut name = openssl::x509::X509Name::builder()?;
+        name.append_entry_by_text("CN", &format!("YubiHSM key {id} attestation"))?;
+        let name = name.build();
+        let mut certificate = openssl::x509::X509::builder()?;
+        certificate.set_version(2)?;
+        let serial = openssl::bn::BigNum::from_u32(id as u32)?;
+        let serial = openssl::asn1::Asn1Integer::from_bn(&serial)?;
+        certificate.set_serial_number(&serial)?;
+        certificate.set_subject_name(&name)?;
+        certificate.set_issuer_name(&name)?;
+        certificate.set_pubkey(&key)?;
+        certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
+        certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
+        certificate.sign(&key, openssl::hash::MessageDigest::sha256())?;
+        certificate.build().to_der().map_err(Error::from)
+    }
+
     fn reply(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
         self.commands.borrow_mut().push(request.to_vec());
         match request.first().copied() {
@@ -457,6 +476,16 @@ impl ProtocolPeer {
                 }
             }
             value
+                if value == CommandCode::SignAttestationCertificate as u8
+                    && inner.data.len() == 4 =>
+            {
+                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                (
+                    inner.command | RESPONSE_BIT,
+                    Self::attestation_certificate(id)?,
+                )
+            }
+            value
                 if value == CommandCode::GenerateAsymmetricKey as u8
                     || value == CommandCode::PutAsymmetricKey as u8 =>
             {
@@ -631,6 +660,34 @@ pub(crate) fn make_yubihsm_metadata_test_slot(valid: bool) -> Box<dyn crate::Slo
         peer,
         (2, 4, 1),
         vec![1, 5, 9, 12, 19, 20, 21, 22, 25],
+    ))
+}
+
+pub(crate) fn make_yubihsm_imported_key_test_slot() -> Box<dyn crate::Slot> {
+    let peer = std::rc::Rc::new(ProtocolPeer::new());
+    peer.objects.borrow_mut().clear();
+    peer.metadata_objects.borrow_mut().insert(
+        2,
+        (
+            ObjectInfo {
+                capabilities: [0; 8],
+                id: 2,
+                length: 256,
+                domains: 0xffff,
+                object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+                sequence: 1,
+                origin: 0,
+                label: "imported-rsa".to_owned(),
+                delegated_capabilities: [0; 8],
+            },
+            Vec::new(),
+        ),
+    );
+    Box::new(crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![crate::YUBIHSM_ALGO_RSA_2048],
     ))
 }
 

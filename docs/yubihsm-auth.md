@@ -131,6 +131,14 @@ representation. Other YubiHSM objects retain their configured labels; an empty
 hardware label receives a deterministic description containing its object type
 and decimal ID.
 
+Generated YubiHSM asymmetric keys also expose a non-token X.509 attestation
+certificate object with the same `CKA_ID`. The certificate is requested from
+the HSM only when a certificate-derived attribute such as `CKA_VALUE` or
+`CKA_SUBJECT` is read, then cached per slot and key generation. Imported keys
+do not expose this object because the YubiHSM cannot attest imported key
+material. The authentication key used for login must grant the
+`sign-attestation-certificate` capability for the lazy read to succeed.
+
 Credential creation, deletion, password changes, management-key changes, and
 application reset are implemented by the internal protocol client but are not
 mapped to PKCS #11 operations. The applet slot is deliberately read-only.

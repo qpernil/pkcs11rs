@@ -1123,6 +1123,10 @@ fn destroy_object(
                 ctx.remove_object_handle(object);
                 return Ok(());
             }
+            KeyMaterial::YubiHsmAttestation { .. } => {
+                ctx.remove_object_handle(object);
+                return Ok(());
+            }
             KeyMaterial::PivData { object_id, .. } => {
                 ctx._get_slot_mut(slot_id)?.piv_delete_data(*object_id)?;
                 ctx.refresh_slot_token_objects(slot_id)?;
@@ -1291,6 +1295,7 @@ fn get_attribute_value(
                     }
                     KeyMaterial::PivCertificate { .. }
                     | KeyMaterial::PivAttestation { .. }
+                    | KeyMaterial::YubiHsmAttestation { .. }
                     | KeyMaterial::PivData { .. }
                     | KeyMaterial::OpenPgpCertificate { .. }
                     | KeyMaterial::IssuerSecurityDomainData { .. }

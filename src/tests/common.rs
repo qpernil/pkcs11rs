@@ -83,6 +83,58 @@ fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
     assert_eq!(&info.serialNumber[..16], b"16909060        ");
 }
 
+#[test]
+fn yubihsm_generated_key_attestation_is_a_lazy_session_object() {
+    let (mut slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    slot.login(b"0001password").unwrap();
+    slot.token_objects(1).unwrap();
+    commands.borrow_mut().clear();
+
+    let objects = slot.session_objects(1).unwrap();
+    let attestation = objects
+        .iter()
+        .find(|object| matches!(object.material, crate::KeyMaterial::YubiHsmAttestation { .. }))
+        .unwrap();
+    assert!(!attestation.token);
+    assert_eq!(attestation.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
+    assert_eq!(attestation.id, 1u16.to_be_bytes());
+    assert!(commands.borrow().is_empty());
+
+    assert!(attestation
+        .attribute_value(CKA_LABEL as CK_ATTRIBUTE_TYPE)
+        .is_some());
+    let _ = attestation.size();
+    assert!(commands.borrow().is_empty());
+
+    let certificate = attestation
+        .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert!(openssl::x509::X509::from_der(&certificate).is_ok());
+    assert_eq!(
+        commands
+            .borrow()
+            .iter()
+            .filter(|(command, _)| {
+                *command == crate::yubihsm::CommandCode::SignAttestationCertificate as u8
+            })
+            .count(),
+        1
+    );
+    assert!(attestation
+        .attribute_value(CKA_SUBJECT as CK_ATTRIBUTE_TYPE)
+        .is_some());
+    assert_eq!(commands.borrow().len(), 1);
+}
+
+#[test]
+fn yubihsm_imported_keys_do_not_expose_attestation_objects() {
+    let mut slot = crate::yubihsm::tests::make_yubihsm_imported_key_test_slot();
+    slot.login(b"0001password").unwrap();
+    slot.token_objects(1).unwrap();
+
+    assert!(slot.session_objects(1).unwrap().is_empty());
+}
+
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
     crate::reset_object_handles();

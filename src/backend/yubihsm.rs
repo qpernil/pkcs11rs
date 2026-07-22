@@ -233,6 +233,7 @@ struct YubiHsmSlot {
     hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
     object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
     object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
+    attestation_cache: RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
     next_object_generation: Cell<u64>,
     device_public_key: OnceLock<Vec<u8>>,
 }
@@ -244,6 +245,21 @@ type YubiHsmObjectMetadata = (
     u64,
     Option<YubiHsmPkcs11Metadata>,
 );
+
+#[derive(Clone, Debug)]
+struct YubiHsmAttestationCache {
+    value: Rc<RefCell<Option<Vec<u8>>>>,
+    attempted: Rc<Cell<bool>>,
+}
+
+impl YubiHsmAttestationCache {
+    fn new() -> Self {
+        Self {
+            value: Rc::new(RefCell::new(None)),
+            attempted: Rc::new(Cell::new(false)),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct YubiHsmPkcs11Metadata {
@@ -267,6 +283,7 @@ impl YubiHsmSlot {
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
+            attestation_cache: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
             device_public_key: OnceLock::new(),
         }
@@ -873,6 +890,21 @@ impl Slot for YubiHsmSlot {
             }
         };
         *self.session.try_borrow_mut()? = Some(session);
+        for cache in self
+            .attestation_cache
+            .try_borrow()
+            .map_err(|_| CKR_CANT_LOCK)?
+            .values()
+        {
+            if cache
+                .value
+                .try_borrow()
+                .map_err(|_| CKR_CANT_LOCK)?
+                .is_none()
+            {
+                cache.attempted.set(false);
+            }
+        }
         Ok(())
     }
     fn logout(&mut self) -> Result<(), Error> {
@@ -1048,6 +1080,13 @@ impl Slot for YubiHsmSlot {
             )?);
         }
         drop(generations);
+        let current_generations = metadata
+            .iter()
+            .map(|(key, (_, _, generation, _))| ((*key, *generation), ()))
+            .collect::<HashMap<_, _>>();
+        self.attestation_cache
+            .try_borrow_mut()?
+            .retain(|key, _| current_generations.contains_key(key));
         *self.object_metadata.try_borrow_mut()? = metadata;
         Ok(objects)
     }
@@ -1084,6 +1123,68 @@ impl Slot for YubiHsmSlot {
             }
         }
         Ok(None)
+    }
+    fn session_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let metadata = self
+            .object_metadata
+            .try_borrow()
+            .map_err(|_| CKR_CANT_LOCK)?;
+        let mut cache = self.attestation_cache.try_borrow_mut()?;
+        let mut objects = Vec::new();
+        for (key, (info, public_key, generation, attribute_metadata)) in metadata.iter() {
+            if info.object_type != YUBIHSM_ASYMMETRIC_KEY || info.origin & 0x01 == 0 {
+                continue;
+            }
+            let Some(public_key) = public_key else {
+                continue;
+            };
+            let cache = cache
+                .entry((*key, *generation))
+                .or_insert_with(YubiHsmAttestationCache::new)
+                .clone();
+            let id = attribute_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.id.clone())
+                .unwrap_or_else(|| info.id.to_be_bytes().to_vec());
+            let label = attribute_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.label.clone())
+                .unwrap_or_else(|| yubihsm_object_label(info));
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!(
+                    "yubihsm-{:02x}-{:04x}-{:02x}-{generation}-attestation",
+                    info.object_type, info.id, info.sequence
+                ),
+                class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                key_type: yubihsm_key_type(info.algorithm),
+                label: format!("{label} attestation certificate"),
+                id,
+                token: false,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: true,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::YubiHsmAttestation {
+                    connector: self.connector.clone(),
+                    session: self.session.clone(),
+                    id: info.id,
+                    algorithm: public_key.algorithm,
+                    value: cache.value,
+                    attempted: cache.attempted,
+                },
+            });
+        }
+        Ok(objects)
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
