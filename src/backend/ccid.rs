@@ -413,7 +413,7 @@ impl Slot for IssuerSecurityDomainSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get()
+        self.authenticated.get() && self.connector.secure_channel_is_active()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(PcscAppletSession {
@@ -454,6 +454,14 @@ impl Slot for IssuerSecurityDomainSlot {
             slot_id,
             &self.discovered_info()?,
         ))
+    }
+    fn invalidate_token_objects(&self) {
+        if let Ok(mut info) = self.info.try_borrow_mut() {
+            *info = None;
+        }
+    }
+    fn is_issuer_security_domain(&self) -> bool {
+        true
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
@@ -660,6 +668,25 @@ impl Session for PcscAppletSession {
         }
         Ok(())
     }
+
+    fn security_domain_put_scp03_key_set(
+        &self,
+        new_kvn: u8,
+        replace_kvn: u8,
+        keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        self.connector
+            .security_domain_put_scp03_key_set(new_kvn, replace_kvn, keys)
+    }
+
+    fn security_domain_delete_scp03_key_set(
+        &self,
+        kvn: u8,
+        delete_last: bool,
+    ) -> Result<(), Error> {
+        self.connector
+            .security_domain_delete_scp03_key_set(kvn, delete_last)
+    }
 }
 
 
@@ -705,6 +732,48 @@ impl Session for IssuerSecurityDomainSession {
             chunk.copy_from_slice(&response.data);
         }
         Ok(())
+    }
+
+    fn security_domain_put_scp03_key_set(
+        &self,
+        new_kvn: u8,
+        replace_kvn: u8,
+        keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        let mut session = self.session.try_borrow_mut()?;
+        let channel = session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        if channel.static_dek()?.len() != 16 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        let result = SecurityDomainClient.put_scp03_key_set(
+            self.connector.as_ref(),
+            channel,
+            new_kvn,
+            replace_kvn,
+            keys,
+        );
+        if result.is_err() {
+            *session = None;
+        }
+        result
+    }
+
+    fn security_domain_delete_scp03_key_set(
+        &self,
+        kvn: u8,
+        delete_last: bool,
+    ) -> Result<(), Error> {
+        let mut session = self.session.try_borrow_mut()?;
+        let result = SecurityDomainClient.delete_scp03_key_set(
+            self.connector.as_ref(),
+            session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?,
+            kvn,
+            delete_last,
+        );
+        if result.is_err() {
+            *session = None;
+        }
+        result
     }
 }
 

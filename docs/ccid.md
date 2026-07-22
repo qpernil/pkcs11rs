@@ -60,9 +60,11 @@ as immutable `CKO_CERTIFICATE` objects in the card's issuer-to-leaf order.
 
 The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
 supports random generation through the applet's `GET CHALLENGE` command and
-uses `C_Login` to establish the configured secure channel. Key import,
-generation, deletion, allowlist management, and Security Domain reset are not
-mapped to PKCS #11 operations.
+uses `C_Login` to establish the configured secure channel. Ordinary PKCS #11
+object operations remain read-only. SCP03 key-set provisioning and deletion
+are available through the explicit administration ABI in `pkcs11rs.h`; key
+generation, certificate and allowlist management, and Security Domain reset
+are not yet exposed.
 
 Protocol-specific key and certificate configuration is documented in
 [`scp03.md`](scp03.md) and [`scp11.md`](scp11.md).

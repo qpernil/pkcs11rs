@@ -303,7 +303,9 @@ impl Connector for AbiScp03Connector {
         receive: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let response = if command.get(1) == Some(&0x84) {
+        let response = if command.get(1) == Some(&0xd8) {
+            abi_scp03_put_key_response(command)?
+        } else if command.get(1) == Some(&0x84) {
             let length = command.last().copied().unwrap_or(0);
             let length = if length == 0 { 256 } else { length as usize };
             let mut response = vec![0; length];
@@ -318,6 +320,37 @@ impl Connector for AbiScp03Connector {
         receive[..response.len()].copy_from_slice(&response);
         Ok(&receive[..response.len()])
     }
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_scp03_put_key_response(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    let command = CommandApdu::decode(encoded)?;
+    let mut data = command.data.as_slice();
+    let new_kvn = *data.first().ok_or(CKR_DATA_INVALID)?;
+    data = &data[1..];
+    let mut response = vec![new_kvn];
+    for _ in 0..3 {
+        if data.len() < 22 || data[..2] != [0x88, 0x10] || data[18] != 3 {
+            return Ok(vec![0x6a, 0x80]);
+        }
+        let wrapped = &data[2..18];
+        let key =
+            crate::secure_channel_crypto::aes_cbc(&[0; 16], &[0; 16], wrapped, Mode::Decrypt)?;
+        let encrypted_ones = crate::secure_channel_crypto::aes_encrypt_block(
+            &key,
+            &[1; crate::secure_channel_crypto::AES_BLOCK_SIZE],
+        )?;
+        if data[19..22] != encrypted_ones[..3] {
+            return Ok(vec![0x6a, 0x80]);
+        }
+        response.extend_from_slice(&encrypted_ones[..3]);
+        data = &data[22..];
+    }
+    if !data.is_empty() {
+        return Ok(vec![0x6a, 0x80]);
+    }
+    response.extend_from_slice(&[0x90, 0x00]);
+    Ok(response)
 }
 
 #[cfg(feature = "abi-tests")]
@@ -337,6 +370,7 @@ impl AbiScp03Slot {
                 vec![0; 16],
                 vec![0; 16],
                 vec![0; 16],
+                (protocol == "SCP03").then(|| vec![0; 16]),
                 [0; 16],
                 0,
             )?))),
@@ -404,6 +438,7 @@ impl Slot for AbiScp03Slot {
             vec![0; 16],
             vec![0; 16],
             vec![0; 16],
+            (self.protocol == "SCP03").then(|| vec![0; 16]),
             [0; 16],
             0,
         )?);
@@ -435,6 +470,10 @@ impl Slot for AbiScp03Slot {
 
     fn login_is_active(&self) -> bool {
         self.session.borrow().is_some()
+    }
+
+    fn is_issuer_security_domain(&self) -> bool {
+        true
     }
 }
 

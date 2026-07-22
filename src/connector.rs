@@ -46,6 +46,27 @@ pub(crate) trait Connector {
 
     fn clear_secure_channel(&self) {}
 
+    fn secure_channel_is_active(&self) -> bool {
+        false
+    }
+
+    fn security_domain_put_scp03_key_set(
+        &self,
+        _new_kvn: u8,
+        _replace_kvn: u8,
+        _keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+
+    fn security_domain_delete_scp03_key_set(
+        &self,
+        _kvn: u8,
+        _delete_last: bool,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+
     fn name(&self) -> String {
         format!(
             "{} {} {}",
@@ -309,6 +330,67 @@ impl Connector for PcscAppletConnector {
                 state.application_aid.clear();
             }
         }
+    }
+
+    fn secure_channel_is_active(&self) -> bool {
+        if self.protocol.is_none() || !self.enabled.get() {
+            return false;
+        }
+        self.state.try_borrow().is_ok_and(|state| {
+            state.application_aid == self.application_aid && state.session.is_some()
+        })
+    }
+
+    fn security_domain_put_scp03_key_set(
+        &self,
+        new_kvn: u8,
+        replace_kvn: u8,
+        keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        self.ensure_selected()?;
+        if !self.enabled.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let session = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        if session.static_dek()?.len() != 16 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        let result = SecurityDomainClient.put_scp03_key_set(
+            self.base.as_ref(),
+            session,
+            new_kvn,
+            replace_kvn,
+            keys,
+        );
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        result
+    }
+
+    fn security_domain_delete_scp03_key_set(
+        &self,
+        kvn: u8,
+        delete_last: bool,
+    ) -> Result<(), Error> {
+        self.ensure_selected()?;
+        if !self.enabled.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let result = SecurityDomainClient.delete_scp03_key_set(
+            self.base.as_ref(),
+            state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?,
+            kvn,
+            delete_last,
+        );
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        result
     }
 }
 

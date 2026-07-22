@@ -84,7 +84,7 @@ mod scp11;
 use scp11::{Scp11KeySet, Scp11Variant};
 
 mod security_domain;
-use security_domain::{Client as SecurityDomainClient, SecurityDomainInfo};
+use security_domain::{Client as SecurityDomainClient, Scp03ProvisioningKeys, SecurityDomainInfo};
 
 mod hsmauth;
 use hsmauth::{
@@ -479,5 +479,7 @@ include!("api/object.rs");
 include!("api/crypt.rs");
 
 include!("api/key.rs");
+
+include!("api/security_domain.rs");
 
 include!("api/interfaces.rs");

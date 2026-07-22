@@ -1,6 +1,15 @@
-use crate::{CommandApdu, Connector, Error, ResponseApdu, CKR_DATA_INVALID, CKR_DEVICE_ERROR};
+use crate::{
+    secure_channel_crypto::{aes_cbc, aes_encrypt_block, AES_BLOCK_SIZE},
+    CommandApdu, Connector, Error, ResponseApdu, Scp03Session, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
+    CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
+};
+use openssl::symm::Mode;
 
 const INS_GET_DATA: u8 = 0xca;
+const INS_PUT_KEY: u8 = 0xd8;
+const INS_DELETE: u8 = 0xe4;
+const KEY_TYPE_AES: u32 = 0x88;
+const TAG_DELETE_KEY_VERSION: u32 = 0xd2;
 const TAG_KEY_INFORMATION: u32 = 0xe0;
 const TAG_CARD_RECOGNITION_DATA: u32 = 0x66;
 const TAG_CA_KLOC_IDENTIFIERS: u32 = 0xff33;
@@ -14,6 +23,12 @@ pub(crate) const KID_SCP03: u8 = 0x01;
 pub(crate) const KID_SCP11A: u8 = 0x11;
 pub(crate) const KID_SCP11B: u8 = 0x13;
 pub(crate) const KID_SCP11C: u8 = 0x15;
+
+pub(crate) struct Scp03ProvisioningKeys<'a> {
+    pub(crate) enc: &'a [u8],
+    pub(crate) mac: &'a [u8],
+    pub(crate) dek: &'a [u8],
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct KeyRef {
@@ -70,6 +85,40 @@ pub(crate) struct SecurityDomainInfo {
 pub(crate) struct Client;
 
 impl Client {
+    pub(crate) fn put_scp03_key_set(
+        &self,
+        connector: &dyn Connector,
+        session: &mut Scp03Session,
+        new_kvn: u8,
+        replace_kvn: u8,
+        keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        let (command, expected) =
+            scp03_put_key_command(session.static_dek()?, new_kvn, replace_kvn, keys)?;
+        let response = session.transmit(connector, &command)?;
+        require_success(&response)?;
+        if response.data != expected {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn delete_scp03_key_set(
+        &self,
+        connector: &dyn Connector,
+        session: &mut Scp03Session,
+        kvn: u8,
+        delete_last: bool,
+    ) -> Result<(), Error> {
+        let command = scp03_delete_key_command(kvn, delete_last)?;
+        let response = session.transmit(connector, &command)?;
+        require_success(&response)?;
+        if !response.data.is_empty() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn discover(&self, connector: &dyn Connector) -> Result<SecurityDomainInfo, Error> {
         let keys = self.get_key_information(connector)?;
         let card_recognition_data = self.get_card_recognition_data(connector)?;
@@ -203,11 +252,78 @@ impl Client {
     }
 }
 
+fn scp03_put_key_command(
+    wrapping_dek: &[u8],
+    new_kvn: u8,
+    replace_kvn: u8,
+    keys: &Scp03ProvisioningKeys<'_>,
+) -> Result<(CommandApdu, Vec<u8>), Error> {
+    if !(1..=254).contains(&new_kvn) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    if wrapping_dek.len() != AES_BLOCK_SIZE
+        || [keys.enc, keys.mac, keys.dek]
+            .iter()
+            .any(|key| key.len() != AES_BLOCK_SIZE)
+    {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+
+    let mut data = vec![new_kvn];
+    let mut expected = vec![new_kvn];
+    for key in [keys.enc, keys.mac, keys.dek] {
+        let wrapped = aes_cbc(wrapping_dek, &[0; AES_BLOCK_SIZE], key, Mode::Encrypt)?;
+        data.extend_from_slice(&encode_tlv(KEY_TYPE_AES, &wrapped)?);
+        let encrypted_ones = aes_encrypt_block(key, &[1; AES_BLOCK_SIZE])?;
+        let kcv = &encrypted_ones[..3];
+        data.push(kcv.len() as u8);
+        data.extend_from_slice(kcv);
+        expected.extend_from_slice(kcv);
+    }
+
+    Ok((
+        CommandApdu {
+            cla: 0x80,
+            ins: INS_PUT_KEY,
+            p1: replace_kvn,
+            p2: KID_SCP03 | 0x80,
+            data,
+            le: None,
+            extended: false,
+        },
+        expected,
+    ))
+}
+
+fn scp03_delete_key_command(kvn: u8, delete_last: bool) -> Result<CommandApdu, Error> {
+    if kvn == 0 {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(CommandApdu {
+        cla: 0x80,
+        ins: INS_DELETE,
+        p1: 0,
+        p2: u8::from(delete_last),
+        data: encode_tlv(TAG_DELETE_KEY_VERSION, &[kvn])?,
+        le: None,
+        extended: false,
+    })
+}
+
+fn require_success(response: &ResponseApdu) -> Result<(), Error> {
+    if response.status == STATUS_SUCCESS {
+        Ok(())
+    } else {
+        Err(apdu_status_error(response.status))
+    }
+}
+
 fn apdu_status_error(status: u16) -> Error {
     log!(1, "Security Domain command failed with status {status:04x}");
     match status {
         0x6982 | 0x6985 => crate::CKR_USER_NOT_LOGGED_IN.into(),
         0x6700 => crate::CKR_DATA_LEN_RANGE.into(),
+        0x6a84 => CKR_DEVICE_MEMORY.into(),
         0x6a80 | 0x6a88 => CKR_DATA_INVALID.into(),
         0x6a86 | 0x6b00 => crate::CKR_ARGUMENTS_BAD.into(),
         0x6d00 => crate::CKR_FUNCTION_NOT_SUPPORTED.into(),
@@ -429,11 +545,23 @@ mod tests {
         }
         fn transmit<'a>(
             &self,
-            _send_buffer: &[u8],
-            _receive_buffer: &'a mut [u8],
+            send_buffer: &[u8],
+            receive_buffer: &'a mut [u8],
             _timeout: Duration,
         ) -> Result<&'a [u8], Error> {
-            Err(CKR_DEVICE_ERROR.into())
+            let command = CommandApdu::decode(send_buffer)?;
+            self.commands.borrow_mut().push(command);
+            let response = self
+                .responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or(CKR_DEVICE_ERROR)?
+                .encode();
+            if response.len() > receive_buffer.len() {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            receive_buffer[..response.len()].copy_from_slice(&response);
+            Ok(&receive_buffer[..response.len()])
         }
     }
 
@@ -520,5 +648,148 @@ mod tests {
         assert!(parse_certificate_bundle(&[0x31, 0]).is_err());
         assert!(parse_certificate_bundle(&[0x30, 0]).is_err());
         assert!(parse_tlvs(&[0x42, 0x81, 0x01, 0]).is_err());
+    }
+
+    #[test]
+    fn scp03_put_key_matches_yubico_wire_format() {
+        let wrapping_dek = hex("404142434445464748494a4b4c4d4e4f");
+        let enc = hex("000102030405060708090a0b0c0d0e0f");
+        let mac = hex("101112131415161718191a1b1c1d1e1f");
+        let dek = hex("202122232425262728292a2b2c2d2e2f");
+        let (command, expected) = scp03_put_key_command(
+            &wrapping_dek,
+            2,
+            0xff,
+            &Scp03ProvisioningKeys {
+                enc: &enc,
+                mac: &mac,
+                dek: &dek,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            (command.cla, command.ins, command.p1, command.p2),
+            (0x80, 0xd8, 0xff, 0x81)
+        );
+        assert_eq!(
+            command.data,
+            hex("02
+                 88 10 3d0fa4b855d2a5aa4954b8b5df582a3a 03 c35280
+                 88 10 790accda858b997029fa9ae50c9cd028 03 013808
+                 88 10 8caa7f589aa0ceb6350a45e70a6e435b 03 840de5")
+        );
+        assert_eq!(expected, hex("02 c35280 013808 840de5"));
+        assert_eq!(command.le, None);
+        assert!(!command.extended);
+    }
+
+    #[test]
+    fn scp03_put_key_requires_aes128_components_and_wrapping_dek() {
+        let key = [0; AES_BLOCK_SIZE];
+        let short = [0; AES_BLOCK_SIZE - 1];
+        assert!(scp03_put_key_command(
+            &short,
+            1,
+            0,
+            &Scp03ProvisioningKeys {
+                enc: &key,
+                mac: &key,
+                dek: &key,
+            },
+        )
+        .is_err());
+        assert!(scp03_put_key_command(
+            &key,
+            1,
+            0,
+            &Scp03ProvisioningKeys {
+                enc: &short,
+                mac: &key,
+                dek: &key,
+            },
+        )
+        .is_err());
+        for reserved_kvn in [0, 255] {
+            assert!(scp03_put_key_command(
+                &key,
+                reserved_kvn,
+                0,
+                &Scp03ProvisioningKeys {
+                    enc: &key,
+                    mac: &key,
+                    dek: &key,
+                },
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn security_domain_statuses_preserve_device_capacity_errors() {
+        let rv: crate::CK_RV = apdu_status_error(0x6a84).into();
+        assert_eq!(rv, CKR_DEVICE_MEMORY as crate::CK_RV);
+    }
+
+    #[test]
+    fn scp03_put_key_validates_the_card_kcv_response() {
+        let wrapping_dek = hex("404142434445464748494a4b4c4d4e4f");
+        let keys = Scp03ProvisioningKeys {
+            enc: &hex("000102030405060708090a0b0c0d0e0f"),
+            mac: &hex("101112131415161718191a1b1c1d1e1f"),
+            dek: &hex("202122232425262728292a2b2c2d2e2f"),
+        };
+        let expected = hex("02 c35280 013808 840de5");
+        let connector = ScriptedConnector::new(vec![response(expected, STATUS_SUCCESS)]);
+        let mut session = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            Some(wrapping_dek.clone()),
+            [0; 16],
+            0,
+        )
+        .unwrap();
+        Client
+            .put_scp03_key_set(&connector, &mut session, 2, 0, &keys)
+            .unwrap();
+
+        let connector = ScriptedConnector::new(vec![response(
+            hex("02 c35280 013808 840de4"),
+            STATUS_SUCCESS,
+        )]);
+        let mut session = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            Some(wrapping_dek),
+            [0; 16],
+            0,
+        )
+        .unwrap();
+        assert!(Client
+            .put_scp03_key_set(&connector, &mut session, 2, 0, &keys)
+            .is_err());
+    }
+
+    #[test]
+    fn scp03_delete_key_set_uses_kvn_filter_and_explicit_last_key_flag() {
+        let command = scp03_delete_key_command(2, true).unwrap();
+        assert_eq!(
+            (command.cla, command.ins, command.p1, command.p2),
+            (0x80, 0xe4, 0, 1)
+        );
+        assert_eq!(command.data, hex("d2 01 02"));
+        assert!(scp03_delete_key_command(0, false).is_err());
+    }
+
+    fn hex(value: &str) -> Vec<u8> {
+        value
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
     }
 }

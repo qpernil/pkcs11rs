@@ -24,6 +24,7 @@ CKR_ENCRYPTED_DATA_INVALID = 0x40
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
+CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68
 CKR_MECHANISM_INVALID = 0x70
 CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
@@ -247,6 +248,17 @@ class CK_GCM_PARAMS(ctypes.Structure):
         ("pAAD", ctypes.POINTER(CK_BYTE)),
         ("ulAADLen", CK_ULONG),
         ("ulTagBits", CK_ULONG),
+    ]
+
+
+class PKCS11RS_SCP03_KEY_SET(ctypes.Structure):
+    _fields_ = [
+        ("pEncKey", ctypes.POINTER(CK_BYTE)),
+        ("ulEncKeyLen", CK_ULONG),
+        ("pMacKey", ctypes.POINTER(CK_BYTE)),
+        ("ulMacKeyLen", CK_ULONG),
+        ("pDekKey", ctypes.POINTER(CK_BYTE)),
+        ("ulDekKeyLen", CK_ULONG),
     ]
 
 
@@ -718,6 +730,19 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_FLAGS),
         ]
         cls.lib.C_GetSessionValidationFlags.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainPutScp03KeySet.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            ctypes.POINTER(PKCS11RS_SCP03_KEY_SET),
+        ]
+        cls.lib.PKCS11RS_SecurityDomainPutScp03KeySet.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainDeleteScp03KeySet.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+        ]
+        cls.lib.PKCS11RS_SecurityDomainDeleteScp03KeySet.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)
@@ -932,6 +957,80 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_GenerateRandom(session, random_data, len(random_data)), CKR_OK
         )
         self.assertEqual(bytes(random_data), bytes(16))
+
+    def test_abi_scp03_fixture_provisions_and_deletes_key_sets(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SCP03_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        enc = (CK_BYTE * 16)(*range(16))
+        mac = (CK_BYTE * 16)(*range(16, 32))
+        dek = (CK_BYTE * 16)(*range(32, 48))
+        keys = PKCS11RS_SCP03_KEY_SET(enc, len(enc), mac, len(mac), dek, len(dek))
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp03KeySet(
+                session.value, 2, 0, ctypes.byref(keys)
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+        self.login_session(session.value)
+        short_keys = PKCS11RS_SCP03_KEY_SET(
+            enc, len(enc) - 1, mac, len(mac), dek, len(dek)
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp03KeySet(
+                session.value, 2, 0, ctypes.byref(short_keys)
+            ),
+            CKR_KEY_SIZE_RANGE,
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp03KeySet(
+                session.value, 2, 0, ctypes.byref(keys)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainDeleteScp03KeySet(
+                session.value, 2, 0
+            ),
+            CKR_OK,
+        )
+
+    def test_scp03_provisioning_rejects_a_secure_channel_without_dek(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SCP11_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        self.login_session(session.value)
+        key = (CK_BYTE * 16)(*range(16))
+        keys = PKCS11RS_SCP03_KEY_SET(key, len(key), key, len(key), key, len(key))
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp03KeySet(
+                session.value, 2, 0, ctypes.byref(keys)
+            ),
+            CKR_KEY_FUNCTION_NOT_PERMITTED,
+        )
+        info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(session.value, ctypes.byref(info)), CKR_OK
+        )
+        self.assertEqual(info.state, CKS_RW_USER_FUNCTIONS)
 
     def test_abi_scp11_fixture_exercises_secure_session_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

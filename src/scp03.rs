@@ -5,7 +5,8 @@ use crate::{
         unpad_iso7816 as unpad, AES_BLOCK_SIZE,
     },
     Connector, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
-    CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, CKR_USER_PIN_NOT_INITIALIZED,
+    CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
+    CKR_USER_PIN_NOT_INITIALIZED,
 };
 use openssl::{memcmp, symm::Mode};
 use std::time::Duration;
@@ -436,7 +437,6 @@ impl Scp03KeySet {
 struct ResolvedKeySet {
     enc: Zeroizing<Vec<u8>>,
     mac: Zeroizing<Vec<u8>>,
-    #[allow(dead_code)]
     dek: Option<Zeroizing<Vec<u8>>>,
 }
 
@@ -560,6 +560,7 @@ pub(crate) struct Scp03Session {
     s_enc: Zeroizing<Vec<u8>>,
     s_mac: Zeroizing<Vec<u8>>,
     s_rmac: Zeroizing<Vec<u8>>,
+    static_dek: Option<Zeroizing<Vec<u8>>>,
     mac_chaining_value: [u8; AES_BLOCK_SIZE],
     encryption_counter: u128,
     security_level: u8,
@@ -569,6 +570,7 @@ impl std::fmt::Debug for Scp03Session {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("Scp03Session")
             .field("key_size", &self.s_enc.len())
+            .field("has_static_dek", &self.static_dek.is_some())
             .field("security_level", &self.security_level)
             .field("encryption_counter", &self.encryption_counter)
             .finish_non_exhaustive()
@@ -580,17 +582,23 @@ impl Scp03Session {
         s_enc: Vec<u8>,
         s_mac: Vec<u8>,
         s_rmac: Vec<u8>,
+        static_dek: Option<Vec<u8>>,
         mac_chaining_value: [u8; AES_BLOCK_SIZE],
         security_level: u8,
     ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
-        if !valid_aes_key(&s_enc) || s_enc.len() != s_mac.len() || s_enc.len() != s_rmac.len() {
+        if !valid_aes_key(&s_enc)
+            || s_enc.len() != s_mac.len()
+            || s_enc.len() != s_rmac.len()
+            || static_dek.as_deref().is_some_and(|key| !valid_aes_key(key))
+        {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         Ok(Self {
             s_enc: Zeroizing::new(s_enc),
             s_mac: Zeroizing::new(s_mac),
             s_rmac: Zeroizing::new(s_rmac),
+            static_dek: static_dek.map(Zeroizing::new),
             mac_chaining_value,
             encryption_counter: 0,
             security_level,
@@ -664,9 +672,20 @@ impl Scp03Session {
             &update,
             &initialize_response.data[21..29],
         )?;
+        session.static_dek = static_keys
+            .dek
+            .as_deref()
+            .map(|key| Zeroizing::new(key.to_vec()));
         let authenticate = session.external_authenticate(&host_cryptogram)?;
         transmit(connector, &authenticate)?.require_success(&authenticate)?;
         Ok(session)
+    }
+
+    pub(crate) fn static_dek(&self) -> Result<&[u8], Error> {
+        self.static_dek
+            .as_ref()
+            .map(|key| key.as_slice())
+            .ok_or(CKR_KEY_FUNCTION_NOT_PERMITTED.into())
     }
 
     fn from_initialize_update(
@@ -711,6 +730,7 @@ impl Scp03Session {
                 s_enc,
                 s_mac,
                 s_rmac,
+                static_dek: None,
                 mac_chaining_value: [0; AES_BLOCK_SIZE],
                 encryption_counter: 0,
                 security_level,
