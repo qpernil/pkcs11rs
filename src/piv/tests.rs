@@ -313,11 +313,15 @@ fn chains_large_general_authenticate_commands() {
 #[test]
 fn parses_metadata_and_certificate_objects() {
     let metadata = [0x01, 0x01, 0x11, 0x02, 0x02, 0x02, 0x03, 0x03, 0x01, 0x01];
+    let gzip_certificate = [
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x33, 0x60, 0x64, 0x00, 0x00,
+        0xc3, 0x0d, 0x31, 0xc2, 0x03, 0x00, 0x00, 0x00,
+    ];
     let certificate_object = encode_tlv(
         0x53,
         &[
-            encode_tlv(0x70, &[0x30, 0x01, 0x00]).unwrap(),
-            encode_tlv(0x71, &[0]).unwrap(),
+            encode_tlv(0x70, &gzip_certificate).unwrap(),
+            encode_tlv(0x71, &[CERTIFICATE_GZIP]).unwrap(),
             encode_tlv(0xfe, &[]).unwrap(),
         ]
         .concat(),
@@ -338,6 +342,110 @@ fn parses_metadata_and_certificate_objects() {
             .unwrap(),
         [0x30, 0x01, 0x00]
     );
+}
+
+#[test]
+fn encodes_piv_certificates_with_the_smallest_standard_representation() {
+    let compressible = vec![0x30; 512];
+    let compressed_object = encode_certificate_object(&compressible).unwrap();
+    let compressed_fields = parse_tlvs(&compressed_object).unwrap();
+    assert_eq!(
+        field(&compressed_fields, 0x71),
+        Some(&[CERTIFICATE_GZIP][..])
+    );
+    let gzip = field(&compressed_fields, 0x70).unwrap();
+    assert_eq!(&gzip[..3], &[0x1f, 0x8b, 0x08]);
+    assert_eq!(gzip[8], 2, "GZIP XFL must indicate maximum compression");
+    assert_eq!(field(&compressed_fields, 0xfe), Some(&[][..]));
+    assert_eq!(
+        decode_certificate_object(&compressed_object).unwrap(),
+        compressible
+    );
+
+    let short = [0x30, 0x01, 0x00];
+    let uncompressed_object = encode_certificate_object(&short).unwrap();
+    let uncompressed_fields = parse_tlvs(&uncompressed_object).unwrap();
+    assert_eq!(field(&uncompressed_fields, 0x70), Some(short.as_slice()));
+    assert_eq!(
+        field(&uncompressed_fields, 0x71),
+        Some(&[CERTIFICATE_UNCOMPRESSED][..])
+    );
+    assert_eq!(
+        decode_certificate_object(&uncompressed_object).unwrap(),
+        short
+    );
+}
+
+#[test]
+fn rejects_invalid_or_excessive_piv_certificate_compression() {
+    let invalid_flag = [
+        encode_tlv(0x70, &[1]).unwrap(),
+        encode_tlv(0x71, &[2]).unwrap(),
+        encode_tlv(0xfe, &[]).unwrap(),
+    ]
+    .concat();
+    assert!(decode_certificate_object(&invalid_flag).is_err());
+
+    let invalid_lrc = [
+        encode_tlv(0x70, &[1]).unwrap(),
+        encode_tlv(0x71, &[CERTIFICATE_UNCOMPRESSED]).unwrap(),
+        encode_tlv(0xfe, &[0]).unwrap(),
+    ]
+    .concat();
+    assert!(decode_certificate_object(&invalid_lrc).is_err());
+
+    let oversized = vec![0; MAX_DECOMPRESSED_CERTIFICATE_SIZE + 1];
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&oversized).unwrap();
+    let oversized_gzip = encoder.finish().unwrap();
+    let oversized_object = [
+        encode_tlv(0x70, &oversized_gzip).unwrap(),
+        encode_tlv(0x71, &[CERTIFICATE_GZIP]).unwrap(),
+        encode_tlv(0xfe, &[]).unwrap(),
+    ]
+    .concat();
+    assert!(decode_certificate_object(&oversized_object).is_err());
+}
+
+#[test]
+fn reads_real_world_zlib_compressed_piv_certificates() {
+    let zlib_certificate = [
+        0x78, 0x9c, 0x33, 0x60, 0x64, 0x00, 0x00, 0x00, 0x95, 0x00, 0x32,
+    ];
+    let zlib_object = [
+        encode_tlv(0x70, &zlib_certificate).unwrap(),
+        encode_tlv(0x71, &[CERTIFICATE_GZIP]).unwrap(),
+        encode_tlv(0xfe, &[]).unwrap(),
+    ]
+    .concat();
+    assert_eq!(
+        decode_certificate_object(&zlib_object).unwrap(),
+        [0x30, 0x01, 0x00]
+    );
+
+    let netid_certificate = [
+        0x01, 0x00, 0x03, 0x00, 0x78, 0x9c, 0x33, 0x60, 0x64, 0x00, 0x00, 0x00, 0x95, 0x00, 0x32,
+    ];
+    let netid_object = [
+        encode_tlv(0x70, &netid_certificate).unwrap(),
+        encode_tlv(0x71, &[CERTIFICATE_GZIP]).unwrap(),
+        encode_tlv(0xfe, &[]).unwrap(),
+    ]
+    .concat();
+    assert_eq!(
+        decode_certificate_object(&netid_object).unwrap(),
+        [0x30, 0x01, 0x00]
+    );
+
+    let mut wrong_length = netid_certificate;
+    wrong_length[2] = 4;
+    let wrong_length_object = [
+        encode_tlv(0x70, &wrong_length).unwrap(),
+        encode_tlv(0x71, &[CERTIFICATE_GZIP]).unwrap(),
+        encode_tlv(0xfe, &[]).unwrap(),
+    ]
+    .concat();
+    assert!(decode_certificate_object(&wrong_length_object).is_err());
 }
 
 #[test]
