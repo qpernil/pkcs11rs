@@ -70,6 +70,22 @@ those keys in zeroizing memory only for the life of the authenticated YubiHSM
 session. Credential passwords are not cached. The direct YubiHSM login forms
 remain available even when no YubiHSM Auth applet is connected.
 
+Asymmetric YubiHSM secure sessions require a locally pinned device key. Set
+`PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX` to the path prefix for trusted-device
+files; its default is the empty string. The module hashes the canonical DER
+SubjectPublicKeyInfo returned by the bare `GET DEVICE PUBLIC KEY` command and
+loads `<prefix><lowercase SHA-256>.pem`. The PEM file may contain either one
+P-256 `PUBLIC KEY` or one X.509 `CERTIFICATE` whose P-256 public key represents
+the trusted device. The stored key must exactly match the device response before
+the secure-session receipt is accepted. A missing, malformed, or mismatched
+entry rejects authentication.
+
+Certificate chains are not processed during login. A target-key-ID `0`
+attestation certificate is validated when it is enrolled and is subsequently
+treated as a pinned device-key representative. A directly pinned public key is
+the explicit alternative for devices that do not use the factory Yubico
+attestation hierarchy.
+
 Credential creation, deletion, password changes, management-key changes, and
 application reset are implemented by the internal protocol client but are not
 mapped to PKCS #11 operations. The applet slot is deliberately read-only.

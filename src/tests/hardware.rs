@@ -516,6 +516,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             connector: hsmauth,
             credential,
             version: info.version,
+            trust_prefix: None,
         }
         .authenticate(
             yubihsm.as_ref(),

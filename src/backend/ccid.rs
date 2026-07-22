@@ -183,6 +183,7 @@ impl HsmAuthSlot {
                 connector: self.connector.clone(),
                 credential,
                 version: info.version,
+                trust_prefix: None,
             })
             .collect())
     }

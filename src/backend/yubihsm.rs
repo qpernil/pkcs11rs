@@ -3,6 +3,7 @@ struct HsmAuthProvider {
     connector: Rc<dyn Connector>,
     credential: HsmAuthCredential,
     version: (u8, u8, u8),
+    trust_prefix: Option<std::ffi::OsString>,
 }
 
 impl HsmAuthProvider {
@@ -20,6 +21,21 @@ impl HsmAuthProvider {
         yubihsm_connector: &dyn Connector,
         authkey_id: u16,
         credential_password: &[u8],
+    ) -> Result<YubiHsmSecureSession, Error> {
+        self.authenticate_with_trust_prefix(
+            yubihsm_connector,
+            authkey_id,
+            credential_password,
+            self.trust_prefix.as_deref(),
+        )
+    }
+
+    fn authenticate_with_trust_prefix(
+        &self,
+        yubihsm_connector: &dyn Connector,
+        authkey_id: u16,
+        credential_password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<YubiHsmSecureSession, Error> {
         match self.credential.algorithm {
             HsmAuthAlgorithm::Aes128YubicoAuthentication => {
@@ -146,6 +162,21 @@ impl HsmAuthProvider {
                         return Err(error);
                     }
                 };
+                if let Err(error) = crate::yubihsm::validate_device_public_key_with_prefix(
+                    &device_public_key,
+                    trust_prefix,
+                ) {
+                    log!(
+                        2,
+                        "YubiHSM device public-key certificate validation failed: {:?}",
+                        error
+                    );
+                    YubiHsmSecureSession::close_failed_asymmetric_handshake(
+                        yubihsm_connector,
+                        handshake,
+                    );
+                    return Err(error);
+                }
                 log!(
                     2,
                     "YubiHSM Auth requesting asymmetric session keys for credential {:?}",
@@ -198,6 +229,7 @@ struct YubiHsmSlot {
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
     version: (u8, u8, u8),
     algorithms: Vec<u8>,
+    trust_prefix: Option<std::ffi::OsString>,
     hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
     object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
     object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
@@ -214,6 +246,7 @@ impl YubiHsmSlot {
             session: Rc::new(RefCell::new(None)),
             version,
             algorithms,
+            trust_prefix: None,
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
@@ -648,10 +681,11 @@ impl Slot for YubiHsmSlot {
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                YubiHsmSecureSession::authenticate_asymmetric(
+                YubiHsmSecureSession::authenticate_asymmetric_with_trust_prefix(
                     self.connector.as_ref(),
                     authkey_id,
                     password,
+                    self.trust_prefix.as_deref(),
                 )?
             }
             YubiHsmLoginUsername::Symmetric(authkey_id) => {
