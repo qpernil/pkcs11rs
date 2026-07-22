@@ -86,6 +86,31 @@ trait Slot {
     fn is_piv(&self) -> bool {
         false
     }
+    fn is_openpgp(&self) -> bool {
+        false
+    }
+    fn openpgp_generate_key_pair(
+        &mut self,
+        _key_ref: OpenPgpKeyRef,
+        _algorithm: OpenPgpAlgorithm,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn openpgp_import_private_key(
+        &mut self,
+        _key_ref: OpenPgpKeyRef,
+        _algorithm: OpenPgpAlgorithm,
+        _material: &KeyMaterial,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn openpgp_set_touch_policy(
+        &mut self,
+        _key_ref: OpenPgpKeyRef,
+        _policy: u8,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn piv_generate_key_pair(
         &mut self,
         _slot: piv::Slot,

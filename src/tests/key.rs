@@ -1,4 +1,56 @@
 #[test]
+pub fn openpgp_generation_templates_select_reference_algorithm_and_touch_policy() {
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut key_type = CKK_EC_EDWARDS as CK_KEY_TYPE;
+    let mut id = [3u8];
+    let mut params = crate::openpgp::Curve::Ed25519.oid().to_vec();
+    let mut touch_policy = 2 as CK_ULONG;
+    let public = [
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            pValue: params.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: params.len() as CK_ULONG,
+        },
+    ];
+    let private = [
+        public[0],
+        public[1],
+        public[2],
+        CK_ATTRIBUTE {
+            type_: crate::CKA_YUBICO_TOUCH_POLICY,
+            pValue: &mut touch_policy as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
+    ];
+
+    let generation =
+        crate::openpgp_generate_key_pair_parameters(&mechanism, &public, &private).unwrap();
+    assert_eq!(generation.key_ref, crate::OpenPgpKeyRef::Authentication);
+    assert_eq!(generation.algorithm, crate::OpenPgpAlgorithm::Ed25519);
+    assert_eq!(generation.touch_policy, 2);
+}
+
+#[test]
 pub fn generate_key_creates_secret_key_object() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

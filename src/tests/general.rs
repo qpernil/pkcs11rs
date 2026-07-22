@@ -523,6 +523,7 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
             algorithm: crate::openpgp::Algorithm::Rsa { bits: 2048 },
             public_key: crate::openpgp::PublicKey::Rsa(public_key),
             pin_policy: 0,
+            touch_policy: 1,
             local: false,
         }],
         certificates: vec![crate::OpenPgpCertificate {
@@ -530,6 +531,7 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
             key_type: CKK_RSA as CK_KEY_TYPE,
             value: vec![0x30, 0],
         }],
+        data_objects: Vec::new(),
     };
 
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
@@ -617,6 +619,91 @@ fn openpgp_mechanisms_are_unique_and_report_complete_rsa_flags() {
         raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS,
         (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS
     );
+    for mechanism_type in [
+        CKM_RSA_PKCS_KEY_PAIR_GEN,
+        CKM_EC_KEY_PAIR_GEN,
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+    ] {
+        let mechanism = mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == mechanism_type as CK_MECHANISM_TYPE)
+            .unwrap();
+        assert_eq!(
+            mechanism.flags & CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS
+        );
+    }
+}
+
+#[test]
+fn openpgp_data_objects_expose_application_tag_and_lazy_value() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let object = crate::TokenObject {
+        slot_id: Some(TEST_SLOT_ID),
+        unique_id: "openpgp-data-005b".to_owned(),
+        class: CKO_DATA as CK_OBJECT_CLASS,
+        key_type: 0,
+        label: "OpenPGP Cardholder name".to_owned(),
+        id: Vec::new(),
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: false,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: crate::KeyMaterial::OpenPgpData {
+            tag: 0x005b,
+            connector,
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+        },
+    };
+    assert_eq!(
+        object.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+        Some(b"OpenPGP".to_vec())
+    );
+    assert_eq!(
+        object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0, 0x5b])
+    );
+    assert_eq!(
+        object.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn openpgp_private_key_template_uses_extended_header_list() {
+    let material = crate::KeyMaterial::Secret(zeroize::Zeroizing::new(vec![0x55; 32]));
+    let encoded = crate::openpgp_private_key_template(
+        crate::OpenPgpKeyRef::Signature,
+        crate::OpenPgpAlgorithm::Ed25519,
+        &[0x16, 1],
+        &material,
+    )
+    .unwrap();
+    assert_eq!(&encoded[..8], &[0x4d, 0x2a, 0xb6, 0, 0x7f, 0x48, 2, 0x92]);
+    assert_eq!(encoded[8], 32);
+    assert_eq!(&encoded[9..12], &[0x5f, 0x48, 32]);
+    assert_eq!(&encoded[12..], &[0x55; 32]);
+}
+
+#[test]
+fn openpgp_uif_modes_map_to_yubico_touch_policy_values() {
+    for (mode, policy) in [(0, 1), (1, 2), (2, 4), (3, 3), (4, 5)] {
+        assert_eq!(crate::openpgp_touch_policy(&[mode, 0x20]), Some(policy));
+    }
+    assert_eq!(crate::openpgp_touch_policy(&[5, 0x20]), None);
+    assert_eq!(crate::openpgp_touch_policy(&[]), None);
 }
 
 #[test]
@@ -684,11 +771,16 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
             public_exponent: vec![1, 0, 1],
             public_key: vec![0; 256],
             pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
+            touch_policy: 1,
         },
     };
     assert!(object
         .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
         .is_some());
+    assert_eq!(
+        object.attribute_value(crate::CKA_YUBICO_TOUCH_POLICY),
+        Some(crate::ulong_attribute(1))
+    );
     object.material = crate::KeyMaterial::OpenPgpPrivate {
         key_ref: crate::openpgp::KeyRef::Authentication,
         algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
@@ -696,10 +788,15 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
         public_exponent: vec![1, 0, 1],
         public_key: vec![0; 256],
         pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
+        touch_policy: 2,
     };
     assert_eq!(
         object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
         Some(vec![CK_FALSE as CK_BBOOL])
+    );
+    assert_eq!(
+        object.attribute_value(crate::CKA_YUBICO_TOUCH_POLICY),
+        Some(crate::ulong_attribute(2))
     );
 }
 

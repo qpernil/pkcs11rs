@@ -12,6 +12,7 @@ struct OpenPgpSlot {
     kdf: Option<openpgp::KdfParams>,
     keys: Vec<openpgp::KeyInfo>,
     certificates: Vec<OpenPgpCertificate>,
+    data_objects: Vec<OpenPgpDataObject>,
 }
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,14 @@ struct OpenPgpCertificate {
     key_ref: OpenPgpKeyRef,
     key_type: CK_KEY_TYPE,
     value: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenPgpDataObject {
+    tag: u16,
+    label: &'static str,
+    value: Rc<RefCell<Option<Vec<u8>>>>,
+    attempted: Rc<Cell<bool>>,
 }
 
 impl OpenPgpSlot {
@@ -41,6 +50,7 @@ impl OpenPgpSlot {
             kdf: None,
             keys: Vec::new(),
             certificates: Vec::new(),
+            data_objects: Vec::new(),
         }
     }
 
@@ -331,6 +341,15 @@ impl Slot for OpenPgpSlot {
         self.update_info(&info);
         self.keys.clear();
         self.certificates.clear();
+        self.data_objects.clear();
+        for &(data_object, label) in openpgp::EXPORTED_DATA_OBJECTS {
+            self.data_objects.push(OpenPgpDataObject {
+                tag: data_object.tag(),
+                label,
+                value: Rc::new(RefCell::new(None)),
+                attempted: Rc::new(Cell::new(false)),
+            });
+        }
         for key_ref in OpenPgpKeyRef::ALL {
             if info.key_status(key_ref) == Some(openpgp::KeyStatus::None) {
                 log!(2, "OpenPGP key reference {:?} is empty", key_ref);
@@ -362,6 +381,11 @@ impl Slot for OpenPgpSlot {
                 algorithm,
                 public_key,
                 pin_policy: info.pin_policy,
+                touch_policy: OpenPgpClient
+                    .get_data(self.connector.as_ref(), openpgp_uif_object(key_ref).tag())
+                    .ok()
+                    .and_then(|value| openpgp_touch_policy(&value))
+                    .unwrap_or(1),
                 local: info.key_is_local(key_ref),
             });
             if let Ok(value) = OpenPgpClient.certificate(self.connector.as_ref(), key_ref) {
@@ -386,6 +410,14 @@ impl Slot for OpenPgpSlot {
                         algorithm,
                         public_key,
                         pin_policy: info.pin_policy,
+                        touch_policy: OpenPgpClient
+                            .get_data(
+                                self.connector.as_ref(),
+                                openpgp::DataObject::UifAttestation.tag(),
+                            )
+                            .ok()
+                            .and_then(|value| openpgp_touch_policy(&value))
+                            .unwrap_or(1),
                         local: info.key_is_local(OpenPgpKeyRef::Attestation),
                     }),
                     Err(error) => log!(
@@ -450,6 +482,30 @@ impl Slot for OpenPgpSlot {
             4096,
             (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
         );
+        add(
+            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            2048,
+            4096,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
+        add(
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            256,
+            521,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
+        add(
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            255,
+            255,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
+        add(
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            255,
+            255,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        );
         for type_ in [CKM_SHA256_RSA_PKCS, CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS] {
             add(
                 type_ as CK_MECHANISM_TYPE,
@@ -497,8 +553,66 @@ impl Slot for OpenPgpSlot {
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
     }
+    fn is_openpgp(&self) -> bool {
+        true
+    }
+    fn openpgp_generate_key_pair(
+        &mut self,
+        key_ref: OpenPgpKeyRef,
+        algorithm: OpenPgpAlgorithm,
+    ) -> Result<(), Error> {
+        OpenPgpClient.generate_key_pair_if_empty(
+            self.connector.as_ref(),
+            &self.application_aid,
+            key_ref,
+            algorithm,
+        )?;
+        self.init_slot()
+    }
+    fn openpgp_import_private_key(
+        &mut self,
+        key_ref: OpenPgpKeyRef,
+        algorithm: OpenPgpAlgorithm,
+        material: &KeyMaterial,
+    ) -> Result<(), Error> {
+        let info = OpenPgpClient.select(self.connector.as_ref(), &self.application_aid)?;
+        let attributes = info
+            .algorithm_attributes(key_ref)
+            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+        let encoded = openpgp_private_key_template(key_ref, algorithm, attributes, material)?;
+        OpenPgpClient.import_private_key_if_empty(
+            self.connector.as_ref(),
+            &self.application_aid,
+            key_ref,
+            algorithm,
+            &encoded,
+        )?;
+        self.init_slot()
+    }
+    fn openpgp_set_touch_policy(
+        &mut self,
+        key_ref: OpenPgpKeyRef,
+        policy: u8,
+    ) -> Result<(), Error> {
+        let value = match policy {
+            1 => [0, 0x20],
+            2 => [1, 0x20],
+            3 => [3, 0x20],
+            4 => [2, 0x20],
+            5 => [4, 0x20],
+            _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+        };
+        OpenPgpClient.put_data(
+            self.connector.as_ref(),
+            openpgp_uif_object(key_ref).tag(),
+            &value,
+        )?;
+        self.init_slot()
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = Vec::with_capacity(self.keys.len() * 2 + self.certificates.len());
+        let mut objects = Vec::with_capacity(
+            self.keys.len() * 2 + self.certificates.len() + self.data_objects.len(),
+        );
         for key in &self.keys {
             let public_bytes = openpgp_public_material(&key.public_key);
             let key_type = key.algorithm.key_type() as CK_KEY_TYPE;
@@ -583,6 +697,7 @@ impl Slot for OpenPgpSlot {
                     public_exponent,
                     public_key: public_bytes,
                     pin_policy: key.pin_policy,
+                    touch_policy: key.touch_policy,
                 },
             });
         }
@@ -613,7 +728,189 @@ impl Slot for OpenPgpSlot {
                 },
             });
         }
+        for data_object in &self.data_objects {
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("openpgp-data-{:04x}", data_object.tag),
+                class: CKO_DATA as CK_OBJECT_CLASS,
+                key_type: 0,
+                label: format!("OpenPGP {}", data_object.label),
+                id: Vec::new(),
+                token: true,
+                private: false,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: true,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                owner_session: None,
+                material: KeyMaterial::OpenPgpData {
+                    tag: data_object.tag,
+                    connector: self.connector.clone(),
+                    value: data_object.value.clone(),
+                    attempted: data_object.attempted.clone(),
+                },
+            });
+        }
         Ok(objects)
+    }
+}
+
+fn openpgp_private_key_template(
+    key_ref: OpenPgpKeyRef,
+    algorithm: OpenPgpAlgorithm,
+    algorithm_attributes: &[u8],
+    material: &KeyMaterial,
+) -> Result<Vec<u8>, Error> {
+    let mut description = Vec::new();
+    let mut key_data = Vec::new();
+    let mut append = |tag: u8, value: &[u8]| -> Result<(), Error> {
+        description.push(tag);
+        description.extend(openpgp_length(value.len())?);
+        key_data.extend_from_slice(value);
+        Ok(())
+    };
+    match (algorithm, material) {
+        (OpenPgpAlgorithm::Rsa { bits }, KeyMaterial::RsaPrivate(key)) => {
+            if key.size() as usize * 8 != bits
+                || algorithm_attributes.len() < 6
+                || algorithm_attributes[0] != 1
+                || usize::from(u16::from_be_bytes([
+                    algorithm_attributes[1],
+                    algorithm_attributes[2],
+                ])) != bits
+            {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+            let exponent_length = usize::from(u16::from_be_bytes([
+                algorithm_attributes[3],
+                algorithm_attributes[4],
+            ])).div_ceil(8);
+            let exponent = openpgp_pad_integer(&key.e().to_vec(), exponent_length)?;
+            let prime_length = bits / 16;
+            append(0x91, &exponent)?;
+            append(
+                0x92,
+                &openpgp_pad_integer(
+                    &key.p().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                    prime_length,
+                )?,
+            )?;
+            append(
+                0x93,
+                &openpgp_pad_integer(
+                    &key.q().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                    prime_length,
+                )?,
+            )?;
+            match algorithm_attributes[5] {
+                2 | 3 => {
+                    append(
+                        0x94,
+                        &openpgp_pad_integer(
+                            &key.iqmp().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            prime_length,
+                        )?,
+                    )?;
+                    append(
+                        0x95,
+                        &openpgp_pad_integer(
+                            &key.dmp1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            prime_length,
+                        )?,
+                    )?;
+                    append(
+                        0x96,
+                        &openpgp_pad_integer(
+                            &key.dmq1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            prime_length,
+                        )?,
+                    )?;
+                }
+                0 | 1 => {}
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            }
+            if matches!(algorithm_attributes[5], 1 | 3) {
+                append(0x97, &key.n().to_vec())?;
+            }
+        }
+        (algorithm, KeyMaterial::Secret(value))
+            if matches!(
+                algorithm,
+                OpenPgpAlgorithm::Ecdsa(_)
+                    | OpenPgpAlgorithm::Ecdh(_)
+                    | OpenPgpAlgorithm::Ed25519
+            ) =>
+        {
+            let length = match algorithm {
+                OpenPgpAlgorithm::Ecdsa(curve) | OpenPgpAlgorithm::Ecdh(curve) => {
+                    curve.coordinate_length().unwrap_or(32)
+                }
+                OpenPgpAlgorithm::Ed25519 => 32,
+                _ => unreachable!(),
+            };
+            append(0x92, &openpgp_pad_integer(value, length)?)?;
+        }
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+    }
+    let mut body = key_ref.crt().to_vec();
+    body.extend(openpgp_tlv(0x7f48, &description)?);
+    body.extend(openpgp_tlv(0x5f48, &key_data)?);
+    openpgp_tlv(0x4d, &body)
+}
+
+fn openpgp_pad_integer(value: &[u8], length: usize) -> Result<Vec<u8>, Error> {
+    if value.len() > length || length == 0 {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    let mut padded = vec![0; length - value.len()];
+    padded.extend_from_slice(value);
+    Ok(padded)
+}
+
+fn openpgp_length(length: usize) -> Result<Vec<u8>, Error> {
+    match length {
+        0..=0x7f => Ok(vec![length as u8]),
+        0x80..=0xff => Ok(vec![0x81, length as u8]),
+        0x100..=0xffff => Ok(vec![0x82, (length >> 8) as u8, length as u8]),
+        _ => Err(CKR_DATA_LEN_RANGE.into()),
+    }
+}
+
+fn openpgp_tlv(tag: u16, value: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut encoded = if tag > 0xff {
+        tag.to_be_bytes().to_vec()
+    } else {
+        vec![tag as u8]
+    };
+    encoded.extend(openpgp_length(value.len())?);
+    encoded.extend_from_slice(value);
+    Ok(encoded)
+}
+
+fn openpgp_uif_object(key_ref: OpenPgpKeyRef) -> openpgp::DataObject {
+    match key_ref {
+        OpenPgpKeyRef::Signature => openpgp::DataObject::UifSignature,
+        OpenPgpKeyRef::Decipher => openpgp::DataObject::UifDecipher,
+        OpenPgpKeyRef::Authentication => openpgp::DataObject::UifAuthentication,
+        OpenPgpKeyRef::Attestation => openpgp::DataObject::UifAttestation,
+    }
+}
+
+fn openpgp_touch_policy(value: &[u8]) -> Option<u8> {
+    match value.first() {
+        Some(0) => Some(1),
+        Some(1) => Some(2),
+        Some(2) => Some(4),
+        Some(3) => Some(3),
+        Some(4) => Some(5),
+        _ => None,
     }
 }
 

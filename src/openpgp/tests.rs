@@ -188,6 +188,7 @@ fn generated_attestation_status_sets_discovered_key_provenance() {
         response(&app_data_with_generated_attestation_only(), STATUS_SUCCESS),
         response(&[], 0x6a88),
         response(&public_key, STATUS_SUCCESS),
+        response(&[0, 0x20], STATUS_SUCCESS),
         response(&[0x30, 0], STATUS_SUCCESS),
     ]));
     let connector_trait: std::rc::Rc<dyn Connector> = connector.clone();
@@ -227,7 +228,11 @@ fn empty_key_information_skips_public_key_discovery() {
     let mut slot = crate::OpenPgpSlot::new(connector_trait, OPENPGP_AID.to_vec());
 
     crate::Slot::init_slot(&mut slot).unwrap();
-    assert!(crate::Slot::token_objects(&slot, 7).unwrap().is_empty());
+    let objects = crate::Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects
+        .iter()
+        .all(|object| object.class == crate::CKO_DATA as crate::CK_OBJECT_CLASS));
+    assert_eq!(objects.len(), EXPORTED_DATA_OBJECTS.len());
     assert!(connector
         .commands
         .borrow()
@@ -697,6 +702,79 @@ fn public_key_reads_work_but_key_generation_and_import_are_prohibited() {
         [0, 0x47, 0x81, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]
     );
     assert_eq!(commands.len(), 2);
+}
+
+#[test]
+fn guarded_key_generation_only_targets_an_empty_reference() {
+    let mut public_key = encode_tlv(0x81, &[0x11; 256]).unwrap();
+    public_key.extend_from_slice(&encode_tlv(0x82, &[0x01, 0x00, 0x01]).unwrap());
+    let public_key = encode_tlv(0x7f49, &public_key).unwrap();
+    let connector = ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&app_data_with_empty_keys(), STATUS_SUCCESS),
+        response(&[], 0x6a88),
+        response(&public_key, STATUS_SUCCESS),
+    ]);
+
+    Client
+        .generate_key_pair_if_empty(
+            &connector,
+            &OPENPGP_AID,
+            KeyRef::Signature,
+            Algorithm::Rsa { bits: 2048 },
+        )
+        .unwrap();
+    assert!(connector
+        .commands
+        .borrow()
+        .iter()
+        .any(|command| command.get(1..4) == Some(&[0x47, 0x80, 0])));
+
+    let occupied = ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&app_data_with_attestation(), STATUS_SUCCESS),
+        response(&[], 0x6a88),
+    ]);
+    assert!(matches!(
+        Client.generate_key_pair_if_empty(
+            &occupied,
+            &OPENPGP_AID,
+            KeyRef::Signature,
+            Algorithm::Rsa { bits: 2048 },
+        ),
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+    ));
+    assert!(occupied
+        .commands
+        .borrow()
+        .iter()
+        .all(|command| command.get(1..4) != Some(&[0x47, 0x80, 0])));
+}
+
+#[test]
+fn guarded_private_key_import_only_targets_an_empty_reference() {
+    let connector = ScriptedConnector::new(vec![
+        response(&[], STATUS_SUCCESS),
+        response(&app_data_with_empty_keys(), STATUS_SUCCESS),
+        response(&[], 0x6a88),
+        response(&[], STATUS_SUCCESS),
+    ]);
+    let template = [0x4d, 0x05, 0xb6, 0, 0x7f, 0x48, 0];
+
+    Client
+        .import_private_key_if_empty(
+            &connector,
+            &OPENPGP_AID,
+            KeyRef::Signature,
+            Algorithm::Rsa { bits: 2048 },
+            &template,
+        )
+        .unwrap();
+    assert!(connector
+        .commands
+        .borrow()
+        .iter()
+        .any(|command| command.get(1..4) == Some(&[0xdb, 0x3f, 0xff])));
 }
 
 #[test]

@@ -4,8 +4,8 @@ use crate::{
     error::Error,
     scp03::{select_application, CommandApdu},
     Connector, CKR_ACTION_PROHIBITED, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
-    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_KEY_TYPE_INCONSISTENT, CKR_PIN_INCORRECT,
+    CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use openssl::{
     bn::BigNum,
@@ -59,7 +59,7 @@ impl KeyRef {
         }
     }
 
-    fn crt(self) -> &'static [u8] {
+    pub(crate) fn crt(self) -> &'static [u8] {
         match self {
             Self::Signature => &[0xb6, 0x00],
             Self::Decipher => &[0xb8, 0x00],
@@ -146,10 +146,23 @@ pub(crate) enum DataObject {
 }
 
 impl DataObject {
-    const fn tag(self) -> u16 {
+    pub(crate) const fn tag(self) -> u16 {
         self as u16
     }
 }
+
+pub(crate) const EXPORTED_DATA_OBJECTS: &[(DataObject, &str)] = &[
+    (DataObject::PrivateUse1, "Private use 1"),
+    (DataObject::PrivateUse2, "Private use 2"),
+    (DataObject::Name, "Cardholder name"),
+    (DataObject::LoginData, "Login data"),
+    (DataObject::Language, "Language preferences"),
+    (DataObject::Sex, "Sex"),
+    (DataObject::Url, "Public key URL"),
+    (DataObject::Fingerprints, "Key fingerprints"),
+    (DataObject::CaFingerprints, "CA fingerprints"),
+    (DataObject::GenerationTimes, "Key generation times"),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Curve {
@@ -277,6 +290,7 @@ pub(crate) struct KeyInfo {
     pub(crate) algorithm: Algorithm,
     pub(crate) public_key: PublicKey,
     pub(crate) pin_policy: u8,
+    pub(crate) touch_policy: u8,
     pub(crate) local: bool,
 }
 
@@ -298,6 +312,7 @@ pub(crate) struct ApplicationInfo {
     pub(crate) admin_pin_max: u8,
     pub(crate) kdf: Option<KdfParams>,
     algorithms: Vec<(KeyRef, Algorithm)>,
+    algorithm_attributes: Vec<(KeyRef, Vec<u8>)>,
     key_statuses: Vec<(KeyRef, KeyStatus)>,
 }
 
@@ -370,6 +385,12 @@ impl ApplicationInfo {
             .find_map(|(reference, status)| (*reference == key_ref).then_some(*status))
     }
 
+    pub(crate) fn algorithm_attributes(&self, key_ref: KeyRef) -> Option<&[u8]> {
+        self.algorithm_attributes
+            .iter()
+            .find_map(|(reference, value)| (*reference == key_ref).then_some(value.as_slice()))
+    }
+
     pub(crate) fn key_is_local(&self, key_ref: KeyRef) -> bool {
         self.key_status(key_ref) == Some(KeyStatus::Generated)
     }
@@ -414,6 +435,44 @@ impl Client {
         self.read_or_generate_key(connector, key_ref, algorithm, true)
     }
 
+    pub(crate) fn generate_key_pair_if_empty(
+        &self,
+        connector: &dyn Connector,
+        application_aid: &[u8],
+        key_ref: KeyRef,
+        algorithm: Algorithm,
+    ) -> Result<PublicKey, Error> {
+        let info = self.select(connector, application_aid)?;
+        if info.key_status(key_ref) != Some(KeyStatus::None) {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        if info.algorithm(key_ref) != Some(algorithm) {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        self.read_or_generate_key_unchecked(connector, key_ref, algorithm)
+    }
+
+    fn read_or_generate_key_unchecked(
+        &self,
+        connector: &dyn Connector,
+        key_ref: KeyRef,
+        algorithm: Algorithm,
+    ) -> Result<PublicKey, Error> {
+        let response = self.transmit_key_creation(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_GENERATE_ASYMMETRIC,
+                p1: 0x80,
+                p2: 0,
+                data: key_ref.crt().to_vec(),
+                le: Some(256),
+                extended: false,
+            },
+        )?;
+        parse_generated_public_key(algorithm, &response)
+    }
+
     fn read_or_generate_key(
         &self,
         connector: &dyn Connector,
@@ -433,51 +492,7 @@ impl Client {
                 extended: false,
             },
         )?;
-        let body = tlv_value(0x7f49, &response)?;
-        let fields = parse_tlvs(&body)?;
-        match algorithm {
-            Algorithm::Rsa { bits } => {
-                let modulus = field_value(&fields, 0x81).ok_or(CKR_DATA_INVALID)?;
-                let exponent = field_value(&fields, 0x82).ok_or(CKR_DATA_INVALID)?;
-                if modulus.len() * 8 != bits {
-                    return Err(CKR_DATA_INVALID.into());
-                }
-                let modulus = BigNum::from_slice(modulus).map_err(Error::from)?;
-                let exponent = BigNum::from_slice(exponent).map_err(Error::from)?;
-                Ok(PublicKey::Rsa(
-                    Rsa::from_public_components(modulus, exponent).map_err(Error::from)?,
-                ))
-            }
-            Algorithm::Ecdsa(curve) | Algorithm::Ecdh(curve)
-                if curve.coordinate_length().is_some() =>
-            {
-                let point = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
-                let expected = curve.coordinate_length().unwrap() * 2 + 1;
-                if point.len() != expected || point[0] != 0x04 {
-                    return Err(CKR_DATA_INVALID.into());
-                }
-                Ok(PublicKey::Ec {
-                    curve,
-                    point: point[1..].to_vec(),
-                })
-            }
-            Algorithm::Ed25519 | Algorithm::Ecdh(Curve::X25519) => {
-                let key = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
-                if key.len() != 32 {
-                    return Err(CKR_DATA_INVALID.into());
-                }
-                let curve = if matches!(algorithm, Algorithm::Ed25519) {
-                    Curve::Ed25519
-                } else {
-                    Curve::X25519
-                };
-                Ok(PublicKey::Raw {
-                    curve,
-                    key: key.to_vec(),
-                })
-            }
-            _ => Err(CKR_DATA_INVALID.into()),
-        }
+        parse_generated_public_key(algorithm, &response)
     }
 
     pub(crate) fn certificate(
@@ -1023,6 +1038,36 @@ impl Client {
         self.put_data_odd(connector, 0x3f, 0xff, private_key_template)
     }
 
+    pub(crate) fn import_private_key_if_empty(
+        &self,
+        connector: &dyn Connector,
+        application_aid: &[u8],
+        key_ref: KeyRef,
+        algorithm: Algorithm,
+        private_key_template: &[u8],
+    ) -> Result<(), Error> {
+        let info = self.select(connector, application_aid)?;
+        if info.key_status(key_ref) != Some(KeyStatus::None) {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        if info.algorithm(key_ref) != Some(algorithm) {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        self.transmit_key_creation(
+            connector,
+            CommandApdu {
+                cla: 0,
+                ins: INS_PUT_DATA_ODD,
+                p1: 0x3f,
+                p2: 0xff,
+                data: private_key_template.to_vec(),
+                le: None,
+                extended: false,
+            },
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn firmware_version(
         &self,
         connector: &dyn Connector,
@@ -1133,6 +1178,60 @@ impl Client {
         require_success(response.status, &command)?;
         Ok(response.data)
     }
+
+    fn transmit_key_creation(
+        &self,
+        connector: &dyn Connector,
+        command: CommandApdu,
+    ) -> Result<Vec<u8>, Error> {
+        let response = connector.send_apdu(&command)?;
+        require_success(response.status, &command)?;
+        Ok(response.data)
+    }
+}
+
+fn parse_generated_public_key(algorithm: Algorithm, response: &[u8]) -> Result<PublicKey, Error> {
+    let body = tlv_value(0x7f49, response)?;
+    let fields = parse_tlvs(&body)?;
+    match algorithm {
+        Algorithm::Rsa { bits } => {
+            let modulus = field_value(&fields, 0x81).ok_or(CKR_DATA_INVALID)?;
+            let exponent = field_value(&fields, 0x82).ok_or(CKR_DATA_INVALID)?;
+            if modulus.len() * 8 != bits {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PublicKey::Rsa(Rsa::from_public_components(
+                BigNum::from_slice(modulus)?,
+                BigNum::from_slice(exponent)?,
+            )?))
+        }
+        Algorithm::Ecdsa(curve) | Algorithm::Ecdh(curve) if curve.coordinate_length().is_some() => {
+            let point = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
+            let expected = curve.coordinate_length().unwrap() * 2 + 1;
+            if point.len() != expected || point[0] != 0x04 {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PublicKey::Ec {
+                curve,
+                point: point[1..].to_vec(),
+            })
+        }
+        Algorithm::Ed25519 | Algorithm::Ecdh(Curve::X25519) => {
+            let key = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
+            if key.len() != 32 {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PublicKey::Raw {
+                curve: if algorithm == Algorithm::Ed25519 {
+                    Curve::Ed25519
+                } else {
+                    Curve::X25519
+                },
+                key: key.to_vec(),
+            })
+        }
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
 }
 
 fn command_may_delete_keys(command: &CommandApdu) -> bool {
@@ -1201,14 +1300,17 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
         return Err(CKR_DATA_INVALID.into());
     }
     let mut algorithms = Vec::new();
+    let mut algorithm_attributes = Vec::new();
     for key_ref in KeyRef::ALL {
         if let Some(value) = field_value(&discretionary, key_ref.algorithm_tag()) {
             algorithms.push((key_ref, parse_algorithm(value)?));
+            algorithm_attributes.push((key_ref, value.to_vec()));
         }
     }
     if let Some(value) = field_value(&discretionary, KeyRef::Attestation.algorithm_tag()) {
         if let Ok(algorithm) = parse_algorithm(value) {
             algorithms.push((KeyRef::Attestation, algorithm));
+            algorithm_attributes.push((KeyRef::Attestation, value.to_vec()));
         }
     }
     let key_statuses = field_value(&discretionary, DataObject::KeyInformation.tag().into())
@@ -1225,6 +1327,7 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
         admin_pin_max: pin_status[3],
         kdf: None,
         algorithms,
+        algorithm_attributes,
         key_statuses,
     })
 }

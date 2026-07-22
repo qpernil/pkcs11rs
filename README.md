@@ -170,9 +170,9 @@ is not intended for a normal module build.
   on the selected backend, installed keys, device firmware, and policy.
 - The live-hardware suite is currently a discovery and metadata smoke test; it
   does not exercise every cryptographic operation against physical devices.
-- OpenPGP key generation, private-key import, UIF administration, and general
-  data-object management are implemented by the internal command layer but are
-  not yet mapped to exported PKCS #11 operations.
+- OpenPGP key generation and private-key import are restricted to references
+  that the card reports as empty, so PKCS #11 operations cannot overwrite an
+  existing OpenPGP key. Readable OpenPGP data objects are exported read-only.
 - Secure-channel credential provisioning and trust-anchor selection are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader
