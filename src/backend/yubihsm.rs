@@ -234,6 +234,7 @@ struct YubiHsmSlot {
     object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
     object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     next_object_generation: Cell<u64>,
+    device_public_key: OnceLock<Vec<u8>>,
 }
 
 type YubiHsmObjectKey = (u8, u16);
@@ -251,6 +252,7 @@ impl YubiHsmSlot {
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
+            device_public_key: OnceLock::new(),
         }
     }
 
@@ -263,6 +265,17 @@ impl YubiHsmSlot {
         let mut slot = Self::new(connector, version, algorithms);
         slot.hsmauth_providers = hsmauth_providers;
         slot
+    }
+
+    fn device_public_key(&self) -> Result<&[u8], Error> {
+        if self.device_public_key.get().is_none() {
+            let public_key = get_yubihsm_device_public_key(self.connector.as_ref())?.to_vec();
+            let _ = self.device_public_key.set(public_key);
+        }
+        self.device_public_key
+            .get()
+            .map(Vec::as_slice)
+            .ok_or_else(|| CKR_DEVICE_ERROR.into())
     }
 }
 
@@ -355,6 +368,39 @@ fn yubihsm_remote_material_with_type(
         public_key,
         value: Rc::new(RefCell::new(None)),
     }
+}
+
+fn yubihsm_device_public_key_object(
+    slot_id: CK_SLOT_ID,
+    public_key: &[u8],
+) -> Result<TokenObject, Error> {
+    let public_key_info = crate::yubihsm::trust::device_spki(public_key)?;
+    Ok(TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: "yubihsm-device-public".to_owned(),
+        class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_EC as CK_KEY_TYPE,
+        label: "YubiHSM device public key".to_owned(),
+        id: Vec::new(),
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::YubiHsmDevicePublic {
+            public_key: public_key.to_vec(),
+            public_key_info,
+        },
+    })
 }
 
 fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
@@ -712,6 +758,7 @@ impl Slot for YubiHsmSlot {
         }
     }
     fn init_slot(&mut self) -> Result<(), Error> {
+        let _ = self.device_public_key.take();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
         self.algorithms = device_info.algorithms;
@@ -791,7 +838,13 @@ impl Slot for YubiHsmSlot {
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
         generations.retain(|key, _| discovered_keys.contains(key));
 
-        let mut objects = Vec::new();
+        let mut objects = match self.device_public_key() {
+            Ok(public_key) => vec![yubihsm_device_public_key_object(slot_id, public_key)?],
+            Err(error) => {
+                log!(2, "YubiHSM GET DEVICE PUBLIC KEY: {:?}", error);
+                Vec::new()
+            }
+        };
         let mut metadata = HashMap::new();
         for (info, public_key) in discovered {
             let key = (info.object_type, info.id);
@@ -825,6 +878,12 @@ impl Slot for YubiHsmSlot {
         slot_id: CK_SLOT_ID,
         unique_id: &str,
     ) -> Result<Option<TokenObject>, Error> {
+        if let Some(public_key) = self.device_public_key.get() {
+            let object = yubihsm_device_public_key_object(slot_id, public_key)?;
+            if object.unique_id == unique_id {
+                return Ok(Some(object));
+            }
+        }
         let metadata = self
             .object_metadata
             .try_borrow()

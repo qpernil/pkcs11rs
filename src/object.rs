@@ -102,6 +102,10 @@ enum KeyMaterial {
         public_key: Vec<u8>,
         value: Rc<RefCell<Option<Vec<u8>>>>,
     },
+    YubiHsmDevicePublic {
+        public_key: Vec<u8>,
+        public_key_info: Vec<u8>,
+    },
     Secret(Zeroizing<Vec<u8>>),
     DerivedSecret(Zeroizing<Vec<u8>>),
 }
@@ -167,6 +171,10 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("object_type", object_type)
                 .field("algorithm", algorithm)
                 .field("length", length)
+                .finish(),
+            Self::YubiHsmDevicePublic { public_key, .. } => fmt
+                .debug_struct("YubiHsmDevicePublic")
+                .field("size", &public_key.len())
                 .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
             Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
@@ -735,6 +743,9 @@ impl TokenObject {
                 KeyMaterial::YubiHsm { algorithm, .. } => {
                     yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
                 }
+                KeyMaterial::YubiHsmDevicePublic { .. } => {
+                    piv_ec_parameters(piv::Algorithm::EccP256).map(<[u8]>::to_vec)
+                }
                 KeyMaterial::PivPrivate { algorithm, .. }
                 | KeyMaterial::PivPublic { algorithm, .. } => {
                     piv_ec_parameters(*algorithm).map(<[u8]>::to_vec)
@@ -810,6 +821,9 @@ impl TokenObject {
                     {
                         der_octet_string(public_key)
                     }
+                    KeyMaterial::YubiHsmDevicePublic { public_key, .. } => {
+                        der_octet_string(public_key)
+                    }
                     _ => None,
                 }
             }
@@ -867,6 +881,11 @@ impl TokenObject {
                     }
                     KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         Some(value.clone())
+                    }
+                    KeyMaterial::YubiHsmDevicePublic {
+                        public_key_info, ..
+                    } if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => {
+                        Some(public_key_info.clone())
                     }
                     KeyMaterial::PivAttestation {
                         connector,
@@ -953,6 +972,7 @@ impl TokenObject {
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsm { .. }
+                | KeyMaterial::YubiHsmDevicePublic { .. }
                 | KeyMaterial::DerivedSecret(_)
         )
     }

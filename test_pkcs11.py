@@ -108,6 +108,8 @@ CKA_KEY_GEN_MECHANISM = 0x00000166
 CKA_MODIFIABLE = 0x00000170
 CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
+CKA_EC_PARAMS = 0x00000180
+CKA_EC_POINT = 0x00000181
 CKA_PKCS11RS_PIV_OBJECT_TAG = 0x80005056
 CKU_SO = 0
 CKU_USER = 1
@@ -1333,6 +1335,155 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(signature_len.value, 256)
+
+    def test_yubihsm_device_public_key_is_a_descriptive_read_only_object(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        label = (CK_BYTE * len(b"YubiHSM device public key"))(
+            *b"YubiHSM device public key"
+        )
+        object_class = CK_ULONG(CKO_PUBLIC_KEY)
+        template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            ),
+            CK_ATTRIBUTE(CKA_LABEL, ctypes.cast(label, CK_VOID_PTR), len(label)),
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        def bytes_attribute(object_handle: int, attribute_type: int) -> bytes:
+            attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, object_handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            value = (CK_BYTE * attribute.ulValueLen)()
+            attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, object_handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return bytes(value)
+
+        generator = bytes.fromhex(
+            "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        )
+        spki = bytes_attribute(handle.value, CKA_PUBLIC_KEY_INFO)
+        self.assertEqual(
+            spki,
+            bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+            + generator,
+        )
+        self.assertEqual(bytes_attribute(handle.value, CKA_ID), b"")
+        self.assertEqual(
+            bytes_attribute(handle.value, CKA_UNIQUE_ID),
+            b"yubihsm-device-public",
+        )
+        self.assertEqual(
+            bytes_attribute(handle.value, CKA_EC_PARAMS),
+            bytes.fromhex("06082a8648ce3d030107"),
+        )
+        self.assertEqual(
+            bytes_attribute(handle.value, CKA_EC_POINT), b"\x04\x41" + generator
+        )
+        for attribute_type in (CKA_ENCRYPT, CKA_VERIFY, CKA_DERIVE, CKA_DESTROYABLE):
+            self.assertEqual(bytes_attribute(handle.value, attribute_type), b"\x00")
+
+    def test_yubihsm_device_enrollment_pins_attested_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            previous_prefix = os.environ.get("PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX")
+            os.environ["PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX"] = directory + os.sep
+            try:
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                session = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_OpenSession(
+                        ABI_TEST_YUBIHSM_SLOT_ID,
+                        CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                        None,
+                        None,
+                        ctypes.byref(session),
+                    ),
+                    CKR_OK,
+                )
+                self.login_session(session.value)
+
+                fingerprint_len = CK_ULONG()
+                self.assertEqual(
+                    self.lib.PKCS11RS_YubiHsmEnrollDeviceAttestation(
+                        session.value, 0, None, ctypes.byref(fingerprint_len)
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(fingerprint_len.value, 32)
+
+                short = (CK_BYTE * 31)()
+                fingerprint_len.value = len(short)
+                self.assertEqual(
+                    self.lib.PKCS11RS_YubiHsmEnrollDeviceAttestation(
+                        session.value, 0, short, ctypes.byref(fingerprint_len)
+                    ),
+                    CKR_BUFFER_TOO_SMALL,
+                )
+                self.assertEqual(fingerprint_len.value, 32)
+
+                fingerprint = (CK_BYTE * fingerprint_len.value)()
+                self.assertEqual(
+                    self.lib.PKCS11RS_YubiHsmEnrollDeviceAttestation(
+                        session.value, 0, fingerprint, ctypes.byref(fingerprint_len)
+                    ),
+                    CKR_OK,
+                )
+                entry = pathlib.Path(directory, bytes(fingerprint).hex() + ".pem")
+                self.assertTrue(entry.read_bytes().startswith(b"-----BEGIN CERTIFICATE-----"))
+
+                direct_fingerprint = (CK_BYTE * 32)()
+                direct_len = CK_ULONG(len(direct_fingerprint))
+                self.assertEqual(
+                    self.lib.PKCS11RS_YubiHsmEnrollDevicePublicKey(
+                        session.value,
+                        direct_fingerprint,
+                        ctypes.byref(direct_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(bytes(direct_fingerprint), bytes(fingerprint))
+                self.assertTrue(entry.read_bytes().startswith(b"-----BEGIN CERTIFICATE-----"))
+
+                factory_fingerprint = (CK_BYTE * 32)()
+                factory_len = CK_ULONG(len(factory_fingerprint))
+                self.assertNotEqual(
+                    self.lib.PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation(
+                        session.value,
+                        factory_fingerprint,
+                        ctypes.byref(factory_len),
+                    ),
+                    CKR_OK,
+                )
+            finally:
+                if previous_prefix is None:
+                    os.environ.pop("PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX", None)
+                else:
+                    os.environ["PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX"] = previous_prefix
 
     def test_abi_yubihsm_fixture_supports_separate_login_username(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

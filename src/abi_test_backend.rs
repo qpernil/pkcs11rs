@@ -1005,6 +1005,10 @@ impl Slot for AbiYubiHsmSlot {
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
+        objects.push(yubihsm_device_public_key_object(
+            slot_id,
+            &abi_yubihsm_device_public_key()?,
+        )?);
         Ok(objects)
     }
 
