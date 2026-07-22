@@ -223,6 +223,10 @@ impl Slot for HsmAuthSlot {
             connector: self.connector.clone(),
         })
     }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         self.connector
             .establish_secure_channel(&self.application_aid)?;

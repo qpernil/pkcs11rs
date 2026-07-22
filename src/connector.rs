@@ -22,6 +22,9 @@ pub(crate) trait Connector {
     fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         crate::iso7816::transmit(self, command)
     }
+    fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        crate::iso7816::transmit_short(self, command)
+    }
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
@@ -198,6 +201,21 @@ impl Connector for PcscAppletConnector {
         let mut state = self.state.try_borrow_mut()?;
         let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit(self.base.as_ref(), command);
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        result
+    }
+
+    fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+        self.ensure_selected()?;
+        if self.protocol.is_none() || !self.enabled.get() {
+            return crate::iso7816::transmit_short(self.base.as_ref(), command);
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let result = channel.transmit_short(self.base.as_ref(), command);
         if result.is_err() {
             state.session = None;
             state.application_aid.clear();

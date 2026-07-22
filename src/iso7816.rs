@@ -32,14 +32,29 @@ pub(crate) fn transmit<C: Connector + ?Sized>(
     connector: &C,
     command: &CommandApdu,
 ) -> Result<ResponseApdu, Error> {
+    transmit_with_capabilities(connector, command, connector.apdu_capabilities())
+}
+
+pub(crate) fn transmit_short<C: Connector + ?Sized>(
+    connector: &C,
+    command: &CommandApdu,
+) -> Result<ResponseApdu, Error> {
+    transmit_with_capabilities(connector, command, ApduCapabilities::SHORT_ONLY)
+}
+
+fn transmit_with_capabilities<C: Connector + ?Sized>(
+    connector: &C,
+    command: &CommandApdu,
+    capabilities: ApduCapabilities,
+) -> Result<ResponseApdu, Error> {
     let mut command = command.clone();
-    let mut response = transmit_command(connector, &command)?;
+    let mut response = transmit_command(connector, &command, capabilities)?;
     if response.status & 0xff00 == 0x6c00 {
         command.le = Some(match response.status as u8 {
             0 => MAX_SHORT_RESPONSE_LENGTH,
             length => length as u32,
         });
-        response = transmit_command(connector, &command)?;
+        response = transmit_command(connector, &command, capabilities)?;
     }
     collect_response_chain(connector, response)
 }
@@ -47,8 +62,8 @@ pub(crate) fn transmit<C: Connector + ?Sized>(
 fn transmit_command<C: Connector + ?Sized>(
     connector: &C,
     command: &CommandApdu,
+    capabilities: ApduCapabilities,
 ) -> Result<ResponseApdu, Error> {
-    let capabilities = connector.apdu_capabilities();
     let needs_extended = command.data.len() > MAX_SHORT_DATA_LENGTH
         || command
             .le
@@ -287,6 +302,18 @@ mod tests {
     fn uses_iso_command_chaining_without_extended_apdus() {
         let connector = ScriptedConnector::new(ApduCapabilities::SHORT_ONLY, &[0x9000, 0x9000]);
         transmit(&connector, &long_command()).unwrap();
+        let commands = connector.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0][0], COMMAND_CHAINING_CLA);
+        assert_eq!(commands[0][4], 255);
+        assert_eq!(commands[1][0], 0);
+        assert_eq!(commands[1][4], 45);
+    }
+
+    #[test]
+    fn explicit_short_mode_uses_chaining_on_extended_connectors() {
+        let connector = ScriptedConnector::new(ApduCapabilities::EXTENDED, &[0x9000, 0x9000]);
+        transmit_short(&connector, &long_command()).unwrap();
         let commands = connector.commands.borrow();
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0][0], COMMAND_CHAINING_CLA);

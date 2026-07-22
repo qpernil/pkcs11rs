@@ -34,6 +34,8 @@ pub(crate) use commands::{
     parse_object_id, parse_object_list, Command, CommandCode, ObjectInfo, ObjectParameters,
     PublicKey,
 };
+#[cfg(all(test, not(feature = "abi-tests")))]
+pub(crate) use commands::{DelegatedObjectParameters, ObjectFilter};
 
 const COMMAND_CREATE_SESSION: u8 = CommandCode::CreateSession as u8;
 const COMMAND_AUTHENTICATE_SESSION: u8 = CommandCode::AuthenticateSession as u8;
@@ -45,7 +47,7 @@ const CHALLENGE_LENGTH: usize = 8;
 const P256_PRIVATE_KEY_LENGTH: usize = 32;
 const P256_PUBLIC_KEY_LENGTH: usize = 65;
 const ASYMMETRIC_RECEIPT_LENGTH: usize = 16;
-const EC_P256_ALGORITHM: u8 = 12;
+const EC_P256_AUTHENTICATION_ALGORITHM: u8 = 49;
 const SCP11_SHARED_INFO: [u8; 3] = [0x3c, 0x88, 0x10];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 const DEFAULT_SALT: &[u8] = b"Yubico";
@@ -681,7 +683,7 @@ pub(crate) fn device_public_key_bytes(
     connector: &dyn Connector,
 ) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
     let mut encoded = send_plain(connector, &Command::get_device_public_key())?;
-    if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != EC_P256_ALGORITHM {
+    if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != EC_P256_AUTHENTICATION_ALGORITHM {
         return Err(CKR_DEVICE_ERROR.into());
     }
     encoded[0] = 0x04;

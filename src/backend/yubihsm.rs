@@ -554,6 +554,10 @@ impl Slot for YubiHsmSlot {
             session: self.session.clone(),
         })
     }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn yubihsm_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
+    }
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         let (username, password) = split_yubihsm_login(pin)?;
         self.login_user(username, password)

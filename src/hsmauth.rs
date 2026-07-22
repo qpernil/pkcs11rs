@@ -412,7 +412,7 @@ impl Client {
             le: None,
             extended: false,
         };
-        let response = connector.send_apdu(&command);
+        let response = connector.send_short_apdu(&command);
         if sensitive {
             command.data.zeroize();
         }
@@ -770,6 +770,9 @@ mod tests {
             ApduCapabilities::EXTENDED
         }
         fn send_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
+            panic!("HSMAuth command was not forced to short APDU mode: {command:?}")
+        }
+        fn send_short_apdu(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
             self.commands.borrow_mut().push(command.clone());
             self.responses
                 .borrow_mut()
@@ -888,13 +891,13 @@ mod tests {
         assert_eq!(symmetric.enc.as_slice(), &[0x22; 16]);
 
         let host_public = Client
-            .get_challenge(&connector, "asymmetric", Some(b"password"))
+            .get_challenge(&connector, "pkcs11rs-asymmetric", Some(b"password"))
             .unwrap();
         assert_eq!(host_public, public_key);
         let asymmetric = Client
             .calculate_session_keys_asymmetric(
                 &connector,
-                "asymmetric",
+                "pkcs11rs-asymmetric",
                 &[0x66; 130],
                 &public_key,
                 &[0x77; 16],
@@ -919,6 +922,8 @@ mod tests {
             .data
             .windows(2)
             .any(|value| value == [TAG_PUBLIC_KEY, 65]));
+        assert_eq!(commands[3].data.len(), 257);
+        assert!(!commands[3].extended);
     }
 
     #[test]

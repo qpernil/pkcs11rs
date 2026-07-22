@@ -73,3 +73,41 @@ remain available even when no YubiHSM Auth applet is connected.
 Credential creation, deletion, password changes, management-key changes, and
 application reset are implemented by the internal protocol client but are not
 mapped to PKCS #11 operations. The applet slot is deliberately read-only.
+
+## Asymmetric hardware provisioning test
+
+The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` test deletes
+the configured test credential and authentication key if they already exist,
+generates a fresh persistent asymmetric credential on a YubiKey, reads its
+P-256 public key, installs that public key as a YubiHSM authentication key, and
+verifies an actual asymmetric session. It leaves the newly provisioned pair in
+place after the test.
+
+Provisioning requires an explicit enable flag and target object ID:
+
+```sh
+PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH=1 \
+PKCS11RS_TEST_YUBIHSM_AUTHKEY_ID=1234 \
+cargo test provisions_asymmetric_hsmauth_credential_on_yubihsm -- --ignored --nocapture
+```
+
+The defaults are YubiHSM Auth management key
+`00000000000000000000000000000000`, credential label
+`pkcs11rs-asymmetric`, credential password `password`, YubiHSM administrator
+key `0001` with password `password`, domain `0001`, and no operational or
+delegated capabilities on the new key. Override them with:
+
+- `PKCS11RS_TEST_HSMAUTH_MANAGEMENT_KEY`
+- `PKCS11RS_TEST_HSMAUTH_LABEL`
+- `PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD`
+- `PKCS11RS_TEST_YUBIHSM_ADMIN_ID`
+- `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`
+- `PKCS11RS_TEST_YUBIHSM_DOMAINS`
+
+When multiple devices are attached, select them by serial number or full device
+name with `PKCS11RS_TEST_HSMAUTH_SOURCE` and `PKCS11RS_TEST_YUBIHSM_SOURCE`.
+Before cleanup, an existing YubiHSM object must have the configured label and
+asymmetric authentication algorithm. This prevents an accidentally reused ID
+from deleting an unrelated object. Cleanup occurs only after the explicit
+enable flag and target ID have been validated. The freshly generated keys are
+not deleted, including after a partial provisioning failure.

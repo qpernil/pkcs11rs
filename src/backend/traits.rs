@@ -15,6 +15,14 @@ trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        None
+    }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn yubihsm_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        None
+    }
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
