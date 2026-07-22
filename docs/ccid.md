@@ -54,9 +54,13 @@ recognition data, CPLC, supported CA identifiers, and available SCP11
 certificate chains. Installed key records, CA identifiers, card recognition,
 and CPLC are exposed as immutable `CKO_DATA` objects. Key records use the
 two-byte KID/KVN reference as `CKA_ID`; `CKA_VALUE` contains only the reported
-key-component type and length pairs, never key material. CA data-object values
-contain Subject Key Identifiers. SCP11 certificate-chain entries are exposed
-as immutable `CKO_CERTIFICATE` objects in the card's issuer-to-leaf order.
+key-component type and length pairs, never key material. Their `CKA_OBJECT_ID`
+contains the KID/KVN reference. Card-recognition and CPLC objects use their
+GlobalPlatform tags as `CKA_OBJECT_ID`; CA objects use the CA-list tag followed
+by KID/KVN. CA data-object values contain Subject Key Identifiers. SCP11
+certificate-chain entries are exposed as immutable `CKO_CERTIFICATE` objects
+in the card's issuer-to-leaf order. The leaf certificate shares the key
+record's KID/KVN `CKA_ID`; preceding certificates use indexed IDs.
 
 The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
 supports random generation through the applet's `GET CHALLENGE` command and

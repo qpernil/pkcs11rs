@@ -771,13 +771,17 @@ fn issuer_sd_token_model_identifies_the_applet() {
             None,
             std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
         ));
-    let slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
+    let mut slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());
     assert_eq!(&token_info.model[..9], b"Issuer SD");
     assert_eq!(&token_info.label[..21], b"Issuer SD #SELECT0001");
+    assert_eq!(token_info.ulMinPinLen, 0);
+    assert_eq!(token_info.ulMaxPinLen, 0);
     assert!(crate::Slot::mechanisms(&slot).is_empty());
+    assert!(crate::Slot::login(&mut slot, &[]).is_ok());
+    assert!(crate::Slot::login_is_active(&slot));
 }
 
 #[test]
@@ -815,6 +819,10 @@ fn issuer_sd_metadata_becomes_read_only_pkcs11_objects() {
     assert_eq!(key.class, CKO_DATA as CK_OBJECT_CLASS);
     assert_eq!(key.id, vec![0x13, 1]);
     assert_eq!(
+        key.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x13, 1])
+    );
+    assert_eq!(
         key.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
         Some(b"Issuer SD".to_vec())
     );
@@ -829,6 +837,7 @@ fn issuer_sd_metadata_becomes_read_only_pkcs11_objects() {
 
     let certificate = objects.last().unwrap();
     assert_eq!(certificate.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
+    assert_eq!(certificate.id, key.id);
     assert_eq!(
         certificate.attribute_value(CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE),
         Some((CKC_X_509 as CK_ULONG).to_ne_bytes().to_vec())
@@ -837,6 +846,46 @@ fn issuer_sd_metadata_becomes_read_only_pkcs11_objects() {
         certificate.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
         Some(vec![0x30, 0])
     );
+
+    let card_recognition = &objects[1];
+    assert_eq!(
+        card_recognition.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x66])
+    );
+    let cplc = &objects[2];
+    assert_eq!(
+        cplc.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x9f, 0x7f])
+    );
+    let ca = &objects[3];
+    assert_eq!(
+        ca.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0xff, 0x34, 0x20, 1])
+    );
+}
+
+#[test]
+fn issuer_sd_leaf_certificate_shares_the_key_id() {
+    let key_ref = crate::security_domain::KeyRef {
+        kid: crate::security_domain::KID_SCP11A,
+        kvn: 7,
+    };
+    let info = crate::SecurityDomainInfo {
+        keys: vec![crate::security_domain::KeyInfo {
+            key_ref,
+            components: Vec::new(),
+        }],
+        certificate_bundles: vec![crate::security_domain::CertificateBundle {
+            key_ref,
+            certificates: vec![vec![0x30, 0], vec![0x30, 0]],
+        }],
+        ..Default::default()
+    };
+
+    let objects = crate::issuer_security_domain_token_objects(TEST_SLOT_ID, &info);
+    assert_eq!(objects[0].id, vec![0x11, 7]);
+    assert_eq!(objects[1].id, vec![0x11, 7, 0, 0]);
+    assert_eq!(objects[2].id, vec![0x11, 7]);
 }
 
 #[test]

@@ -476,6 +476,8 @@ impl Slot for AbiScp03Slot {
 
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        info.ulMinPinLen = 0;
+        info.ulMaxPinLen = 0;
         Ok(())
     }
 

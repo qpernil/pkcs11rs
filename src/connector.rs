@@ -46,6 +46,7 @@ pub(crate) trait Connector {
 
     fn clear_secure_channel(&self) {}
 
+    #[allow(dead_code)]
     fn secure_channel_is_active(&self) -> bool {
         false
     }
