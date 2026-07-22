@@ -484,9 +484,7 @@ impl Session for AbiYubiHsmSession {
             YubiHsmCommandCode::GetOpaque => {
                 return match id {
                     ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
-                    ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => {
-                        Ok(ABI_YUBIHSM_OPAQUE_CERTIFICATE.to_vec())
-                    }
+                    ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
                     _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
                 };
             }
@@ -535,7 +533,31 @@ const ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID: u16 = 6;
 #[cfg(feature = "abi-tests")]
 const ABI_YUBIHSM_OPAQUE_DATA: &[u8] = b"ABI opaque data";
 #[cfg(feature = "abi-tests")]
-const ABI_YUBIHSM_OPAQUE_CERTIFICATE: &[u8] = &[0x30, 0x03, 0x02, 0x01, 0x01];
+fn abi_yubihsm_opaque_certificate() -> Result<Vec<u8>, Error> {
+    static CERTIFICATE: OnceLock<Vec<u8>> = OnceLock::new();
+    if let Some(certificate) = CERTIFICATE.get() {
+        return Ok(certificate.clone());
+    }
+    let private_key = Rsa::generate(2048)?;
+    let certificate_key = PKey::from_rsa(private_key)?;
+    let mut name = openssl::x509::X509Name::builder()?;
+    name.append_entry_by_text("CN", "PKCS11RS ABI YubiHSM")?;
+    let name = name.build();
+    let serial_number = BigNum::from_slice(&[0x80])?;
+    let serial = openssl::asn1::Asn1Integer::from_bn(&serial_number)?;
+    let mut certificate = openssl::x509::X509::builder()?;
+    certificate.set_version(2)?;
+    certificate.set_serial_number(&serial)?;
+    certificate.set_subject_name(&name)?;
+    certificate.set_issuer_name(&name)?;
+    certificate.set_pubkey(&certificate_key)?;
+    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
+    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
+    certificate.sign(&certificate_key, MessageDigest::sha256())?;
+    let certificate = certificate.build().to_der()?;
+    let _ = CERTIFICATE.set(certificate);
+    CERTIFICATE.get().cloned().ok_or(CKR_DEVICE_ERROR.into())
+}
 
 #[cfg(feature = "abi-tests")]
 pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
@@ -743,7 +765,7 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
             ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID,
             YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
             b"opaque-cert".as_slice(),
-            ABI_YUBIHSM_OPAQUE_CERTIFICATE.len(),
+            abi_yubihsm_opaque_certificate()?.len(),
         ),
     ];
     definitions

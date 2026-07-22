@@ -549,6 +549,146 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         crate::encode_pkcs1_v1_5_signature_input(b"abc", 128).unwrap()
     );
 
+    mechanism.mechanism = CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE;
+    let mut long_message = vec![0x42; 512];
+    signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            long_message.as_mut_ptr(),
+            long_message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), &long_message).unwrap();
+    let digest_info = crate::piv_digest_info(mechanism.mechanism, digest.as_ref()).unwrap();
+    assert_eq!(
+        *captured.borrow(),
+        crate::encode_pkcs1_v1_5_signature_input(&digest_info, 128).unwrap()
+    );
+
+    mechanism.mechanism = CKM_RSA_X_509 as CK_MECHANISM_TYPE;
+    signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut raw_input = vec![0; 125];
+    raw_input.extend_from_slice(b"abc");
+    assert_eq!(*captured.borrow(), raw_input);
+
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+pub fn verify_accepts_raw_rsa_and_pss_signatures() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let private_key = {
+        let context = crate::lock_context().unwrap();
+        match &context
+            .as_ref()
+            .unwrap()
+            .memory_objects
+            .get(&2)
+            .unwrap()
+            .material
+        {
+            crate::KeyMaterial::RsaPrivate(key) => key.clone(),
+            _ => panic!("test private key is not RSA"),
+        }
+    };
+    let key_size = private_key.size() as usize;
+
+    let mut raw_data = b"raw RSA input".to_vec();
+    let mut encoded = vec![0; key_size - raw_data.len()];
+    encoded.extend_from_slice(&raw_data);
+    let mut raw_signature = vec![0; key_size];
+    private_key
+        .private_encrypt(&encoded, &mut raw_signature, openssl::rsa::Padding::NONE)
+        .unwrap();
+    let mut raw_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut raw_mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            raw_data.as_mut_ptr(),
+            raw_data.len() as CK_ULONG,
+            raw_signature.as_mut_ptr(),
+            raw_signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut digest = openssl::hash::hash(
+        openssl::hash::MessageDigest::sha256(),
+        b"RSA-PSS verification",
+    )
+    .unwrap()
+    .to_vec();
+    let pss = crate::encode_rsa_pss(
+        &digest,
+        key_size,
+        CKM_SHA256 as CK_MECHANISM_TYPE,
+        33,
+        32,
+    )
+    .unwrap();
+    let mut pss_signature = vec![0; key_size];
+    private_key
+        .private_encrypt(&pss, &mut pss_signature, openssl::rsa::Padding::NONE)
+        .unwrap();
+    let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+        sLen: 32,
+    };
+    let mut pss_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut pss_mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            digest.as_mut_ptr(),
+            digest.len() as CK_ULONG,
+            pss_signature.as_mut_ptr(),
+            pss_signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 }
 

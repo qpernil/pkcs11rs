@@ -170,7 +170,9 @@ fn verify(
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
                 let mut recovered = vec![0; public_key.size() as usize];
-                let padding = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+                let padding = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                    || piv_is_pss_mechanism(operation.mechanism)
+                {
                     Padding::NONE
                 } else {
                     Padding::PKCS1
@@ -179,7 +181,14 @@ fn verify(
                     .public_decrypt(signature, &mut recovered, padding)
                     .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
                 recovered.truncate(recovered_len);
-                let expected = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+                let expected = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+                    if data.len() > public_key.size() as usize {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let mut expected = vec![0; public_key.size() as usize - data.len()];
+                    expected.extend_from_slice(data);
+                    expected
+                } else if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
                     data.to_vec()
                 } else if piv_is_hashed_rsa_pkcs(operation.mechanism) {
                     let digest = hash(
@@ -192,6 +201,10 @@ fn verify(
                     let (mgf, salt_length, hash_mechanism) =
                         operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
                     let digest = if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+                        let expected_length = digest_for_hash_mechanism(hash_mechanism)?.size();
+                        if data.len() != expected_length {
+                            return Err(CKR_DATA_LEN_RANGE.into());
+                        }
                         data.to_vec()
                     } else {
                         hash(

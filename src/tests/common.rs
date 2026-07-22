@@ -150,6 +150,16 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(found, 1);
     assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
+    let mut raw_rsa_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(session, &mut raw_rsa_mechanism, private_key),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
     let mut rsa_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
@@ -173,12 +183,48 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_OK as CK_RV
     );
     assert_eq!(ciphertext_len, 256);
-    let mut decrypted = [0u8; 32];
-    let mut decrypted_len = decrypted.len() as CK_ULONG;
+    let mut too_small = [0u8; 1];
+    let mut decrypted_len = too_small.len() as CK_ULONG;
     assert_eq!(
         crate::C_DecryptInit(session, &mut rsa_mechanism, private_key),
         CKR_OK as CK_RV
     );
+    assert_eq!(
+        crate::C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ciphertext_len,
+            too_small.as_mut_ptr(),
+            &mut decrypted_len,
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(decrypted_len, b"plaintext".len() as CK_ULONG);
+    let decrypt_commands = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(code, _)| *code == crate::YubiHsmCommandCode::DecryptPkcs1 as u8)
+            .count()
+    };
+    assert_eq!(decrypt_commands(), 1);
+    {
+        let context = crate::lock_context().unwrap();
+        let debug = format!(
+            "{:?}",
+            context
+                .as_ref()
+                .unwrap()
+                .decrypt_operations
+                .get(&session)
+                .unwrap()
+        );
+        assert!(debug.contains("result_length"));
+        assert!(!debug.contains("plaintext"));
+    }
+
+    let mut decrypted = [0u8; 32];
+    decrypted_len = decrypted.len() as CK_ULONG;
     assert_eq!(
         crate::C_Decrypt(
             session,
@@ -190,6 +236,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_OK as CK_RV
     );
     assert_eq!(&decrypted[..decrypted_len as usize], b"plaintext");
+    assert_eq!(decrypt_commands(), 1);
 
     let mut sign_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -692,11 +739,23 @@ fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
         Some(crate::ulong_attribute(CKC_X_509 as CK_ULONG))
     );
     for attribute in [CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER] {
-        assert_eq!(
-            certificate.attribute_value(attribute as CK_ATTRIBUTE_TYPE),
-            Some(Vec::new())
-        );
+        assert!(certificate
+            .attribute_value(attribute as CK_ATTRIBUTE_TYPE)
+            .is_none());
     }
+}
+
+#[test]
+fn certificate_serial_numbers_are_der_integers() {
+    assert_eq!(crate::der_integer(&[]).unwrap(), [0x02, 0x01, 0x00]);
+    assert_eq!(
+        crate::der_integer(&[0, 0x7f]).unwrap(),
+        [0x02, 0x01, 0x7f]
+    );
+    assert_eq!(
+        crate::der_integer(&[0x80]).unwrap(),
+        [0x02, 0x02, 0x00, 0x80]
+    );
 }
 
 #[test]
@@ -2177,6 +2236,33 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
+
+    let public_operations = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA256,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+        crate::YUBIHSM_ALGO_EC_P256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA256,
+    ]);
+    let flags = |type_| {
+        public_operations
+            .iter()
+            .find(|mechanism| mechanism.type_ == type_)
+            .unwrap()
+            .flags
+    };
+    assert_ne!(
+        flags(CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE) & CKF_VERIFY as CK_FLAGS,
+        0
+    );
+    assert_ne!(
+        flags(CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE) & CKF_ENCRYPT as CK_FLAGS,
+        0
+    );
+    assert_ne!(
+        flags(CKM_ECDSA as CK_MECHANISM_TYPE) & CKF_VERIFY as CK_FLAGS,
+        0
+    );
 
     let without_ecb =
         crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_AES128, crate::YUBIHSM_ALGO_AES_CBC]);

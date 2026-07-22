@@ -274,7 +274,7 @@ struct GcmParameters {
     tag_bits: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CryptOperation {
     key: KeyMaterial,
     slot_id: CK_SLOT_ID,
@@ -285,6 +285,24 @@ struct CryptOperation {
     gcm: Option<GcmParameters>,
     oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
     piv_pin_policy: Option<u8>,
+    result: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for CryptOperation {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("CryptOperation")
+            .field("key", &self.key)
+            .field("slot_id", &self.slot_id)
+            .field("requires_login", &self.requires_login)
+            .field("context_specific_extended", &self.context_specific_extended)
+            .field("mechanism", &self.mechanism)
+            .field("iv", &self.iv)
+            .field("gcm", &self.gcm)
+            .field("oaep", &self.oaep)
+            .field("piv_pin_policy", &self.piv_pin_policy)
+            .field("result_length", &self.result.as_ref().map(|result| result.len()))
+            .finish()
+    }
 }
 
 
@@ -326,12 +344,15 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
             .issuer_name()
             .to_der()
             .ok(),
-        x if x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
-            .ok()?
-            .serial_number()
-            .to_bn()
-            .ok()
-            .map(|serial| serial.to_vec()),
+        x if x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE => {
+            let serial = openssl::x509::X509::from_der(value)
+                .ok()?
+                .serial_number()
+                .to_bn()
+                .ok()?
+                .to_vec();
+            der_integer(&serial)
+        }
         x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
             .ok()?
             .public_key()
@@ -340,6 +361,30 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
             .ok(),
         _ => None,
     }
+}
+
+fn der_integer(magnitude: &[u8]) -> Option<Vec<u8>> {
+    let first_nonzero = magnitude
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(magnitude.len());
+    let magnitude = &magnitude[first_nonzero..];
+    let needs_sign_padding = magnitude.first().is_some_and(|byte| byte & 0x80 != 0);
+    let content_length = magnitude.len().max(1) + usize::from(needs_sign_padding);
+    let mut encoded = Vec::with_capacity(content_length + 3);
+    encoded.push(0x02);
+    if content_length < 128 {
+        encoded.push(content_length as u8);
+    } else if content_length <= u8::MAX as usize {
+        encoded.extend_from_slice(&[0x81, content_length as u8]);
+    } else {
+        return None;
+    }
+    if magnitude.is_empty() || needs_sign_padding {
+        encoded.push(0);
+    }
+    encoded.extend_from_slice(magnitude);
+    Some(encoded)
 }
 
 fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -837,21 +882,6 @@ impl TokenObject {
                         attempted,
                     )
                     .and_then(|value| piv_certificate_attribute(&value, x)),
-                    KeyMaterial::YubiHsm {
-                        object_type,
-                        algorithm,
-                        ..
-                    } if *object_type == YUBIHSM_OPAQUE
-                        && *algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
-                        && matches!(
-                            x,
-                            value if value == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
-                                || value == CKA_ISSUER as CK_ATTRIBUTE_TYPE
-                                || value == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
-                        ) =>
-                    {
-                        Some(Vec::new())
-                    }
                     _ => None,
                 }
             }

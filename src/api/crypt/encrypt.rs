@@ -243,6 +243,7 @@ fn crypt_init(
                 KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
                 _ => None,
             },
+            result: None,
         };
         if encrypting {
             ctx.encrypt_operations.insert(session_handle, operation);
@@ -530,7 +531,10 @@ fn crypt(
             *output_len = required as CK_ULONG;
             return Ok(());
         }
-        let result = (|| -> Result<Vec<u8>, Error> {
+        let result = if let Some(result) = operation.result {
+            result.to_vec()
+        } else {
+            let result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
                 KeyMaterial::RsaPublic(key)
                     if encrypting && operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE =>
@@ -659,17 +663,26 @@ fn crypt(
                 }
                 _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }
-        })();
-        let result = match result {
-            Ok(result) => result,
-            Err(error) => {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
-                return Err(error);
+            })();
+            match result {
+                Ok(result) => result,
+                Err(error) => {
+                    ctx.encrypt_operations.remove(&session_handle);
+                    ctx.decrypt_operations.remove(&session_handle);
+                    return Err(error);
+                }
             }
         };
         if *output_len < result.len() as CK_ULONG {
             *output_len = result.len() as CK_ULONG;
+            let operations = if encrypting {
+                &mut ctx.encrypt_operations
+            } else {
+                &mut ctx.decrypt_operations
+            };
+            if let Some(operation) = operations.get_mut(&session_handle) {
+                operation.result = Some(Zeroizing::new(result));
+            }
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
         unsafe { ptr::copy_nonoverlapping(result.as_ptr(), output, result.len()) };

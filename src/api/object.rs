@@ -1120,6 +1120,33 @@ fn get_attribute_value(
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
+            if let KeyMaterial::YubiHsm {
+                id,
+                object_type,
+                algorithm,
+                value,
+                ..
+            } = &object.material
+            {
+                if *object_type == YUBIHSM_OPAQUE
+                    && *algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
+                    && is_certificate_attribute(attribute.type_)
+                {
+                    let payload = yubihsm_opaque_value(ctx, session_handle, *id, value)?;
+                    match piv_certificate_attribute(&payload, attribute.type_) {
+                        Some(value) => {
+                            if let Err(error) = write_attribute_value(attribute, &value) {
+                                rv = combine_attribute_rv(rv, error);
+                            }
+                        }
+                        None => {
+                            attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                            rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                        }
+                    }
+                    continue;
+                }
+            }
             if attribute.type_ == CKA_VALUE as CK_ATTRIBUTE_TYPE {
                 match &object.material {
                     KeyMaterial::DerivedSecret(value) => {
@@ -1204,6 +1231,29 @@ fn get_attribute_value(
             Err(rv.into())
         }
     })
+}
+
+fn yubihsm_opaque_value(
+    ctx: &Context,
+    session_handle: CK_SESSION_HANDLE,
+    id: u16,
+    value: &Rc<RefCell<Option<Vec<u8>>>>,
+) -> Result<Vec<u8>, Error> {
+    if value
+        .try_borrow()
+        .map_err(|_| Error::from(CKR_CANT_LOCK))?
+        .is_none()
+    {
+        let payload = ctx._get_session(session_handle)?.1.yubihsm_command(
+            &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?,
+        )?;
+        *value.try_borrow_mut()? = Some(payload);
+    }
+    value
+        .try_borrow()
+        .map_err(|_| Error::from(CKR_CANT_LOCK))?
+        .clone()
+        .ok_or(CKR_DEVICE_ERROR.into())
 }
 
 fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
