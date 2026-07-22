@@ -360,6 +360,42 @@ impl PivSlot {
             })
             .unwrap_or(self.version)
     }
+
+    fn cache_certificate(
+        &mut self,
+        slot: piv::Slot,
+        algorithm: piv::Algorithm,
+        certificate: Vec<u8>,
+        data: Vec<u8>,
+    ) -> Result<(), Error> {
+        self.certificates.retain(|candidate| candidate.slot != slot);
+        self.certificates.push(PivCertificate {
+            slot,
+            algorithm,
+            value: certificate.clone(),
+            attestation: slot == piv::Slot::Attestation,
+        });
+        self.data_objects
+            .retain(|candidate| candidate.object_id != slot.certificate_object());
+        self.data_objects.push(PivDataObject {
+            object_id: slot.certificate_object(),
+            value: data,
+        });
+        if slot != piv::Slot::Attestation && !self.keys.iter().any(|key| key.slot == slot) {
+            let public_key = piv_public_key_from_certificate(algorithm, &certificate)?;
+            self.keys.push(PivKey {
+                slot,
+                algorithm,
+                public_key,
+                attestation: Rc::new(RefCell::new(None)),
+                attestation_attempted: Rc::new(Cell::new(false)),
+                pin_policy: 0,
+                touch_policy: 0,
+                origin: 0,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl Slot for PivSlot {
@@ -535,7 +571,18 @@ impl Slot for PivSlot {
                     .and_then(|key| piv_public_key_from_metadata(algorithm, key).ok())?;
                 Some((algorithm, public_key, metadata.clone()))
             });
-            let certificate = PivClient.certificate(self.connector.as_ref(), slot).ok();
+            let certificate_data = PivClient
+                .get_data(self.connector.as_ref(), slot.certificate_object())
+                .ok();
+            if let Some(value) = certificate_data.as_ref() {
+                self.data_objects.push(PivDataObject {
+                    object_id: slot.certificate_object(),
+                    value: value.clone(),
+                });
+            }
+            let certificate = certificate_data
+                .as_deref()
+                .and_then(|value| piv::decode_certificate_object(value).ok());
             let certificate_algorithm = certificate
                 .as_deref()
                 .and_then(piv_algorithm_from_certificate);
@@ -823,28 +870,8 @@ impl Slot for PivSlot {
         if !piv_algorithm_supported(self.reported_version(), algorithm) {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
-        PivClient.put_certificate(self.connector.as_ref(), slot, certificate)?;
-        self.certificates.retain(|candidate| candidate.slot != slot);
-        self.certificates.push(PivCertificate {
-            slot,
-            algorithm,
-            value: certificate.to_vec(),
-            attestation: slot == piv::Slot::Attestation,
-        });
-        if slot != piv::Slot::Attestation && !self.keys.iter().any(|key| key.slot == slot) {
-            let public_key = piv_public_key_from_certificate(algorithm, certificate)?;
-            self.keys.push(PivKey {
-                slot,
-                algorithm,
-                public_key,
-                attestation: Rc::new(RefCell::new(None)),
-                attestation_attempted: Rc::new(Cell::new(false)),
-                pin_policy: 0,
-                touch_policy: 0,
-                origin: 0,
-            });
-        }
-        Ok(())
+        let data = PivClient.put_certificate(self.connector.as_ref(), slot, certificate)?;
+        self.cache_certificate(slot, algorithm, certificate.to_vec(), data)
     }
     fn piv_delete_key(&mut self, slot: piv::Slot) -> Result<(), Error> {
         if !self.management_authenticated.get() {
@@ -879,6 +906,8 @@ impl Slot for PivSlot {
         PivClient.delete_certificate(self.connector.as_ref(), slot)?;
         self.certificates
             .retain(|certificate| certificate.slot != slot);
+        self.data_objects
+            .retain(|object| object.object_id != slot.certificate_object());
         Ok(())
     }
     fn piv_write_data(&mut self, object_id: u32, value: &[u8]) -> Result<(), Error> {
@@ -887,6 +916,15 @@ impl Slot for PivSlot {
         }
         if !piv::data_object_allowed(object_id) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+        if let Some(slot) = piv::data_object_mapping(object_id).and_then(|mapping| mapping.slot) {
+            let certificate = piv::decode_certificate_object(value)?;
+            let algorithm = piv_algorithm_from_certificate(&certificate).ok_or(CKR_DATA_INVALID)?;
+            if !piv_algorithm_supported(self.reported_version(), algorithm) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+            PivClient.put_data(self.connector.as_ref(), object_id, value)?;
+            return self.cache_certificate(slot, algorithm, certificate, value.to_vec());
         }
         PivClient.put_data(self.connector.as_ref(), object_id, value)?;
         self.data_objects
@@ -903,6 +941,14 @@ impl Slot for PivSlot {
         }
         if !piv::data_object_allowed(object_id) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+        }
+        if let Some(slot) = piv::data_object_mapping(object_id).and_then(|mapping| mapping.slot) {
+            PivClient.delete_certificate(self.connector.as_ref(), slot)?;
+            self.certificates
+                .retain(|certificate| certificate.slot != slot);
+            self.data_objects
+                .retain(|object| object.object_id != object_id);
+            return Ok(());
         }
         PivClient.put_data(self.connector.as_ref(), object_id, &[])?;
         self.data_objects
