@@ -582,6 +582,7 @@ impl Context {
                         firmware_version: Cell::new(None),
                         serial_number: OnceLock::new(),
                         apdu_capabilities: Cell::new(ApduCapabilities::SHORT_ONLY),
+                        connection_epoch: Cell::new(0),
                     };
                     let name = connector.name();
                     log!(2, "{}", name);

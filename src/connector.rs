@@ -13,6 +13,9 @@ pub(crate) trait Connector {
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         None
     }
+    fn connection_epoch(&self) -> u64 {
+        0
+    }
     fn set_device_identity(&self, _firmware: Option<(u8, u8, u8)>, _serial: Option<&str>) {}
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
@@ -97,6 +100,23 @@ pub(crate) trait Connector {
 pub(crate) struct SecureChannelState {
     pub(crate) application_aid: Vec<u8>,
     pub(crate) session: Option<Scp03Session>,
+    pub(crate) validated_scp11_keys: HashMap<Scp11CertificateCacheKey, Vec<u8>>,
+    pub(crate) connection_epoch: u64,
+}
+
+impl SecureChannelState {
+    fn synchronize_connection(&mut self, connection_epoch: u64) {
+        if self.connection_epoch != connection_epoch {
+            self.session = None;
+            self.application_aid.clear();
+            self.validated_scp11_keys.clear();
+            self.connection_epoch = connection_epoch;
+        }
+    }
+
+    fn invalidate_scp11_certificates(&mut self) {
+        self.validated_scp11_keys.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -131,6 +151,8 @@ impl PcscAppletConnector {
 
     fn ensure_selected(&self) -> Result<(), Error> {
         let mut state = self.state.try_borrow_mut()?;
+        let connection_epoch = self.base.connection_epoch();
+        state.synchronize_connection(connection_epoch);
         if state.application_aid != self.application_aid {
             state.session = None;
             state.application_aid.clear();
@@ -143,7 +165,7 @@ impl PcscAppletConnector {
         }
 
         let established = match self.protocol.ok_or(CKR_ARGUMENTS_BAD)? {
-            SecureChannelProtocol::Scp03 => {
+            SecureChannelProtocol::Scp03 => (|| {
                 let keys = Scp03KeySet::from_environment()?;
                 let security_level = configured_security_level()?;
                 Scp03Session::authenticate_selected(
@@ -151,18 +173,54 @@ impl PcscAppletConnector {
                     &keys,
                     security_level,
                     &self.application_aid,
-                )?
+                )
+            })(),
+            SecureChannelProtocol::Scp11a => self.establish_scp11(&mut state, Scp11Variant::A),
+            SecureChannelProtocol::Scp11b => self.establish_scp11(&mut state, Scp11Variant::B),
+            SecureChannelProtocol::Scp11c => self.establish_scp11(&mut state, Scp11Variant::C),
+        };
+        let established = match established {
+            Ok(established) => established,
+            Err(error) => {
+                state.session = None;
+                state.application_aid.clear();
+                return Err(error);
             }
-            SecureChannelProtocol::Scp11a => Scp11KeySet::from_environment(Scp11Variant::A)?
-                .authenticate_selected(self.base.as_ref())?,
-            SecureChannelProtocol::Scp11b => Scp11KeySet::from_environment(Scp11Variant::B)?
-                .authenticate_selected(self.base.as_ref())?,
-            SecureChannelProtocol::Scp11c => Scp11KeySet::from_environment(Scp11Variant::C)?
-                .authenticate_selected(self.base.as_ref())?,
         };
         state.application_aid = self.application_aid.clone();
         state.session = Some(established);
         Ok(())
+    }
+
+    fn establish_scp11(
+        &self,
+        state: &mut SecureChannelState,
+        variant: Scp11Variant,
+    ) -> Result<Scp03Session, Error> {
+        let keys = Scp11KeySet::from_environment(variant)?;
+        let cache_key = keys.certificate_cache_key();
+        let cached = cache_key
+            .as_ref()
+            .and_then(|key| state.validated_scp11_keys.get(key))
+            .cloned();
+        let first = keys.authenticate_application(
+            self.base.as_ref(),
+            &self.application_aid,
+            cached.as_deref(),
+        );
+        let (session, validated) = match first {
+            Err(_) if cached.is_some() => {
+                if let Some(key) = cache_key.as_ref() {
+                    state.validated_scp11_keys.remove(key);
+                }
+                keys.authenticate_application(self.base.as_ref(), &self.application_aid, None)?
+            }
+            result => result?,
+        };
+        if let (Some(key), Some(point)) = (cache_key, validated) {
+            state.validated_scp11_keys.insert(key, point);
+        }
+        Ok(session)
     }
 
     fn record_discovery_error(&self, error: &Error) {
@@ -207,6 +265,9 @@ impl Connector for PcscAppletConnector {
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         self.base.firmware_version()
+    }
+    fn connection_epoch(&self) -> u64 {
+        self.base.connection_epoch()
     }
     fn set_device_identity(&self, firmware: Option<(u8, u8, u8)>, serial: Option<&str>) {
         self.base.set_device_identity(firmware, serial);
@@ -419,7 +480,9 @@ impl Connector for PcscAppletConnector {
             session,
             prepared,
         );
-        if result.is_err() {
+        if result.is_ok() {
+            state.invalidate_scp11_certificates();
+        } else {
             state.session = None;
             state.application_aid.clear();
         }
@@ -552,6 +615,7 @@ pub(crate) struct PcscConnector {
     pub(crate) firmware_version: Cell<Option<(u8, u8, u8)>>,
     pub(crate) serial_number: OnceLock<String>,
     pub(crate) apdu_capabilities: Cell<ApduCapabilities>,
+    pub(crate) connection_epoch: Cell<u64>,
 }
 
 impl std::fmt::Debug for PcscConnector {
@@ -587,6 +651,9 @@ impl Connector for PcscConnector {
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         self.firmware_version.get()
+    }
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch.get()
     }
     fn set_device_identity(&self, firmware: Option<(u8, u8, u8)>, serial: Option<&str>) {
         if let Some(firmware) = firmware {
@@ -643,6 +710,8 @@ impl Connector for PcscConnector {
         self.apdu_capabilities
             .set(detect_pcsc_apdu_capabilities(&card));
         *self.card.borrow_mut() = Some(card);
+        self.connection_epoch
+            .set(self.connection_epoch.get().wrapping_add(1));
         Ok(())
     }
 }
@@ -873,5 +942,26 @@ mod tests {
         assert!(yubikey_atr_is_nfc(&[0x3b, 0x8d]));
         assert!(!yubikey_atr_is_nfc(&[0x3b, 0xfd]));
         assert!(!yubikey_atr_is_nfc(&[]));
+    }
+
+    #[test]
+    fn validated_scp11_keys_survive_selection_but_not_reconnect_or_sd_mutation() {
+        let key = (0x13, 1, [0x55; 32]);
+        let mut state = SecureChannelState::default();
+        state.connection_epoch = 7;
+        state.application_aid = vec![1, 2, 3];
+        state.validated_scp11_keys.insert(key, vec![0x04; 65]);
+
+        state.synchronize_connection(7);
+        assert!(state.validated_scp11_keys.contains_key(&key));
+
+        state.invalidate_scp11_certificates();
+        assert!(state.validated_scp11_keys.is_empty());
+        state.validated_scp11_keys.insert(key, vec![0x04; 65]);
+
+        state.synchronize_connection(8);
+        assert!(state.validated_scp11_keys.is_empty());
+        assert!(state.application_aid.is_empty());
+        assert_eq!(state.connection_epoch, 8);
     }
 }

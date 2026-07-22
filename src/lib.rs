@@ -71,6 +71,8 @@ use error::*;
 
 mod secure_channel_crypto;
 
+mod certificate_chain;
+
 mod iso7816;
 use iso7816::ApduCapabilities;
 
@@ -81,7 +83,7 @@ use scp03::{
 };
 
 mod scp11;
-use scp11::{Scp11KeySet, Scp11Variant};
+use scp11::{Scp11CertificateCacheKey, Scp11KeySet, Scp11Variant};
 
 mod security_domain;
 use security_domain::{

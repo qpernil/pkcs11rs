@@ -18,12 +18,15 @@ expected P-256 Security Domain public key to be pinned using exactly one of:
 
 - `PKCS11RS_SCP11_SD_PUBLIC_KEY`: the 65-byte uncompressed SEC1 public point,
   encoded as hexadecimal;
-- `PKCS11RS_SCP11_SD_CERTIFICATE`: path to a PEM or DER X.509 certificate whose
-  P-256 public key is the expected `CERT.SD.ECKA` key.
+- `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to the PEM or DER X.509 CA
+  certificate that authenticates the SD certificate chain.
 
-The certificate file is treated as pinned configuration. The implementation
-does not fetch and implicitly trust an unverified certificate from the card.
-Choosing the trusted certificate chain remains the caller's responsibility.
+In CA-certificate mode, the module temporarily selects the Issuer SD, reads the
+chain for the configured SCP11 KID/KVN, and reselects the target applet. OpenSSL
+validates the chain against the configured CA, including validity periods and
+CA constraints, before the leaf P-256 key is used for SCP11 authentication. The
+SCP11 receipt then proves that the card owns the matching private key. The
+module never implicitly trusts a certificate obtained from the card.
 
 Optional configuration:
 
@@ -79,3 +82,27 @@ serial numbers for SCP11a or SCP11c. Passing an empty allowlist clears it.
 reference. It does not expose the GlobalPlatform wildcard deletion behavior.
 Successful mutations invalidate and refresh the Issuer SD object inventory.
 Raw `STORE DATA` and Security Domain reset are deliberately not exposed.
+
+## SCP11b hardware provisioning test
+
+The ignored `provisions_and_authenticates_scp11b_key` test generates a
+persistent P-256 SCP11b key, issues and stores an issuer-to-leaf certificate
+chain using the repository's test CA, rediscovers both objects, and completes
+an SCP11b-protected Issuer SD `GET DATA`. It refuses to replace an existing
+KID `0x13` key and leaves the new key and certificates installed.
+
+Choose an unused nonzero KVN and explicitly enable the destructive test:
+
+```sh
+PKCS11RS_TEST_PROVISION_SCP11B=1 \
+PKCS11RS_TEST_SCP11B_KVN=2 \
+PKCS11RS_CCID_SECURE_CHANNEL=scp03 \
+cargo test provisions_and_authenticates_scp11b_key -- --ignored --nocapture
+```
+
+The provisioning channel must authenticate the OCE, so it may use SCP03,
+SCP11a, or SCP11c, but not SCP11b. Configure its keys as described above and
+in [`scp03.md`](scp03.md). When multiple YubiKeys are attached, set
+`PKCS11RS_TEST_ISSUER_SD_SOURCE` to the desired serial number or full reader
+name. The embedded CA private key and resulting certificates are test material
+only.

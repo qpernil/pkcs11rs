@@ -1,5 +1,14 @@
 use super::*;
-use openssl::bn::BigNum;
+use openssl::{
+    asn1::Asn1Time,
+    bn::BigNum,
+    hash::MessageDigest,
+    pkey::PKey,
+    x509::{
+        extension::{BasicConstraints, KeyUsage},
+        X509NameBuilder,
+    },
+};
 use std::{cell::RefCell, time::Duration};
 
 #[derive(Debug)]
@@ -54,6 +63,68 @@ fn private_key(scalar: u32) -> EcKey<Private> {
         .mul_generator2(&group, &scalar, &mut context)
         .unwrap();
     EcKey::from_private_components(&group, &scalar, &public).unwrap()
+}
+
+fn certificate_chain(leaf_signer: &EcKey<Private>) -> Vec<Vec<u8>> {
+    let ca_key = private_key(4);
+    let ca_pkey = PKey::from_ec_key(ca_key.clone()).unwrap();
+    let mut ca_name = X509NameBuilder::new().unwrap();
+    ca_name
+        .append_entry_by_text("CN", "pkcs11rs SCP11 test CA")
+        .unwrap();
+    let ca_name = ca_name.build();
+    let mut ca = X509::builder().unwrap();
+    ca.set_version(2).unwrap();
+    let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
+    ca.set_serial_number(&serial).unwrap();
+    ca.set_subject_name(&ca_name).unwrap();
+    ca.set_issuer_name(&ca_name).unwrap();
+    ca.set_pubkey(&ca_pkey).unwrap();
+    ca.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+        .unwrap();
+    ca.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+        .unwrap();
+    ca.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
+    ca.append_extension(KeyUsage::new().key_cert_sign().build().unwrap())
+        .unwrap();
+    ca.sign(&ca_pkey, MessageDigest::sha256()).unwrap();
+    let ca = ca.build();
+
+    let leaf_key = private_key(5);
+    let leaf_pkey = PKey::from_ec_key(leaf_key).unwrap();
+    let mut leaf_name = X509NameBuilder::new().unwrap();
+    leaf_name
+        .append_entry_by_text("CN", "pkcs11rs SCP11B card")
+        .unwrap();
+    let leaf_name = leaf_name.build();
+    let mut leaf = X509::builder().unwrap();
+    leaf.set_version(2).unwrap();
+    let serial = BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap();
+    leaf.set_serial_number(&serial).unwrap();
+    leaf.set_subject_name(&leaf_name).unwrap();
+    leaf.set_issuer_name(ca.subject_name()).unwrap();
+    leaf.set_pubkey(&leaf_pkey).unwrap();
+    leaf.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+        .unwrap();
+    leaf.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+        .unwrap();
+    leaf.append_extension(KeyUsage::new().key_agreement().build().unwrap())
+        .unwrap();
+    let signer = PKey::from_ec_key(leaf_signer.clone()).unwrap();
+    leaf.sign(&signer, MessageDigest::sha256()).unwrap();
+    vec![ca.to_der().unwrap(), leaf.build().to_der().unwrap()]
+}
+
+#[test]
+fn scp11b_card_key_requires_a_valid_certificate_chain() {
+    let certificates = certificate_chain(&private_key(4));
+    assert!(
+        Scp11KeySet::scp11b_from_certificates(1, &certificates[1..], &certificates[..1]).is_ok()
+    );
+
+    let invalid = certificate_chain(&private_key(6));
+    assert!(Scp11KeySet::scp11b_from_certificates(1, &invalid[1..], &invalid[..1]).is_err());
 }
 
 #[test]
@@ -126,7 +197,8 @@ fn authenticates_scp11b_against_fixed_p256_vector() {
     let keys = Scp11KeySet {
         variant: Scp11Variant::B,
         key_version: 1,
-        card_public_key: parse_public_point(&static_public).unwrap(),
+        card_public_key: Some(parse_public_point(&static_public).unwrap()),
+        trust_anchors: Vec::new(),
         host: None,
     };
     let session = keys
@@ -182,7 +254,8 @@ fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
     let keys = Scp11KeySet {
         variant: Scp11Variant::A,
         key_version: 1,
-        card_public_key: parse_public_point(&static_public).unwrap(),
+        card_public_key: Some(parse_public_point(&static_public).unwrap()),
+        trust_anchors: Vec::new(),
         host: Some(Scp11aHostCredentials {
             key_version: 0,
             key_id: 0,

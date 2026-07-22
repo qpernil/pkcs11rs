@@ -20,6 +20,10 @@ trait Slot {
         None
     }
     #[cfg(all(test, not(feature = "abi-tests")))]
+    fn security_domain_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        None
+    }
+    #[cfg(all(test, not(feature = "abi-tests")))]
     fn yubihsm_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         None
     }
