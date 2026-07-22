@@ -83,6 +83,7 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
                     }
                 }
                 *guard = None;
+                reset_object_handles();
                 if logout_failed {
                     CKR_FUNCTION_FAILED as CK_RV
                 } else {

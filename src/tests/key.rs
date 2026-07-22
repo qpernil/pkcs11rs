@@ -170,7 +170,12 @@ pub fn generate_key_creates_secret_key_object() {
     );
     {
         let context = crate::lock_context().unwrap();
-        let object = context.as_ref().unwrap().objects.get(&key).unwrap();
+        let object = context
+            .as_ref()
+            .unwrap()
+            .memory_objects
+            .get(&key)
+            .unwrap();
         match &object.material {
             crate::KeyMaterial::Secret(value) => {
                 assert_eq!(value.len(), value_len as usize);
@@ -425,7 +430,11 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
 
     assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
     let context = crate::lock_context().unwrap();
-    assert!(!context.as_ref().unwrap().objects.contains_key(&key));
+    assert!(!context
+        .as_ref()
+        .unwrap()
+        .memory_objects
+        .contains_key(&key));
     drop(context);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -441,7 +450,7 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
         let mut context = crate::lock_context().unwrap();
         let context = context.as_mut().unwrap();
         context.dynamic_slots.insert(TEST_SLOT_ID);
-        let mut session_object = context.objects.get(&1).unwrap().clone();
+        let mut session_object = context.memory_objects.get(&1).unwrap().clone();
         session_object.unique_id.clear();
         session_object.token = false;
         session_object.owner_session = Some(TEST_SESSION_HANDLE);
@@ -461,7 +470,7 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
         assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
         assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
         assert!(context
-            .objects
+            .memory_objects
             .values()
             .all(|object| object.slot_id != Some(TEST_SLOT_ID)));
     }
@@ -730,6 +739,58 @@ pub fn yubihsm_key_pair_generation_requires_token_objects() {
         .into();
         assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
     }
+}
+
+#[test]
+pub fn yubihsm_key_pair_generation_requires_matching_ids() {
+    let mut modulus_bits = 2048 as CK_ULONG;
+    let mut public_id = [0, 1];
+    let mut private_id = [0, 2];
+    let modulus_attribute = CK_ATTRIBUTE {
+        type_: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut modulus_bits as *mut CK_ULONG).cast(),
+        ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    };
+    let public_id_attribute = CK_ATTRIBUTE {
+        type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+        pValue: public_id.as_mut_ptr().cast(),
+        ulValueLen: public_id.len() as CK_ULONG,
+    };
+    let private_id_attribute = CK_ATTRIBUTE {
+        type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+        pValue: private_id.as_mut_ptr().cast(),
+        ulValueLen: private_id.len() as CK_ULONG,
+    };
+    let mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let public_template = [modulus_attribute, public_id_attribute];
+
+    for private_template in [&[][..], &[private_id_attribute][..]] {
+        let rv: CK_RV = crate::yubihsm_generate_key_pair_command(
+            &mechanism,
+            &public_template,
+            private_template,
+        )
+        .unwrap_err()
+        .into();
+        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
+    }
+
+    private_id.copy_from_slice(&public_id);
+    let (object, _) = crate::yubihsm_generate_key_pair_command(
+        &mechanism,
+        &public_template,
+        &[private_id_attribute],
+    )
+    .unwrap();
+    assert_eq!(object.id, public_id);
+
+    let (object, _) =
+        crate::yubihsm_generate_key_pair_command(&mechanism, &[modulus_attribute], &[]).unwrap();
+    assert!(object.id.is_empty());
 }
 
 #[test]

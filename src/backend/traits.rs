@@ -45,6 +45,16 @@ trait Slot {
     fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
+    fn token_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<TokenObject>, Error> {
+        Ok(self
+            .token_objects(slot_id)?
+            .into_iter()
+            .find(|object| object.token && object.unique_id == unique_id))
+    }
     fn session_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }

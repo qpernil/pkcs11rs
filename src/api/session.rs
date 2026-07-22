@@ -180,7 +180,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         ctx.decrypt_operations.remove(&session_handle);
         ctx.sign_operations.remove(&session_handle);
         ctx.verify_operations.remove(&session_handle);
-        ctx.objects
+        ctx.memory_objects
             .retain(|_, object| object.owner_session != Some(session_handle));
         log!(2, "C_CloseSession removed {:?}", (session_handle, session));
         log!(2, "C_CloseSession sessions after {:?}", ctx.sessions);
@@ -234,7 +234,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .retain(|session, _operation| !closed_sessions.contains(session));
         ctx.verify_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.objects.retain(|_, object| {
+        ctx.memory_objects.retain(|_, object| {
             object
                 .owner_session
                 .map(|owner| !closed_sessions.contains(&owner))

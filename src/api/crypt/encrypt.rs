@@ -178,8 +178,7 @@ fn crypt_init(
             _ => return Err(CKR_MECHANISM_INVALID.into()),
         };
         let object = ctx
-            .objects
-            .get(&key)
+            .resolve_object(key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.private && !logged_in {

@@ -1178,7 +1178,12 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
 
     {
         let mut context = crate::lock_context().unwrap();
-        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        let object = context
+            .as_mut()
+            .unwrap()
+            .memory_objects
+            .get_mut(&2)
+            .unwrap();
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
@@ -1236,7 +1241,12 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
 
     {
         let mut context = crate::lock_context().unwrap();
-        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        let object = context
+            .as_mut()
+            .unwrap()
+            .memory_objects
+            .get_mut(&2)
+            .unwrap();
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
@@ -1293,7 +1303,12 @@ fn context_specific_login_requires_user_login() {
 
     {
         let mut context = crate::lock_context().unwrap();
-        let object = context.as_mut().unwrap().objects.get_mut(&2).unwrap();
+        let object = context
+            .as_mut()
+            .unwrap()
+            .memory_objects
+            .get_mut(&2)
+            .unwrap();
         object.private = false;
     }
 
@@ -1322,7 +1337,7 @@ fn context_specific_login_requires_user_login() {
 }
 
 #[test]
-pub fn login_is_shared_and_logout_invalidates_private_objects() {
+pub fn login_is_shared_and_logout_invalidates_private_session_objects() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -1467,7 +1482,7 @@ pub fn login_is_shared_and_logout_invalidates_private_objects() {
     let mut object_size = 0;
     assert_eq!(
         crate::C_GetObjectSize(ro_session, 2, &mut object_size),
-        CKR_OBJECT_HANDLE_INVALID as CK_RV
+        CKR_OK as CK_RV
     );
     assert_eq!(
         crate::C_GetObjectSize(ro_session, private_session_key, &mut object_size),
@@ -1495,7 +1510,7 @@ pub fn login_is_shared_and_logout_invalidates_private_objects() {
         CKR_OK as CK_RV
     );
     assert_eq!(count, 1);
-    assert_ne!(new_private_handle, 2);
+    assert_eq!(new_private_handle, 2);
     assert_ne!(new_private_handle, private_session_key);
     assert_eq!(crate::C_FindObjectsFinal(ro_session), CKR_OK as CK_RV);
 
@@ -2424,4 +2439,88 @@ pub fn read_only_sessions_cannot_mutate_token_or_private_objects() {
     assert_eq!(crate::C_DestroyObject(session, object), CKR_OK as CK_RV);
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+#[test]
+fn object_handles_are_unique_across_storage_kinds_and_slots() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    let mut first = crate::Context::new().unwrap();
+    let mut first_slot_object = first.memory_objects.values().next().unwrap().clone();
+    first_slot_object.slot_id = Some(100);
+    first_slot_object.unique_id = "slot-100-object".to_owned();
+    first_slot_object.token = true;
+    first.reconcile_slot_token_objects(100, vec![first_slot_object.clone()]).unwrap();
+
+    let mut second_slot_object = first_slot_object;
+    second_slot_object.slot_id = Some(101);
+    second_slot_object.unique_id = "slot-101-object".to_owned();
+    first.reconcile_slot_token_objects(101, vec![second_slot_object]).unwrap();
+
+    let handles = first
+        .memory_objects
+        .keys()
+        .chain(first.token_object_handles.keys())
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        handles.len(),
+        first.memory_objects.len() + first.token_object_handles.len()
+    );
+    finalize_for_test();
+}
+
+#[test]
+fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    let mut context = crate::Context::new().unwrap();
+    let mut object = context.memory_objects.values().next().unwrap().clone();
+    object.slot_id = Some(100);
+    object.unique_id = "native-object-v1".to_owned();
+    object.token = true;
+    context
+        .reconcile_slot_token_objects(100, vec![object.clone()])
+        .unwrap();
+    let original = *context.token_object_handles.keys().next().unwrap();
+
+    context
+        .reconcile_slot_token_objects(100, vec![object.clone()])
+        .unwrap();
+    assert!(context.token_object_handles.contains_key(&original));
+
+    context.find_operations.insert(
+        TEST_SESSION_HANDLE,
+        crate::FindOperation {
+            objects: vec![original],
+            next: 0,
+        },
+    );
+    object.unique_id = "native-object-v2".to_owned();
+    context
+        .reconcile_slot_token_objects(100, vec![object.clone()])
+        .unwrap();
+    let replacement = *context.token_object_handles.keys().next().unwrap();
+    assert_ne!(replacement, original);
+    assert!(context.find_operations[&TEST_SESSION_HANDLE].objects.is_empty());
+
+    let mut moved = object;
+    moved.unique_id = "native-object-moved".to_owned();
+    context
+        .reconcile_slot_token_objects_with_rebindings(
+            100,
+            vec![moved.clone()],
+            &[(replacement, moved.unique_id.clone())],
+        )
+        .unwrap();
+    assert_eq!(
+        context.token_object_handles[&replacement].unique_id,
+        "native-object-moved"
+    );
+
+    assert!(context
+        .reconcile_slot_token_objects(100, vec![moved.clone(), moved])
+        .is_err());
+    finalize_for_test();
 }

@@ -155,7 +155,13 @@ struct YubiHsmSlot {
     version: (u8, u8, u8),
     algorithms: Vec<u8>,
     hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+    object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
+    object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
+    next_object_generation: Cell<u64>,
 }
+
+type YubiHsmObjectKey = (u8, u16);
+type YubiHsmObjectMetadata = (YubiHsmObjectInfo, Option<YubiHsmPublicKey>, u64);
 
 impl YubiHsmSlot {
     fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
@@ -165,6 +171,9 @@ impl YubiHsmSlot {
             version,
             algorithms,
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
+            object_metadata: RefCell::new(HashMap::new()),
+            object_generations: RefCell::new(HashMap::new()),
+            next_object_generation: Cell::new(1),
         }
     }
 
@@ -283,6 +292,16 @@ fn yubihsm_token_objects(
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
 ) -> Result<Vec<TokenObject>, Error> {
+    let generation = info.sequence as u64;
+    yubihsm_token_objects_with_generation(slot_id, info, public_key, generation)
+}
+
+fn yubihsm_token_objects_with_generation(
+    slot_id: CK_SLOT_ID,
+    info: YubiHsmObjectInfo,
+    public_key: Option<YubiHsmPublicKey>,
+    generation: u64,
+) -> Result<Vec<TokenObject>, Error> {
     let key_type = yubihsm_key_type(info.algorithm);
     let label = info.label.clone();
     if info.object_type == YUBIHSM_OPAQUE
@@ -292,7 +311,10 @@ fn yubihsm_token_objects(
         return Ok(Vec::new());
     }
     let id = info.id.to_be_bytes().to_vec();
-    let unique = format!("yubihsm-{:02x}-{:04x}", info.object_type, info.id);
+    let unique = format!(
+        "yubihsm-{:02x}-{:04x}-{:02x}-{generation}",
+        info.object_type, info.id, info.sequence
+    );
     let generated = info.origin & 0x01 != 0;
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
     let authentication_key = info.object_type == YUBIHSM_AUTHENTICATION_KEY;
@@ -635,14 +657,17 @@ impl Slot for YubiHsmSlot {
             self.session.as_ref(),
             &YubiHsmCommand::list_objects(&[])?,
         )?;
-        let mut objects = Vec::new();
+        let mut discovered = Vec::new();
         for entry in parse_yubihsm_object_list(&listed)? {
             let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
                 self.connector.as_ref(),
                 self.session.as_ref(),
                 &YubiHsmCommand::get_object_info(entry.id, entry.object_type),
             )?)?;
-            if info.id != entry.id || info.object_type != entry.object_type {
+            if info.id != entry.id
+                || info.object_type != entry.object_type
+                || info.sequence != entry.sequence
+            {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             let public_key = if yubihsm_object_has_public_key(&info) {
@@ -654,9 +679,70 @@ impl Slot for YubiHsmSlot {
             } else {
                 None
             };
-            objects.extend(yubihsm_token_objects(slot_id, info, public_key)?);
+            discovered.push((info, public_key));
         }
+
+        let discovered_keys = discovered
+            .iter()
+            .map(|(info, _)| (info.object_type, info.id))
+            .collect::<HashSet<_>>();
+        let mut generations = self
+            .object_generations
+            .try_borrow_mut()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        generations.retain(|key, _| discovered_keys.contains(key));
+
+        let mut objects = Vec::new();
+        let mut metadata = HashMap::new();
+        for (info, public_key) in discovered {
+            let key = (info.object_type, info.id);
+            let generation = match generations.get(&key) {
+                Some((sequence, generation)) if *sequence == info.sequence => *generation,
+                _ => {
+                    let generation = self.next_object_generation.get();
+                    self.next_object_generation.set(
+                        generation
+                            .checked_add(1)
+                            .ok_or(CKR_DEVICE_MEMORY)?,
+                    );
+                    generations.insert(key, (info.sequence, generation));
+                    generation
+                }
+            };
+            metadata.insert(key, (info.clone(), public_key.clone(), generation));
+            objects.extend(yubihsm_token_objects_with_generation(
+                slot_id,
+                info,
+                public_key,
+                generation,
+            )?);
+        }
+        drop(generations);
+        *self.object_metadata.try_borrow_mut()? = metadata;
         Ok(objects)
+    }
+    fn token_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<TokenObject>, Error> {
+        let metadata = self
+            .object_metadata
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for (info, public_key, generation) in metadata {
+            if let Some(object) =
+                yubihsm_token_objects_with_generation(slot_id, info, public_key, generation)?
+                .into_iter()
+                .find(|object| object.unique_id == unique_id)
+            {
+                return Ok(Some(object));
+            }
+        }
+        Ok(None)
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)

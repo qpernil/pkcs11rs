@@ -358,7 +358,11 @@ pub fn destroy_openpgp_objects_is_prohibited() {
             CKR_ACTION_PROHIBITED as CK_RV
         );
         let context = crate::lock_context().unwrap();
-        assert!(context.as_ref().unwrap().objects.contains_key(&handle));
+        assert!(context
+            .as_ref()
+            .unwrap()
+            .memory_objects
+            .contains_key(&handle));
     }
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);

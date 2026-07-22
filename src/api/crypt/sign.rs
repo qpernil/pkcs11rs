@@ -91,7 +91,9 @@ fn sign_init(
             None
         };
 
-        let object = ctx.objects.get(&key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx
+            .resolve_object(key)?
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }

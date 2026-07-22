@@ -67,6 +67,7 @@ CKO_CERTIFICATE = 0x00000001
 CKC_X_509 = 0x00000000
 CKK_GENERIC_SECRET = 0x00000010
 CKK_RSA = 0x00000000
+CKK_AES = 0x0000001F
 CKK_YUBICO_AES128_CCM_WRAP = 0xD955421D
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
@@ -781,12 +782,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.login_with_pin(session, b"123456")
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
-        template = (CK_ATTRIBUTE * 1)(
+        key_type = CK_ULONG(CKK_RSA)
+        can_sign = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_CLASS,
                 ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
                 ctypes.sizeof(object_class),
-            )
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_SIGN,
+                ctypes.cast(ctypes.byref(can_sign), CK_VOID_PTR),
+                ctypes.sizeof(can_sign),
+            ),
         )
         self.assertEqual(
             self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
@@ -797,7 +810,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
             CKR_OK,
         )
-        self.assertEqual((found.value, handle.value), (1, 4))
+        self.assertEqual(found.value, 1)
         self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
 
         mechanism = CK_MECHANISM(CKM_RSA_PKCS, None, 0)
@@ -840,12 +853,24 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.login_session(session)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
-        template = (CK_ATTRIBUTE * 1)(
+        key_type = CK_ULONG(CKK_RSA)
+        can_sign = CK_BYTE(1)
+        template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_CLASS,
                 ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
                 ctypes.sizeof(object_class),
-            )
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_SIGN,
+                ctypes.cast(ctypes.byref(can_sign), CK_VOID_PTR),
+                ctypes.sizeof(can_sign),
+            ),
         )
         self.assertEqual(
             self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
@@ -908,6 +933,42 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_TEMPLATE_INCONSISTENT,
         )
 
+    def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        modulus_bits = CK_ULONG(2048)
+        public_id = (CK_BYTE * 2)(0, 1)
+        private_id = (CK_BYTE * 2)(0, 2)
+        public_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_MODULUS_BITS,
+                ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
+                ctypes.sizeof(modulus_bits),
+            ),
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(public_id, CK_VOID_PTR), len(public_id)),
+        )
+        private_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(private_id, CK_VOID_PTR), len(private_id))
+        )
+        mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
+        public_key = CK_ULONG()
+        private_key = CK_ULONG()
+
+        for candidate, count in ((None, 0), (private_template, len(private_template))):
+            self.assertEqual(
+                self.lib.C_GenerateKeyPair(
+                    session,
+                    ctypes.byref(mechanism),
+                    public_template,
+                    len(public_template),
+                    candidate,
+                    count,
+                    ctypes.byref(public_key),
+                    ctypes.byref(private_key),
+                ),
+                CKR_TEMPLATE_INCONSISTENT,
+            )
+
     def test_abi_yubihsm_fixture_exercises_aes_gcm(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
@@ -932,12 +993,26 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertIn(CKM_AES_GCM, mechanisms)
 
         object_class = CK_ULONG(CKO_SECRET_KEY)
-        template = (CK_ATTRIBUTE * 1)(
+        key_type = CK_ULONG(CKK_AES)
+        can_encrypt = CK_BYTE(1)
+        key_id = (CK_BYTE * 2)(0, 2)
+        template = (CK_ATTRIBUTE * 4)(
             CK_ATTRIBUTE(
                 CKA_CLASS,
                 ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
                 ctypes.sizeof(object_class),
-            )
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_ENCRYPT,
+                ctypes.cast(ctypes.byref(can_encrypt), CK_VOID_PTR),
+                ctypes.sizeof(can_encrypt),
+            ),
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id)),
         )
         self.assertEqual(
             self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
@@ -2250,7 +2325,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OPERATION_NOT_INITIALIZED,
         )
 
-    def test_login_is_shared_and_logout_invalidates_private_objects(self) -> None:
+    def test_login_is_shared_and_logout_invalidates_private_session_objects(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         read_only_session = CK_ULONG()
         read_write_session = CK_ULONG()
@@ -2383,7 +2458,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 2,
                 ctypes.byref(object_size),
             ),
-            CKR_OBJECT_HANDLE_INVALID,
+            CKR_OK,
         )
         self.assertEqual(
             self.lib.C_GetObjectSize(
@@ -2422,7 +2497,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(found_count.value, 1)
-        self.assertNotEqual(found.value, 2)
+        self.assertEqual(found.value, 2)
         self.assertNotEqual(found.value, private_session_key.value)
         self.assertEqual(
             self.lib.C_FindObjectsFinal(read_only_session.value),
