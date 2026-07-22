@@ -774,10 +774,12 @@ impl Context {
                                 }
                                 Box::new(hsmauth_slot)
                             }
-                            CcidApplication::GlobalPlatform => Box::new(GlobalPlatformSlot::new(
-                                application_connector,
-                                application_aid,
-                            )),
+                            CcidApplication::IssuerSecurityDomain => {
+                                Box::new(IssuerSecurityDomainSlot::new(
+                                    application_connector,
+                                    application_aid,
+                                ))
+                            }
                         };
                         if slot.is_present() {
                             if let Err(error) = slot.init_slot() {

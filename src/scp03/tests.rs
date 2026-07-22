@@ -96,7 +96,7 @@ fn encodes_short_apdu_cases() {
             ins: 0xa4,
             p1: 4,
             p2: 0,
-            data: YUBIKEY_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
+            data: DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
             le: Some(256),
             extended: false,
         }
@@ -388,7 +388,7 @@ fn resolves_all_three_keys_from_the_initialize_update_context() {
 #[test]
 fn selects_configured_security_domain() {
     let connector = ScriptedConnector::new(vec![hex("6f 00 90 00")]);
-    select_application(&connector, &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID).unwrap();
+    select_application(&connector, &DEFAULT_ISSUER_SECURITY_DOMAIN_AID).unwrap();
     assert_eq!(
         connector.commands.into_inner(),
         vec![hex("00 A4 04 00 08 A0 00 00 01 51 00 00 00 00")]
@@ -830,7 +830,7 @@ fn error_responses_do_not_require_rmac() {
 fn yubikey_sessions_share_and_require_the_authenticated_channel() {
     let connector = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]));
     let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
-    let session = crate::GlobalPlatformSession {
+    let session = crate::IssuerSecurityDomainSession {
         slotID: 1,
         flags: 0,
         connector: connector.clone(),
@@ -877,7 +877,7 @@ fn yubikey_sessions_share_and_require_the_authenticated_channel() {
 fn yubikey_sessions_discard_desynchronized_channels() {
     let connector = std::rc::Rc::new(ScriptedConnector::new(vec![]));
     let shared = std::rc::Rc::new(RefCell::new(Some(test_session(0x01))));
-    let session = crate::GlobalPlatformSession {
+    let session = crate::IssuerSecurityDomainSession {
         slotID: 1,
         flags: 0,
         connector,
@@ -933,7 +933,7 @@ fn authenticates_with_yubico_diversified_transport_keys() {
         &keys,
         YUBIKEY_SECURITY_LEVEL,
         host,
-        &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
     )
     .unwrap();
     let commands = connector.commands.into_inner();
@@ -965,7 +965,7 @@ fn matches_kaoh_globalplatform_scp03_authentication_vector() {
         &keys,
         0x03,
         host,
-        &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
     )
     .unwrap();
 
@@ -1223,7 +1223,7 @@ fn authenticates_with_deterministic_challenges() {
         &keys,
         0x03,
         host,
-        &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
     )
     .unwrap();
     let commands = connector.commands.into_inner();
@@ -1250,7 +1250,7 @@ fn verifies_pseudo_random_card_challenge() {
     let host: [u8; 8] = hex("0102030405060708").try_into().unwrap();
     let sequence = hex("000001");
     let mut challenge_context = sequence.clone();
-    challenge_context.extend_from_slice(&YUBIKEY_ISSUER_SECURITY_DOMAIN_AID);
+    challenge_context.extend_from_slice(&DEFAULT_ISSUER_SECURITY_DOMAIN_AID);
     let card = derive(&keys.enc, DERIVATION_CARD_CHALLENGE, &challenge_context, 64).unwrap();
     assert_eq!(card, hex("86 C8 BD 65 FA 10 44 EE"));
     let mut session_context = host.to_vec();
@@ -1270,7 +1270,7 @@ fn verifies_pseudo_random_card_challenge() {
         &keys,
         0x03,
         host,
-        &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID,
+        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
     )
     .unwrap();
 }

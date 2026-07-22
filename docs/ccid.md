@@ -7,7 +7,7 @@ The PC/SC transport automatically probes these CCID applets by default:
 | PIV | `A0 00 00 03 08` | `PKCS11RS_PIV_AID` |
 | OpenPGP | `D2 76 00 01 24 01` | `PKCS11RS_OPENPGP_AID` |
 | YubiHSM Auth | `A0 00 00 05 27 21 07 01` | `PKCS11RS_HSMAUTH_AID` |
-| Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_GLOBALPLATFORM_AID` |
+| Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
 can be selected successfully. Initialization and object-discovery failures do
@@ -24,7 +24,7 @@ applets should be exposed:
 PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-Accepted names are `piv`, `openpgp`, `hsmauth`, and `globalplatform`. Names are
+Accepted names are `piv`, `openpgp`, `hsmauth`, and `issuer-sd`. Names are
 case-insensitive and duplicates are ignored.
 
 ## Secure channels
@@ -35,8 +35,8 @@ the selected AID. Selecting another applet invalidates the previous channel,
 so the module selects the requested AID and renegotiates before sending the
 next protected command.
 
-The reader connection is shared between all applet slots. The Issuer Security
-Domain is the Secure Domain management applet; it is not required to use PIV,
+The reader connection is shared between all applet slots. The Issuer SD is the
+Secure Domain management applet; it is not required to use PIV,
 OpenPGP, or YubiHSM Auth.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those

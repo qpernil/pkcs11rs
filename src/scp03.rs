@@ -11,7 +11,7 @@ use openssl::{memcmp, symm::Mode};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-pub(crate) const YUBIKEY_ISSUER_SECURITY_DOMAIN_AID: [u8; 8] =
+pub(crate) const DEFAULT_ISSUER_SECURITY_DOMAIN_AID: [u8; 8] =
     [0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
 pub(crate) const YUBIKEY_FACTORY_KEY_VERSION: u8 = 0xff;
 pub(crate) const YUBIKEY_FACTORY_KEY_ID: u8 = 0x00;

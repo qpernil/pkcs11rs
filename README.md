@@ -20,7 +20,7 @@ appropriate PKCS #11 error instead of being omitted.
   asymmetric, symmetric, HMAC, wrapping, opaque, and authentication objects.
 - **YubiHSM Auth** as a discoverable CCID applet whose credentials can
   authenticate sessions on YubiHSM USB slots.
-- **Issuer Security Domain** discovery with read-only key metadata, CA
+- **Issuer SD** discovery with read-only key metadata, CA
   identifiers, CPLC, and SCP11 certificate chains.
 - **SCP03, SCP11a, and SCP11b** secure messaging for selected CCID applets.
 
@@ -80,7 +80,7 @@ YubiHSM USB devices and the default CCID applets available through PC/SC.
 ## CCID Configuration
 
 The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, and the
-Issuer Security Domain. Each selectable applet is exposed as its own PKCS #11
+Issuer SD. Each selectable applet is exposed as its own PKCS #11
 slot.
 
 Limit discovery to selected applets with:

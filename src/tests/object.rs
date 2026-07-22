@@ -1734,7 +1734,7 @@ pub fn get_attribute_value_reads_certificate_values() {
 }
 
 #[test]
-pub fn security_domain_objects_expose_values_but_cannot_be_copied_or_destroyed() {
+pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -1762,9 +1762,9 @@ pub fn security_domain_objects_expose_values_but_cannot_be_copied_or_destroyed()
         local: false,
         key_gen_mechanism: None,
         owner_session: None,
-        material: crate::KeyMaterial::SecurityDomainData {
+        material: crate::KeyMaterial::IssuerSecurityDomainData {
             value: value.clone(),
-            application: "GlobalPlatform Security Domain".to_owned(),
+            application: "Issuer SD".to_owned(),
             object_id: Vec::new(),
         },
     };
