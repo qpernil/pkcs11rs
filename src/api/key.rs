@@ -266,6 +266,39 @@ fn generate_key_pair(
             )?;
             return Ok(());
         }
+        if ctx.get_slot(slot_id)?.is_openpgp() {
+            let generation = openpgp_generate_key_pair_parameters(
+                mechanism,
+                public_template,
+                private_template,
+            )?;
+            validate_new_object_access(&generation.public_object, flags, logged_in)?;
+            validate_new_object_access(&generation.private_object, flags, logged_in)?;
+            ctx._get_slot_mut(slot_id)?.openpgp_generate_key_pair(
+                generation.key_ref,
+                generation.algorithm,
+            )?;
+            if generation.touch_policy != 0 {
+                ctx._get_slot_mut(slot_id)?.openpgp_set_touch_policy(
+                    generation.key_ref,
+                    generation.touch_policy,
+                )?;
+            }
+            ctx.refresh_slot_token_objects(slot_id)?;
+            *private_handle = find_openpgp_key_handle(
+                ctx,
+                slot_id,
+                generation.key_ref,
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            )?;
+            *public_handle = find_openpgp_key_handle(
+                ctx,
+                slot_id,
+                generation.key_ref,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            )?;
+            return Ok(());
+        }
         if !ctx.get_slot(slot_id)?.is_yubihsm() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
@@ -300,6 +333,154 @@ fn generate_key_pair(
             .ok_or(CKR_DEVICE_ERROR)?;
         Ok(())
     })
+}
+
+struct OpenPgpGeneration {
+    key_ref: OpenPgpKeyRef,
+    algorithm: OpenPgpAlgorithm,
+    public_object: TokenObject,
+    private_object: TokenObject,
+    touch_policy: u8,
+}
+
+fn openpgp_key_ref(id: &[u8]) -> Result<OpenPgpKeyRef, Error> {
+    match id {
+        [1] => Ok(OpenPgpKeyRef::Signature),
+        [2] => Ok(OpenPgpKeyRef::Decipher),
+        [3] => Ok(OpenPgpKeyRef::Authentication),
+        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+    }
+}
+
+fn openpgp_generate_key_pair_parameters(
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<OpenPgpGeneration, Error> {
+    if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let key_type = match mechanism.mechanism {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => CKK_RSA as CK_KEY_TYPE,
+        x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => CKK_EC as CK_KEY_TYPE,
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            CKK_EC_EDWARDS as CK_KEY_TYPE
+        }
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE
+        }
+        _ => return Err(CKR_MECHANISM_INVALID.into()),
+    };
+    let public_object = key_pair_object(
+        public_template,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    let filtered_private_template = private_template
+        .iter()
+        .filter(|attribute| attribute.type_ != CKA_YUBICO_TOUCH_POLICY)
+        .copied()
+        .collect::<Vec<_>>();
+    let private_object = key_pair_object(
+        &filtered_private_template,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    if !public_object.token || !private_object.token || public_object.id != private_object.id {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let key_ref = openpgp_key_ref(&private_object.id)?;
+    let algorithm = match mechanism.mechanism {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let bits_attribute =
+                template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let bits = read_ulong_template_attribute(bits_attribute).map_err(Error::from)?;
+            if let Some(exponent) =
+                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+            {
+                if read_attribute_value(exponent).map_err(Error::from)? != [1, 0, 1] {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+            match bits {
+                2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa { bits: bits as usize },
+                _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+            }
+        }
+        x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            let curve = openpgp_curve(&params)?;
+            if key_ref == OpenPgpKeyRef::Decipher {
+                OpenPgpAlgorithm::Ecdh(curve)
+            } else {
+                OpenPgpAlgorithm::Ecdsa(curve)
+            }
+        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if params.as_slice() != openpgp::Curve::Ed25519.oid() || key_ref == OpenPgpKeyRef::Decipher {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            OpenPgpAlgorithm::Ed25519
+        }
+        _ => {
+            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if params.as_slice() != openpgp::Curve::X25519.oid() || key_ref != OpenPgpKeyRef::Decipher {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
+        }
+    };
+    let touch_policy = match template_attribute(private_template, CKA_YUBICO_TOUCH_POLICY) {
+        Some(attribute) => {
+            let value = read_ulong_template_attribute(attribute).map_err(Error::from)?;
+            match value {
+                1..=5 => value as u8,
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            }
+        }
+        None => 0,
+    };
+    Ok(OpenPgpGeneration {
+        key_ref,
+        algorithm,
+        public_object,
+        private_object,
+        touch_policy,
+    })
+}
+
+fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> {
+    [
+        openpgp::Curve::P256,
+        openpgp::Curve::P384,
+        openpgp::Curve::P521,
+        openpgp::Curve::BrainpoolP256,
+        openpgp::Curve::BrainpoolP384,
+        openpgp::Curve::BrainpoolP512,
+        openpgp::Curve::Secp256k1,
+    ]
+    .into_iter()
+    .find(|curve| curve.oid() == parameters)
+    .ok_or_else(|| CKR_CURVE_NOT_SUPPORTED.into())
+}
+
+fn find_openpgp_key_handle(
+    ctx: &Context,
+    slot_id: CK_SLOT_ID,
+    key_ref: OpenPgpKeyRef,
+    class: CK_OBJECT_CLASS,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    ctx.resolved_objects()?
+        .into_iter()
+        .find(|(_, object)| {
+            object.slot_id == Some(slot_id)
+                && object.class == class
+                && object.id == [key_ref as u8]
+        })
+        .map(|(handle, _)| handle)
+        .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }
 
 struct PivGeneration {

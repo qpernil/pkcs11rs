@@ -37,6 +37,11 @@ non-extractable, with all ordinary cryptographic capabilities disabled because
 actual attestation uses the applet-specific command. Cards without this
 extension continue to expose only the three standard key references.
 
+Readable cardholder, private-use, fingerprint, CA-fingerprint, and key
+generation-time data objects are exposed as read-only `CKO_DATA` objects.
+Their OpenPGP tag is returned in `CKA_OBJECT_ID`, and `CKA_VALUE` is fetched
+from the applet only when first requested.
+
 Key Information (`DE`) distinguishes empty, device-generated, and imported
 keys. Device-generated keys report `CKA_LOCAL=true` and their corresponding
 PKCS #11 key-pair generation mechanism. Imported keys report
@@ -60,11 +65,26 @@ The current PKCS #11 surface includes:
   data. The decipher key reference is used for ECDH.
 - Random data through `C_GenerateRandom`, using the applet's `GET CHALLENGE`
   command.
+- RSA, ECDSA, ECDH, Ed25519, and X25519 key-pair generation through the
+  corresponding PKCS #11 key-pair generation mechanisms.
+- RSA and elliptic-curve private-key import through `C_CreateObject`.
 
 RSA keys from 1024 through 4096 bits are recognized. Supported elliptic-curve
 metadata includes P-256, P-384, P-521, Brainpool P-256/P-384/P-512,
 secp256k1, Ed25519, and X25519. Actual availability depends on the key present
 in the card and the firmware's OpenPGP implementation.
+
+`CKA_ID` selects the OpenPGP key reference: `01` for signature, `02` for
+decipher, and `03` for authentication. Generation and import require token
+objects and matching IDs and algorithms. The operation is accepted only when
+Key Information (`DE`) reports the selected reference as empty.
+
+OpenPGP UIF is exposed on private keys through
+`CKA_YUBICO_TOUCH_POLICY`. Values are `1` (off), `2` (on), `3` (cached), `4`
+(fixed), and `5` (cached-fixed). The attribute can be supplied during
+generation or import and changed later with `C_SetAttributeValue` in a
+read/write session. Fixed policies cannot be weakened without replacing the
+key; that restriction is enforced by the applet.
 
 The host performs the PKCS #1 v1.5 encoding and decoding required by the
 corresponding PKCS #11 RSA mechanisms. ECDSA responses are converted from the
@@ -102,10 +122,12 @@ and PIN management.
 
 The module never deletes or replaces OpenPGP keys. `C_DestroyObject` returns
 `CKR_ACTION_PROHIBITED` for every OpenPGP object and leaves the object visible.
-The OpenPGP APDU client also rejects potentially key-destructive commands
-before transport, including application termination and activation, retry
-count changes, key generation, private-key import, and writes to key algorithm
-attributes. These commands return `CKR_ACTION_PROHIBITED` and no APDU is sent.
+Generation and import use guarded command paths that re-read Key Information
+immediately before the mutating APDU and proceed only for an empty reference.
+The general OpenPGP APDU path continues to reject potentially key-destructive
+commands before transport, including application termination and activation,
+retry count changes, unguarded key generation or import, and writes to key
+algorithm attributes.
 
 Discovery and public-key retrieval remain read-only. Certificate, UIF, and
 general data-object helpers cannot bypass the key-preservation checks, while

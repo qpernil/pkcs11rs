@@ -1,4 +1,64 @@
 #[test]
+pub fn openpgp_private_import_templates_select_reference_and_scalar() {
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC_MONTGOMERY as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut id = [2u8];
+    let mut params = crate::openpgp::Curve::X25519.oid().to_vec();
+    let mut value = [0x55u8; 32];
+    let mut touch_policy = 1 as CK_ULONG;
+    let templ = [
+        CK_ATTRIBUTE {
+            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+            pValue: &mut class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            pValue: &mut key_type as *mut CK_KEY_TYPE as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut token as *mut CK_BBOOL as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+            pValue: id.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: id.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            pValue: params.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: params.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            pValue: value.as_mut_ptr() as CK_VOID_PTR,
+            ulValueLen: value.len() as CK_ULONG,
+        },
+        CK_ATTRIBUTE {
+            type_: crate::CKA_YUBICO_TOUCH_POLICY,
+            pValue: &mut touch_policy as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        },
+    ];
+
+    let import = crate::openpgp_private_import(&templ).unwrap();
+    assert_eq!(import.key_ref, crate::OpenPgpKeyRef::Decipher);
+    assert_eq!(
+        import.algorithm,
+        crate::OpenPgpAlgorithm::Ecdh(crate::openpgp::Curve::X25519)
+    );
+    assert_eq!(import.touch_policy, 1);
+    assert!(matches!(
+        import.material,
+        crate::KeyMaterial::Secret(ref scalar) if scalar.as_slice() == value
+    ));
+}
+
+#[test]
 pub fn find_objects_filters_by_attribute_template() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -390,6 +450,7 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         public_exponent: vec![1, 0, 1],
         public_key: Vec::new(),
         pin_policy: 0,
+        touch_policy: 1,
     };
     let handles = {
         let mut context = crate::lock_context().unwrap();

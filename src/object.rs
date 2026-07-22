@@ -49,6 +49,7 @@ enum KeyMaterial {
         #[allow(dead_code)]
         public_key: Vec<u8>,
         pin_policy: u8,
+        touch_policy: u8,
     },
     OpenPgpPublic {
         algorithm: OpenPgpAlgorithm,
@@ -72,6 +73,12 @@ enum KeyMaterial {
     },
     OpenPgpCertificate {
         value: Vec<u8>,
+    },
+    OpenPgpData {
+        tag: u16,
+        connector: Rc<dyn Connector>,
+        value: Rc<RefCell<Option<Vec<u8>>>>,
+        attempted: Rc<Cell<bool>>,
     },
     IssuerSecurityDomainData {
         value: Vec<u8>,
@@ -207,6 +214,11 @@ impl std::fmt::Debug for KeyMaterial {
             Self::OpenPgpCertificate { value } => fmt
                 .debug_struct("OpenPgpCertificate")
                 .field("size", &value.len())
+                .finish(),
+            Self::OpenPgpData { tag, value, .. } => fmt
+                .debug_struct("OpenPgpData")
+                .field("tag", tag)
+                .field("cached", &value.borrow().is_some())
                 .finish(),
             Self::IssuerSecurityDomainData {
                 value,
@@ -621,6 +633,7 @@ impl TokenObject {
                     Some(application.as_bytes().to_vec())
                 }
                 KeyMaterial::PivData { .. } => Some(b"PIV".to_vec()),
+                KeyMaterial::OpenPgpData { .. } => Some(b"OpenPGP".to_vec()),
                 _ => None,
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -628,6 +641,7 @@ impl TokenObject {
                 KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
                     .map(piv::data_object_oid),
+                KeyMaterial::OpenPgpData { tag, .. } => Some(tag.to_be_bytes().to_vec()),
                 _ => None,
             },
             x if x == CKA_PKCS11RS_PIV_OBJECT_TAG => match &self.material {
@@ -849,6 +863,9 @@ impl TokenObject {
                 KeyMaterial::PivPrivate { touch_policy, .. } => {
                     Some(ulong_attribute(*touch_policy as CK_ULONG))
                 }
+                KeyMaterial::OpenPgpPrivate { touch_policy, .. } => {
+                    Some(ulong_attribute(*touch_policy as CK_ULONG))
+                }
                 _ => None,
             },
             x if x == CKA_YUBICO_PIN_POLICY => match &self.material {
@@ -881,6 +898,19 @@ impl TokenObject {
                     }
                     KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         Some(value.clone())
+                    }
+                    KeyMaterial::OpenPgpData {
+                        connector,
+                        tag,
+                        value,
+                        attempted,
+                    }
+                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
+                    {
+                        if !attempted.replace(true) {
+                            *value.borrow_mut() = OpenPgpClient.get_data(connector.as_ref(), *tag).ok();
+                        }
+                        value.borrow().clone().or_else(|| Some(Vec::new()))
                     }
                     KeyMaterial::YubiHsmDevicePublic {
                         public_key_info, ..
@@ -967,6 +997,7 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
+                | KeyMaterial::OpenPgpData { .. }
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }

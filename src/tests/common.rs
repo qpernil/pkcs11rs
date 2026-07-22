@@ -2343,9 +2343,11 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
                 key: vec![0; 32],
             },
             pin_policy: 0,
+            touch_policy: 1,
             local: true,
         }],
         certificates: Vec::new(),
+        data_objects: Vec::new(),
     };
     let openpgp_eddsa = mechanism(
         crate::Slot::mechanisms(&openpgp),

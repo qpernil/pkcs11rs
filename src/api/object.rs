@@ -135,6 +135,29 @@ fn create_object(
             }
             return Ok(());
         }
+        if ctx.get_slot(slot_id)?.is_openpgp() {
+            let import = openpgp_private_import(templ)?;
+            validate_new_object_access(&import.object, flags, logged_in)?;
+            ctx._get_slot_mut(slot_id)?.openpgp_import_private_key(
+                import.key_ref,
+                import.algorithm,
+                &import.material,
+            )?;
+            if import.touch_policy != 0 {
+                ctx._get_slot_mut(slot_id)?.openpgp_set_touch_policy(
+                    import.key_ref,
+                    import.touch_policy,
+                )?;
+            }
+            ctx.refresh_slot_token_objects(slot_id)?;
+            *object_handle = find_openpgp_key_handle(
+                ctx,
+                slot_id,
+                import.key_ref,
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            )?;
+            return Ok(());
+        }
         let mut object = parse_create_object_template(templ)?;
         validate_new_object_access(&object, flags, logged_in)?;
         if ctx.get_slot(slot_id)?.is_yubihsm() {
@@ -161,6 +184,104 @@ fn create_object(
         let handle = ctx.insert_object(object);
         *object_handle = handle;
         Ok(())
+    })
+}
+
+struct OpenPgpImport {
+    key_ref: OpenPgpKeyRef,
+    algorithm: OpenPgpAlgorithm,
+    material: KeyMaterial,
+    object: TokenObject,
+    touch_policy: u8,
+}
+
+fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error> {
+    validate_unique_template(templ)?;
+    let key_type_attribute =
+        template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+            .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
+    let filtered = templ
+        .iter()
+        .filter(|attribute| {
+            !matches!(
+                attribute.type_,
+                x if is_key_component_attribute(x)
+                    || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                    || x == CKA_YUBICO_TOUCH_POLICY
+            )
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let object = key_pair_object(
+        &filtered,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    if !object.token {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let key_ref = openpgp_key_ref(&object.id)?;
+    let (algorithm, material) = if key_type == CKK_RSA as CK_KEY_TYPE {
+        let without_touch = templ
+            .iter()
+            .filter(|attribute| attribute.type_ != CKA_YUBICO_TOUCH_POLICY)
+            .copied()
+            .collect::<Vec<_>>();
+        let parsed = parse_create_object_template(&without_touch)?;
+        let KeyMaterial::RsaPrivate(key) = parsed.material else {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        };
+        let bits = key.size() as usize * 8;
+        if !matches!(bits, 2048 | 3072 | 4096) {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        (OpenPgpAlgorithm::Rsa { bits }, KeyMaterial::RsaPrivate(key))
+    } else {
+        let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
+        let params = required_template_value(templ, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+        let algorithm = if key_type == CKK_EC as CK_KEY_TYPE {
+            let curve = openpgp_curve(&params)?;
+            if key_ref == OpenPgpKeyRef::Decipher {
+                OpenPgpAlgorithm::Ecdh(curve)
+            } else {
+                OpenPgpAlgorithm::Ecdsa(curve)
+            }
+        } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
+            if params.as_slice() != openpgp::Curve::Ed25519.oid()
+                || key_ref == OpenPgpKeyRef::Decipher
+            {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            OpenPgpAlgorithm::Ed25519
+        } else if key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE {
+            if params.as_slice() != openpgp::Curve::X25519.oid()
+                || key_ref != OpenPgpKeyRef::Decipher
+            {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
+        } else {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        };
+        (algorithm, KeyMaterial::Secret(private))
+    };
+    let touch_policy = match template_attribute(templ, CKA_YUBICO_TOUCH_POLICY) {
+        Some(attribute) => {
+            let value = read_ulong_template_attribute(attribute).map_err(Error::from)?;
+            match value {
+                1..=5 => value as u8,
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            }
+        }
+        None => 0,
+    };
+    Ok(OpenPgpImport {
+        key_ref,
+        algorithm,
+        material,
+        object,
+        touch_policy,
     })
 }
 
@@ -1369,6 +1490,22 @@ fn set_attribute_value(
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
+        }
+        if let KeyMaterial::OpenPgpPrivate { key_ref, .. } = stored_object.material {
+            let [attribute] = templ else {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            };
+            if attribute.type_ != CKA_YUBICO_TOUCH_POLICY {
+                return Err(CKR_ATTRIBUTE_READ_ONLY.into());
+            }
+            let policy = read_ulong_template_attribute(attribute).map_err(Error::from)?;
+            if !matches!(policy, 1..=5) {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            ctx._get_slot_mut(slot_id)?
+                .openpgp_set_touch_policy(key_ref, policy as u8)?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+            return Ok(());
         }
         if ctx.token_object_handles.contains_key(&object)
             && !matches!(stored_object.material, KeyMaterial::PivPrivate { .. })
