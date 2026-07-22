@@ -415,7 +415,7 @@ impl Slot for IssuerSecurityDomainSlot {
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
-        self.authenticated.get() && self.connector.secure_channel_is_active()
+        self.authenticated.get()
     }
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
         Box::new(PcscAppletSession {
@@ -445,6 +445,8 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        info.ulMinPinLen = 0;
+        info.ulMaxPinLen = 0;
         if let Some((major, minor, patch)) = self.connector.firmware_version() {
             info.firmwareVersion.major = major;
             info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
@@ -477,6 +479,7 @@ fn issuer_security_domain_data_object(
     unique_id: String,
     label: String,
     id: Vec<u8>,
+    object_id: Vec<u8>,
     value: Vec<u8>,
 ) -> TokenObject {
     TokenObject {
@@ -503,7 +506,7 @@ fn issuer_security_domain_data_object(
         material: KeyMaterial::IssuerSecurityDomainData {
             value,
             application: ISSUER_SECURITY_DOMAIN_APPLICATION.to_owned(),
-            object_id: Vec::new(),
+            object_id,
         },
     }
 }
@@ -539,6 +542,7 @@ fn issuer_security_domain_token_objects(
             format!("issuer-sd-key-{:02x}-{:02x}", key.key_ref.kid, key.key_ref.kvn),
             format!("Issuer SD {name} KVN {}", key.key_ref.kvn),
             vec![key.key_ref.kid, key.key_ref.kvn],
+            vec![key.key_ref.kid, key.key_ref.kvn],
             value,
         ));
     }
@@ -548,6 +552,7 @@ fn issuer_security_domain_token_objects(
             "issuer-sd-card-recognition".to_string(),
             "Issuer SD card recognition data".to_string(),
             vec![0x66],
+            vec![0x66],
             value.clone(),
         ));
     }
@@ -556,6 +561,7 @@ fn issuer_security_domain_token_objects(
             slot_id,
             "issuer-sd-cplc".to_string(),
             "Issuer SD CPLC".to_string(),
+            vec![0x9f, 0x7f],
             vec![0x9f, 0x7f],
             value.clone(),
         ));
@@ -578,6 +584,14 @@ fn issuer_security_domain_token_objects(
                 ca.key_ref.kid, ca.key_ref.kvn
             ),
             vec![ca.key_ref.kid, ca.key_ref.kvn],
+            [
+                match ca.kind {
+                    security_domain::CaIdentifierKind::Kloc => vec![0xff, 0x33],
+                    security_domain::CaIdentifierKind::Klcc => vec![0xff, 0x34],
+                },
+                vec![ca.key_ref.kid, ca.key_ref.kvn],
+            ]
+            .concat(),
             ca.subject_key_identifier.clone(),
         ));
     }
@@ -597,11 +611,15 @@ fn issuer_security_domain_token_objects(
                     bundle.key_ref.kvn,
                     index + 1
                 ),
-                id: [
-                    vec![bundle.key_ref.kid, bundle.key_ref.kvn],
-                    (index as u16).to_be_bytes().to_vec(),
-                ]
-                .concat(),
+                id: if index + 1 == bundle.certificates.len() {
+                    vec![bundle.key_ref.kid, bundle.key_ref.kvn]
+                } else {
+                    [
+                        vec![bundle.key_ref.kid, bundle.key_ref.kvn],
+                        (index as u16).to_be_bytes().to_vec(),
+                    ]
+                    .concat()
+                },
                 token: true,
                 private: false,
                 encrypt: false,

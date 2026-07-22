@@ -1012,6 +1012,13 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def test_abi_scp03_fixture_exercises_secure_session_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        token_info = CK_TOKEN_INFO()
+        self.assertEqual(
+            self.lib.C_GetTokenInfo(ABI_TEST_SCP03_SLOT_ID, ctypes.byref(token_info)),
+            CKR_OK,
+        )
+        self.assertEqual(token_info.ulMinPinLen, 0)
+        self.assertEqual(token_info.ulMaxPinLen, 0)
         session = self.open_slot_session(ABI_TEST_SCP03_SLOT_ID)
         self.login_session(session)
         random_data = (CK_BYTE * 16)()
