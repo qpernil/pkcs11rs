@@ -17,6 +17,7 @@ enum SecureChannelProtocol {
     Scp03,
     Scp11a,
     Scp11b,
+    Scp11c,
 }
 
 fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
@@ -134,6 +135,7 @@ fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
         "scp03" => Ok(SecureChannelProtocol::Scp03),
         "scp11a" => Ok(SecureChannelProtocol::Scp11a),
         "scp11b" => Ok(SecureChannelProtocol::Scp11b),
+        "scp11c" => Ok(SecureChannelProtocol::Scp11c),
         _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }

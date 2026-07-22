@@ -1,4 +1,4 @@
-# SCP11a and SCP11b configuration
+# SCP11a, SCP11b, and SCP11c configuration
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11b` to establish an SCP11b secure
 channel for the selected CCID applet on a PC/SC card. See
@@ -7,6 +7,9 @@ shared-slot behavior. YubiKey SCP11 support requires firmware 5.7.2 or later.
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11a` to use SCP11a instead. SCP11a adds
 mutual authentication and requires the OCE credentials described below.
+
+Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11c` to use SCP11c. It uses the same OCE
+credentials as SCP11a, with the SCP11c key referenced by KID `0x15`.
 
 The Issuer SD is used separately for Secure Domain management.
 
@@ -39,8 +42,9 @@ The leaf certificate public key must match the configured OCE private key, and
 each certificate must verify the next certificate in the configured chain.
 
 The SCP11b transport uses NIST P-256 ephemeral key agreement and KID `0x13`.
-The SCP11a transport uploads the OCE certificate chain, uses KID `0x11`, and
-combines ephemeral and static ECDH. Both use AES-128 session keys and the
+The SCP11a and SCP11c transports upload the OCE certificate chain, use KID
+`0x11` and `0x15` respectively, and combine ephemeral and static ECDH. All use
+AES-128 session keys and the
 mandatory `0x33` security level with command and response encryption and MAC
 authentication. The card receipt is verified before the channel becomes
 active. Subsequent APDUs use the same short, extended, command-chaining,

@@ -561,6 +561,7 @@ pub(crate) struct Scp03Session {
     s_mac: Zeroizing<Vec<u8>>,
     s_rmac: Zeroizing<Vec<u8>>,
     static_dek: Option<Zeroizing<Vec<u8>>>,
+    oce_authenticated: bool,
     mac_chaining_value: [u8; AES_BLOCK_SIZE],
     encryption_counter: u128,
     security_level: u8,
@@ -571,6 +572,7 @@ impl std::fmt::Debug for Scp03Session {
         fmt.debug_struct("Scp03Session")
             .field("key_size", &self.s_enc.len())
             .field("has_static_dek", &self.static_dek.is_some())
+            .field("oce_authenticated", &self.oce_authenticated)
             .field("security_level", &self.security_level)
             .field("encryption_counter", &self.encryption_counter)
             .finish_non_exhaustive()
@@ -583,6 +585,7 @@ impl Scp03Session {
         s_mac: Vec<u8>,
         s_rmac: Vec<u8>,
         static_dek: Option<Vec<u8>>,
+        oce_authenticated: bool,
         mac_chaining_value: [u8; AES_BLOCK_SIZE],
         security_level: u8,
     ) -> Result<Self, Error> {
@@ -599,6 +602,7 @@ impl Scp03Session {
             s_mac: Zeroizing::new(s_mac),
             s_rmac: Zeroizing::new(s_rmac),
             static_dek: static_dek.map(Zeroizing::new),
+            oce_authenticated,
             mac_chaining_value,
             encryption_counter: 0,
             security_level,
@@ -676,6 +680,7 @@ impl Scp03Session {
             .dek
             .as_deref()
             .map(|key| Zeroizing::new(key.to_vec()));
+        session.oce_authenticated = true;
         let authenticate = session.external_authenticate(&host_cryptogram)?;
         transmit(connector, &authenticate)?.require_success(&authenticate)?;
         Ok(session)
@@ -686,6 +691,14 @@ impl Scp03Session {
             .as_ref()
             .map(|key| key.as_slice())
             .ok_or(CKR_KEY_FUNCTION_NOT_PERMITTED.into())
+    }
+
+    pub(crate) fn require_oce_authentication(&self) -> Result<(), Error> {
+        if self.oce_authenticated {
+            Ok(())
+        } else {
+            Err(crate::CKR_USER_NOT_LOGGED_IN.into())
+        }
     }
 
     fn from_initialize_update(
@@ -731,6 +744,7 @@ impl Scp03Session {
                 s_mac,
                 s_rmac,
                 static_dek: None,
+                oce_authenticated: true,
                 mac_chaining_value: [0; AES_BLOCK_SIZE],
                 encryption_counter: 0,
                 security_level,

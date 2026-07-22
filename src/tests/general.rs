@@ -305,6 +305,10 @@ fn secure_channel_configuration_accepts_only_explicit_protocols() {
         crate::parse_secure_channel("scp11b").unwrap(),
         crate::SecureChannelProtocol::Scp11b
     );
+    assert_eq!(
+        crate::parse_secure_channel("scp11c").unwrap(),
+        crate::SecureChannelProtocol::Scp11c
+    );
     assert!(crate::parse_secure_channel("scp11").is_err());
 }
 

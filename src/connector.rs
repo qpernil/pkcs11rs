@@ -149,6 +149,8 @@ impl PcscAppletConnector {
                 .authenticate_selected(self.base.as_ref())?,
             SecureChannelProtocol::Scp11b => Scp11KeySet::from_environment(Scp11Variant::B)?
                 .authenticate_selected(self.base.as_ref())?,
+            SecureChannelProtocol::Scp11c => Scp11KeySet::from_environment(Scp11Variant::C)?
+                .authenticate_selected(self.base.as_ref())?,
         };
         state.application_aid = self.application_aid.clone();
         state.session = Some(established);

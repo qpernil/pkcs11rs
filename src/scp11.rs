@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 
 const SCP11A_KEY_ID: u8 = 0x11;
 const SCP11B_KEY_ID: u8 = 0x13;
+const SCP11C_KEY_ID: u8 = 0x15;
 const SCP11_SECURITY_LEVEL: u8 = 0x33;
 const KEY_USAGE: u8 = 0x3c;
 const KEY_TYPE_AES: u8 = 0x88;
@@ -31,6 +32,7 @@ const DERIVED_KEY_COUNT: usize = 5;
 pub(crate) enum Scp11Variant {
     A,
     B,
+    C,
 }
 
 impl Scp11Variant {
@@ -38,6 +40,7 @@ impl Scp11Variant {
         match self {
             Self::A => 0x01,
             Self::B => 0x00,
+            Self::C => 0x03,
         }
     }
 
@@ -45,6 +48,7 @@ impl Scp11Variant {
         match self {
             Self::A => SCP11A_KEY_ID,
             Self::B => SCP11B_KEY_ID,
+            Self::C => SCP11C_KEY_ID,
         }
     }
 
@@ -52,6 +56,7 @@ impl Scp11Variant {
         match self {
             Self::A => 0x82,
             Self::B => 0x88,
+            Self::C => 0x82,
         }
     }
 }
@@ -100,7 +105,7 @@ impl Scp11KeySet {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         let host = match variant {
-            Scp11Variant::A => Some(Scp11aHostCredentials::from_environment()?),
+            Scp11Variant::A | Scp11Variant::C => Some(Scp11aHostCredentials::from_environment()?),
             Scp11Variant::B => None,
         };
         Ok(Self {
@@ -173,6 +178,7 @@ impl Scp11KeySet {
             key_material[32..48].to_vec(),
             key_material[48..64].to_vec(),
             None,
+            self.host.is_some(),
             expected_receipt,
             SCP11_SECURITY_LEVEL,
         )

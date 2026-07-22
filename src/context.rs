@@ -82,7 +82,7 @@ impl Context {
             ),
             (
                 ABI_TEST_SCP11_SLOT_ID,
-                Box::new(AbiScp03Slot::new("SCP11")?) as Box<dyn Slot>,
+                Box::new(AbiScp03Slot::new("SCP11A")?) as Box<dyn Slot>,
             ),
         ]);
         #[cfg(not(feature = "abi-tests"))]
