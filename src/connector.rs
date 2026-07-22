@@ -947,9 +947,11 @@ mod tests {
     #[test]
     fn validated_scp11_keys_survive_selection_but_not_reconnect_or_sd_mutation() {
         let key = (0x13, 1, [0x55; 32]);
-        let mut state = SecureChannelState::default();
-        state.connection_epoch = 7;
-        state.application_aid = vec![1, 2, 3];
+        let mut state = SecureChannelState {
+            connection_epoch: 7,
+            application_aid: vec![1, 2, 3],
+            ..SecureChannelState::default()
+        };
         state.validated_scp11_keys.insert(key, vec![0x04; 65]);
 
         state.synchronize_connection(7);

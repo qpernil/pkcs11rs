@@ -28,6 +28,10 @@ const KEY_TYPE_AES: u8 = 0x88;
 const KEY_LENGTH_AES_128: u8 = 16;
 const SESSION_KEY_LENGTH: usize = 16;
 const DERIVED_KEY_COUNT: usize = 5;
+const YUBICO_ATTESTATION_ROOT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/certificates/yubikey/yubico-attestation-root-1.pem"
+));
 
 pub(crate) type Scp11CertificateCacheKey = (u8, u8, [u8; 32]);
 
@@ -105,9 +109,10 @@ impl Scp11KeySet {
                 }
                 (None, anchors)
             }
-            (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
-                return Err(CKR_USER_PIN_NOT_INITIALIZED.into());
-            }
+            (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => (
+                None,
+                vec![X509::from_pem(YUBICO_ATTESTATION_ROOT)?.to_der()?],
+            ),
             (Err(env::VarError::NotUnicode(_)), _)
             | (_, Err(env::VarError::NotUnicode(_)))
             | (Ok(_), Ok(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
@@ -211,6 +216,7 @@ impl Scp11KeySet {
         })
     }
 
+    #[cfg(test)]
     fn establish_with_ephemeral(
         &self,
         connector: &dyn Connector,

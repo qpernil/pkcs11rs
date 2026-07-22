@@ -13,20 +13,26 @@ credentials as SCP11a, with the SCP11c key referenced by KID `0x15`.
 
 The Issuer SD is used separately for Secure Domain management.
 
-SCP11b authenticates the card to the host. This implementation requires the
-expected P-256 Security Domain public key to be pinned using exactly one of:
+SCP11b authenticates the card to the host. On a stock YubiKey with firmware
+5.7.4 or later, the module validates the Security Domain certificate chain
+against its embedded Yubico Attestation Root 1. This supports the factory
+SCP11b identity without additional trust configuration.
+
+Custom-provisioned devices may override the factory trust anchor using exactly
+one of:
 
 - `PKCS11RS_SCP11_SD_PUBLIC_KEY`: the 65-byte uncompressed SEC1 public point,
   encoded as hexadecimal;
 - `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to the PEM or DER X.509 CA
   certificate that authenticates the SD certificate chain.
 
-In CA-certificate mode, the module temporarily selects the Issuer SD, reads the
-chain for the configured SCP11 KID/KVN, and reselects the target applet. OpenSSL
-validates the chain against the configured CA, including validity periods and
-CA constraints, before the leaf P-256 key is used for SCP11 authentication. The
-SCP11 receipt then proves that the card owns the matching private key. The
-module never implicitly trusts a certificate obtained from the card.
+In factory or configured CA-certificate mode, the module temporarily selects
+the Issuer SD, reads the chain for the configured SCP11 KID/KVN, and reselects
+the target applet. OpenSSL validates the chain against the selected CA,
+including validity periods and CA constraints, before the leaf P-256 key is
+used for SCP11 authentication. The SCP11 receipt then proves that the card owns
+the matching private key. The module never implicitly trusts a certificate
+obtained from the card.
 
 Optional configuration:
 
