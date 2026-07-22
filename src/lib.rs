@@ -486,4 +486,6 @@ include!("api/key.rs");
 
 include!("api/security_domain.rs");
 
+include!("api/yubihsm.rs");
+
 include!("api/interfaces.rs");

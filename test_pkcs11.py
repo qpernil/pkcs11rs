@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import pathlib
 import platform
 import subprocess
+import tempfile
 import unittest
 
 
@@ -805,6 +807,25 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_BYTE,
         ]
         cls.lib.PKCS11RS_SecurityDomainDeleteScp11Key.restype = CK_RV
+        cls.lib.PKCS11RS_YubiHsmEnrollDeviceAttestation.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_YubiHsmEnrollDeviceAttestation.restype = CK_RV
+        cls.lib.PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation.restype = CK_RV
+        cls.lib.PKCS11RS_YubiHsmEnrollDevicePublicKey.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_YubiHsmEnrollDevicePublicKey.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)

@@ -519,6 +519,10 @@ impl Session for AbiYubiHsmSession {
         Ok(())
     }
 
+    fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
+        abi_yubihsm_device_public_key()
+    }
+
     fn yubihsm_command(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         const NIST_AES_KEY_ID: u16 = 3;
         const NIST_AES_128_KEY: [u8; 16] = [
@@ -539,10 +543,17 @@ impl Session for AbiYubiHsmSession {
         let (cipher, mode, iv, input) = match command.code() {
             YubiHsmCommandCode::GetOpaque => {
                 return match id {
+                    0 => abi_yubihsm_attestation_signer_certificate(),
                     ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
                     ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
                     _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
                 };
+            }
+            YubiHsmCommandCode::SignAttestationCertificate => {
+                if data != [0, 0, 0, 0] {
+                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
+                }
+                return abi_yubihsm_device_attestation();
             }
             YubiHsmCommandCode::EncryptEcb => {
                 (Cipher::aes_128_ecb(), Mode::Encrypt, None, data.get(2..))
@@ -588,6 +599,68 @@ const ABI_YUBIHSM_OPAQUE_DATA_ID: u16 = 5;
 const ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID: u16 = 6;
 #[cfg(feature = "abi-tests")]
 const ABI_YUBIHSM_OPAQUE_DATA: &[u8] = b"ABI opaque data";
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_private_key(scalar: u32) -> Result<PKey<Private>, Error> {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+    let private = BigNum::from_u32(scalar)?;
+    let mut public = EcPoint::new(&group)?;
+    let mut context = openssl::bn::BigNumContext::new()?;
+    public.mul_generator2(&group, &private, &mut context)?;
+    Ok(PKey::from_ec_key(EcKey::from_private_components(
+        &group, &private, &public,
+    )?)?)
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_public_key(key: &PKey<Private>) -> Result<PKey<Public>, Error> {
+    Ok(PKey::public_key_from_der(&key.public_key_to_der()?)?)
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_device_public_key() -> Result<Vec<u8>, Error> {
+    let key = abi_yubihsm_private_key(1)?.ec_key()?;
+    let mut context = openssl::bn::BigNumContext::new()?;
+    Ok(key
+        .public_key()
+        .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut context)?)
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_certificate(
+    public_key: &PKey<Public>,
+    signer: &PKey<Private>,
+    serial: u32,
+) -> Result<Vec<u8>, Error> {
+    let mut name = openssl::x509::X509Name::builder()?;
+    name.append_entry_by_text("CN", "PKCS11RS ABI YubiHSM attestation")?;
+    let name = name.build();
+    let serial = BigNum::from_u32(serial)?.to_asn1_integer()?;
+    let mut certificate = openssl::x509::X509::builder()?;
+    certificate.set_version(2)?;
+    certificate.set_serial_number(&serial)?;
+    certificate.set_subject_name(&name)?;
+    certificate.set_issuer_name(&name)?;
+    certificate.set_pubkey(public_key)?;
+    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
+    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
+    certificate.sign(signer, MessageDigest::sha256())?;
+    Ok(certificate.build().to_der()?)
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_attestation_signer_certificate() -> Result<Vec<u8>, Error> {
+    let signer = abi_yubihsm_private_key(2)?;
+    abi_yubihsm_certificate(&abi_yubihsm_public_key(&signer)?, &signer, 1)
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_device_attestation() -> Result<Vec<u8>, Error> {
+    let device = abi_yubihsm_private_key(1)?;
+    let signer = abi_yubihsm_private_key(2)?;
+    abi_yubihsm_certificate(&abi_yubihsm_public_key(&device)?, &signer, 2)
+}
+
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_opaque_certificate() -> Result<Vec<u8>, Error> {
     static CERTIFICATE: OnceLock<Vec<u8>> = OnceLock::new();

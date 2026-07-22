@@ -975,6 +975,9 @@ impl Session for YubiHsmSession {
     fn yubihsm_command(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         self.send_secure_cmd(command)
     }
+    fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
+        crate::get_yubihsm_device_public_key(self.connector.as_ref()).map(Vec::from)
+    }
 }
 
 impl YubiHsmSession {

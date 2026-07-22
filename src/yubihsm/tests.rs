@@ -524,8 +524,7 @@ impl ProtocolPeer {
     }
 }
 
-pub(crate) fn make_yubihsm_test_slot(
-) -> (
+pub(crate) fn make_yubihsm_test_slot() -> (
     Box<dyn crate::Slot>,
     InnerCommands,
     std::rc::Rc<Cell<bool>>,
@@ -538,15 +537,12 @@ pub(crate) fn make_yubihsm_test_slot(
     let mut slot = crate::YubiHsmSlot::new(
         peer,
         (2, 4, 1),
-        vec![1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56],
+        vec![
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+        ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
-    (
-        Box::new(slot),
-        commands,
-        corrupt_response_mac,
-        trust,
-    )
+    (Box::new(slot), commands, corrupt_response_mac, trust)
 }
 
 impl Connector for ProtocolPeer {
