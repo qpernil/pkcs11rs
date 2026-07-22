@@ -67,6 +67,13 @@ pub(crate) trait Connector {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
 
+    fn security_domain_scp11_administration(
+        &self,
+        _operation: &Scp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+
     fn name(&self) -> String {
         format!(
             "{} {} {}",
@@ -387,6 +394,29 @@ impl Connector for PcscAppletConnector {
             state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?,
             kvn,
             delete_last,
+        );
+        if result.is_err() {
+            state.session = None;
+            state.application_aid.clear();
+        }
+        result
+    }
+
+    fn security_domain_scp11_administration(
+        &self,
+        operation: &Scp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        self.ensure_selected()?;
+        if !self.enabled.get() {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let mut state = self.state.try_borrow_mut()?;
+        let session = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let prepared = SecurityDomainClient.prepare_scp11_administration(session, operation)?;
+        let result = SecurityDomainClient.execute_scp11_administration(
+            self.base.as_ref(),
+            session,
+            prepared,
         );
         if result.is_err() {
             state.session = None;

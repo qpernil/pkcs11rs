@@ -689,6 +689,14 @@ impl Session for PcscAppletSession {
         self.connector
             .security_domain_delete_scp03_key_set(kvn, delete_last)
     }
+
+    fn security_domain_scp11_administration(
+        &self,
+        operation: &Scp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        self.connector
+            .security_domain_scp11_administration(operation)
+    }
 }
 
 
@@ -771,6 +779,24 @@ impl Session for IssuerSecurityDomainSession {
             session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?,
             kvn,
             delete_last,
+        );
+        if result.is_err() {
+            *session = None;
+        }
+        result
+    }
+
+    fn security_domain_scp11_administration(
+        &self,
+        operation: &Scp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        let mut session = self.session.try_borrow_mut()?;
+        let channel = session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let prepared = SecurityDomainClient.prepare_scp11_administration(channel, operation)?;
+        let result = SecurityDomainClient.execute_scp11_administration(
+            self.connector.as_ref(),
+            channel,
+            prepared,
         );
         if result.is_err() {
             *session = None;

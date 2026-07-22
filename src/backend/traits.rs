@@ -260,6 +260,12 @@ trait Session {
     ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn security_domain_scp11_administration(
+        &self,
+        _operation: &Scp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
 }
 
 fn session_state(flags: CK_FLAGS, role: Option<LoginRole>) -> CK_STATE {

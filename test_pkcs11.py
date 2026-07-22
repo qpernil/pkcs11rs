@@ -262,6 +262,13 @@ class PKCS11RS_SCP03_KEY_SET(ctypes.Structure):
     ]
 
 
+class PKCS11RS_BYTE_BUFFER(ctypes.Structure):
+    _fields_ = [
+        ("pValue", ctypes.POINTER(CK_BYTE)),
+        ("ulValueLen", CK_ULONG),
+    ]
+
+
 class CK_MECHANISM_INFO(ctypes.Structure):
     _fields_ = [
         ("ulMinKeySize", CK_ULONG),
@@ -743,6 +750,61 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_BYTE,
         ]
         cls.lib.PKCS11RS_SecurityDomainDeleteScp03KeySet.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainGenerateScp11Key.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            CK_BYTE,
+            CK_BYTE,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_SecurityDomainGenerateScp11Key.restype = CK_RV
+        for name in (
+            "PKCS11RS_SecurityDomainPutScp11PrivateKey",
+            "PKCS11RS_SecurityDomainPutScp11PublicKey",
+        ):
+            function = getattr(cls.lib, name)
+            function.argtypes = [
+                CK_ULONG,
+                CK_BYTE,
+                CK_BYTE,
+                CK_BYTE,
+                ctypes.POINTER(CK_BYTE),
+                CK_ULONG,
+            ]
+            function.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainStoreScp11CertificateChain.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            ctypes.POINTER(PKCS11RS_BYTE_BUFFER),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_SecurityDomainStoreScp11CertificateChain.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainStoreScp11CaIssuer.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_SecurityDomainStoreScp11CaIssuer.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainSetScp11Allowlist.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            ctypes.POINTER(PKCS11RS_BYTE_BUFFER),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_SecurityDomainSetScp11Allowlist.restype = CK_RV
+        cls.lib.PKCS11RS_SecurityDomainDeleteScp11Key.argtypes = [
+            CK_ULONG,
+            CK_BYTE,
+            CK_BYTE,
+            CK_BYTE,
+        ]
+        cls.lib.PKCS11RS_SecurityDomainDeleteScp11Key.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)
@@ -1031,6 +1093,157 @@ class Pkcs11AbiTests(unittest.TestCase):
             self.lib.C_GetSessionInfo(session.value, ctypes.byref(info)), CKR_OK
         )
         self.assertEqual(info.state, CKS_RW_USER_FUNCTIONS)
+
+    def test_scp11_administration_abi_covers_key_and_trust_lifecycle(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SCP11_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+        self.login_session(session.value)
+
+        public_len = CK_ULONG()
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainGenerateScp11Key(
+                session.value, 0x13, 2, 0, 0, None, ctypes.byref(public_len)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(public_len.value, 65)
+        short_public = (CK_BYTE * 64)()
+        public_len.value = len(short_public)
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainGenerateScp11Key(
+                session.value,
+                0x13,
+                2,
+                0,
+                0,
+                short_public,
+                ctypes.byref(public_len),
+            ),
+            CKR_BUFFER_TOO_SMALL,
+        )
+        self.assertEqual(public_len.value, 65)
+        public = (CK_BYTE * public_len.value)()
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainGenerateScp11Key(
+                session.value, 0x13, 2, 0, 0, public, ctypes.byref(public_len)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(public[:1]), b"\x04")
+
+        generator = bytes.fromhex(
+            "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"
+            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+        )
+        spki = bytes.fromhex(
+            "3059301306072a8648ce3d020106082a8648ce3d030107034200"
+        ) + generator
+        spki_buffer = (CK_BYTE * len(spki)).from_buffer_copy(spki)
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp11PublicKey(
+                session.value, 0x11, 3, 0, spki_buffer, len(spki_buffer)
+            ),
+            CKR_OK,
+        )
+
+        private_key = bytes.fromhex(
+            "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b"
+            "02010104200000000000000000000000000000000000000000000000000000000000000001"
+            "a144034200"
+        ) + generator
+        private_key_buffer = (CK_BYTE * len(private_key)).from_buffer_copy(private_key)
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp11PrivateKey(
+                session.value,
+                0x11,
+                4,
+                0,
+                private_key_buffer,
+                len(private_key_buffer),
+            ),
+            CKR_KEY_FUNCTION_NOT_PERMITTED,
+        )
+
+        certificate = bytes.fromhex(
+            "3082018130820127a0030201020214153d8447fd625878efa59113f46c94d2a531f975"
+            "300a06082a8648ce3d04030230163114301206035504030c0b53442d4142492d546573"
+            "74301e170d3236303732323135313534315a170d3236303732333135313534315a3016"
+            "3114301206035504030c0b53442d4142492d546573743059301306072a8648ce3d0201"
+            "06082a8648ce3d0301070342000466c8a6ac7e9997860f5f3622a162c7e4ec4e719f"
+            "bf7d4d9acb1158756650323ca52dd5fdd469c02af5c22fd9704a8c98a635d3133906f"
+            "bed6fa54e84f36b0189a3533051301d0603551d0e04160414f188fad024f39bea4a5a"
+            "0ebe60aa3c422660eb97301f0603551d23041830168014f188fad024f39bea4a5a0ebe"
+            "60aa3c422660eb97300f0603551d130101ff040530030101ff300a06082a8648ce3d04"
+            "03020348003045022100aa29dabb8a6b8adbf8cec6df82de12ce080168c0295ca5c270"
+            "1309e65913735f02200579599c0e08e97370a84260c84159e301a354cc088a064dc2c2"
+            "1d1e272e7fcb"
+        )
+        certificate_buffer = (CK_BYTE * len(certificate)).from_buffer_copy(certificate)
+        certificate_entry = PKCS11RS_BYTE_BUFFER(
+            certificate_buffer, len(certificate_buffer)
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainStoreScp11CertificateChain(
+                session.value, 0x11, 3, ctypes.byref(certificate_entry), 1
+            ),
+            CKR_OK,
+        )
+
+        ski = (CK_BYTE * 20)(*range(20))
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainStoreScp11CaIssuer(
+                session.value, 0x11, 3, ski, len(ski)
+            ),
+            CKR_OK,
+        )
+        serial = (CK_BYTE * 2)(0, 0x80)
+        serial_entry = PKCS11RS_BYTE_BUFFER(serial, len(serial))
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainSetScp11Allowlist(
+                session.value, 0x11, 3, ctypes.byref(serial_entry), 1
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainDeleteScp11Key(
+                session.value, 0x11, 3, 0
+            ),
+            CKR_OK,
+        )
+
+        scp03_session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SCP03_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(scp03_session),
+            ),
+            CKR_OK,
+        )
+        self.login_session(scp03_session.value)
+        self.assertEqual(
+            self.lib.PKCS11RS_SecurityDomainPutScp11PrivateKey(
+                scp03_session.value,
+                0x15,
+                4,
+                0,
+                private_key_buffer,
+                len(private_key_buffer),
+            ),
+            CKR_OK,
+        )
 
     def test_abi_scp11_fixture_exercises_secure_session_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
