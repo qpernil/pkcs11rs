@@ -3,7 +3,7 @@ enum CcidApplication {
     Piv,
     OpenPgp,
     HsmAuth,
-    GlobalPlatform,
+    IssuerSecurityDomain,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +34,7 @@ fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
                 CcidApplication::Piv
                 | CcidApplication::OpenPgp
                 | CcidApplication::HsmAuth
-                | CcidApplication::GlobalPlatform => secure_channel,
+                | CcidApplication::IssuerSecurityDomain => secure_channel,
             };
             Ok(CcidConfiguration {
                 application,
@@ -67,7 +67,7 @@ fn default_ccid_applications() -> Vec<CcidApplication> {
         CcidApplication::Piv,
         CcidApplication::OpenPgp,
         CcidApplication::HsmAuth,
-        CcidApplication::GlobalPlatform,
+        CcidApplication::IssuerSecurityDomain,
     ]
 }
 
@@ -76,7 +76,7 @@ fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
         "piv" => Ok(CcidApplication::Piv),
         "openpgp" => Ok(CcidApplication::OpenPgp),
         "hsmauth" => Ok(CcidApplication::HsmAuth),
-        "globalplatform" => Ok(CcidApplication::GlobalPlatform),
+        "issuer-sd" => Ok(CcidApplication::IssuerSecurityDomain),
         _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }
@@ -86,7 +86,7 @@ fn ccid_application_label(application: CcidApplication) -> &'static str {
         CcidApplication::Piv => "PIV",
         CcidApplication::OpenPgp => "OpenPGP",
         CcidApplication::HsmAuth => "YubiHSM Auth",
-        CcidApplication::GlobalPlatform => "Issuer SD",
+        CcidApplication::IssuerSecurityDomain => "Issuer SD",
     }
 }
 
@@ -101,9 +101,9 @@ fn ccid_application_aid(
             "PKCS11RS_HSMAUTH_AID",
             &hsmauth::AID[..],
         ),
-        CcidApplication::GlobalPlatform => (
-            "PKCS11RS_GLOBALPLATFORM_AID",
-            &YUBIKEY_ISSUER_SECURITY_DOMAIN_AID[..],
+        CcidApplication::IssuerSecurityDomain => (
+            "PKCS11RS_ISSUER_SD_AID",
+            &DEFAULT_ISSUER_SECURITY_DOMAIN_AID[..],
         ),
     };
     configured_ccid_aid(name, default)
@@ -342,14 +342,14 @@ fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenOb
 }
 
 #[derive(Debug)]
-struct GlobalPlatformSlot {
+struct IssuerSecurityDomainSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
     info: RefCell<Option<SecurityDomainInfo>>,
 }
 
-impl GlobalPlatformSlot {
+impl IssuerSecurityDomainSlot {
     fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
@@ -368,7 +368,7 @@ impl GlobalPlatformSlot {
     }
 }
 
-impl Slot for GlobalPlatformSlot {
+impl Slot for IssuerSecurityDomainSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -450,7 +450,7 @@ impl Slot for GlobalPlatformSlot {
         Ok(())
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        Ok(security_domain_token_objects(
+        Ok(issuer_security_domain_token_objects(
             slot_id,
             &self.discovered_info()?,
         ))
@@ -460,9 +460,9 @@ impl Slot for GlobalPlatformSlot {
     }
 }
 
-const SECURITY_DOMAIN_APPLICATION: &str = "GlobalPlatform Security Domain";
+const ISSUER_SECURITY_DOMAIN_APPLICATION: &str = "Issuer SD";
 
-fn security_domain_data_object(
+fn issuer_security_domain_data_object(
     slot_id: CK_SLOT_ID,
     unique_id: String,
     label: String,
@@ -490,15 +490,15 @@ fn security_domain_data_object(
         local: false,
         key_gen_mechanism: None,
         owner_session: None,
-        material: KeyMaterial::SecurityDomainData {
+        material: KeyMaterial::IssuerSecurityDomainData {
             value,
-            application: SECURITY_DOMAIN_APPLICATION.to_owned(),
+            application: ISSUER_SECURITY_DOMAIN_APPLICATION.to_owned(),
             object_id: Vec::new(),
         },
     }
 }
 
-fn security_domain_key_name(kid: u8) -> String {
+fn issuer_security_domain_key_name(kid: u8) -> String {
     match kid {
         security_domain::KID_SCP03 => "SCP03 K-ENC".to_string(),
         0x02 => "SCP03 K-MAC".to_string(),
@@ -512,7 +512,7 @@ fn security_domain_key_name(kid: u8) -> String {
     }
 }
 
-fn security_domain_token_objects(
+fn issuer_security_domain_token_objects(
     slot_id: CK_SLOT_ID,
     info: &SecurityDomainInfo,
 ) -> Vec<TokenObject> {
@@ -523,8 +523,8 @@ fn security_domain_token_objects(
             .iter()
             .flat_map(|component| [component.key_type, component.length])
             .collect();
-        let name = security_domain_key_name(key.key_ref.kid);
-        objects.push(security_domain_data_object(
+        let name = issuer_security_domain_key_name(key.key_ref.kid);
+        objects.push(issuer_security_domain_data_object(
             slot_id,
             format!("issuer-sd-key-{:02x}-{:02x}", key.key_ref.kid, key.key_ref.kvn),
             format!("Issuer SD {name} KVN {}", key.key_ref.kvn),
@@ -533,7 +533,7 @@ fn security_domain_token_objects(
         ));
     }
     if let Some(value) = &info.card_recognition_data {
-        objects.push(security_domain_data_object(
+        objects.push(issuer_security_domain_data_object(
             slot_id,
             "issuer-sd-card-recognition".to_string(),
             "Issuer SD card recognition data".to_string(),
@@ -542,7 +542,7 @@ fn security_domain_token_objects(
         ));
     }
     if let Some(value) = &info.cplc {
-        objects.push(security_domain_data_object(
+        objects.push(issuer_security_domain_data_object(
             slot_id,
             "issuer-sd-cplc".to_string(),
             "Issuer SD CPLC".to_string(),
@@ -555,7 +555,7 @@ fn security_domain_token_objects(
             security_domain::CaIdentifierKind::Kloc => "KLOC",
             security_domain::CaIdentifierKind::Klcc => "KLCC",
         };
-        objects.push(security_domain_data_object(
+        objects.push(issuer_security_domain_data_object(
             slot_id,
             format!(
                 "issuer-sd-ca-{}-{:02x}-{:02x}",
@@ -572,7 +572,7 @@ fn security_domain_token_objects(
         ));
     }
     for bundle in &info.certificate_bundles {
-        let name = security_domain_key_name(bundle.key_ref.kid);
+        let name = issuer_security_domain_key_name(bundle.key_ref.kid);
         for (index, certificate) in bundle.certificates.iter().enumerate() {
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
@@ -606,7 +606,7 @@ fn security_domain_token_objects(
                 local: false,
                 key_gen_mechanism: None,
                 owner_session: None,
-                material: KeyMaterial::SecurityDomainCertificate {
+                material: KeyMaterial::IssuerSecurityDomainCertificate {
                     value: certificate.clone(),
                 },
             });
@@ -664,14 +664,14 @@ impl Session for PcscAppletSession {
 
 
 #[derive(Debug)]
-struct GlobalPlatformSession {
+struct IssuerSecurityDomainSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
-impl Session for GlobalPlatformSession {
+impl Session for IssuerSecurityDomainSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -708,7 +708,7 @@ impl Session for GlobalPlatformSession {
     }
 }
 
-impl GlobalPlatformSession {
+impl IssuerSecurityDomainSession {
     fn send_apdu(&self, command: &CommandApdu, chained: bool) -> Result<ResponseApdu, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
         let result = {

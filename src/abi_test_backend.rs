@@ -388,7 +388,7 @@ impl Slot for AbiScp03Slot {
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(GlobalPlatformSession {
+        Box::new(IssuerSecurityDomainSession {
             slotID: slot_id,
             flags,
             connector: self.connector.clone(),

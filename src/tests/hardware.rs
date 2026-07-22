@@ -60,9 +60,9 @@ mod hardware_provisioning {
         let hsmauth = crate::HsmAuthSlot::new(connector(), hsmauth_aid);
         assert!(crate::Slot::hsmauth_provisioning_connector(&hsmauth).is_some());
 
-        let issuer_sd = crate::GlobalPlatformSlot::new(
+        let issuer_sd = crate::IssuerSecurityDomainSlot::new(
             connector(),
-            crate::YUBIKEY_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
+            crate::DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
         );
         assert!(crate::Slot::hsmauth_provisioning_connector(&issuer_sd).is_none());
 

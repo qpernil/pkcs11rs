@@ -916,8 +916,8 @@ fn copy_object(
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if matches!(
             copied_object.material,
-            KeyMaterial::SecurityDomainData { .. }
-                | KeyMaterial::SecurityDomainCertificate { .. }
+            KeyMaterial::IssuerSecurityDomainData { .. }
+                | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
         ) {
@@ -974,8 +974,8 @@ fn destroy_object(
         }
         if matches!(
             stored_object.material,
-            KeyMaterial::SecurityDomainData { .. }
-                | KeyMaterial::SecurityDomainCertificate { .. }
+            KeyMaterial::IssuerSecurityDomainData { .. }
+                | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
@@ -1144,8 +1144,8 @@ fn get_attribute_value(
                     | KeyMaterial::PivAttestation { .. }
                     | KeyMaterial::PivData { .. }
                     | KeyMaterial::OpenPgpCertificate { .. }
-                    | KeyMaterial::SecurityDomainData { .. }
-                    | KeyMaterial::SecurityDomainCertificate { .. } => {
+                    | KeyMaterial::IssuerSecurityDomainData { .. }
+                    | KeyMaterial::IssuerSecurityDomainCertificate { .. } => {
                         match object.attribute_value(attribute.type_) {
                             Some(value) => {
                                 if let Err(e) = write_attribute_value(attribute, &value) {

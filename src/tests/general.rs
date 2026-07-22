@@ -259,7 +259,7 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 pub fn yubikey_login_preserves_connector_errors() {
     let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
-    let mut slot = crate::GlobalPlatformSlot::new(
+    let mut slot = crate::IssuerSecurityDomainSlot::new(
         std::rc::Rc::new(crate::PcscAppletConnector::new(
             base,
             &application_aid,
@@ -276,10 +276,17 @@ pub fn yubikey_login_preserves_connector_errors() {
 #[test]
 fn applet_configuration_accepts_only_canonical_names() {
     assert_eq!(
-        crate::parse_ccid_application("globalplatform").unwrap(),
-        crate::CcidApplication::GlobalPlatform
+        crate::parse_ccid_application("issuer-sd").unwrap(),
+        crate::CcidApplication::IssuerSecurityDomain
     );
-    for invalid in ["pgp", "yubihsm-auth", "global-platform", "gp", "scp03"] {
+    for invalid in [
+        "pgp",
+        "yubihsm-auth",
+        "globalplatform",
+        "global-platform",
+        "gp",
+        "scp03",
+    ] {
         assert!(crate::parse_ccid_application(invalid).is_err(), "{invalid}");
     }
 }
@@ -309,7 +316,7 @@ fn ccid_application_discovery_defaults_to_supported_applets() {
             crate::CcidApplication::Piv,
             crate::CcidApplication::OpenPgp,
             crate::CcidApplication::HsmAuth,
-            crate::CcidApplication::GlobalPlatform,
+            crate::CcidApplication::IssuerSecurityDomain,
         ]
     );
 }
@@ -396,10 +403,9 @@ fn passive_ccid_slots_do_not_repeat_presence_select() {
     let mut hsmauth = crate::HsmAuthSlot::new(connector(), hsmauth_aid);
     assert!(crate::Slot::init_slot(&mut hsmauth).is_ok());
 
-    let globalplatform_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
-    let mut globalplatform =
-        crate::GlobalPlatformSlot::new(connector(), globalplatform_aid);
-    assert!(crate::Slot::init_slot(&mut globalplatform).is_ok());
+    let issuer_sd_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let mut issuer_sd = crate::IssuerSecurityDomainSlot::new(connector(), issuer_sd_aid);
+    assert!(crate::Slot::init_slot(&mut issuer_sd).is_ok());
 }
 
 #[test]
@@ -717,7 +723,7 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
 }
 
 #[test]
-fn globalplatform_token_model_identifies_the_applet() {
+fn issuer_sd_token_model_identifies_the_applet() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
         select_ok: std::cell::Cell::new(true),
@@ -731,7 +737,7 @@ fn globalplatform_token_model_identifies_the_applet() {
             None,
             std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
         ));
-    let slot = crate::GlobalPlatformSlot::new(connector, aid);
+    let slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());
@@ -741,7 +747,7 @@ fn globalplatform_token_model_identifies_the_applet() {
 }
 
 #[test]
-fn security_domain_metadata_becomes_read_only_pkcs11_objects() {
+fn issuer_sd_metadata_becomes_read_only_pkcs11_objects() {
     let info = crate::SecurityDomainInfo {
         keys: vec![crate::security_domain::KeyInfo {
             key_ref: crate::security_domain::KeyRef {
@@ -769,14 +775,14 @@ fn security_domain_metadata_becomes_read_only_pkcs11_objects() {
         }],
     };
 
-    let objects = crate::security_domain_token_objects(TEST_SLOT_ID, &info);
+    let objects = crate::issuer_security_domain_token_objects(TEST_SLOT_ID, &info);
     assert_eq!(objects.len(), 5);
     let key = &objects[0];
     assert_eq!(key.class, CKO_DATA as CK_OBJECT_CLASS);
     assert_eq!(key.id, vec![0x13, 1]);
     assert_eq!(
         key.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
-        Some(b"GlobalPlatform Security Domain".to_vec())
+        Some(b"Issuer SD".to_vec())
     );
     assert_eq!(
         key.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
@@ -885,7 +891,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         let context = context.as_mut().unwrap();
         context.slots.insert(
             TEST_SLOT_ID,
-            Box::new(crate::GlobalPlatformSlot::new(
+            Box::new(crate::IssuerSecurityDomainSlot::new(
                 connector.clone(),
                 application_aid,
             )),

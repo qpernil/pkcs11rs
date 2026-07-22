@@ -73,12 +73,12 @@ enum KeyMaterial {
     OpenPgpCertificate {
         value: Vec<u8>,
     },
-    SecurityDomainData {
+    IssuerSecurityDomainData {
         value: Vec<u8>,
         application: String,
         object_id: Vec<u8>,
     },
-    SecurityDomainCertificate {
+    IssuerSecurityDomainCertificate {
         value: Vec<u8>,
     },
     HsmAuthCredential {
@@ -200,18 +200,18 @@ impl std::fmt::Debug for KeyMaterial {
                 .debug_struct("OpenPgpCertificate")
                 .field("size", &value.len())
                 .finish(),
-            Self::SecurityDomainData {
+            Self::IssuerSecurityDomainData {
                 value,
                 application,
                 object_id,
             } => fmt
-                .debug_struct("SecurityDomainData")
+                .debug_struct("IssuerSecurityDomainData")
                 .field("size", &value.len())
                 .field("application", application)
                 .field("object_id", object_id)
                 .finish(),
-            Self::SecurityDomainCertificate { value } => fmt
-                .debug_struct("SecurityDomainCertificate")
+            Self::IssuerSecurityDomainCertificate { value } => fmt
+                .debug_struct("IssuerSecurityDomainCertificate")
                 .field("size", &value.len())
                 .finish(),
             Self::HsmAuthCredential {
@@ -564,7 +564,7 @@ impl TokenObject {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => {
                     Some(b"Opaque object".to_vec())
                 }
-                KeyMaterial::SecurityDomainData { application, .. } => {
+                KeyMaterial::IssuerSecurityDomainData { application, .. } => {
                     Some(application.as_bytes().to_vec())
                 }
                 KeyMaterial::PivData { .. } => Some(b"PIV".to_vec()),
@@ -572,7 +572,7 @@ impl TokenObject {
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
-                KeyMaterial::SecurityDomainData { object_id, .. } => Some(object_id.clone()),
+                KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
                     .map(piv::data_object_oid),
                 _ => None,
@@ -812,10 +812,10 @@ impl TokenObject {
                     }
                     KeyMaterial::PivCertificate { value, .. }
                     | KeyMaterial::OpenPgpCertificate { value }
-                    | KeyMaterial::SecurityDomainCertificate { value } => {
+                    | KeyMaterial::IssuerSecurityDomainCertificate { value } => {
                         piv_certificate_attribute(value, x)
                     }
-                    KeyMaterial::SecurityDomainData { value, .. }
+                    KeyMaterial::IssuerSecurityDomainData { value, .. }
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
                         Some(value.clone())
@@ -918,8 +918,8 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpPrivate { .. }
                 | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
-                | KeyMaterial::SecurityDomainData { .. }
-                | KeyMaterial::SecurityDomainCertificate { .. }
+                | KeyMaterial::IssuerSecurityDomainData { .. }
+                | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsm { .. }
