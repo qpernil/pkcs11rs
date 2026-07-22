@@ -10,9 +10,11 @@ The PC/SC transport automatically probes these CCID applets by default:
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
-can be selected successfully. Initialization and object-discovery failures do
-not remove an already discovered slot; they leave it enumerated with the token
-marked not-present. The next refresh retries discovery.
+can be selected successfully. Reader and applet discovery is a snapshot taken
+on the first `C_GetSlotList` call after `C_Initialize`; discovering newly added
+readers or applets requires `C_Finalize` followed by `C_Initialize`. Existing
+slots still refresh token presence when a session is opened. Initialization and
+object-discovery failures do not remove an already selected applet slot.
 
 ## Allowlist
 

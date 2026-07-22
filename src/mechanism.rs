@@ -57,13 +57,13 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 19] = [
         type_: CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
         min_key_size: 2048,
         max_key_size: 4096,
-        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE,
         min_key_size: 2048,
         max_key_size: 4096,
-        flags: (CKF_HW | CKF_DECRYPT) as CK_FLAGS,
+        flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -75,7 +75,7 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 19] = [
         type_: CKM_ECDSA as CK_MECHANISM_TYPE,
         min_key_size: 224,
         max_key_size: 521,
-        flags: (CKF_HW | CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -422,4 +422,3 @@ fn get_mechanism_info(
         Ok(())
     })
 }
-

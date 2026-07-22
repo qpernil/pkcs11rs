@@ -80,6 +80,9 @@ CKA_OBJECT_ID = 0x00000012
 CKA_CERTIFICATE_TYPE = 0x00000080
 CKA_ISSUER = 0x00000081
 CKA_SERIAL_NUMBER = 0x00000082
+CKA_CERTIFICATE_CATEGORY = 0x00000087
+CKA_CHECK_VALUE = 0x00000090
+CKA_PUBLIC_KEY_INFO = 0x00000129
 CKA_KEY_TYPE = 0x00000100
 CKA_SUBJECT = 0x00000101
 CKA_ID = 0x00000102
@@ -1579,10 +1582,19 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKC_X_509,
         )
         self.assertEqual(
-            bytes_attribute(certificate, CKA_VALUE), b"\x30\x03\x02\x01\x01"
+            scalar_attribute(certificate, CKA_CERTIFICATE_CATEGORY, CK_ULONG()), 0
         )
-        for attribute_type in (CKA_SUBJECT, CKA_ISSUER, CKA_SERIAL_NUMBER):
-            self.assertEqual(bytes_attribute(certificate, attribute_type), b"")
+        self.assertTrue(bytes_attribute(certificate, CKA_VALUE).startswith(b"\x30"))
+        subject = bytes_attribute(certificate, CKA_SUBJECT)
+        self.assertTrue(subject.startswith(b"\x30"))
+        self.assertEqual(bytes_attribute(certificate, CKA_ISSUER), subject)
+        self.assertEqual(
+            bytes_attribute(certificate, CKA_SERIAL_NUMBER), b"\x02\x02\x00\x80"
+        )
+        self.assertTrue(
+            bytes_attribute(certificate, CKA_PUBLIC_KEY_INFO).startswith(b"\x30")
+        )
+        self.assertEqual(len(bytes_attribute(certificate, CKA_CHECK_VALUE)), 3)
 
     def test_pkcs11_2_40_function_list_entries_are_present(self) -> None:
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()

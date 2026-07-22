@@ -444,13 +444,13 @@ impl Slot for OpenPgpSlot {
                 flags,
             });
         };
-        for type_ in [
-            CKM_RSA_X_509,
-            CKM_RSA_PKCS,
-            CKM_SHA256_RSA_PKCS,
-            CKM_SHA384_RSA_PKCS,
-            CKM_SHA512_RSA_PKCS,
-        ] {
+        add(
+            CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            2048,
+            4096,
+            (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        );
+        for type_ in [CKM_SHA256_RSA_PKCS, CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS] {
             add(
                 type_ as CK_MECHANISM_TYPE,
                 2048,
@@ -458,14 +458,12 @@ impl Slot for OpenPgpSlot {
                 (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
             );
         }
-        for type_ in [CKM_RSA_PKCS, CKM_RSA_X_509] {
-            add(
-                type_ as CK_MECHANISM_TYPE,
-                2048,
-                4096,
-                (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
-            );
-        }
+        add(
+            CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+            2048,
+            4096,
+            (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS,
+        );
         add(
             CKM_ECDSA as CK_MECHANISM_TYPE,
             256,

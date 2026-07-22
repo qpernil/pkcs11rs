@@ -165,6 +165,11 @@ fn sign_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
         if matches!(object.material, KeyMaterial::YubiHsm { .. })
+            && mechanism.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+        {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        if matches!(object.material, KeyMaterial::YubiHsm { .. })
             && (piv_is_hashed_rsa_pkcs(mechanism.mechanism)
                 || piv_is_hashed_ecdsa(mechanism.mechanism)
                 || (piv_is_pss_mechanism(mechanism.mechanism)
@@ -300,9 +305,7 @@ fn sign(
             },
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
-        if (operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-            || operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-            || piv_is_hashed_rsa_pkcs(operation.mechanism))
+        if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
             && data.len() > required.saturating_sub(11)
         {
             ctx.sign_operations.remove(&session_handle);
@@ -363,10 +366,12 @@ fn sign(
                     } else if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
                         encode_pkcs1_v1_5_signature_input(data, required)?
                     } else if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-                        if data.len() != required {
+                        if data.len() > required {
                             return Err(CKR_DATA_LEN_RANGE.into());
                         }
-                        data.to_vec()
+                        let mut input = vec![0; required - data.len()];
+                        input.extend_from_slice(data);
+                        input
                     } else if piv_is_hashed_ecdsa(operation.mechanism) {
                         digest.ok_or(CKR_MECHANISM_PARAM_INVALID)?
                     } else {

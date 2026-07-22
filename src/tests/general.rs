@@ -586,6 +586,36 @@ fn openpgp_generated_key_algorithms_report_key_pair_generation_mechanisms() {
 }
 
 #[test]
+fn openpgp_mechanisms_are_unique_and_report_complete_rsa_flags() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let slot = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    let unique = mechanisms
+        .iter()
+        .map(|mechanism| mechanism.type_)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), mechanisms.len());
+
+    let rsa_pkcs = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(
+        rsa_pkcs.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
+    let raw_rsa = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_X_509 as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(raw_rsa.flags & CKF_SIGN as CK_FLAGS, 0);
+    assert_eq!(
+        raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS
+    );
+}
+
+#[test]
 fn openpgp_metadata_failure_does_not_hide_selected_applet() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
