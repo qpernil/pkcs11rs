@@ -55,6 +55,9 @@ pub(crate) fn entry_path(
     let mut name = prefix
         .map(OsStr::to_os_string)
         .unwrap_or_else(configured_prefix);
+    if name.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     name.push(fingerprint(encoded_public_point)?);
     name.push(".pem");
     Ok(PathBuf::from(name))
@@ -64,8 +67,18 @@ pub(crate) fn validate_device_public_key(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<(), Error> {
+    let prefix = prefix
+        .map(OsStr::to_os_string)
+        .unwrap_or_else(configured_prefix);
+    if prefix.is_empty() {
+        log!(
+            2,
+            "YubiHSM device trust is not configured; accepting an unpinned device key"
+        );
+        return Ok(());
+    }
     let expected = device_spki(encoded_public_point)?;
-    let path = entry_path(encoded_public_point, prefix)?;
+    let path = entry_path(encoded_public_point, Some(prefix.as_os_str()))?;
     let pem = fs::read(path).map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
     let pinned = public_key_from_pem(&pem)?;
     let pinned = pinned.public_key_to_der().map_err(Error::from)?;
@@ -305,6 +318,31 @@ mod tests {
         with_entry(&certificate_pem(&key), &point, |prefix| {
             validate_device_public_key(&point, Some(prefix)).unwrap();
         });
+    }
+
+    #[test]
+    fn accepts_an_unpinned_device_when_trust_is_not_configured() {
+        let (_, point) = test_key();
+        validate_device_public_key(&point, Some(OsStr::new(""))).unwrap();
+    }
+
+    #[test]
+    fn configured_trust_requires_the_exact_device_entry() {
+        let (_, point) = test_key();
+        let prefix = unused_prefix();
+        assert!(matches!(
+            validate_device_public_key(&point, Some(prefix.as_os_str())),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        ));
+    }
+
+    #[test]
+    fn enrollment_requires_a_configured_trust_prefix() {
+        let (_, point) = test_key();
+        assert!(matches!(
+            install_public_key(&point, Some(OsStr::new(""))),
+            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as _
+        ));
     }
 
     #[test]
