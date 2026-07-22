@@ -108,7 +108,10 @@ PKCS #11 discovery as a read-only `CKO_PUBLIC_KEY` named
 `YubiHSM device public key`. It has no cryptographic operation capabilities,
 has an empty `CKA_ID`, returns the canonical DER SubjectPublicKeyInfo through
 `CKA_PUBLIC_KEY_INFO`, and uses `yubihsm-device-public` as `CKA_UNIQUE_ID`.
-`CKA_EC_PARAMS` and `CKA_EC_POINT` expose the standard P-256 representation.
+`CKA_EC_PARAMS` and `CKA_EC_POINT` expose the standard P-256
+representation. Other YubiHSM objects retain their configured labels; an empty
+hardware label receives a deterministic description containing its object type
+and decimal ID.
 
 Credential creation, deletion, password changes, management-key changes, and
 application reset are implemented by the internal protocol client but are not

@@ -1408,6 +1408,17 @@ class Pkcs11AbiTests(unittest.TestCase):
         for attribute_type in (CKA_ENCRYPT, CKA_VERIFY, CKA_DERIVE, CKA_DESTROYABLE):
             self.assertEqual(bytes_attribute(handle.value, attribute_type), b"\x00")
 
+        self.assertEqual(self.lib.C_FindObjectsInit(session, None, 0), CKR_OK)
+        handles = (CK_ULONG * 64)()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, handles, len(handles), ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        self.assertGreater(found.value, 0)
+        for object_handle in handles[: found.value]:
+            self.assertTrue(bytes_attribute(object_handle, CKA_LABEL))
+
     def test_yubihsm_device_enrollment_pins_attested_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             previous_prefix = os.environ.get("PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX")
