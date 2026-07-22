@@ -37,6 +37,21 @@ fn debug_level_configuration_has_three_modes() {
 }
 
 #[test]
+fn yubihsm_connector_configuration_accepts_multiple_urls() {
+    assert_eq!(crate::configured_yubihsm_urls(None).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        crate::configured_yubihsm_urls(Some(
+            " http://first:12345/,https://second:8443,http://first:12345 "
+                .into()
+        ))
+        .unwrap(),
+        ["http://first:12345", "https://second:8443"]
+    );
+    assert!(crate::configured_yubihsm_urls(Some("".into())).is_err());
+    assert!(crate::configured_yubihsm_urls(Some("http://first,,http://second".into())).is_err());
+}
+
+#[test]
 fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
     assert!(crate::configured_yubihsm_usb(None).unwrap());
     assert!(crate::configured_yubihsm_usb(Some("1".into())).unwrap());
@@ -44,6 +59,28 @@ fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
     for invalid in ["", "false", "2"] {
         assert!(crate::configured_yubihsm_usb(Some(invalid.into())).is_err());
     }
+}
+
+#[test]
+fn unavailable_yubihsm_connector_is_an_empty_slot() {
+    let connector = crate::CurlConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
+    let slot = crate::YubiHsmSlot::new(std::rc::Rc::new(connector), (0, 0, 0), Vec::new());
+    let mut info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
+
+    assert!(!crate::Slot::is_present(&slot));
+    crate::Slot::get_slot_info(&slot, &mut info).unwrap();
+    assert_eq!(info.flags & CKF_TOKEN_PRESENT as CK_FLAGS, 0);
+}
+
+#[test]
+fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
+    let slot = crate::yubihsm::tests::make_yubihsm_connector_named_test_slot();
+    let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
+    slot.get_token_info(&mut info).unwrap();
+
+    assert_eq!(&info.label[..19], b"YubiHSM #16909060  ");
+    assert_eq!(&info.model[..16], b"YubiHSM         ");
+    assert_eq!(&info.serialNumber[..16], b"16909060        ");
 }
 
 fn finalize_for_test() {

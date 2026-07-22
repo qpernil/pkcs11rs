@@ -808,12 +808,55 @@ impl PcscConnector {
     }
 }
 
+const YUBIHSM_CONNECTOR_BUFFER_SIZE: usize = 3139;
+
+#[derive(Debug, Eq, PartialEq)]
+struct YubiHsmConnectorStatus {
+    serial: String,
+    version: (u8, u8, u8),
+}
+
+fn parse_yubihsm_connector_status(value: &[u8]) -> Result<YubiHsmConnectorStatus, Error> {
+    let value = std::str::from_utf8(value).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut status = None;
+    let mut serial = None;
+    let mut version = None;
+    for line in value.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(CKR_DEVICE_ERROR.into());
+        };
+        match name {
+            "status" => status = Some(value),
+            "serial" => serial = Some(value.to_owned()),
+            "version" => {
+                let components = value
+                    .split('.')
+                    .map(str::parse::<u8>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+                let [major, minor, patch] = components.as_slice() else {
+                    return Err(CKR_DEVICE_ERROR.into());
+                };
+                version = Some((*major, *minor, *patch));
+            }
+            _ => {}
+        }
+    }
+    if status != Some("OK") {
+        return Err(CKR_DEVICE_REMOVED.into());
+    }
+    Ok(YubiHsmConnectorStatus {
+        serial: serial.ok_or(CKR_DEVICE_ERROR)?,
+        version: version.ok_or(CKR_DEVICE_ERROR)?,
+    })
+}
+
 #[derive(Debug)]
-#[allow(dead_code)]
-struct CurlConnector {
+pub(crate) struct CurlConnector {
     serial: String,
     url: String,
-    connected: bool,
+    version: (u8, u8, u8),
+    connected: Cell<bool>,
     curl: RefCell<curl::easy::Easy>,
 }
 
@@ -825,66 +868,102 @@ impl Connector for CurlConnector {
         "Yubico"
     }
     fn product(&self) -> &str {
-        "CurlConnector"
+        "YubiHSM Connector"
     }
     fn serial(&self) -> &str {
         &self.serial
     }
     fn major(&self) -> u8 {
-        0
+        self.version.0
     }
     fn minor(&self) -> u8 {
-        1
+        self.version.1
     }
     fn is_present(&self) -> bool {
-        self.connected
+        self.connected.get()
+    }
+    fn name(&self) -> String {
+        format!("Yubico YubiHSM Connector {}", self.url)
     }
     fn buffer_size(&self) -> usize {
-        2048
+        YUBIHSM_CONNECTOR_BUFFER_SIZE
     }
     fn transmit<'a>(
         &self,
         send_buffer: &[u8],
         receive_buffer: &'a mut [u8],
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let mut write_len = 0usize;
-        let mut read_len = 0usize;
+        let mut received = Vec::new();
         let mut curl = self.curl.try_borrow_mut()?;
-        curl.post_field_size(send_buffer.len() as u64)?;
+        curl.url(&format!("{}/connector/api", self.url))?;
+        curl.timeout(timeout)?;
+        curl.fail_on_error(true)?;
+        curl.post(true)?;
+        curl.post_fields_copy(send_buffer)?;
+        let mut headers = curl::easy::List::new();
+        headers.append("Content-Type: application/octet-stream")?;
+        curl.http_headers(headers)?;
         {
             let mut transfer = curl.transfer();
-            transfer.read_function(|mut slice| match slice.write(&send_buffer[read_len..]) {
-                Ok(read) => {
-                    read_len += read;
-                    Ok(read)
-                }
-                Err(_) => Err(curl::easy::ReadError::Abort),
-            })?;
             transfer.write_function(|slice| {
-                let mut rslice = &mut receive_buffer[write_len..];
-                match rslice.write(slice) {
-                    Ok(writ) => {
-                        write_len += writ;
-                        Ok(writ)
-                    }
-                    Err(_) => Err(curl::easy::WriteError::Pause),
-                }
+                received.extend_from_slice(slice);
+                Ok(slice.len())
             })?;
-            transfer.perform()?;
+            if let Err(error) = transfer.perform() {
+                self.connected.set(false);
+                return Err(error.into());
+            }
         }
-        let received = &receive_buffer[..write_len];
+        if received.len() > receive_buffer.len() {
+            return Err(CKR_DEVICE_MEMORY.into());
+        }
+        receive_buffer[..received.len()].copy_from_slice(&received);
         log!(2, "curl.post({:?}) -> {:?}", send_buffer, received);
-        Ok(received)
+        self.connected.set(true);
+        Ok(&receive_buffer[..received.len()])
+    }
+    fn refresh(&self) -> Result<(), Error> {
+        if !self.connected.get() {
+            return Err(CKR_DEVICE_REMOVED.into());
+        }
+        match self.status(Duration::from_secs(5)) {
+            Ok(_) => {
+                self.connected.set(true);
+                Ok(())
+            }
+            Err(error) => {
+                self.connected.set(false);
+                Err(error)
+            }
+        }
     }
 }
 
 impl CurlConnector {
-    #[allow(dead_code)]
-    fn connect(&mut self) -> Result<(), Error> {
+    pub(crate) fn new(url: String) -> Result<Self, Error> {
+        let url = url.trim_end_matches('/').to_owned();
+        if url.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let mut curl = curl::easy::Easy::new();
+        curl.useragent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))?;
+        Ok(Self {
+            serial: String::new(),
+            url,
+            version: (0, 0, 0),
+            connected: Cell::new(false),
+            curl: RefCell::new(curl),
+        })
+    }
+
+    fn status(&self, timeout: Duration) -> Result<YubiHsmConnectorStatus, Error> {
         let mut received = Vec::new();
         let mut curl = self.curl.try_borrow_mut()?;
         curl.url(&format!("{}/connector/status", self.url))?;
+        curl.timeout(timeout)?;
+        curl.fail_on_error(true)?;
+        curl.get(true)?;
         {
             let mut transfer = curl.transfer();
             transfer.write_function(|slice| {
@@ -893,21 +972,150 @@ impl CurlConnector {
             })?;
             transfer.perform()?;
         }
-        log!(
-            2,
-            "curl.get() -> {:?}",
-            String::from_utf8_lossy(&received).to_string()
-        );
+        log!(2, "curl.get() -> {:?}", String::from_utf8_lossy(&received));
+        parse_yubihsm_connector_status(&received)
+    }
+
+    pub(crate) fn connect(&mut self) -> Result<(), Error> {
+        let status = self.status(Duration::from_secs(5))?;
+        self.serial = status.serial;
+        self.version = status.version;
+        let mut curl = self.curl.try_borrow_mut()?;
         curl.url(&format!("{}/connector/api", self.url))?;
         curl.post(true)?;
-        self.connected = true;
+        self.connected.set(true);
         Ok(())
+    }
+
+    pub(crate) fn set_unavailable(&self) {
+        self.connected.set(false);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        let header_end = loop {
+            let length = stream.read(&mut buffer).unwrap();
+            assert_ne!(length, 0);
+            request.extend_from_slice(&buffer[..length]);
+            if let Some(offset) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let length = stream.read(&mut buffer).unwrap();
+            assert_ne!(length, 0);
+            request.extend_from_slice(&buffer[..length]);
+        }
+        request
+    }
+
+    fn write_http_response(stream: &mut std::net::TcpStream, body: &[u8]) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    }
+
+    #[test]
+    fn parses_yubihsm_connector_status() {
+        assert_eq!(
+            parse_yubihsm_connector_status(b"status=OK\nserial=12345678\nversion=3.0.7\n").unwrap(),
+            YubiHsmConnectorStatus {
+                serial: "12345678".to_owned(),
+                version: (3, 0, 7),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unavailable_or_malformed_yubihsm_connector_status() {
+        assert!(
+            parse_yubihsm_connector_status(b"status=NO_DEVICE\nserial=*\nversion=3.0.7\n").is_err()
+        );
+        assert!(parse_yubihsm_connector_status(b"status=OK\nserial=*\nversion=3.0\n").is_err());
+        assert!(parse_yubihsm_connector_status(b"status=OK\nserial=*\n").is_err());
+    }
+
+    #[test]
+    fn unconnected_curl_connector_has_a_stable_url_identity() {
+        let connector = CurlConnector::new("http://127.0.0.1:12345/".to_owned()).unwrap();
+        assert_eq!(
+            connector.name(),
+            "Yubico YubiHSM Connector http://127.0.0.1:12345"
+        );
+        assert!(!connector.is_present());
+    }
+
+    #[test]
+    fn curl_connector_uses_status_and_binary_api_endpoints() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut status, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut status);
+            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            write_http_response(&mut status, b"status=OK\nserial=12345678\nversion=3.0.7\n");
+
+            let (mut refreshed_status, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut refreshed_status);
+            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            write_http_response(
+                &mut refreshed_status,
+                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+            );
+
+            let (mut api, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut api);
+            assert!(request.starts_with(b"POST /connector/api HTTP/1.1\r\n"));
+            let header_end = request
+                .windows(4)
+                .position(|value| value == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            assert!(std::str::from_utf8(&request[..header_end])
+                .unwrap()
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Content-Type: application/octet-stream")));
+            assert_eq!(&request[header_end..], b"\x03\x00\x01\x42");
+            write_http_response(&mut api, b"\x83\x00\x01\x42");
+        });
+
+        let mut connector = CurlConnector::new(format!("http://{address}")).unwrap();
+        connector.connect().unwrap();
+        assert!(connector.is_present());
+        assert_eq!(connector.serial(), "12345678");
+        assert_eq!((connector.major(), connector.minor()), (3, 0));
+        connector.refresh().unwrap();
+        let mut response = [0; 32];
+        assert_eq!(
+            connector
+                .transmit(b"\x03\x00\x01\x42", &mut response, Duration::from_secs(1))
+                .unwrap(),
+            b"\x83\x00\x01\x42"
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn detects_nfc_pcsc_channel() {

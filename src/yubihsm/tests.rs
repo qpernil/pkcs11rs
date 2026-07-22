@@ -104,6 +104,8 @@ struct ProtocolPeer {
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
     authenticate_payload: Vec<u8>,
     closed_sessions: Cell<usize>,
+    product: &'static str,
+    serial: &'static str,
 }
 
 fn encode_object_info(info: &ObjectInfo) -> Vec<u8> {
@@ -145,6 +147,8 @@ impl ProtocolPeer {
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
             authenticate_payload: Vec::new(),
             closed_sessions: Cell::new(0),
+            product: "YubiHSM",
+            serial: "16909060",
         }
     }
 
@@ -630,6 +634,19 @@ pub(crate) fn make_yubihsm_metadata_test_slot(valid: bool) -> Box<dyn crate::Slo
     ))
 }
 
+pub(crate) fn make_yubihsm_connector_named_test_slot() -> Box<dyn crate::Slot> {
+    let mut peer = ProtocolPeer::new();
+    peer.product = "YubiHSM Connector";
+    peer.serial = "*";
+    let mut slot = crate::YubiHsmSlot::new(
+        std::rc::Rc::new(peer),
+        (0, 0, 0),
+        vec![1, 5, 9, 12, 19, 20, 21, 22, 25],
+    );
+    crate::Slot::init_slot(&mut slot).unwrap();
+    Box::new(slot)
+}
+
 impl Connector for ProtocolPeer {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -638,10 +655,10 @@ impl Connector for ProtocolPeer {
         "Yubico"
     }
     fn product(&self) -> &str {
-        "YubiHSM"
+        self.product
     }
     fn serial(&self) -> &str {
-        "16909060"
+        self.serial
     }
     fn major(&self) -> u8 {
         2

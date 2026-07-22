@@ -2,14 +2,21 @@
 
 ## Slot layout
 
-The module exposes one slot for every selectable CCID applet and one slot for
-every physical YubiHSM USB device. YubiHSM Auth credentials are objects in the
-applet slot and authentication methods for YubiHSM USB slots. For one YubiKey
-with all four default applets and one YubiHSM, the result is five slots.
+The module exposes one slot for every selectable CCID applet, one slot for
+every physical YubiHSM USB device, and one slot for each URL configured in
+`PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated YubiHSM Connector base URLs,
+for example `http://hsm-a:12345,http://hsm-b:12345`. Remote slots are additive;
+they do not disable direct USB discovery. An unreachable configured connector
+is retained as an empty slot until the module is reinitialized.
 
 Direct YubiHSM USB discovery is enabled by default. Set
-`PKCS11RS_YUBIHSM_USB=0` to disable it. The only accepted values are `0` and
-`1`.
+`PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP
+connector slots. The only accepted values are `0` and `1`.
+
+YubiHSM Auth credentials are objects in the applet slot and authentication
+methods for every present YubiHSM slot, whether reached over USB or HTTP. For
+one YubiKey with all four default applets and one YubiHSM, the result is five
+slots.
 
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
 Every credential is represented by a `CKO_SECRET_KEY` with key type

@@ -1,3 +1,21 @@
+fn configured_yubihsm_urls(value: Option<std::ffi::OsString>) -> Result<Vec<String>, Error> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let mut urls = Vec::new();
+    for url in value.split(',') {
+        let url = url.trim().trim_end_matches('/');
+        if url.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        if !urls.iter().any(|configured| configured == url) {
+            urls.push(url.to_owned());
+        }
+    }
+    Ok(urls)
+}
+
 #[cfg(any(not(feature = "abi-tests"), test))]
 fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
     match value {
@@ -11,6 +29,7 @@ fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Result<bool, Err
 struct Context {
     libusb: Option<rusb::Context>,
     pcsc: Option<Rc<pcsc::Context>>,
+    yubihsm_urls: Vec<String>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     dynamic_slots: HashSet<CK_SLOT_ID>,
     slots_discovered: bool,
@@ -59,6 +78,7 @@ impl std::fmt::Debug for Context {
         fmt.debug_struct("Context")
             .field("libusb", &self.libusb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
+            .field("yubihsm_urls", &self.yubihsm_urls)
             .field("slots", &self.slots)
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
@@ -99,6 +119,7 @@ impl Context {
         let slots = HashMap::new();
 
         let objects = default_objects()?;
+        let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
         let mut context = Context {
@@ -126,6 +147,7 @@ impl Context {
                     None
                 }
             },
+            yubihsm_urls,
             slots,
             dynamic_slots: HashSet::new(),
             slots_discovered: false,
@@ -587,6 +609,41 @@ impl Context {
                     }
                 }
             }
+        }
+        for url in self.yubihsm_urls.clone() {
+            let mut connector = match CurlConnector::new(url.clone()) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    log!(1, "YubiHSM connector configuration for {url}: {:?}", error);
+                    continue;
+                }
+            };
+            let connected = match connector.connect() {
+                Ok(()) => true,
+                Err(error) => {
+                    log!(1, "YubiHSM connector connection to {url}: {:?}", error);
+                    false
+                }
+            };
+            let name = connector.name();
+            log!(2, "{} at {}", name, url);
+            let slot_id = next_key(&self.slots, 0);
+            let connector = Rc::new(connector);
+            let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers(
+                connector.clone(),
+                (0, 0, 0),
+                Vec::new(),
+                hsmauth_providers.clone(),
+            ));
+            if connected {
+                if let Err(error) = slot.init_slot() {
+                    log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
+                    connector.set_unavailable();
+                }
+            }
+            self.slots.insert(slot_id, slot);
+            self.dynamic_slots.insert(slot_id);
+            seen_dynamic_slots.insert(slot_id);
         }
         if let Some(context) = self.pcsc.clone() {
             if let Ok(readers) = context.list_readers_owned() {
