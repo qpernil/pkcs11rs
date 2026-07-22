@@ -425,7 +425,7 @@ fn piv_generate_key_pair_parameters(
     if id.len() != 1 || (!public_object.id.is_empty() && public_object.id != *id) {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let slot = piv::Slot::from_id(id[0]).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+    let slot = piv::Slot::from_cka_id(id[0]).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
     if slot == piv::Slot::Attestation {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
@@ -465,7 +465,7 @@ fn find_piv_key_handle(
         .find(|(_, object)| {
             object.slot_id == Some(slot_id)
                 && object.class == class
-                && object.id == [piv_slot as u8]
+                && object.id == [piv_slot.cka_id()]
         })
         .map(|(handle, _)| handle)
         .ok_or_else(|| CKR_DEVICE_ERROR.into())

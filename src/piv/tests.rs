@@ -492,6 +492,12 @@ fn enumerates_all_piv_slots_and_certificate_objects() {
     assert_eq!(Slot::Retired1.certificate_object(), 0x5f_c10d);
     assert_eq!(Slot::Retired20.certificate_object(), 0x5f_c120);
     assert_eq!(Slot::Attestation.certificate_object(), 0x5f_ff01);
+    assert_eq!(Slot::Authentication.cka_id(), 1);
+    assert_eq!(Slot::Signature.cka_id(), 2);
+    assert_eq!(Slot::Retired1.cka_id(), 5);
+    assert_eq!(Slot::Retired20.cka_id(), 24);
+    assert_eq!(Slot::Attestation.cka_id(), 25);
+    assert_eq!(Slot::from_cka_id(2), Some(Slot::Signature));
     assert!(Slot::Retired10.is_retired());
     assert!(!Slot::Attestation.is_retired());
 }
@@ -500,10 +506,36 @@ fn enumerates_all_piv_slots_and_certificate_objects() {
 fn restricts_general_data_writes_to_piv_and_vendor_objects() {
     assert!(data_object_allowed(0x5f_c102));
     assert!(data_object_allowed(0x5f_ff10));
-    assert!(!data_object_allowed(0x5f_ff01));
-    assert!(!data_object_allowed(Slot::Signature.certificate_object()));
-    assert_eq!(data_object_name(0x5f_c102), "Cardholder unique identifier");
+    assert!(data_object_allowed(0x5f_ff01));
+    assert!(data_object_allowed(Slot::Signature.certificate_object()));
+    assert_eq!(data_object_name(0x5f_c102), "Cardholder Unique Identifier");
     assert_eq!(data_object_name(0x5f_ff10), "PIV data 5FFF10");
+}
+
+#[test]
+fn maps_all_ykcs11_piv_data_identifiers_and_oids() {
+    assert_eq!(DATA_OBJECTS.len(), 37);
+    for (index, mapping) in DATA_OBJECTS.iter().enumerate() {
+        assert_eq!(mapping.cka_id as usize, index + 1);
+        assert_eq!(data_object_mapping(mapping.object_id), Some(mapping));
+        assert_eq!(data_object_mapping_by_cka_id(mapping.cka_id), Some(mapping));
+        assert_eq!(
+            data_object_mapping_by_oid(&data_object_oid(mapping)),
+            Some(mapping)
+        );
+        if let Some(slot) = mapping.slot {
+            assert_eq!(slot.cka_id(), mapping.cka_id);
+            assert_eq!(slot.certificate_object(), mapping.object_id);
+        }
+    }
+    assert_eq!(
+        data_object_oid(data_object_mapping(0x5f_c105).unwrap()),
+        [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x01]
+    );
+    assert_eq!(
+        data_object_oid(data_object_mapping(0x5f_c102).unwrap()),
+        [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00]
+    );
 }
 
 #[test]

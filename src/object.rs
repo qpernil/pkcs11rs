@@ -300,6 +300,12 @@ fn bool_attribute(value: bool) -> Vec<u8> {
     }]
 }
 
+fn piv_object_tag(object_id: u32) -> Vec<u8> {
+    let bytes = object_id.to_be_bytes();
+    let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
+    bytes[first..].to_vec()
+}
+
 fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
     match attribute_type {
         x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => Some(value.to_vec()),
@@ -407,6 +413,7 @@ impl TokenObject {
             CKA_ID as CK_ATTRIBUTE_TYPE,
             CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
             CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+            CKA_PKCS11RS_PIV_OBJECT_TAG,
             CKA_YUBICO_HSMAUTH_ALGORITHM,
             CKA_YUBICO_HSMAUTH_RETRIES,
             CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
@@ -470,7 +477,11 @@ impl TokenObject {
                 Some(ulong_attribute(self.key_type))
             }
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes().to_vec()),
-            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
+                    .map(|mapping| vec![mapping.cka_id]),
+                _ => Some(self.id.clone()),
+            },
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
             x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
@@ -562,11 +573,12 @@ impl TokenObject {
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
                 KeyMaterial::SecurityDomainData { object_id, .. } => Some(object_id.clone()),
-                KeyMaterial::PivData { object_id, .. } => {
-                    let bytes = object_id.to_be_bytes();
-                    let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
-                    Some(bytes[first..].to_vec())
-                }
+                KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
+                    .map(piv::data_object_oid),
+                _ => None,
+            },
+            x if x == CKA_PKCS11RS_PIV_OBJECT_TAG => match &self.material {
+                KeyMaterial::PivData { object_id, .. } => Some(piv_object_tag(*object_id)),
                 _ => None,
             },
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {

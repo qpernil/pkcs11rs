@@ -585,10 +585,13 @@ impl Slot for PivSlot {
                 origin: metadata.origin.unwrap_or(0),
             });
         }
-        for (object_id, _) in piv::DATA_OBJECTS {
-            if let Ok(value) = PivClient.get_data(self.connector.as_ref(), *object_id) {
+        for mapping in piv::DATA_OBJECTS
+            .iter()
+            .filter(|mapping| mapping.slot.is_none())
+        {
+            if let Ok(value) = PivClient.get_data(self.connector.as_ref(), mapping.object_id) {
                 self.data_objects.push(PivDataObject {
-                    object_id: *object_id,
+                    object_id: mapping.object_id,
                     value,
                 });
             }
@@ -912,7 +915,7 @@ impl Slot for PivSlot {
             if key.slot == piv::Slot::Attestation {
                 continue;
             }
-            let id = vec![key.slot as u8];
+            let id = vec![key.slot.cka_id()];
             let fingerprint = piv_key_fingerprint(key)?;
             let label = format!("PIV slot {:02X}", key.slot as u8);
             let key_type = key.public_key.key_type(key.algorithm);
@@ -1051,7 +1054,7 @@ impl Slot for PivSlot {
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type,
                 label: piv_slot_label(certificate.slot, true, certificate.attestation),
-                id: vec![certificate.slot as u8],
+                id: vec![certificate.slot.cka_id()],
                 token: true,
                 private: false,
                 encrypt: false,
@@ -1085,7 +1088,7 @@ impl Slot for PivSlot {
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
                 key_type,
                 label: piv_slot_label(key.slot, true, true),
-                id: vec![key.slot as u8],
+                id: vec![key.slot.cka_id()],
                 token: false,
                 private: false,
                 encrypt: false,
@@ -1117,7 +1120,9 @@ impl Slot for PivSlot {
                 class: CKO_DATA as CK_OBJECT_CLASS,
                 key_type: 0,
                 label: piv::data_object_name(data.object_id),
-                id: Vec::new(),
+                id: piv::data_object_mapping(data.object_id)
+                    .map(|mapping| vec![mapping.cka_id])
+                    .unwrap_or_default(),
                 token: true,
                 private: false,
                 encrypt: false,

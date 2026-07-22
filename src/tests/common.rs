@@ -1796,7 +1796,7 @@ fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
         class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         key_type: CKK_EC as CK_KEY_TYPE,
         label: "PIV slot 9C".to_owned(),
-        id: vec![0x9c],
+        id: vec![2],
         token: true,
         private: false,
         encrypt: false,
@@ -1955,6 +1955,9 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
         data_objects: vec![crate::PivDataObject {
             object_id: 0x5f_c102,
             value: vec![1, 2, 3],
+        }, crate::PivDataObject {
+            object_id: 0x5f_ff10,
+            value: vec![4, 5, 6],
         }],
     };
     let objects = crate::Slot::token_objects(&piv, 7).unwrap();
@@ -1968,6 +1971,14 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
     );
     assert_eq!(
         object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00])
+    );
+    assert_eq!(
+        object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![27])
+    );
+    assert_eq!(
+        object.attribute_value(crate::CKA_PKCS11RS_PIV_OBJECT_TAG),
         Some(vec![0x5f, 0xc1, 0x02])
     );
     assert_eq!(

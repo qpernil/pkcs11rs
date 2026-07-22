@@ -17,21 +17,6 @@ pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
 pub(crate) const ORIGIN_GENERATED: u8 = 1;
 pub(crate) const ORIGIN_IMPORTED: u8 = 2;
 
-pub(crate) const DATA_OBJECTS: &[(u32, &str)] = &[
-    (0x5f_c107, "Card capability container"),
-    (0x5f_c102, "Cardholder unique identifier"),
-    (0x5f_c103, "Cardholder fingerprints"),
-    (0x5f_c106, "Security object"),
-    (0x5f_c108, "Facial image"),
-    (0x5f_c109, "Printed information"),
-    (0x7e, "Discovery object"),
-    (0x5f_c10c, "Key history object"),
-    (0x5f_c121, "Iris images"),
-    (0x7f61, "Biometric information templates group"),
-    (0x5f_c122, "Secure messaging signer certificate"),
-    (0x5f_c123, "Pairing code reference data"),
-];
-
 const INS_SELECT: u8 = 0xa4;
 const INS_VERIFY: u8 = 0x20;
 const INS_CHANGE_REFERENCE: u8 = 0x24;
@@ -219,6 +204,40 @@ impl Slot {
         Self::ALL.iter().copied().find(|slot| *slot as u8 == id)
     }
 
+    pub(crate) fn cka_id(self) -> u8 {
+        match self {
+            Self::Authentication => 1,
+            Self::Signature => 2,
+            Self::KeyManagement => 3,
+            Self::CardAuthentication => 4,
+            Self::Retired1
+            | Self::Retired2
+            | Self::Retired3
+            | Self::Retired4
+            | Self::Retired5
+            | Self::Retired6
+            | Self::Retired7
+            | Self::Retired8
+            | Self::Retired9
+            | Self::Retired10
+            | Self::Retired11
+            | Self::Retired12
+            | Self::Retired13
+            | Self::Retired14
+            | Self::Retired15
+            | Self::Retired16
+            | Self::Retired17
+            | Self::Retired18
+            | Self::Retired19
+            | Self::Retired20 => 5 + (self as u8 - Self::Retired1 as u8),
+            Self::Attestation => 25,
+        }
+    }
+
+    pub(crate) fn from_cka_id(id: u8) -> Option<Self> {
+        Self::ALL.iter().copied().find(|slot| slot.cka_id() == id)
+    }
+
     pub(crate) fn is_retired(self) -> bool {
         (Self::Retired1 as u8..=Self::Retired20 as u8).contains(&(self as u8))
     }
@@ -254,16 +273,310 @@ impl Slot {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DataObjectMapping {
+    pub(crate) object_id: u32,
+    pub(crate) cka_id: u8,
+    pub(crate) name: &'static str,
+    pub(crate) slot: Option<Slot>,
+}
+
+pub(crate) const DATA_OBJECTS: &[DataObjectMapping] = &[
+    DataObjectMapping {
+        object_id: 0x5f_c105,
+        cka_id: 1,
+        name: "X.509 Certificate for PIV Authentication",
+        slot: Some(Slot::Authentication),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10a,
+        cka_id: 2,
+        name: "X.509 Certificate for Digital Signature",
+        slot: Some(Slot::Signature),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10b,
+        cka_id: 3,
+        name: "X.509 Certificate for Key Management",
+        slot: Some(Slot::KeyManagement),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c101,
+        cka_id: 4,
+        name: "X.509 Certificate for Card Authentication",
+        slot: Some(Slot::CardAuthentication),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10d,
+        cka_id: 5,
+        name: "X.509 Certificate for Retired Key 1",
+        slot: Some(Slot::Retired1),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10e,
+        cka_id: 6,
+        name: "X.509 Certificate for Retired Key 2",
+        slot: Some(Slot::Retired2),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10f,
+        cka_id: 7,
+        name: "X.509 Certificate for Retired Key 3",
+        slot: Some(Slot::Retired3),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c110,
+        cka_id: 8,
+        name: "X.509 Certificate for Retired Key 4",
+        slot: Some(Slot::Retired4),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c111,
+        cka_id: 9,
+        name: "X.509 Certificate for Retired Key 5",
+        slot: Some(Slot::Retired5),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c112,
+        cka_id: 10,
+        name: "X.509 Certificate for Retired Key 6",
+        slot: Some(Slot::Retired6),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c113,
+        cka_id: 11,
+        name: "X.509 Certificate for Retired Key 7",
+        slot: Some(Slot::Retired7),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c114,
+        cka_id: 12,
+        name: "X.509 Certificate for Retired Key 8",
+        slot: Some(Slot::Retired8),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c115,
+        cka_id: 13,
+        name: "X.509 Certificate for Retired Key 9",
+        slot: Some(Slot::Retired9),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c116,
+        cka_id: 14,
+        name: "X.509 Certificate for Retired Key 10",
+        slot: Some(Slot::Retired10),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c117,
+        cka_id: 15,
+        name: "X.509 Certificate for Retired Key 11",
+        slot: Some(Slot::Retired11),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c118,
+        cka_id: 16,
+        name: "X.509 Certificate for Retired Key 12",
+        slot: Some(Slot::Retired12),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c119,
+        cka_id: 17,
+        name: "X.509 Certificate for Retired Key 13",
+        slot: Some(Slot::Retired13),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11a,
+        cka_id: 18,
+        name: "X.509 Certificate for Retired Key 14",
+        slot: Some(Slot::Retired14),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11b,
+        cka_id: 19,
+        name: "X.509 Certificate for Retired Key 15",
+        slot: Some(Slot::Retired15),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11c,
+        cka_id: 20,
+        name: "X.509 Certificate for Retired Key 16",
+        slot: Some(Slot::Retired16),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11d,
+        cka_id: 21,
+        name: "X.509 Certificate for Retired Key 17",
+        slot: Some(Slot::Retired17),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11e,
+        cka_id: 22,
+        name: "X.509 Certificate for Retired Key 18",
+        slot: Some(Slot::Retired18),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c11f,
+        cka_id: 23,
+        name: "X.509 Certificate for Retired Key 19",
+        slot: Some(Slot::Retired19),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c120,
+        cka_id: 24,
+        name: "X.509 Certificate for Retired Key 20",
+        slot: Some(Slot::Retired20),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_ff01,
+        cka_id: 25,
+        name: "X.509 Certificate for PIV Attestation",
+        slot: Some(Slot::Attestation),
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c107,
+        cka_id: 26,
+        name: "Card Capability Container",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c102,
+        cka_id: 27,
+        name: "Cardholder Unique Identifier",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c103,
+        cka_id: 28,
+        name: "Cardholder Fingerprints",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c106,
+        cka_id: 29,
+        name: "Security Object",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c108,
+        cka_id: 30,
+        name: "Cardholder Facial Images",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c109,
+        cka_id: 31,
+        name: "Printed Information",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x7e,
+        cka_id: 32,
+        name: "Discovery Object",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c10c,
+        cka_id: 33,
+        name: "Key History Object",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c121,
+        cka_id: 34,
+        name: "Cardholder Iris Images",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x7f61,
+        cka_id: 35,
+        name: "Biometric Information Templates Group Template",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c122,
+        cka_id: 36,
+        name: "Secure Messaging Certificate Signer",
+        slot: None,
+    },
+    DataObjectMapping {
+        object_id: 0x5f_c123,
+        cka_id: 37,
+        name: "Pairing Code Reference Data Container",
+        slot: None,
+    },
+];
+
+pub(crate) fn data_object_mapping(object_id: u32) -> Option<&'static DataObjectMapping> {
+    DATA_OBJECTS
+        .iter()
+        .find(|mapping| mapping.object_id == object_id)
+}
+
+pub(crate) fn data_object_mapping_by_cka_id(cka_id: u8) -> Option<&'static DataObjectMapping> {
+    DATA_OBJECTS.iter().find(|mapping| mapping.cka_id == cka_id)
+}
+
+pub(crate) fn data_object_oid(mapping: &DataObjectMapping) -> Vec<u8> {
+    match mapping.cka_id {
+        1 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x01],
+        2 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x00],
+        3 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x02],
+        4 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x05, 0x00],
+        5..=24 => vec![
+            0x60,
+            0x86,
+            0x48,
+            0x01,
+            0x65,
+            0x03,
+            0x07,
+            0x02,
+            0x10,
+            mapping.cka_id - 4,
+        ],
+        25 => vec![0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0xc4, 0x0a, 0x03],
+        26 => vec![
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x01, 0x81, 0x5b, 0x00,
+        ],
+        27 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00],
+        28 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x60, 0x10],
+        29 => vec![
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x81, 0x10, 0x00,
+        ],
+        30 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x60, 0x30],
+        31 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x01],
+        32 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x60, 0x50],
+        33 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x60, 0x60],
+        34..=37 => vec![
+            0x60,
+            0x86,
+            0x48,
+            0x01,
+            0x65,
+            0x03,
+            0x07,
+            0x02,
+            0x10,
+            mapping.cka_id - 13,
+        ],
+        _ => unreachable!("PIV data object mapping has an invalid CKA_ID"),
+    }
+}
+
+pub(crate) fn data_object_mapping_by_oid(oid: &[u8]) -> Option<&'static DataObjectMapping> {
+    DATA_OBJECTS
+        .iter()
+        .find(|mapping| data_object_oid(mapping) == oid)
+}
+
 pub(crate) fn data_object_allowed(object_id: u32) -> bool {
-    DATA_OBJECTS.iter().any(|(id, _)| *id == object_id)
+    data_object_mapping(object_id).is_some()
         || ((0x5f_ff00..=0x5f_ffff).contains(&object_id) && object_id != 0x5f_ff01)
 }
 
 pub(crate) fn data_object_name(object_id: u32) -> String {
-    DATA_OBJECTS
-        .iter()
-        .find_map(|(id, name)| (*id == object_id).then_some(*name))
-        .map(str::to_owned)
+    data_object_mapping(object_id)
+        .map(|mapping| mapping.name.to_owned())
         .unwrap_or_else(|| format!("PIV data {object_id:06X}"))
 }
 
