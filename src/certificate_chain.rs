@@ -70,10 +70,3 @@ pub(crate) fn validate_p256_public_point(
         .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut context)
         .map_err(Error::from)
 }
-
-pub(crate) fn p256_public_point_from_paths(
-    certificate_paths: &str,
-    ca_certificate_paths: &str,
-) -> Result<Vec<u8>, Error> {
-    validate_p256_public_point(&load(certificate_paths)?, &load(ca_certificate_paths)?)
-}

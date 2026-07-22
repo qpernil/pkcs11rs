@@ -46,7 +46,8 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, corrupt_response_mac) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, commands, corrupt_response_mac, _trust) =
+        crate::yubihsm::tests::make_yubihsm_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -372,7 +373,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1121,7 +1122,7 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
     assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, _, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1200,7 +1201,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     const KEY_ID: u16 = 0x1235;
-    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1521,7 +1522,7 @@ fn yubihsm_x25519_two_way_derive(
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, _) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);

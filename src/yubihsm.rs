@@ -30,6 +30,7 @@ use zeroize::Zeroizing;
 
 #[allow(dead_code)]
 mod commands;
+mod trust;
 pub(crate) use commands::{
     parse_object_id, parse_object_list, Command, CommandCode, ObjectInfo, ObjectParameters,
     PublicKey,
@@ -429,13 +430,14 @@ impl SecureSession {
         let _ = session.send_command(connector, &Command::close_session());
     }
 
-    pub(crate) fn authenticate_asymmetric(
+    pub(crate) fn authenticate_asymmetric_with_trust_prefix(
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
+        trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Self, Error> {
         let host_static_key = derive_p256_key(password)?;
-        let device_static_key = device_public_key(connector)?;
+        let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
         let group = p256_group()?;
         let host_ephemeral_key = EcKey::generate(&group)?;
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
@@ -675,8 +677,25 @@ fn parse_p256_public_key(encoded: &[u8]) -> Result<EcKey<openssl::pkey::Public>,
     Ok(key)
 }
 
+#[allow(dead_code)]
 fn device_public_key(connector: &dyn Connector) -> Result<EcKey<openssl::pkey::Public>, Error> {
     parse_p256_public_key(&device_public_key_bytes(connector)?)
+}
+
+fn trusted_device_public_key(
+    connector: &dyn Connector,
+    trust_prefix: Option<&std::ffi::OsStr>,
+) -> Result<EcKey<openssl::pkey::Public>, Error> {
+    let encoded = device_public_key_bytes(connector)?;
+    trust::validate_device_public_key(&encoded, trust_prefix)?;
+    parse_p256_public_key(&encoded)
+}
+
+pub(crate) fn validate_device_public_key_with_prefix(
+    encoded: &[u8],
+    trust_prefix: Option<&std::ffi::OsStr>,
+) -> Result<(), Error> {
+    trust::validate_device_public_key(encoded, trust_prefix)
 }
 
 pub(crate) fn device_public_key_bytes(

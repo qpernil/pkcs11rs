@@ -1,6 +1,12 @@
 use super::*;
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ffi::OsString,
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 const PASSWORD: &[u8] = b"password";
 const HOST_CHALLENGE: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -37,6 +43,39 @@ pub(crate) const RFC7748_SHARED_SECRET: [u8; 32] = [
     0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33, 0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
 ];
 type InnerCommands = std::rc::Rc<RefCell<Vec<(u8, Vec<u8>)>>>;
+
+static NEXT_TRUST_ENTRY: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct TestTrustEntry {
+    prefix: OsString,
+    path: PathBuf,
+}
+
+impl TestTrustEntry {
+    fn new() -> Self {
+        let group = p256_group().unwrap();
+        let private = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY).unwrap();
+        let point = p256_public_key(&private).unwrap();
+        let public = parse_p256_public_key(&point).unwrap();
+        let pem = PKey::from_ec_key(public)
+            .unwrap()
+            .public_key_to_pem()
+            .unwrap();
+        let id = NEXT_TRUST_ENTRY.fetch_add(1, Ordering::Relaxed);
+        let prefix = std::env::temp_dir()
+            .join(format!("pkcs11rs-yubihsm-{id}-"))
+            .into_os_string();
+        let path = trust::entry_path(&point, Some(&prefix)).unwrap();
+        fs::write(&path, pem).unwrap();
+        Self { prefix, path }
+    }
+}
+
+impl Drop for TestTrustEntry {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Debug)]
 struct PeerSession {
@@ -486,20 +525,27 @@ impl ProtocolPeer {
 }
 
 pub(crate) fn make_yubihsm_test_slot(
-) -> (Box<dyn crate::Slot>, InnerCommands, std::rc::Rc<Cell<bool>>) {
+) -> (
+    Box<dyn crate::Slot>,
+    InnerCommands,
+    std::rc::Rc<Cell<bool>>,
+    TestTrustEntry,
+) {
     let peer = std::rc::Rc::new(ProtocolPeer::new());
     let commands = peer.inner_commands.clone();
     let corrupt_response_mac = peer.corrupt_response_mac.clone();
+    let trust = TestTrustEntry::new();
+    let mut slot = crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56],
+    );
+    slot.trust_prefix = Some(trust.prefix.clone());
     (
-        Box::new(crate::YubiHsmSlot::new(
-            peer,
-            (2, 4, 1),
-            vec![
-                1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
-            ],
-        )),
+        Box::new(slot),
         commands,
         corrupt_response_mac,
+        trust,
     )
 }
 
@@ -920,6 +966,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
             public_key: None,
         },
         version: (5, 4, 3),
+        trust_prefix: None,
     };
     let duplicate = crate::HsmAuthProvider {
         connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "87654321" }),
@@ -959,6 +1006,7 @@ fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
             public_key: None,
         },
         version: (5, 7, 1),
+        trust_prefix: None,
     };
 
     assert!(matches!(
@@ -980,6 +1028,7 @@ fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
 
 #[test]
 fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
+    let trust = TestTrustEntry::new();
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
     let provider = crate::HsmAuthProvider {
@@ -992,6 +1041,7 @@ fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
             public_key: Some(hsmauth.public_key.clone()),
         },
         version: (5, 7, 1),
+        trust_prefix: Some(trust.prefix.clone()),
     };
     let mut slot = crate::YubiHsmSlot::with_hsmauth_providers(
         yubihsm.clone(),
@@ -1012,6 +1062,7 @@ fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
 
 #[test]
 fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
+    let trust = TestTrustEntry::new();
     let yubihsm = ProtocolPeer::new();
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::failing_calculate());
     let provider = crate::HsmAuthProvider {
@@ -1024,6 +1075,7 @@ fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
             public_key: Some(hsmauth.public_key.clone()),
         },
         version: (5, 7, 1),
+        trust_prefix: Some(trust.prefix.clone()),
     };
 
     assert!(matches!(
@@ -1040,8 +1092,15 @@ fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
 
 #[test]
 fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
+    let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();
-    let mut session = SecureSession::authenticate_asymmetric(&peer, 1, PASSWORD).unwrap();
+    let mut session = SecureSession::authenticate_asymmetric_with_trust_prefix(
+        &peer,
+        1,
+        PASSWORD,
+        Some(&trust.prefix),
+    )
+    .unwrap();
     assert_eq!(
         session
             .send_command(&peer, &Command::get_storage_info())
@@ -1056,10 +1115,32 @@ fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
 
 #[test]
 fn asymmetric_authentication_rejects_the_wrong_password() {
+    let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();
     assert!(matches!(
-        SecureSession::authenticate_asymmetric(&peer, 1, b"wrong-password"),
+        SecureSession::authenticate_asymmetric_with_trust_prefix(
+            &peer,
+            1,
+            b"wrong-password",
+            Some(&trust.prefix),
+        ),
         Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+    ));
+}
+
+#[test]
+fn asymmetric_authentication_rejects_an_untrusted_device_public_key() {
+    let trust = TestTrustEntry::new();
+    fs::write(&trust.path, b"not a public key").unwrap();
+    let peer = ProtocolPeer::new();
+    assert!(matches!(
+        SecureSession::authenticate_asymmetric_with_trust_prefix(
+            &peer,
+            1,
+            PASSWORD,
+            Some(&trust.prefix),
+        ),
+        Err(Error::Generic(rv)) if rv == crate::CKR_ARGUMENTS_BAD as _
     ));
 }
 
