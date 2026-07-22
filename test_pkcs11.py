@@ -526,6 +526,15 @@ class Pkcs11AbiTests(unittest.TestCase):
             CK_ULONG,
         ]
         cls.lib.C_Login.restype = CK_RV
+        cls.lib.C_LoginUser.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.C_LoginUser.restype = CK_RV
         cls.lib.C_Logout.argtypes = [CK_ULONG]
         cls.lib.C_Logout.restype = CK_RV
         cls.lib.C_GetMechanismList.argtypes = [
@@ -981,6 +990,35 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(signature_len.value, 256)
+
+    def test_abi_yubihsm_fixture_supports_separate_login_username(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        username = (CK_BYTE * 4)(*b"0001")
+        pin = (CK_BYTE * 4)(*b"1234")
+        self.assertEqual(
+            self.lib.C_LoginUser(
+                session,
+                CKU_USER,
+                pin,
+                len(pin),
+                username,
+                len(username),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+        self.assertEqual(
+            self.lib.C_LoginUser(
+                session,
+                CKU_SO,
+                pin,
+                len(pin),
+                username,
+                len(username),
+            ),
+            CKR_USER_TYPE_INVALID,
+        )
 
     def test_yubihsm_key_pair_generation_requires_token_objects(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

@@ -108,24 +108,6 @@ impl Frame {
     }
 }
 
-pub(crate) fn parse_pin(pin: &[u8]) -> Result<(u16, &[u8]), Error> {
-    if !(12..=68).contains(&pin.len()) {
-        return Err(CKR_PIN_INCORRECT.into());
-    }
-    let id = std::str::from_utf8(&pin[..4])
-        .ok()
-        .and_then(|value| u16::from_str_radix(value, 16).ok())
-        .ok_or(CKR_PIN_INCORRECT)?;
-    Ok((id, &pin[4..]))
-}
-
-pub(crate) fn parse_asymmetric_pin(pin: &[u8]) -> Result<(u16, &[u8]), Error> {
-    if pin.first() != Some(&b'@') {
-        return Err(CKR_PIN_INCORRECT.into());
-    }
-    parse_pin(&pin[1..])
-}
-
 pub(crate) fn get_device_info(connector: &dyn Connector) -> Result<DeviceInfo, Error> {
     let data = send_plain(connector, &Command::get_device_info(None))?;
     if data.len() < 9 {

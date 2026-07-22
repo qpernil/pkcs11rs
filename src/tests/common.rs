@@ -2936,7 +2936,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
         "C_LoginUser",
         crate::C_LoginUser(
             session,
-            0,
+            CKU_USER as CK_USER_TYPE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
             data.as_mut_ptr(),

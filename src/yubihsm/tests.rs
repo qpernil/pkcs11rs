@@ -776,55 +776,60 @@ fn frame_parser_requires_exact_length() {
 }
 
 #[test]
-fn pin_contains_four_hex_digit_authentication_key_id() {
-    let (id, password) = parse_pin(b"00fFpassword").unwrap();
-    assert_eq!(id, 0xff);
-    assert_eq!(password, PASSWORD);
-    assert!(parse_pin(b"xyz1password").is_err());
-    assert!(parse_pin(b"0001short").is_err());
-}
-
-#[test]
-fn asymmetric_pin_uses_at_prefixed_authentication_key_id() {
-    let (id, password) = parse_asymmetric_pin(b"@00fFpassword").unwrap();
-    assert_eq!(id, 0xff);
-    assert_eq!(password, PASSWORD);
-    assert!(parse_asymmetric_pin(b"00ffpassword").is_err());
-    assert!(parse_asymmetric_pin(b"@xyz1password").is_err());
-}
-
-#[test]
-fn hsmauth_pin_encodes_the_credential_label_and_optional_source() {
-    let login = crate::parse_hsmauth_pin(b":default@12345678:password:00fF").unwrap();
+fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
+    let login = crate::parse_hsmauth_username(b":00fFdefault@12345678").unwrap();
     assert_eq!(login.label, "default");
-    assert_eq!(login.source.as_deref(), Some("12345678"));
+    assert_eq!(login.source, Some("12345678"));
     assert_eq!(login.authkey_id, 0xff);
-    assert_eq!(login.credential_password, PASSWORD);
 
-    let login = crate::parse_hsmauth_pin(":räksmörgås::0001".as_bytes()).unwrap();
+    let login = crate::parse_hsmauth_username(":0001räksmörgås".as_bytes()).unwrap();
     assert_eq!(login.label, "räksmörgås");
     assert!(login.source.is_none());
     assert_eq!(login.authkey_id, 1);
-    assert!(login.credential_password.is_empty());
 
-    let login = crate::parse_hsmauth_pin(b":default:pass:word:0001").unwrap();
-    assert_eq!(login.credential_password, b"pass:word");
-    assert_eq!(login.authkey_id, 1);
+    assert!(matches!(
+        crate::parse_yubihsm_login_username(b"00fF").unwrap(),
+        crate::YubiHsmLoginUsername::Symmetric(0xff)
+    ));
+    assert!(matches!(
+        crate::parse_yubihsm_login_username(b"@00fF").unwrap(),
+        crate::YubiHsmLoginUsername::Asymmetric(0xff)
+    ));
 }
 
 #[test]
-fn hsmauth_pin_rejects_malformed_selectors() {
-    for pin in [
-        b"default:password:0001".as_slice(),
-        b"::0001",
-        b":default:0001",
-        b":default@:password:0001",
-        b":default:password:\xff001",
-        b":default:password:xyz1",
-        b":default:password:001",
-        b":default:passwordpasswordx:0001",
+fn yubihsm_login_splits_username_from_password() {
+    assert_eq!(
+        crate::split_yubihsm_login(b"00fFpassword").unwrap(),
+        (b"00fF".as_slice(), PASSWORD)
+    );
+    assert_eq!(
+        crate::split_yubihsm_login(b"@00fFpassword").unwrap(),
+        (b"@00fF".as_slice(), PASSWORD)
+    );
+    assert_eq!(
+        crate::split_yubihsm_login(b":0001default:pass:word").unwrap(),
+        (b":0001default".as_slice(), b"pass:word".as_slice())
+    );
+}
+
+#[test]
+fn yubihsm_login_rejects_malformed_usernames() {
+    for username in [
+        b"default".as_slice(),
+        b":0001",
+        b":xyz1default",
+        b":0001default@",
+        b":0001default@source@extra",
+        b":0001default:source",
+        b":0001default\x01",
+        b"@001",
+        b"@xyz1",
     ] {
-        assert!(crate::parse_hsmauth_pin(pin).is_err(), "accepted {pin:?}");
+        assert!(
+            crate::parse_yubihsm_login_username(username).is_err(),
+            "accepted {username:?}"
+        );
     }
 }
 
@@ -911,10 +916,10 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     );
 
     assert!(matches!(
-        crate::Slot::login(&mut slot, b":64656661756c74206b6579:password:0001"),
+        crate::Slot::login(&mut slot, b":000164656661756c74206b6579:password"),
         Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
     ));
-    crate::Slot::login(&mut slot, b":default key@12345678:password:0001").unwrap();
+    crate::Slot::login_user(&mut slot, b":0001default key@12345678", b"password").unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());
@@ -978,7 +983,7 @@ fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
         std::rc::Rc::new(std::cell::RefCell::new(vec![provider])),
     );
 
-    crate::Slot::login(&mut slot, b":asymmetric:password:0001").unwrap();
+    crate::Slot::login(&mut slot, b":0001asymmetric:password").unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 92, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);
     assert!(session.get_session_info().is_ok());

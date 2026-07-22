@@ -819,6 +819,14 @@ impl Slot for AbiYubiHsmSlot {
         }
     }
 
+    fn login_user(&mut self, username: &[u8], pin: &[u8]) -> Result<(), Error> {
+        if username == b"0001" && pin == b"1234" {
+            Ok(())
+        } else {
+            Err(CKR_PIN_INCORRECT.into())
+        }
+    }
+
     fn logout(&mut self) -> Result<(), Error> {
         Ok(())
     }
