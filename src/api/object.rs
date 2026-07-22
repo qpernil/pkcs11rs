@@ -67,7 +67,7 @@ fn create_object(
                         .filter_map(|(handle, candidate)| {
                             (candidate.slot_id == Some(slot_id)
                                 && candidate.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
-                                && candidate.id == [slot as u8]
+                                && candidate.id == [slot.cka_id()]
                                 && candidate.token)
                                 .then_some(handle)
                         })
@@ -84,7 +84,7 @@ fn create_object(
                         .find(|(_, object)| {
                             object.slot_id == Some(slot_id)
                                 && object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
-                                && object.id == [slot as u8]
+                                && object.id == [slot.cka_id()]
                         })
                         .map(|(handle, _)| handle)
                         .ok_or(CKR_DEVICE_ERROR)?;
@@ -174,7 +174,7 @@ fn piv_key_object_handles(
         .into_iter()
         .filter_map(|(handle, candidate)| {
             let key_object = candidate.slot_id == Some(slot_id)
-                && candidate.id == [piv_slot as u8]
+                && candidate.id == [piv_slot.cka_id()]
                 && matches!(
                     candidate.class,
                     x if x == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
@@ -226,7 +226,7 @@ fn piv_import_slot(id: &[u8], allow_attestation: bool) -> Result<piv::Slot, Erro
     let [id] = id else {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     };
-    let slot = piv::Slot::from_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+    let slot = piv::Slot::from_cka_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
     if slot == piv::Slot::Attestation && !allow_attestation {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
@@ -469,7 +469,9 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
         CKA_LABEL as CK_ATTRIBUTE_TYPE,
         CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
+        CKA_ID as CK_ATTRIBUTE_TYPE,
         CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+        CKA_PKCS11RS_PIV_OBJECT_TAG,
         CKA_VALUE as CK_ATTRIBUTE_TYPE,
     ];
     if templ
@@ -478,14 +480,44 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     {
         return Err(CKR_ATTRIBUTE_TYPE_INVALID.into());
     }
-    let object_id_bytes =
-        required_template_value(templ, CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE)?.to_vec();
-    if object_id_bytes.len() > 3 {
-        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    let from_cka_id = template_attribute(templ, CKA_ID as CK_ATTRIBUTE_TYPE)
+        .map(|attribute| {
+            let value = read_attribute_value(attribute).map_err(Error::from)?;
+            let [id] = value.as_slice() else {
+                return Err(Error::from(CKR_ATTRIBUTE_VALUE_INVALID));
+            };
+            piv::data_object_mapping_by_cka_id(*id)
+                .map(|mapping| mapping.object_id)
+                .ok_or_else(|| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
+        })
+        .transpose()?;
+    let from_oid = template_attribute(templ, CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE)
+        .map(|attribute| {
+            let value = read_attribute_value(attribute).map_err(Error::from)?;
+            piv::data_object_mapping_by_oid(&value)
+                .map(|mapping| mapping.object_id)
+                .ok_or_else(|| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
+        })
+        .transpose()?;
+    let from_tag = template_attribute(templ, CKA_PKCS11RS_PIV_OBJECT_TAG)
+        .map(|attribute| {
+            let value = read_attribute_value(attribute).map_err(Error::from)?;
+            if value.is_empty() || value.len() > 3 {
+                return Err(Error::from(CKR_ATTRIBUTE_VALUE_INVALID));
+            }
+            Ok(value
+                .iter()
+                .fold(0u32, |object_id, byte| (object_id << 8) | *byte as u32))
+        })
+        .transpose()?;
+    let object_ids = [from_cka_id, from_oid, from_tag]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let object_id = *object_ids.first().ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    if object_ids.iter().any(|candidate| *candidate != object_id) {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let object_id = object_id_bytes
-        .iter()
-        .fold(0u32, |value, byte| (value << 8) | *byte as u32);
     if !piv::data_object_allowed(object_id) {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
@@ -516,7 +548,9 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         class: CKO_DATA as CK_OBJECT_CLASS,
         key_type: 0,
         label,
-        id: Vec::new(),
+        id: piv::data_object_mapping(object_id)
+            .map(|mapping| vec![mapping.cka_id])
+            .unwrap_or_default(),
         token: true,
         private,
         encrypt: false,
@@ -956,7 +990,7 @@ fn destroy_object(
                 let [id] = stored_object.id.as_slice() else {
                     return Err(CKR_DEVICE_ERROR.into());
                 };
-                Some((false, piv::Slot::from_id(*id).ok_or(CKR_DEVICE_ERROR)?))
+                Some((false, piv::Slot::from_cka_id(*id).ok_or(CKR_DEVICE_ERROR)?))
             }
             KeyMaterial::PivPublic { .. } | KeyMaterial::RsaPublic(_)
                 if ctx.get_slot(slot_id)?.is_piv() =>
@@ -1108,6 +1142,7 @@ fn get_attribute_value(
                     }
                     KeyMaterial::PivCertificate { .. }
                     | KeyMaterial::PivAttestation { .. }
+                    | KeyMaterial::PivData { .. }
                     | KeyMaterial::OpenPgpCertificate { .. }
                     | KeyMaterial::SecurityDomainData { .. }
                     | KeyMaterial::SecurityDomainCertificate { .. } => {
@@ -1300,7 +1335,7 @@ fn set_attribute_value(
             let [id] = id.as_slice() else {
                 return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             };
-            let to = piv::Slot::from_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+            let to = piv::Slot::from_cka_id(*id).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
             if to == piv::Slot::Attestation {
                 return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
@@ -1326,7 +1361,7 @@ fn set_attribute_value(
                 let target = token_objects
                     .iter()
                     .find(|candidate| {
-                        candidate.id == [to as u8]
+                        candidate.id == [to.cka_id()]
                             && candidate.class == class
                             && candidate.token
                     })
@@ -1472,4 +1507,86 @@ fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
             .map(|_| ())
             .ok_or(CKR_OPERATION_NOT_INITIALIZED.into())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut [u8]) -> CK_ATTRIBUTE {
+        CK_ATTRIBUTE {
+            type_,
+            pValue: value.as_mut_ptr().cast(),
+            ulValueLen: value.len() as CK_ULONG,
+        }
+    }
+
+    fn imported_data_object_id(template: &[CK_ATTRIBUTE]) -> Result<u32, Error> {
+        match piv_data_import(template)? {
+            PivImport::Data { object_id, .. } => Ok(object_id),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn piv_data_templates_resolve_equivalent_ykcs11_identifiers() {
+        let mut value = [1];
+        let mut cka_id = [27];
+        let mut oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00];
+        let mut tag = [0x5f, 0xc1, 0x02];
+        let value_attribute = attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value);
+        let id_attribute = attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut cka_id);
+        let oid_attribute = attribute(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE, &mut oid);
+        let tag_attribute = attribute(CKA_PKCS11RS_PIV_OBJECT_TAG, &mut tag);
+
+        for identifiers in [
+            vec![id_attribute],
+            vec![oid_attribute],
+            vec![tag_attribute],
+            vec![id_attribute, oid_attribute, tag_attribute],
+        ] {
+            let mut template = vec![value_attribute];
+            template.extend(identifiers);
+            assert_eq!(imported_data_object_id(&template).unwrap(), 0x5f_c102);
+        }
+    }
+
+    #[test]
+    fn piv_data_templates_reject_mismatched_standard_identifiers() {
+        let mut value = [1];
+        let mut cka_id = [27];
+        let mut ccc_oid = [
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x01, 0x81, 0x5b, 0x00,
+        ];
+        let template = [
+            attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+            attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut cka_id),
+            attribute(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE, &mut ccc_oid),
+        ];
+        let error = imported_data_object_id(&template).unwrap_err();
+        assert_eq!(CK_RV::from(error), CKR_TEMPLATE_INCONSISTENT as CK_RV);
+    }
+
+    #[test]
+    fn arbitrary_piv_data_tags_do_not_gain_standard_identifiers() {
+        let mut value = [1];
+        let mut tag = [0x5f, 0xff, 0x10];
+        let template = [
+            attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+            attribute(CKA_PKCS11RS_PIV_OBJECT_TAG, &mut tag),
+        ];
+        let object = match piv_data_import(&template).unwrap() {
+            PivImport::Data { object, .. } => object,
+            _ => unreachable!(),
+        };
+        assert_eq!(object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
+        assert_eq!(
+            object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+            None
+        );
+        assert_eq!(
+            object.attribute_value(CKA_PKCS11RS_PIV_OBJECT_TAG),
+            Some(tag.to_vec())
+        );
+    }
 }
