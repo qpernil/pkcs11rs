@@ -128,6 +128,12 @@ fn scp11b_card_key_requires_a_valid_certificate_chain() {
 }
 
 #[test]
+fn embedded_yubico_attestation_root_is_self_signed() {
+    let root = X509::from_pem(YUBICO_ATTESTATION_ROOT).unwrap();
+    assert!(root.verify(&root.public_key().unwrap()).unwrap());
+}
+
+#[test]
 fn encodes_scp11b_authentication_parameters() {
     let mut point = vec![0x04];
     point.extend(1u8..=64);
