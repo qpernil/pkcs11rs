@@ -371,6 +371,7 @@ impl AbiScp03Slot {
                 vec![0; 16],
                 vec![0; 16],
                 (protocol == "SCP03").then(|| vec![0; 16]),
+                protocol != "SCP11B",
                 [0; 16],
                 0,
             )?))),
@@ -439,6 +440,7 @@ impl Slot for AbiScp03Slot {
             vec![0; 16],
             vec![0; 16],
             (self.protocol == "SCP03").then(|| vec![0; 16]),
+            self.protocol != "SCP11B",
             [0; 16],
             0,
         )?);

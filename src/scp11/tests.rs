@@ -73,6 +73,19 @@ fn encodes_scp11b_authentication_parameters() {
 }
 
 #[test]
+fn scp11_variants_use_globalplatform_parameters_and_instructions() {
+    assert_eq!(Scp11Variant::A.parameter(), 0x01);
+    assert_eq!(Scp11Variant::A.key_id(), 0x11);
+    assert_eq!(Scp11Variant::A.instruction(), 0x82);
+    assert_eq!(Scp11Variant::B.parameter(), 0x00);
+    assert_eq!(Scp11Variant::B.key_id(), 0x13);
+    assert_eq!(Scp11Variant::B.instruction(), 0x88);
+    assert_eq!(Scp11Variant::C.parameter(), 0x03);
+    assert_eq!(Scp11Variant::C.key_id(), 0x15);
+    assert_eq!(Scp11Variant::C.instruction(), 0x82);
+}
+
+#[test]
 fn key_derivation_uses_x963_sha256_counter_layout() {
     let agreement: Vec<u8> = (0u8..64).collect();
     assert_eq!(
@@ -116,8 +129,10 @@ fn authenticates_scp11b_against_fixed_p256_vector() {
         card_public_key: parse_public_point(&static_public).unwrap(),
         host: None,
     };
-    keys.establish_with_ephemeral(&connector, private_key(1))
+    let session = keys
+        .establish_with_ephemeral(&connector, private_key(1))
         .unwrap();
+    assert!(session.require_oce_authentication().is_err());
     assert_eq!(
         connector.commands.borrow().as_slice(),
         &[parse_hex(
@@ -175,8 +190,10 @@ fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
             certificates: vec![vec![0x30, 0x01, 0x00]],
         }),
     };
-    keys.establish_with_ephemeral(&connector, private_key(1))
+    let session = keys
+        .establish_with_ephemeral(&connector, private_key(1))
         .unwrap();
+    session.require_oce_authentication().unwrap();
     assert_eq!(
         connector.commands.borrow().as_slice(),
         &[

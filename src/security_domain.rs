@@ -110,6 +110,7 @@ impl Client {
         kvn: u8,
         delete_last: bool,
     ) -> Result<(), Error> {
+        session.require_oce_authentication()?;
         let command = scp03_delete_key_command(kvn, delete_last)?;
         let response = session.transmit(connector, &command)?;
         require_success(&response)?;
@@ -746,6 +747,7 @@ mod tests {
             vec![0; 16],
             vec![0; 16],
             Some(wrapping_dek.clone()),
+            true,
             [0; 16],
             0,
         )
@@ -763,6 +765,7 @@ mod tests {
             vec![0; 16],
             vec![0; 16],
             Some(wrapping_dek),
+            true,
             [0; 16],
             0,
         )
