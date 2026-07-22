@@ -1726,6 +1726,42 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     );
     assert_eq!(random, [0; 16]);
 
+    let mut yubihsm_session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            crate::ABI_TEST_YUBIHSM_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut yubihsm_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let username = *b"0001";
+    assert_eq!(
+        crate::C_LoginUser(
+            yubihsm_session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_ptr() as *mut CK_BYTE,
+            pin.len() as CK_ULONG,
+            username.as_ptr() as *mut CK_BYTE,
+            username.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Logout(yubihsm_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::C_LoginUser(
+            yubihsm_session,
+            CKU_SO as CK_USER_TYPE,
+            pin.as_ptr() as *mut CK_BYTE,
+            pin.len() as CK_ULONG,
+            username.as_ptr() as *mut CK_BYTE,
+            username.len() as CK_ULONG,
+        ),
+        CKR_USER_TYPE_INVALID as CK_RV
+    );
+
     finalize_for_test();
 }
 

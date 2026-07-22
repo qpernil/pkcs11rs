@@ -86,18 +86,6 @@ pub extern "C" fn C_GetInterface(
 }
 
 #[no_mangle]
-pub extern "C" fn C_LoginUser(
-    session_handle: CK_SESSION_HANDLE,
-    _user_type: CK_USER_TYPE,
-    _pin: *mut ::std::os::raw::c_uchar,
-    _pin_len: ::std::os::raw::c_ulong,
-    _username: *mut ::std::os::raw::c_uchar,
-    _username_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    session_function_not_supported(session_handle)
-}
-
-#[no_mangle]
 pub extern "C" fn C_SessionCancel(session_handle: CK_SESSION_HANDLE, _flags: CK_FLAGS) -> CK_RV {
     session_function_not_supported(session_handle)
 }

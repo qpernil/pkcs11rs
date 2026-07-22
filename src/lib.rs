@@ -104,12 +104,11 @@ use openpgp::{
 mod yubihsm;
 use yubihsm::{
     device_public_key_bytes as get_yubihsm_device_public_key,
-    get_device_info as get_yubihsm_device_info,
-    parse_asymmetric_pin as parse_yubihsm_asymmetric_pin,
-    parse_object_id as parse_yubihsm_object_id, parse_object_list as parse_yubihsm_object_list,
-    parse_pin as parse_yubihsm_pin, Command as YubiHsmCommand, CommandCode as YubiHsmCommandCode,
-    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
-    PublicKey as YubiHsmPublicKey, SecureSession as YubiHsmSecureSession,
+    get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
+    parse_object_list as parse_yubihsm_object_list, Command as YubiHsmCommand,
+    CommandCode as YubiHsmCommandCode, ObjectInfo as YubiHsmObjectInfo,
+    ObjectParameters as YubiHsmObjectParameters, PublicKey as YubiHsmPublicKey,
+    SecureSession as YubiHsmSecureSession,
 };
 
 #[allow(dead_code)]

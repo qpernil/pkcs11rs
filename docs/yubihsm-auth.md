@@ -30,14 +30,14 @@ An ordinary YubiHSM slot supports three `C_Login` PIN forms:
 | --- | --- |
 | Direct symmetric key | `AAAApassword` |
 | Direct asymmetric key | `@AAAApassword` |
-| YubiHSM Auth credential | `:<label>:<credential-password>:AAAA` |
+| YubiHSM Auth credential | `:AAAA<label>[@<source>]:<credential-password>` |
 
 `AAAA` is the four-hex-digit ID of the authentication key on the target
 YubiHSM. Credential labels are printable UTF-8 strings. For example,
 credential label `default` and YubiHSM authentication-key ID `0001` use:
 
 ```text
-:default:credential-password:0001
+:0001default:credential-password
 ```
 
 The short YubiHSM Auth form is accepted when exactly one connected applet has
@@ -45,15 +45,25 @@ that credential label. If multiple YubiKeys contain the same label, append the
 source YubiKey serial number:
 
 ```text
-:default@12345678:credential-password:0001
+:0001default@12345678:credential-password
 ```
 
 When a source has no serial number, its slot description is used as the source
-identifier. `@` and `:` are reserved in the credential selector. A credential
-password may contain colons because the final colon separates the password
-from the fixed-width authentication-key ID. The selected credential and target
-YubiHSM authentication key must form a compatible symmetric or asymmetric
-authentication pair.
+identifier. `@` and `:` are reserved in the credential selector. The leading
+colon identifies a YubiHSM Auth login, and the next four characters are always
+the target YubiHSM authentication-key ID. The following colon separates the
+selector from the password, so the password itself may contain colons. The
+selected credential and target YubiHSM authentication key must form a
+compatible symmetric or asymmetric authentication pair.
+
+PKCS #11 3.x callers may instead pass the authentication selector and password
+separately with `C_LoginUser`:
+
+| Authentication | Username | PIN |
+| --- | --- | --- |
+| Direct symmetric key | `AAAA` | Password |
+| Direct asymmetric key | `@AAAA` | Password |
+| YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
 
 The module asks the YubiHSM Auth applet to calculate the session keys and keeps
 those keys in zeroizing memory only for the life of the authenticated YubiHSM
