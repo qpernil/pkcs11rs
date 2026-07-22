@@ -249,6 +249,9 @@ trait Session {
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn security_domain_put_scp03_key_set(
         &self,
         _new_kvn: u8,

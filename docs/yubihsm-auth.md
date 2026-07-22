@@ -80,11 +80,28 @@ the trusted device. The stored key must exactly match the device response before
 the secure-session receipt is accepted. A missing, malformed, or mismatched
 entry rejects authentication.
 
-Certificate chains are not processed during login. A target-key-ID `0`
-attestation certificate is validated when it is enrolled and is subsequently
-treated as a pinned device-key representative. A directly pinned public key is
-the explicit alternative for devices that do not use the factory Yubico
-attestation hierarchy.
+Certificate chains are not processed during login. Instead, `pkcs11rs.h`
+declares three explicit enrollment functions. They require a read/write session
+on a YubiHSM slot and an existing `CKU_USER` login:
+
+- `PKCS11RS_YubiHsmEnrollDeviceAttestation` attests the internal device public
+  key using the supplied attestation-key ID and reads the attesting certificate
+  from the opaque object with that same ID. The certificate signature and exact
+  device-key match are verified. Calling this function is the administrator's
+  explicit decision to trust that on-device attestation key.
+- `PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation` uses the factory attestation
+  key and certificate at reserved ID `0`, then validates the complete target,
+  device, Yubico intermediate, and Yubico root chain before installing the pin.
+- `PKCS11RS_YubiHsmEnrollDevicePublicKey` directly pins the public key returned
+  by `GET DEVICE PUBLIC KEY` without attestation.
+
+Each function returns the 32-byte SHA-256 fingerprint used in the trust-file
+name. A null output pointer queries that fixed length without installing
+anything. Attestation enrollment requires the authenticating YubiHSM key to
+have `sign-attestation-certificate` and `get-opaque` capabilities. Generic
+attestation IDs must refer to an asymmetric key and X.509 opaque object with the
+same ID. On commercial YubiHSM devices, ID `0` is reserved for the built-in
+factory attestation key and preloaded certificate.
 
 Credential creation, deletion, password changes, management-key changes, and
 application reset are implemented by the internal protocol client but are not

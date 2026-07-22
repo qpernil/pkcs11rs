@@ -30,7 +30,7 @@ use zeroize::Zeroizing;
 
 #[allow(dead_code)]
 mod commands;
-mod trust;
+pub(crate) mod trust;
 pub(crate) use commands::{
     parse_object_id, parse_object_list, Command, CommandCode, ObjectInfo, ObjectParameters,
     PublicKey,

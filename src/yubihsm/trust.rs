@@ -11,21 +11,41 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
+    io::Write,
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 pub(crate) const TRUST_PREFIX_ENV: &str = "PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX";
+const YUBICO_ROOT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/certificates/yubihsm/yubihsm2-attestation-root.pem"
+));
+const YUBICO_INTERMEDIATE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem"
+));
+static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttestationValidation {
+    ExplicitSigner,
+    Yubico,
+}
 
 pub(crate) fn configured_prefix() -> OsString {
     env::var_os(TRUST_PREFIX_ENV).unwrap_or_default()
 }
 
 pub(crate) fn fingerprint(encoded_public_point: &[u8]) -> Result<String, Error> {
-    let spki = device_spki(encoded_public_point)?;
-    Ok(sha256(&spki)
+    Ok(fingerprint_bytes(encoded_public_point)?
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+pub(crate) fn fingerprint_bytes(encoded_public_point: &[u8]) -> Result<[u8; 32], Error> {
+    Ok(sha256(&device_spki(encoded_public_point)?))
 }
 
 pub(crate) fn entry_path(
@@ -59,21 +79,108 @@ pub(crate) fn validate_device_public_key(
 pub(crate) fn public_key_from_pem(pem: &[u8]) -> Result<PKey<Public>, Error> {
     let key = match X509::from_pem(pem) {
         Ok(certificate) => certificate.public_key().map_err(Error::from)?,
-        Err(_) => PKey::public_key_from_pem(pem)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
+        Err(_) => PKey::public_key_from_pem(pem).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
     };
-    let ec = key
-        .ec_key()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let ec = key.ec_key().map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
     if ec.group().curve_name() != Some(Nid::X9_62_PRIME256V1) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    ec.check_key()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    ec.check_key().map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
     PKey::from_ec_key(ec).map_err(Error::from)
 }
 
-fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn install_public_key(
+    encoded_public_point: &[u8],
+    prefix: Option<&OsStr>,
+) -> Result<[u8; 32], Error> {
+    let key = parse_p256_public_key(encoded_public_point)?;
+    let pem = PKey::from_ec_key(key)?.public_key_to_pem()?;
+    install_pem(encoded_public_point, &pem, prefix, false)
+}
+
+pub(crate) fn install_attestation(
+    encoded_public_point: &[u8],
+    attestation: &[u8],
+    device_certificate: &[u8],
+    validation: AttestationValidation,
+    prefix: Option<&OsStr>,
+) -> Result<[u8; 32], Error> {
+    let attestation = X509::from_der(attestation)
+        .or_else(|_| X509::from_pem(attestation))
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let device_certificate = X509::from_der(device_certificate)
+        .or_else(|_| X509::from_pem(device_certificate))
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    match validation {
+        AttestationValidation::ExplicitSigner => {
+            let signer = device_certificate.public_key()?;
+            if !attestation.verify(&signer)? {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+        }
+        AttestationValidation::Yubico => {
+            let intermediate = X509::from_pem(YUBICO_INTERMEDIATE)?;
+            let root = X509::from_pem(YUBICO_ROOT)?;
+            crate::certificate_chain::validate_p256_public_point(
+                &[
+                    intermediate.to_der()?,
+                    device_certificate.to_der()?,
+                    attestation.to_der()?,
+                ],
+                &[root.to_der()?],
+            )?;
+        }
+    }
+    let attested_key = public_key_from_pem(&attestation.to_pem()?)?;
+    if !memcmp::eq(
+        &device_spki(encoded_public_point)?,
+        &attested_key.public_key_to_der()?,
+    ) {
+        return Err(CKR_PIN_INCORRECT.into());
+    }
+    install_pem(encoded_public_point, &attestation.to_pem()?, prefix, true)
+}
+
+fn install_pem(
+    encoded_public_point: &[u8],
+    pem: &[u8],
+    prefix: Option<&OsStr>,
+    replace_matching_entry: bool,
+) -> Result<[u8; 32], Error> {
+    let path = entry_path(encoded_public_point, prefix)?;
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        validate_device_public_key(encoded_public_point, prefix)?;
+        if !replace_matching_entry {
+            return fingerprint_bytes(encoded_public_point);
+        }
+    }
+
+    let id = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = path.as_os_str().to_os_string();
+    temporary_name.push(format!(".tmp-{}-{id}", std::process::id()));
+    let temporary = PathBuf::from(temporary_name);
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        file.write_all(pem)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        fs::rename(&temporary, &path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        fingerprint_bytes(encoded_public_point)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error> {
     let key = parse_p256_public_key(encoded_public_point)?;
     PKey::from_ec_key(key)?
         .public_key_to_der()
@@ -88,6 +195,7 @@ mod tests {
         bn::BigNum,
         ec::{EcGroup, EcKey, PointConversionForm},
         hash::MessageDigest,
+        pkey::Private,
         x509::{X509NameBuilder, X509},
     };
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,8 +215,8 @@ mod tests {
     }
 
     fn certificate_pem(key: &PKey<Public>) -> Vec<u8> {
-        let signing = EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap())
-            .unwrap();
+        let signing =
+            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap();
         let signing = PKey::from_ec_key(signing).unwrap();
         let mut name = X509NameBuilder::new().unwrap();
         name.append_entry_by_text("CN", "pkcs11rs YubiHSM pin")
@@ -130,6 +238,53 @@ mod tests {
             .unwrap();
         certificate.sign(&signing, MessageDigest::sha256()).unwrap();
         certificate.build().to_pem().unwrap()
+    }
+
+    fn signed_certificate(key: &PKey<Public>, signer: &PKey<Private>, serial: u32) -> X509 {
+        let mut name = X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "pkcs11rs YubiHSM attestation")
+            .unwrap();
+        let name = name.build();
+        let mut certificate = X509::builder().unwrap();
+        certificate.set_version(2).unwrap();
+        certificate
+            .set_serial_number(&BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        certificate.set_subject_name(&name).unwrap();
+        certificate.set_issuer_name(&name).unwrap();
+        certificate.set_pubkey(key).unwrap();
+        certificate
+            .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
+            .unwrap();
+        certificate
+            .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
+            .unwrap();
+        certificate.sign(signer, MessageDigest::sha256()).unwrap();
+        certificate.build()
+    }
+
+    fn private_key() -> PKey<Private> {
+        PKey::from_ec_key(
+            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn public_point(key: &PKey<Private>) -> Vec<u8> {
+        let ec = key.ec_key().unwrap();
+        let mut context = openssl::bn::BigNumContext::new().unwrap();
+        ec.public_key()
+            .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED, &mut context)
+            .unwrap()
+    }
+
+    fn public_key(key: &PKey<Private>) -> PKey<Public> {
+        PKey::public_key_from_der(&key.public_key_to_der().unwrap()).unwrap()
+    }
+
+    fn unused_prefix() -> PathBuf {
+        let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("pkcs11rs-enroll-{id}-"))
     }
 
     fn with_entry(pem: &[u8], point: &[u8], test: impl FnOnce(&OsStr)) {
@@ -160,5 +315,56 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         assert_eq!(fingerprint(&point).unwrap(), expected);
+    }
+
+    #[test]
+    fn installs_device_attestation_certificate() {
+        let device_key = private_key();
+        let device_point = public_point(&device_key);
+        let signer = private_key();
+        let signer_certificate = signed_certificate(&public_key(&signer), &signer, 1);
+        let attestation = signed_certificate(&public_key(&device_key), &signer, 2);
+        let prefix = unused_prefix();
+
+        let digest = install_attestation(
+            &device_point,
+            &attestation.to_der().unwrap(),
+            &signer_certificate.to_der().unwrap(),
+            AttestationValidation::ExplicitSigner,
+            Some(prefix.as_os_str()),
+        )
+        .unwrap();
+
+        assert_eq!(digest, fingerprint_bytes(&device_point).unwrap());
+        validate_device_public_key(&device_point, Some(prefix.as_os_str())).unwrap();
+        fs::remove_file(entry_path(&device_point, Some(prefix.as_os_str())).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn rejects_attestation_signed_by_another_key() {
+        let device_key = private_key();
+        let device_point = public_point(&device_key);
+        let signer = private_key();
+        let wrong_signer = private_key();
+        let wrong_certificate = signed_certificate(&public_key(&wrong_signer), &wrong_signer, 1);
+        let attestation = signed_certificate(&public_key(&device_key), &signer, 2);
+
+        assert!(matches!(
+            install_attestation(
+                &device_point,
+                &attestation.to_der().unwrap(),
+                &wrong_certificate.to_der().unwrap(),
+                AttestationValidation::ExplicitSigner,
+                Some(unused_prefix().as_os_str()),
+            ),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        ));
+    }
+
+    #[test]
+    fn embedded_yubico_intermediate_is_signed_by_embedded_root() {
+        let intermediate = X509::from_pem(YUBICO_INTERMEDIATE).unwrap();
+        let root = X509::from_pem(YUBICO_ROOT).unwrap();
+        assert!(intermediate.verify(&root.public_key().unwrap()).unwrap());
     }
 }

@@ -104,6 +104,27 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_SecurityDomainDeleteScp11Key)(
   CK_BBOOL deleteLast
 );
 
+#define PKCS11RS_YUBIHSM_DEVICE_FINGERPRINT_SIZE 32
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmEnrollDeviceAttestation)(
+  CK_SESSION_HANDLE hSession,
+  CK_ULONG ulAttestationKeyId,
+  CK_BYTE_PTR pFingerprint,
+  CK_ULONG_PTR pulFingerprintLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation)(
+  CK_SESSION_HANDLE hSession,
+  CK_BYTE_PTR pFingerprint,
+  CK_ULONG_PTR pulFingerprintLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmEnrollDevicePublicKey)(
+  CK_SESSION_HANDLE hSession,
+  CK_BYTE_PTR pFingerprint,
+  CK_ULONG_PTR pulFingerprintLen
+);
+
 #ifdef __cplusplus
 }
 #endif

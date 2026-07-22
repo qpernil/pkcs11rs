@@ -10,6 +10,8 @@ static TEST_CONTEXT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static TEST_SLOT_LOGOUT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static NEXT_ENROLLMENT_FILE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
 static TEST_SLOT_FAIL_LOGOUT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 const PKCS11_2_40_FUNCTION_COUNT: usize = 68;
@@ -37,6 +39,159 @@ fn debug_level_configuration_has_three_modes() {
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
     crate::reset_object_handles();
+}
+
+#[test]
+fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
+    use std::sync::atomic::Ordering;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let id = NEXT_ENROLLMENT_FILE.fetch_add(1, Ordering::Relaxed);
+    let prefix = std::env::temp_dir().join(format!(
+        "pkcs11rs-device-enrollment-{}-{id}-",
+        std::process::id()
+    ));
+    let mut fingerprint_len = 0;
+    assert_eq!(
+        crate::map(crate::yubihsm_enroll_device(
+            session,
+            ::std::ptr::null_mut(),
+            &mut fingerprint_len,
+            crate::YubiHsmEnrollment::PublicKey,
+            Some(prefix.as_os_str()),
+        )),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(fingerprint_len, 32);
+
+    let mut fingerprint = [0; 32];
+    assert_eq!(
+        crate::map(crate::yubihsm_enroll_device(
+            session,
+            fingerprint.as_mut_ptr(),
+            &mut fingerprint_len,
+            crate::YubiHsmEnrollment::PublicKey,
+            Some(prefix.as_os_str()),
+        )),
+        CKR_OK as CK_RV
+    );
+    let fingerprint_hex: String = fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut path = prefix.as_os_str().to_os_string();
+    path.push(fingerprint_hex);
+    path.push(".pem");
+    let path = std::path::PathBuf::from(path);
+    let pem = std::fs::read(&path).unwrap();
+    let key = crate::yubihsm::trust::public_key_from_pem(&pem).unwrap();
+    assert_eq!(
+        openssl::sha::sha256(&key.public_key_to_der().unwrap()),
+        fingerprint
+    );
+
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[cfg(feature = "abi-tests")]
+#[test]
+fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
+    use std::sync::atomic::Ordering;
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            crate::ABI_TEST_YUBIHSM_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"1234";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let id = NEXT_ENROLLMENT_FILE.fetch_add(1, Ordering::Relaxed);
+    let prefix = std::env::temp_dir().join(format!(
+        "pkcs11rs-attestation-enrollment-{}-{id}-",
+        std::process::id()
+    ));
+    let mut fingerprint = [0; 32];
+    let mut fingerprint_len = fingerprint.len() as CK_ULONG;
+    assert_eq!(
+        crate::map(crate::yubihsm_enroll_device(
+            session,
+            fingerprint.as_mut_ptr(),
+            &mut fingerprint_len,
+            crate::YubiHsmEnrollment::Attestation {
+                key_id: 0,
+                validation: crate::yubihsm::trust::AttestationValidation::ExplicitSigner,
+            },
+            Some(prefix.as_os_str()),
+        )),
+        CKR_OK as CK_RV
+    );
+
+    let fingerprint_hex: String = fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut path = prefix.as_os_str().to_os_string();
+    path.push(fingerprint_hex);
+    path.push(".pem");
+    let path = std::path::PathBuf::from(path);
+    let pem = std::fs::read(&path).unwrap();
+    assert!(pem.starts_with(b"-----BEGIN CERTIFICATE-----"));
+    std::fs::remove_file(path).unwrap();
+
+    assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
 }
 
 #[test]
