@@ -16,7 +16,7 @@ SCP03 configuration is supplied as hexadecimal environment variables:
 
 - `PKCS11RS_SCP03_ENC_KEY` (optional direct static key)
 - `PKCS11RS_SCP03_MAC_KEY` (optional direct static key)
-- `PKCS11RS_SCP03_DEK_KEY` (optional; reserved for key management)
+- `PKCS11RS_SCP03_DEK_KEY` (optional for transport; required for key-set provisioning)
 - `PKCS11RS_SCP03_BMK` (optional Yubico Batch Master Key)
 - `PKCS11RS_SCP03_KEY_VERSION` (optional decimal or `0x` byte, default `255`)
 - `PKCS11RS_SCP03_KEY_ID` (optional decimal or `0x` byte, default `0`)
@@ -70,3 +70,40 @@ commands. SCP03 response decryption and R-MAC verification are then performed
 once over the reassembled non-segmented response. A chain is limited to 256
 continuation segments, and every continuation after the initial `61xx` must
 contribute response data.
+
+## Issuer SD key provisioning
+
+`pkcs11rs.h` declares an administration ABI for loading and deleting SCP03 key
+sets. Initialize the module, open a read/write session on the Issuer SD slot,
+and call `C_Login` to establish SCP03 before using either function:
+
+```c
+PKCS11RS_SCP03_KEY_SET keys = {
+  .pEncKey = enc, .ulEncKeyLen = 16,
+  .pMacKey = mac, .ulMacKeyLen = 16,
+  .pDekKey = dek, .ulDekKeyLen = 16,
+};
+
+CK_RV rv = PKCS11RS_SecurityDomainPutScp03KeySet(
+  session, new_kvn, replace_kvn, &keys
+);
+```
+
+The function follows the Yubico `PUT KEY` format. All three AES-128 components
+are wrapped with the current static DEK using AES-CBC with a zero IV. The
+three-byte key check values are calculated and verified against the card's
+response. Provisioning returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
+authenticated channel has no static DEK, including an SCP11 channel.
+
+`replace_kvn` is zero when adding a key set and identifies the old KVN for an
+in-place replacement otherwise. New key sets must use a KVN from 1 through
+254; KVN 255 is reserved for the factory key set. Safer rotation adds a new
+KVN, reconnects and authenticates with it, and only then calls
+`PKCS11RS_SecurityDomainDeleteScp03KeySet` for the old KVN. The deletion API
+rejects KVN zero. Its `deleteLast` argument must be `CK_TRUE` to deliberately
+delete the final set and trigger the device's last-key behavior.
+
+The administration calls are vendor extensions and are not included in the
+standard PKCS #11 function lists. They require a read/write session and an
+existing `CKU_USER` login. Key material is never logged, and temporary key
+state retained by the secure channel is zeroized on release.

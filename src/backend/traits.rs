@@ -56,6 +56,7 @@ trait Slot {
     fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
+    fn invalidate_token_objects(&self) {}
     fn token_object(
         &self,
         slot_id: CK_SLOT_ID,
@@ -73,6 +74,9 @@ trait Slot {
         MECHANISMS.to_vec()
     }
     fn is_yubihsm(&self) -> bool {
+        false
+    }
+    fn is_issuer_security_domain(&self) -> bool {
         false
     }
     fn is_piv(&self) -> bool {
@@ -239,6 +243,21 @@ trait Session {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn yubihsm_command(&self, _command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn security_domain_put_scp03_key_set(
+        &self,
+        _new_kvn: u8,
+        _replace_kvn: u8,
+        _keys: &Scp03ProvisioningKeys<'_>,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn security_domain_delete_scp03_key_set(
+        &self,
+        _kvn: u8,
+        _delete_last: bool,
+    ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
 }
