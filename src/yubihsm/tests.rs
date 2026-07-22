@@ -240,8 +240,8 @@ impl ProtocolPeer {
 
     fn authenticate_session(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
         let frame = Frame::parse(request)?;
-        let mut session = self.session.borrow_mut();
-        let session = session.as_mut().ok_or(CKR_DEVICE_ERROR)?;
+        let mut session_slot = self.session.borrow_mut();
+        let session = session_slot.as_mut().ok_or(CKR_DEVICE_ERROR)?;
         if frame.data.len() != 1 + MAC_LENGTH + MAC_LENGTH || frame.data[0] != session.sid {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -252,6 +252,8 @@ impl ProtocolPeer {
         if frame.data[1..9] != session.expected_host_cryptogram
             || !memcmp::eq(&command_mac[..MAC_LENGTH], &frame.data[payload_length..])
         {
+            *session_slot = None;
+            self.closed_sessions.set(self.closed_sessions.get() + 1);
             return Frame::new(COMMAND_ERROR, vec![0x04]).map(|frame| frame.encode());
         }
         session.mac_chaining_value = command_mac;
@@ -275,7 +277,9 @@ impl ProtocolPeer {
         mac_input.extend_from_slice(&request[..3 + payload_length]);
         let command_mac = aes_cmac(&session.s_mac, &mac_input)?;
         if !memcmp::eq(&command_mac[..MAC_LENGTH], &frame.data[payload_length..]) {
-            return Err(CKR_DEVICE_ERROR.into());
+            *session_slot = None;
+            self.closed_sessions.set(self.closed_sessions.get() + 1);
+            return Frame::new(COMMAND_ERROR, vec![0x04]).map(|frame| frame.encode());
         }
         session.mac_chaining_value = command_mac;
         if frame.data[0] != session.sid {
@@ -621,6 +625,7 @@ impl Connector for SymmetricHsmAuthPeer {
 struct AsymmetricHsmAuthPeer {
     ephemeral_key: EcKey<Private>,
     public_key: Vec<u8>,
+    fail_calculate: bool,
 }
 
 impl AsymmetricHsmAuthPeer {
@@ -638,6 +643,14 @@ impl AsymmetricHsmAuthPeer {
         Self {
             ephemeral_key,
             public_key,
+            fail_calculate: false,
+        }
+    }
+
+    fn failing_calculate() -> Self {
+        Self {
+            fail_calculate: true,
+            ..Self::new()
         }
     }
 }
@@ -683,6 +696,12 @@ impl Connector for AsymmetricHsmAuthPeer {
         }
         if command.ins != 0x03 {
             return Err(CKR_DEVICE_ERROR.into());
+        }
+        if self.fail_calculate {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x63c7,
+            });
         }
         let context = test_tlv_value(&command.data, 0x77)?;
         let device_public_key = test_tlv_value(&command.data, 0x7c)?;
@@ -906,6 +925,38 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
 }
 
 #[test]
+fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
+    let yubihsm = ProtocolPeer::new();
+    let provider = crate::HsmAuthProvider {
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        credential: crate::HsmAuthCredential {
+            label: "default key".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: None,
+        },
+        version: (5, 7, 1),
+    };
+
+    assert!(matches!(
+        provider.authenticate(&yubihsm, 1, b"wrong-password"),
+        Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
+    ));
+    assert_eq!(
+        yubihsm
+            .commands
+            .borrow()
+            .iter()
+            .map(|command| command[0])
+            .collect::<Vec<_>>(),
+        [COMMAND_CREATE_SESSION, COMMAND_AUTHENTICATE_SESSION]
+    );
+    assert!(yubihsm.session.borrow().is_none());
+    assert_eq!(yubihsm.closed_sessions.get(), 1);
+}
+
+#[test]
 fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
@@ -935,6 +986,34 @@ fn hsmauth_asymmetric_credential_opens_a_real_yubihsm_secure_session() {
         yubihsm.inner_commands.borrow().as_slice(),
         [(CommandCode::GetStorageInfo as u8, Vec::new())]
     );
+}
+
+#[test]
+fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
+    let yubihsm = ProtocolPeer::new();
+    let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::failing_calculate());
+    let provider = crate::HsmAuthProvider {
+        connector: hsmauth.clone(),
+        credential: crate::HsmAuthCredential {
+            label: "asymmetric".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
+            retries: 8,
+            touch_required: true,
+            public_key: Some(hsmauth.public_key.clone()),
+        },
+        version: (5, 7, 1),
+    };
+
+    assert!(matches!(
+        provider.authenticate(&yubihsm, 1, PASSWORD),
+        Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
+    ));
+    let commands = yubihsm.commands.borrow();
+    assert_eq!(commands.len(), 3);
+    assert_eq!(commands[0][0], COMMAND_CREATE_SESSION);
+    assert_eq!(commands[2][0], COMMAND_SESSION_MESSAGE);
+    assert!(yubihsm.session.borrow().is_none());
+    assert_eq!(yubihsm.closed_sessions.get(), 1);
 }
 
 #[test]

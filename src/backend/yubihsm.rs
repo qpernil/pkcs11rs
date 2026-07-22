@@ -54,7 +54,22 @@ impl HsmAuthProvider {
                     &handshake.context,
                     &handshake.card_cryptogram,
                     credential_password,
-                )?;
+                );
+                let keys = match keys {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiHSM Auth finalizing failed symmetric target session {}",
+                            handshake.sid
+                        );
+                        YubiHsmSecureSession::finish_failed_symmetric_handshake(
+                            yubihsm_connector,
+                            handshake,
+                        );
+                        return Err(error);
+                    }
+                };
                 log!(
                     2,
                     "YubiHSM Auth received symmetric session keys for target session {}",
@@ -116,7 +131,21 @@ impl HsmAuthProvider {
                     "YubiHSM Auth reading the target YubiHSM device public key for session {}",
                     handshake.sid
                 );
-                let device_public_key = get_yubihsm_device_public_key(yubihsm_connector)?;
+                let device_public_key = match get_yubihsm_device_public_key(yubihsm_connector) {
+                    Ok(public_key) => public_key,
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiHSM Auth closing failed asymmetric target session {}",
+                            handshake.sid
+                        );
+                        YubiHsmSecureSession::close_failed_asymmetric_handshake(
+                            yubihsm_connector,
+                            handshake,
+                        );
+                        return Err(error);
+                    }
+                };
                 log!(
                     2,
                     "YubiHSM Auth requesting asymmetric session keys for credential {:?}",
@@ -129,7 +158,22 @@ impl HsmAuthProvider {
                     &device_public_key,
                     &handshake.receipt,
                     credential_password,
-                )?;
+                );
+                let keys = match keys {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiHSM Auth closing failed asymmetric target session {}",
+                            handshake.sid
+                        );
+                        YubiHsmSecureSession::close_failed_asymmetric_handshake(
+                            yubihsm_connector,
+                            handshake,
+                        );
+                        return Err(error);
+                    }
+                };
                 let session_id = handshake.sid;
                 let session = YubiHsmSecureSession::complete_asymmetric_with_session_keys(
                     handshake,

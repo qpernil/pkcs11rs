@@ -302,6 +302,22 @@ impl SecureSession {
         Self::complete_symmetric(connector, handshake, s_enc, s_mac, s_rmac, None)
     }
 
+    pub(crate) fn finish_failed_symmetric_handshake(
+        connector: &dyn Connector,
+        handshake: SymmetricHandshake,
+    ) {
+        let zero_key = || Zeroizing::new([0; AES_BLOCK_SIZE]);
+        if let Ok(mut session) = Self::complete_symmetric_with_session_keys(
+            connector,
+            handshake,
+            zero_key(),
+            zero_key(),
+            zero_key(),
+        ) {
+            let _ = session.send_command(connector, &Command::close_session());
+        }
+    }
+
     fn complete_symmetric(
         connector: &dyn Connector,
         handshake: SymmetricHandshake,
@@ -399,6 +415,34 @@ impl SecureSession {
             mac_chaining_value: handshake.receipt,
             valid: true,
         }
+    }
+
+    pub(crate) fn close_failed_asymmetric_handshake(
+        connector: &dyn Connector,
+        handshake: AsymmetricHandshake,
+    ) {
+        let mut counter = [0; AES_BLOCK_SIZE];
+        increment_counter(&mut counter);
+        Self::send_invalid_close(connector, handshake.sid, counter, handshake.receipt);
+    }
+
+    fn send_invalid_close(
+        connector: &dyn Connector,
+        sid: u8,
+        counter: [u8; AES_BLOCK_SIZE],
+        mac_chaining_value: [u8; AES_BLOCK_SIZE],
+    ) {
+        let zero_key = || Zeroizing::new([0; AES_BLOCK_SIZE]);
+        let mut session = Self {
+            sid,
+            s_enc: zero_key(),
+            s_mac: zero_key(),
+            s_rmac: zero_key(),
+            counter,
+            mac_chaining_value,
+            valid: true,
+        };
+        let _ = session.send_command(connector, &Command::close_session());
     }
 
     pub(crate) fn authenticate_asymmetric(
