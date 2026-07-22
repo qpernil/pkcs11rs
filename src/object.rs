@@ -113,6 +113,14 @@ enum KeyMaterial {
         public_key: Vec<u8>,
         public_key_info: Vec<u8>,
     },
+    YubiHsmAttestation {
+        connector: Rc<dyn Connector>,
+        session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+        id: u16,
+        algorithm: u8,
+        value: Rc<RefCell<Option<Vec<u8>>>>,
+        attempted: Rc<Cell<bool>>,
+    },
     Secret(Zeroizing<Vec<u8>>),
     DerivedSecret(Zeroizing<Vec<u8>>),
 }
@@ -182,6 +190,17 @@ impl std::fmt::Debug for KeyMaterial {
             Self::YubiHsmDevicePublic { public_key, .. } => fmt
                 .debug_struct("YubiHsmDevicePublic")
                 .field("size", &public_key.len())
+                .finish(),
+            Self::YubiHsmAttestation {
+                id,
+                algorithm,
+                value,
+                ..
+            } => fmt
+                .debug_struct("YubiHsmAttestation")
+                .field("id", id)
+                .field("algorithm", algorithm)
+                .field("cached", &value.borrow().is_some())
                 .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
             Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
@@ -440,6 +459,28 @@ fn lazy_piv_attestation_certificate(
     Some(certificate)
 }
 
+fn lazy_yubihsm_attestation_certificate(
+    connector: &dyn Connector,
+    session: &RefCell<Option<YubiHsmSecureSession>>,
+    id: u16,
+    value: &RefCell<Option<Vec<u8>>>,
+    attempted: &Cell<bool>,
+) -> Option<Vec<u8>> {
+    if attempted.replace(true) {
+        return value.borrow().clone();
+    }
+
+    let certificate = send_yubihsm_secure_command(
+        connector,
+        session,
+        &YubiHsmCommand::sign_attestation_certificate(id, 0),
+    )
+    .ok()?;
+    openssl::x509::X509::from_der(&certificate).ok()?;
+    *value.borrow_mut() = Some(certificate.clone());
+    Some(certificate)
+}
+
 impl TokenObject {
     fn has_sensitive_attributes(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -468,7 +509,9 @@ impl TokenObject {
     fn size(&self) -> CK_ULONG {
         let defer_certificate_attributes = matches!(
             &self.material,
-            KeyMaterial::PivAttestation { attempted, .. } if !attempted.get()
+            KeyMaterial::PivAttestation { attempted, .. }
+                | KeyMaterial::YubiHsmAttestation { attempted, .. }
+                if !attempted.get()
         );
         [
             CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -931,6 +974,21 @@ impl TokenObject {
                         attempted,
                     )
                     .and_then(|value| piv_certificate_attribute(&value, x)),
+                    KeyMaterial::YubiHsmAttestation {
+                        connector,
+                        session,
+                        id,
+                        value,
+                        attempted,
+                        ..
+                    } => lazy_yubihsm_attestation_certificate(
+                        connector.as_ref(),
+                        session,
+                        *id,
+                        value,
+                        attempted,
+                    )
+                    .and_then(|value| piv_certificate_attribute(&value, x)),
                     _ => None,
                 }
             }
@@ -1004,6 +1062,7 @@ impl TokenObject {
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsm { .. }
                 | KeyMaterial::YubiHsmDevicePublic { .. }
+                | KeyMaterial::YubiHsmAttestation { .. }
                 | KeyMaterial::DerivedSecret(_)
         )
     }
