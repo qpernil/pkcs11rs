@@ -303,9 +303,22 @@ impl Connector for AbiScp03Connector {
         receive: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let response = if command.get(1) == Some(&0xd8) {
+        let decoded = CommandApdu::decode(command)?;
+        let response = if decoded.ins == 0xd8 && decoded.p2 & 0x80 != 0 {
             abi_scp03_put_key_response(command)?
-        } else if command.get(1) == Some(&0x84) {
+        } else if decoded.ins == 0xd8 {
+            let mut response = vec![*decoded.data.first().ok_or(CKR_DATA_INVALID)?];
+            response.extend([0x90, 0x00]);
+            response
+        } else if decoded.ins == 0xf1 {
+            let mut response = vec![0xb0, 65];
+            response.extend(crate::scp03::parse_hex(
+                "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
+                 4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+            )?);
+            response.extend([0x90, 0x00]);
+            response
+        } else if decoded.ins == 0x84 {
             let length = command.last().copied().unwrap_or(0);
             let length = if length == 0 { 256 } else { length as usize };
             let mut response = vec![0; length];

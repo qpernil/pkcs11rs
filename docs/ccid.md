@@ -62,9 +62,9 @@ The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
 supports random generation through the applet's `GET CHALLENGE` command and
 uses `C_Login` to establish the configured secure channel. Ordinary PKCS #11
 object operations remain read-only. SCP03 key-set provisioning and deletion
-are available through the explicit administration ABI in `pkcs11rs.h`; key
-generation, certificate and allowlist management, and Security Domain reset
-are not yet exposed.
+and typed SCP11 key and trust management are available through the explicit
+administration ABI in `pkcs11rs.h`. Raw Security Domain data storage and reset
+are not exposed.
 
 Protocol-specific key and certificate configuration is documented in
 [`scp03.md`](scp03.md) and [`scp11.md`](scp11.md).

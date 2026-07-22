@@ -21,8 +21,9 @@ appropriate PKCS #11 error instead of being omitted.
 - **YubiHSM Auth** as a discoverable CCID applet whose credentials can
   authenticate sessions on YubiHSM USB slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
-  SCP11 certificate chains, and an explicit SCP03 key-provisioning ABI.
-- **SCP03, SCP11a, and SCP11b** secure messaging for selected CCID applets.
+  SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
+- **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
+  applets.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.

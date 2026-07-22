@@ -3,12 +3,26 @@ use crate::{
     CommandApdu, Connector, Error, ResponseApdu, Scp03Session, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
     CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
 };
-use openssl::symm::Mode;
+use openssl::{
+    bn::BigNumContext,
+    ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
+    nid::Nid,
+    pkey::PKey,
+    symm::Mode,
+    x509::X509,
+};
+use zeroize::Zeroizing;
 
 const INS_GET_DATA: u8 = 0xca;
 const INS_PUT_KEY: u8 = 0xd8;
+const INS_STORE_DATA: u8 = 0xe2;
 const INS_DELETE: u8 = 0xe4;
+const INS_GENERATE_KEY: u8 = 0xf1;
 const KEY_TYPE_AES: u32 = 0x88;
+const KEY_TYPE_ECC_PUBLIC: u32 = 0xb0;
+const KEY_TYPE_ECC_PRIVATE: u32 = 0xb1;
+const KEY_TYPE_ECC_PARAMS: u32 = 0xf0;
+const TAG_DELETE_KEY_ID: u32 = 0xd0;
 const TAG_DELETE_KEY_VERSION: u32 = 0xd2;
 const TAG_KEY_INFORMATION: u32 = 0xe0;
 const TAG_CARD_RECOGNITION_DATA: u32 = 0x66;
@@ -28,6 +42,51 @@ pub(crate) struct Scp03ProvisioningKeys<'a> {
     pub(crate) enc: &'a [u8],
     pub(crate) mac: &'a [u8],
     pub(crate) dek: &'a [u8],
+}
+
+pub(crate) enum Scp11Administration {
+    GenerateKey {
+        key_ref: KeyRef,
+        replace_kvn: u8,
+        curve: u8,
+    },
+    PutPrivateKey {
+        key_ref: KeyRef,
+        replace_kvn: u8,
+        encoded: Zeroizing<Vec<u8>>,
+    },
+    PutPublicKey {
+        key_ref: KeyRef,
+        replace_kvn: u8,
+        encoded: Vec<u8>,
+    },
+    StoreCertificateChain {
+        key_ref: KeyRef,
+        certificates: Vec<Vec<u8>>,
+    },
+    StoreCaIssuer {
+        key_ref: KeyRef,
+        subject_key_identifier: Vec<u8>,
+    },
+    SetAllowlist {
+        key_ref: KeyRef,
+        serials: Vec<Vec<u8>>,
+    },
+    DeleteKey {
+        key_ref: KeyRef,
+        delete_last: bool,
+    },
+}
+
+pub(crate) struct PreparedScp11Administration {
+    command: CommandApdu,
+    response: Scp11Response,
+}
+
+enum Scp11Response {
+    Empty,
+    Exact(Vec<u8>),
+    GeneratedPublicKey(Scp11Curve),
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -118,6 +177,157 @@ impl Client {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(())
+    }
+
+    pub(crate) fn prepare_scp11_administration(
+        &self,
+        session: &Scp03Session,
+        operation: &Scp11Administration,
+    ) -> Result<PreparedScp11Administration, Error> {
+        session.require_oce_authentication()?;
+        let (command, response) = match operation {
+            Scp11Administration::GenerateKey {
+                key_ref,
+                replace_kvn,
+                curve,
+            } => {
+                validate_scp11_key_ref(*key_ref)?;
+                let curve = Scp11Curve::from_id(*curve)?;
+                let data = [
+                    vec![key_ref.kvn],
+                    encode_tlv(KEY_TYPE_ECC_PARAMS, &[curve.id()])?,
+                ]
+                .concat();
+                (
+                    administration_apdu(INS_GENERATE_KEY, *replace_kvn, key_ref.kid, data),
+                    Scp11Response::GeneratedPublicKey(curve),
+                )
+            }
+            Scp11Administration::PutPrivateKey {
+                key_ref,
+                replace_kvn,
+                encoded,
+            } => {
+                validate_scp11_key_ref(*key_ref)?;
+                let (curve, scalar) = parse_private_key(encoded)?;
+                let wrapping_dek = session.static_dek()?;
+                if wrapping_dek.len() != AES_BLOCK_SIZE || scalar.len() % AES_BLOCK_SIZE != 0 {
+                    return Err(CKR_KEY_SIZE_RANGE.into());
+                }
+                let wrapped = aes_cbc(
+                    wrapping_dek,
+                    &[0; AES_BLOCK_SIZE],
+                    scalar.as_slice(),
+                    Mode::Encrypt,
+                )?;
+                let data = put_ec_key_data(key_ref.kvn, KEY_TYPE_ECC_PRIVATE, &wrapped, curve)?;
+                (
+                    administration_apdu(INS_PUT_KEY, *replace_kvn, key_ref.kid, data),
+                    Scp11Response::Exact(vec![key_ref.kvn]),
+                )
+            }
+            Scp11Administration::PutPublicKey {
+                key_ref,
+                replace_kvn,
+                encoded,
+            } => {
+                validate_ec_public_key_ref(*key_ref)?;
+                let (curve, point) = parse_public_key(encoded)?;
+                let data = put_ec_key_data(key_ref.kvn, KEY_TYPE_ECC_PUBLIC, &point, curve)?;
+                (
+                    administration_apdu(INS_PUT_KEY, *replace_kvn, key_ref.kid, data),
+                    Scp11Response::Exact(vec![key_ref.kvn]),
+                )
+            }
+            Scp11Administration::StoreCertificateChain {
+                key_ref,
+                certificates,
+            } => {
+                validate_scp11_key_ref(*key_ref)?;
+                validate_certificate_chain(certificates)?;
+                let selector = encode_tlv(0x83, &key_ref.encoded())?;
+                let selector = encode_tlv(0xa6, &selector)?;
+                let certificates = certificates.concat();
+                let data = [selector, encode_tlv(TAG_CERTIFICATE_STORE, &certificates)?].concat();
+                (
+                    administration_apdu(INS_STORE_DATA, 0x90, 0, data),
+                    Scp11Response::Empty,
+                )
+            }
+            Scp11Administration::StoreCaIssuer {
+                key_ref,
+                subject_key_identifier,
+            } => {
+                validate_ec_public_key_ref(*key_ref)?;
+                if subject_key_identifier.is_empty() {
+                    return Err(CKR_ARGUMENTS_BAD.into());
+                }
+                let klcc = matches!(key_ref.kid, KID_SCP11A | KID_SCP11B | KID_SCP11C);
+                let selector = [
+                    encode_tlv(0x80, &[u8::from(klcc)])?,
+                    encode_tlv(0x42, subject_key_identifier)?,
+                    encode_tlv(0x83, &key_ref.encoded())?,
+                ]
+                .concat();
+                (
+                    administration_apdu(INS_STORE_DATA, 0x90, 0, encode_tlv(0xa6, &selector)?),
+                    Scp11Response::Empty,
+                )
+            }
+            Scp11Administration::SetAllowlist { key_ref, serials } => {
+                if !matches!(key_ref.kid, KID_SCP11A | KID_SCP11C) || key_ref.kvn == 0 {
+                    return Err(CKR_ARGUMENTS_BAD.into());
+                }
+                let selector = encode_tlv(0x83, &key_ref.encoded())?;
+                let serials = serials
+                    .iter()
+                    .map(|serial| {
+                        let serial = canonical_positive_integer(serial)?;
+                        encode_tlv(0x93, &serial)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .concat();
+                let data = [encode_tlv(0xa6, &selector)?, encode_tlv(0x70, &serials)?].concat();
+                (
+                    administration_apdu(INS_STORE_DATA, 0x90, 0, data),
+                    Scp11Response::Empty,
+                )
+            }
+            Scp11Administration::DeleteKey {
+                key_ref,
+                delete_last,
+            } => {
+                validate_ec_public_key_ref(*key_ref)?;
+                let data = [
+                    encode_tlv(TAG_DELETE_KEY_ID, &[key_ref.kid])?,
+                    encode_tlv(TAG_DELETE_KEY_VERSION, &[key_ref.kvn])?,
+                ]
+                .concat();
+                (
+                    administration_apdu(INS_DELETE, 0, u8::from(*delete_last), data),
+                    Scp11Response::Empty,
+                )
+            }
+        };
+        Ok(PreparedScp11Administration { command, response })
+    }
+
+    pub(crate) fn execute_scp11_administration(
+        &self,
+        connector: &dyn Connector,
+        session: &mut Scp03Session,
+        prepared: PreparedScp11Administration,
+    ) -> Result<Vec<u8>, Error> {
+        let response = session.transmit(connector, &prepared.command)?;
+        require_success(&response)?;
+        match prepared.response {
+            Scp11Response::Empty if response.data.is_empty() => Ok(Vec::new()),
+            Scp11Response::Exact(expected) if response.data == expected => Ok(Vec::new()),
+            Scp11Response::GeneratedPublicKey(curve) => {
+                parse_generated_public_key(&response.data, curve)
+            }
+            _ => Err(CKR_DEVICE_ERROR.into()),
+        }
     }
 
     pub(crate) fn discover(&self, connector: &dyn Connector) -> Result<SecurityDomainInfo, Error> {
@@ -251,6 +461,208 @@ impl Client {
             extended: false,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Scp11Curve {
+    Secp256r1,
+    Secp384r1,
+    Secp521r1,
+    BrainpoolP256r1,
+    BrainpoolP384r1,
+    BrainpoolP512r1,
+}
+
+impl Scp11Curve {
+    fn from_id(id: u8) -> Result<Self, Error> {
+        match id {
+            0x00 => Ok(Self::Secp256r1),
+            0x01 => Ok(Self::Secp384r1),
+            0x02 => Ok(Self::Secp521r1),
+            0x03 => Ok(Self::BrainpoolP256r1),
+            0x05 => Ok(Self::BrainpoolP384r1),
+            0x07 => Ok(Self::BrainpoolP512r1),
+            _ => Err(CKR_ARGUMENTS_BAD.into()),
+        }
+    }
+
+    fn from_nid(nid: Nid) -> Result<Self, Error> {
+        match nid {
+            Nid::X9_62_PRIME256V1 => Ok(Self::Secp256r1),
+            Nid::SECP384R1 => Ok(Self::Secp384r1),
+            Nid::SECP521R1 => Ok(Self::Secp521r1),
+            Nid::BRAINPOOL_P256R1 => Ok(Self::BrainpoolP256r1),
+            Nid::BRAINPOOL_P384R1 => Ok(Self::BrainpoolP384r1),
+            Nid::BRAINPOOL_P512R1 => Ok(Self::BrainpoolP512r1),
+            _ => Err(CKR_ARGUMENTS_BAD.into()),
+        }
+    }
+
+    fn id(self) -> u8 {
+        match self {
+            Self::Secp256r1 => 0x00,
+            Self::Secp384r1 => 0x01,
+            Self::Secp521r1 => 0x02,
+            Self::BrainpoolP256r1 => 0x03,
+            Self::BrainpoolP384r1 => 0x05,
+            Self::BrainpoolP512r1 => 0x07,
+        }
+    }
+
+    fn nid(self) -> Nid {
+        match self {
+            Self::Secp256r1 => Nid::X9_62_PRIME256V1,
+            Self::Secp384r1 => Nid::SECP384R1,
+            Self::Secp521r1 => Nid::SECP521R1,
+            Self::BrainpoolP256r1 => Nid::BRAINPOOL_P256R1,
+            Self::BrainpoolP384r1 => Nid::BRAINPOOL_P384R1,
+            Self::BrainpoolP512r1 => Nid::BRAINPOOL_P512R1,
+        }
+    }
+
+    fn public_point_length(self) -> Result<usize, Error> {
+        let group = EcGroup::from_curve_name(self.nid())?;
+        Ok(1 + 2 * group.degree().div_ceil(8) as usize)
+    }
+}
+
+pub(crate) fn scp11_public_point_length(curve: u8) -> Result<usize, Error> {
+    Scp11Curve::from_id(curve)?.public_point_length()
+}
+
+fn validate_new_key_ref(key_ref: KeyRef) -> Result<(), Error> {
+    if key_ref.kvn == 0 {
+        Err(CKR_ARGUMENTS_BAD.into())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_scp11_key_ref(key_ref: KeyRef) -> Result<(), Error> {
+    validate_new_key_ref(key_ref)?;
+    if matches!(key_ref.kid, KID_SCP11A | KID_SCP11B | KID_SCP11C) {
+        Ok(())
+    } else {
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
+}
+
+fn validate_ec_public_key_ref(key_ref: KeyRef) -> Result<(), Error> {
+    validate_new_key_ref(key_ref)?;
+    if matches!(
+        key_ref.kid,
+        0x10 | KID_SCP11A | KID_SCP11B | KID_SCP11C | 0x20..=0x2f
+    ) {
+        Ok(())
+    } else {
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
+}
+
+fn administration_apdu(ins: u8, p1: u8, p2: u8, data: Vec<u8>) -> CommandApdu {
+    CommandApdu {
+        cla: if matches!(ins, INS_PUT_KEY | INS_DELETE | INS_GENERATE_KEY) {
+            0x80
+        } else {
+            0
+        },
+        ins,
+        p1,
+        p2,
+        data,
+        le: None,
+        extended: false,
+    }
+}
+
+fn put_ec_key_data(
+    kvn: u8,
+    key_type: u32,
+    key: &[u8],
+    curve: Scp11Curve,
+) -> Result<Vec<u8>, Error> {
+    Ok([
+        vec![kvn],
+        encode_tlv(key_type, key)?,
+        encode_tlv(KEY_TYPE_ECC_PARAMS, &[curve.id()])?,
+        vec![0],
+    ]
+    .concat())
+}
+
+fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>), Error> {
+    let key = PKey::private_key_from_pkcs8(encoded)
+        .or_else(|_| PKey::private_key_from_der(encoded))
+        .and_then(|key| key.ec_key())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    key.check_key()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let curve = Scp11Curve::from_nid(key.group().curve_name().ok_or(CKR_ARGUMENTS_BAD)?)?;
+    let length = key.group().degree().div_ceil(8);
+    let scalar = key
+        .private_key()
+        .to_vec_padded(i32::try_from(length).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?)
+        .map_err(Error::from)?;
+    Ok((curve, Zeroizing::new(scalar)))
+}
+
+fn parse_public_key(encoded: &[u8]) -> Result<(Scp11Curve, Vec<u8>), Error> {
+    let key = PKey::public_key_from_der(encoded)
+        .and_then(|key| key.ec_key())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    key.check_key()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let curve = Scp11Curve::from_nid(key.group().curve_name().ok_or(CKR_ARGUMENTS_BAD)?)?;
+    let mut context = BigNumContext::new()?;
+    let point =
+        key.public_key()
+            .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut context)?;
+    Ok((curve, point))
+}
+
+fn parse_generated_public_key(encoded: &[u8], curve: Scp11Curve) -> Result<Vec<u8>, Error> {
+    let tlvs = parse_tlvs(encoded)?;
+    if tlvs.len() != 1 || tlvs[0].tag != KEY_TYPE_ECC_PUBLIC {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    let group = EcGroup::from_curve_name(curve.nid())?;
+    let mut context = BigNumContext::new()?;
+    let point = EcPoint::from_bytes(&group, tlvs[0].value, &mut context)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let key = EcKey::from_public_key(&group, &point).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    key.check_key().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(tlvs[0].value.to_vec())
+}
+
+fn validate_certificate_chain(certificates: &[Vec<u8>]) -> Result<(), Error> {
+    if certificates.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let certificates = certificates
+        .iter()
+        .map(|encoded| X509::from_der(encoded).map_err(|_| Error::from(CKR_DATA_INVALID)))
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in certificates.windows(2) {
+        let issuer = pair[0].public_key()?;
+        if !pair[1].verify(&issuer)? {
+            return Err(CKR_DATA_INVALID.into());
+        }
+    }
+    Ok(())
+}
+
+fn canonical_positive_integer(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    let stripped = encoded
+        .iter()
+        .position(|byte| *byte != 0)
+        .map(|offset| &encoded[offset..])
+        .ok_or(CKR_ARGUMENTS_BAD)?;
+    let mut canonical = Vec::with_capacity(stripped.len() + 1);
+    if stripped[0] & 0x80 != 0 {
+        canonical.push(0);
+    }
+    canonical.extend_from_slice(stripped);
+    Ok(canonical)
 }
 
 fn scp03_put_key_command(
@@ -784,6 +1196,234 @@ mod tests {
         );
         assert_eq!(command.data, hex("d2 01 02"));
         assert!(scp03_delete_key_command(0, false).is_err());
+    }
+
+    #[test]
+    fn scp11_key_commands_match_yubico_wire_formats() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let ec_key = EcKey::generate(&group).unwrap();
+        let key = PKey::from_ec_key(ec_key).unwrap();
+        let mut session = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            Some(vec![0; 16]),
+            true,
+            [0; 16],
+            0,
+        )
+        .unwrap();
+
+        let generated = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::GenerateKey {
+                    key_ref: KeyRef {
+                        kid: KID_SCP11B,
+                        kvn: 2,
+                    },
+                    replace_kvn: 1,
+                    curve: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                generated.command.cla,
+                generated.command.ins,
+                generated.command.p1,
+                generated.command.p2,
+            ),
+            (0x80, 0xf1, 1, KID_SCP11B)
+        );
+        assert_eq!(generated.command.data, hex("02 f0 01 00"));
+
+        let public = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::PutPublicKey {
+                    key_ref: KeyRef {
+                        kid: KID_SCP11A,
+                        kvn: 3,
+                    },
+                    replace_kvn: 0,
+                    encoded: key.public_key_to_der().unwrap(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (public.command.ins, public.command.p1, public.command.p2),
+            (0xd8, 0, KID_SCP11A)
+        );
+        assert_eq!(public.command.data[0], 3);
+        assert_eq!(*public.command.data.last().unwrap(), 0);
+        let public_tlvs =
+            parse_tlvs(&public.command.data[1..public.command.data.len() - 1]).unwrap();
+        assert_eq!(public_tlvs[0].tag, KEY_TYPE_ECC_PUBLIC);
+        assert_eq!(public_tlvs[1].value, &[0]);
+
+        let private = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::PutPrivateKey {
+                    key_ref: KeyRef {
+                        kid: KID_SCP11C,
+                        kvn: 4,
+                    },
+                    replace_kvn: 2,
+                    encoded: Zeroizing::new(key.private_key_to_pkcs8().unwrap()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (private.command.ins, private.command.p1, private.command.p2),
+            (0xd8, 2, KID_SCP11C)
+        );
+        let private_tlvs =
+            parse_tlvs(&private.command.data[1..private.command.data.len() - 1]).unwrap();
+        assert_eq!(private_tlvs[0].tag, KEY_TYPE_ECC_PRIVATE);
+        assert_eq!(private_tlvs[0].value.len(), 32);
+        assert_eq!(private_tlvs[1].value, &[0]);
+
+        let point = public_tlvs[0].value.to_vec();
+        let connector = ScriptedConnector::new(vec![response(
+            encode_tlv(KEY_TYPE_ECC_PUBLIC, &point).unwrap(),
+            STATUS_SUCCESS,
+        )]);
+        let output = Client
+            .execute_scp11_administration(&connector, &mut session, generated)
+            .unwrap();
+        assert_eq!(output, point);
+    }
+
+    #[test]
+    fn scp11_administration_requires_oce_authentication_and_dek_for_private_import() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let operation = Scp11Administration::GenerateKey {
+            key_ref: KeyRef {
+                kid: KID_SCP11B,
+                kvn: 1,
+            },
+            replace_kvn: 0,
+            curve: 0,
+        };
+        let card_only = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            None,
+            false,
+            [0; 16],
+            0,
+        )
+        .unwrap();
+        assert!(Client
+            .prepare_scp11_administration(&card_only, &operation)
+            .is_err());
+
+        let oce = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            None,
+            true,
+            [0; 16],
+            0,
+        )
+        .unwrap();
+        assert!(Client
+            .prepare_scp11_administration(
+                &oce,
+                &Scp11Administration::PutPrivateKey {
+                    key_ref: KeyRef {
+                        kid: KID_SCP11A,
+                        kvn: 1,
+                    },
+                    replace_kvn: 0,
+                    encoded: Zeroizing::new(key.private_key_to_pkcs8().unwrap()),
+                },
+            )
+            .is_err());
+        assert!(Client
+            .prepare_scp11_administration(&oce, &operation)
+            .is_ok());
+    }
+
+    #[test]
+    fn scp11_trust_and_exact_delete_commands_are_typed() {
+        let session = Scp03Session::from_session_keys(
+            vec![0; 16],
+            vec![0; 16],
+            vec![0; 16],
+            None,
+            true,
+            [0; 16],
+            0,
+        )
+        .unwrap();
+        let key_ref = KeyRef {
+            kid: KID_SCP11A,
+            kvn: 2,
+        };
+        let certificate = certificate();
+        let stored = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::StoreCertificateChain {
+                    key_ref,
+                    certificates: vec![certificate.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (stored.command.cla, stored.command.ins, stored.command.p1),
+            (0, 0xe2, 0x90)
+        );
+        assert!(stored.command.data.ends_with(&certificate));
+
+        let allowlist = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::SetAllowlist {
+                    key_ref,
+                    serials: vec![vec![0, 0x80]],
+                },
+            )
+            .unwrap();
+        assert!(allowlist.command.data.ends_with(&hex("70 04 93 02 00 80")));
+        assert!(Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::SetAllowlist {
+                    key_ref,
+                    serials: vec![vec![0]],
+                },
+            )
+            .is_err());
+
+        let deleted = Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::DeleteKey {
+                    key_ref,
+                    delete_last: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(deleted.command.data, hex("d0 01 11 d2 01 02"));
+        assert!(Client
+            .prepare_scp11_administration(
+                &session,
+                &Scp11Administration::DeleteKey {
+                    key_ref: KeyRef {
+                        kid: KID_SCP11A,
+                        kvn: 0,
+                    },
+                    delete_last: false,
+                },
+            )
+            .is_err());
     }
 
     fn hex(value: &str) -> Vec<u8> {

@@ -23,14 +23,13 @@ expected P-256 Security Domain public key to be pinned using exactly one of:
 
 The certificate file is treated as pinned configuration. The implementation
 does not fetch and implicitly trust an unverified certificate from the card.
-Certificate-chain validation and provisioning remain the caller's
-responsibility.
+Choosing the trusted certificate chain remains the caller's responsibility.
 
 Optional configuration:
 
 - `PKCS11RS_SCP11_KEY_VERSION`: decimal or `0x` key version, default `1`;
 
-SCP11a additionally requires:
+SCP11a and SCP11c additionally require:
 
 - `PKCS11RS_SCP11_OCE_PRIVATE_KEY`: path to a PEM or DER P-256 private key;
 - `PKCS11RS_SCP11_OCE_CERTIFICATES`: one or more certificate paths separated by
@@ -49,3 +48,34 @@ mandatory `0x33` security level with command and response encryption and MAC
 authentication. The card receipt is verified before the channel becomes
 active. Subsequent APDUs use the same short, extended, command-chaining,
 response-chaining, counter, padding, and MAC handling as the SCP03 transport.
+
+## Issuer SD key provisioning
+
+`pkcs11rs.h` declares typed administration functions for SCP11 keys and trust
+data. They require a read/write session on the Issuer SD slot and an existing
+`CKU_USER` login over an OCE-authenticated channel. SCP03, SCP11a, and SCP11c
+authenticate the OCE. SCP11b authenticates only the card and is rejected for
+all administration functions.
+
+`PKCS11RS_SecurityDomainGenerateScp11Key` generates an EC private key on the
+device and returns its uncompressed SEC1 public point. A null output pointer
+queries the required point length without generating a key. The curve values
+declared in `pkcs11rs.h` match Yubico's Security Domain curve IDs.
+
+`PKCS11RS_SecurityDomainPutScp11PrivateKey` accepts an unencrypted DER PKCS#8
+or traditional EC private key. The private scalar is wrapped using the current
+static DEK, so the function returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
+authenticated channel has no DEK. `PKCS11RS_SecurityDomainPutScp11PublicKey`
+accepts a DER SubjectPublicKeyInfo EC public key and does not require a DEK.
+Temporary private-key material is zeroized.
+
+`PKCS11RS_SecurityDomainStoreScp11CertificateChain` accepts DER X.509
+certificates in issuer-to-leaf order and verifies that each issuer signs the
+next certificate before sending anything. The CA issuer function stores a
+Subject Key Identifier, and the allowlist function stores positive certificate
+serial numbers for SCP11a or SCP11c. Passing an empty allowlist clears it.
+
+`PKCS11RS_SecurityDomainDeleteScp11Key` deletes exactly one nonzero KID/KVN
+reference. It does not expose the GlobalPlatform wildcard deletion behavior.
+Successful mutations invalidate and refresh the Issuer SD object inventory.
+Raw `STORE DATA` and Security Domain reset are deliberately not exposed.
