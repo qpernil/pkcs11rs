@@ -370,6 +370,26 @@ fn yubihsm_remote_material_with_type(
     }
 }
 
+fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
+    if !info.label.is_empty() {
+        return info.label.clone();
+    }
+    let kind = match (info.object_type, info.algorithm) {
+        (YUBIHSM_OPAQUE, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE) => "certificate",
+        (YUBIHSM_OPAQUE, _) => "opaque object",
+        (YUBIHSM_AUTHENTICATION_KEY, _) => "authentication key",
+        (YUBIHSM_ASYMMETRIC_KEY, _) => "asymmetric key",
+        (YUBIHSM_WRAP_KEY, _) => "wrap key",
+        (YUBIHSM_HMAC_KEY, _) => "HMAC key",
+        (YUBIHSM_TEMPLATE, _) => "template",
+        (YUBIHSM_OTP_AEAD_KEY, _) => "OTP AEAD key",
+        (YUBIHSM_SYMMETRIC_KEY, _) => "symmetric key",
+        (YUBIHSM_PUBLIC_WRAP_KEY, _) => "public wrap key",
+        _ => "object",
+    };
+    format!("YubiHSM {kind} {}", info.id)
+}
+
 fn yubihsm_device_public_key_object(
     slot_id: CK_SLOT_ID,
     public_key: &[u8],
@@ -427,7 +447,7 @@ fn yubihsm_token_objects_with_generation(
     generation: u64,
 ) -> Result<Vec<TokenObject>, Error> {
     let key_type = yubihsm_key_type(info.algorithm);
-    let label = info.label.clone();
+    let label = yubihsm_object_label(&info);
     if info.object_type == YUBIHSM_OPAQUE
         && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
         && label.starts_with("Meta object")

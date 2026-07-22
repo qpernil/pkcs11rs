@@ -291,6 +291,54 @@ pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
 }
 
 #[test]
+fn yubihsm_empty_hardware_labels_receive_descriptive_fallbacks() {
+    for object_type in [
+        crate::YUBIHSM_OPAQUE,
+        crate::YUBIHSM_AUTHENTICATION_KEY,
+        crate::YUBIHSM_ASYMMETRIC_KEY,
+        crate::YUBIHSM_WRAP_KEY,
+        crate::YUBIHSM_HMAC_KEY,
+        crate::YUBIHSM_TEMPLATE,
+        crate::YUBIHSM_OTP_AEAD_KEY,
+        crate::YUBIHSM_SYMMETRIC_KEY,
+        crate::YUBIHSM_PUBLIC_WRAP_KEY,
+    ] {
+        let info = crate::YubiHsmObjectInfo {
+            capabilities: [0; 8],
+            id: 42,
+            length: 0,
+            domains: 1,
+            object_type,
+            algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+            sequence: 1,
+            origin: 1,
+            label: String::new(),
+            delegated_capabilities: [0; 8],
+        };
+        let label = crate::yubihsm_object_label(&info);
+        assert!(label.starts_with("YubiHSM "));
+        assert!(label.ends_with(" 42"));
+    }
+
+    let mut info = crate::YubiHsmObjectInfo {
+        capabilities: [0; 8],
+        id: 42,
+        length: 0,
+        domains: 1,
+        object_type: crate::YUBIHSM_OPAQUE,
+        algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 1,
+        origin: 1,
+        label: "configured label".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    assert_eq!(crate::yubihsm_object_label(&info), "configured label");
+    info.algorithm = crate::YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE;
+    info.label.clear();
+    assert_eq!(crate::yubihsm_object_label(&info), "YubiHSM certificate 42");
+}
+
+#[test]
 pub fn destroy_openpgp_objects_is_prohibited() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
