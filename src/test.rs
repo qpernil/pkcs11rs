@@ -4,3 +4,4 @@ include!("tests/crypto.rs");
 include!("tests/object.rs");
 include!("tests/key.rs");
 include!("tests/interfaces.rs");
+include!("tests/hardware.rs");

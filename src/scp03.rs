@@ -753,6 +753,16 @@ impl Scp03Session {
         self.unprotect_response(response)
     }
 
+    pub(crate) fn transmit_short(
+        &mut self,
+        connector: &dyn Connector,
+        command: &CommandApdu,
+    ) -> Result<ResponseApdu, Error> {
+        let protected = self.protect_command(command)?;
+        let response = crate::iso7816::transmit_short(connector, &protected)?;
+        self.unprotect_response(response)
+    }
+
     pub(crate) fn transmit_chained(
         &mut self,
         connector: &dyn Connector,

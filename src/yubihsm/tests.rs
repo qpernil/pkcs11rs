@@ -134,7 +134,7 @@ impl ProtocolPeer {
                 let group = p256_group()?;
                 let key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
                 let mut public = p256_public_key(&key)?;
-                public[0] = EC_P256_ALGORITHM;
+                public[0] = EC_P256_AUTHENTICATION_ALGORITHM;
                 Frame::new(
                     CommandCode::GetDevicePublicKey as u8 | RESPONSE_BIT,
                     public.to_vec(),
@@ -611,6 +611,9 @@ impl Connector for SymmetricHsmAuthPeer {
             status: 0x9000,
         })
     }
+    fn send_short_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        self.send_apdu(command)
+    }
     fn transmit<'a>(
         &self,
         _send_buffer: &[u8],
@@ -731,6 +734,9 @@ impl Connector for AsymmetricHsmAuthPeer {
             data: keys[16..].to_vec(),
             status: 0x9000,
         })
+    }
+    fn send_short_apdu(&self, command: &crate::CommandApdu) -> Result<crate::ResponseApdu, Error> {
+        self.send_apdu(command)
     }
     fn transmit<'a>(
         &self,
@@ -888,6 +894,17 @@ fn authenticates_and_exchanges_encrypted_session_messages() {
         .send_command(&peer, &Command::close_session())
         .unwrap();
     assert_eq!(peer.commands.borrow().len(), 5);
+}
+
+#[test]
+fn device_public_key_uses_the_asymmetric_authentication_algorithm() {
+    let peer = ProtocolPeer::new();
+    let public_key = device_public_key_bytes(&peer).unwrap();
+    assert_eq!(public_key[0], 0x04);
+    assert!(parse_p256_public_key(&public_key).is_ok());
+    let command = peer.commands.borrow();
+    assert_eq!(command.len(), 1);
+    assert_eq!(command[0][0], CommandCode::GetDevicePublicKey as u8);
 }
 
 #[test]
