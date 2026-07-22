@@ -7,6 +7,10 @@ every physical YubiHSM USB device. YubiHSM Auth credentials are objects in the
 applet slot and authentication methods for YubiHSM USB slots. For one YubiKey
 with all four default applets and one YubiHSM, the result is five slots.
 
+Direct YubiHSM USB discovery is enabled by default. Set
+`PKCS11RS_YUBIHSM_USB=0` to disable it. The only accepted values are `0` and
+`1`.
+
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
 Every credential is represented by a `CKO_SECRET_KEY` with key type
 `CKK_GENERIC_SECRET`, no cryptographic capabilities, and no readable

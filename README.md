@@ -78,6 +78,15 @@ pkcs11-tool \
 No configuration is required for normal discovery. The module probes supported
 YubiHSM USB devices and the default CCID applets available through PC/SC.
 
+Disable direct YubiHSM USB discovery:
+
+```sh
+export PKCS11RS_YUBIHSM_USB=0
+```
+
+The setting defaults to `1`. Any value other than `0` or `1` makes
+`C_Initialize` return `CKR_ARGUMENTS_BAD`.
+
 ## CCID Configuration
 
 The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, and the
