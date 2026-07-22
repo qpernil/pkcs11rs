@@ -5,10 +5,12 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE,
     CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
+use flate2::{read::GzDecoder, read::ZlibDecoder, write::GzEncoder, Compression};
 use openssl::{
     memcmp,
     symm::{Cipher, Crypter, Mode},
 };
+use std::io::{Read, Write};
 use zeroize::Zeroizing;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
@@ -48,6 +50,9 @@ const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
 const INS_SET_PIN_RETRIES: u8 = 0xfa;
 const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
+const CERTIFICATE_UNCOMPRESSED: u8 = 0;
+const CERTIFICATE_GZIP: u8 = 1;
+const MAX_DECOMPRESSED_CERTIFICATE_SIZE: usize = u16::MAX as usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Version {
@@ -769,9 +774,7 @@ impl Client {
         certificate: &[u8],
     ) -> Result<(), Error> {
         openssl::x509::X509::from_der(certificate).map_err(|_| Error::from(CKR_DATA_INVALID))?;
-        let mut object = encode_tlv(0x70, certificate)?;
-        object.extend_from_slice(&encode_tlv(0x71, &[0])?);
-        object.extend_from_slice(&encode_tlv(0xfe, &[])?);
+        let object = encode_certificate_object(certificate)?;
         self.put_data(connector, slot.certificate_object(), &object)
     }
 
@@ -813,13 +816,7 @@ impl Client {
         slot: Slot,
     ) -> Result<Vec<u8>, Error> {
         let object = self.get_data(connector, slot.certificate_object())?;
-        let fields = parse_tlvs(&object)?;
-        if field(&fields, 0x71).is_some_and(|compressed| compressed != [0]) {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
-        field(&fields, 0x70)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| CKR_DATA_INVALID.into())
+        decode_certificate_object(&object)
     }
 
     pub(crate) fn attestation(
@@ -1077,6 +1074,83 @@ fn encode_tlv(tag: u32, value: &[u8]) -> Result<Vec<u8>, Error> {
     }
     encoded.extend_from_slice(value);
     Ok(encoded)
+}
+
+fn encode_certificate_object(certificate: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(certificate)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let (stored, cert_info) = if compressed.len() < certificate.len() {
+        (compressed.as_slice(), CERTIFICATE_GZIP)
+    } else {
+        (certificate, CERTIFICATE_UNCOMPRESSED)
+    };
+
+    let mut object = encode_tlv(0x70, stored)?;
+    object.extend_from_slice(&encode_tlv(0x71, &[cert_info])?);
+    object.extend_from_slice(&encode_tlv(0xfe, &[])?);
+    Ok(object)
+}
+
+fn decode_certificate_object(object: &[u8]) -> Result<Vec<u8>, Error> {
+    let fields = parse_tlvs(object)?;
+    if fields.len() != 3
+        || fields
+            .iter()
+            .any(|field| !matches!(field.tag, 0x70 | 0x71 | 0xfe))
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    for tag in [0x70, 0x71, 0xfe] {
+        if fields.iter().filter(|field| field.tag == tag).count() != 1 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+    }
+    if field(&fields, 0xfe) != Some(&[]) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+
+    let certificate = field(&fields, 0x70)
+        .filter(|value| !value.is_empty())
+        .ok_or(CKR_DATA_INVALID)?;
+    match field(&fields, 0x71) {
+        Some([CERTIFICATE_UNCOMPRESSED]) => Ok(certificate.to_vec()),
+        Some([CERTIFICATE_GZIP]) => decode_compressed_certificate(certificate),
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
+}
+
+fn decode_compressed_certificate(compressed: &[u8]) -> Result<Vec<u8>, Error> {
+    // Some deployed NET iD cards prefix a zlib stream with a marker and the
+    // expected uncompressed size. Yubico's middleware accepts this format.
+    let (compressed, expected_length) = if let [0x01, 0x00, low, high, rest @ ..] = compressed {
+        (rest, Some(u16::from_le_bytes([*low, *high]) as usize))
+    } else {
+        (compressed, None)
+    };
+    let mut decoded = Vec::new();
+    let limit = (MAX_DECOMPRESSED_CERTIFICATE_SIZE + 1) as u64;
+    if compressed.starts_with(&[0x1f, 0x8b]) {
+        GzDecoder::new(compressed)
+            .take(limit)
+            .read_to_end(&mut decoded)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    } else {
+        ZlibDecoder::new(compressed)
+            .take(limit)
+            .read_to_end(&mut decoded)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    }
+    if decoded.len() > MAX_DECOMPRESSED_CERTIFICATE_SIZE
+        || expected_length.is_some_and(|expected| expected != decoded.len())
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(decoded)
 }
 
 #[cfg(test)]

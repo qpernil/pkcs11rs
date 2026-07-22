@@ -22,6 +22,7 @@ abi-tests = []
 rusb = "0.9.4"
 pcsc = "2.9.0"
 curl = "0.4.50"
+flate2 = "1.1.9"
 openssl = "0.10.81"
 zeroize = "1.9.0"
 
