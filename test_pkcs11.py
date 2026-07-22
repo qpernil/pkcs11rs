@@ -102,6 +102,7 @@ CKA_KEY_GEN_MECHANISM = 0x00000166
 CKA_MODIFIABLE = 0x00000170
 CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
+CKA_PKCS11RS_PIV_OBJECT_TAG = 0x80005056
 CKU_SO = 0
 CKU_USER = 1
 CKS_RO_PUBLIC_SESSION = 0
@@ -826,6 +827,89 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(signature_len.value, 256)
+
+    def test_abi_piv_related_objects_share_ykcs11_id(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
+        self.login_with_pin(session, b"123456")
+
+        def find_one(object_class: int) -> int:
+            encoded_class = CK_ULONG(object_class)
+            encoded_id = CK_BYTE(2)
+            token = CK_BYTE(1)
+            template = (CK_ATTRIBUTE * 3)(
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(encoded_class), CK_VOID_PTR),
+                    ctypes.sizeof(encoded_class),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ID,
+                    ctypes.cast(ctypes.byref(encoded_id), CK_VOID_PTR),
+                    ctypes.sizeof(encoded_id),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                    ctypes.sizeof(token),
+                ),
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handles = (CK_ULONG * 2)()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(session, handles, len(handles), ctypes.byref(found)),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            return handles[0]
+
+        def bytes_attribute(handle: int, attribute_type: int) -> bytes:
+            attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            value = (CK_BYTE * attribute.ulValueLen)()
+            attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return bytes(value)
+
+        handles = {
+            object_class: find_one(object_class)
+            for object_class in (
+                CKO_PUBLIC_KEY,
+                CKO_PRIVATE_KEY,
+                CKO_CERTIFICATE,
+                CKO_DATA,
+            )
+        }
+        for handle in handles.values():
+            self.assertEqual(bytes_attribute(handle, CKA_ID), b"\x02")
+
+        certificate = bytes_attribute(handles[CKO_CERTIFICATE], CKA_VALUE)
+        raw_data = bytes_attribute(handles[CKO_DATA], CKA_VALUE)
+        self.assertEqual(certificate[:1], b"\x30")
+        self.assertEqual(raw_data[:1], b"\x70")
+        self.assertNotEqual(raw_data, certificate)
+        self.assertEqual(
+            bytes_attribute(handles[CKO_DATA], CKA_OBJECT_ID),
+            bytes.fromhex("60864801650307020100"),
+        )
+        self.assertEqual(
+            bytes_attribute(handles[CKO_DATA], CKA_PKCS11RS_PIV_OBJECT_TAG),
+            bytes.fromhex("5fc10a"),
+        )
 
     def test_abi_scp03_fixture_exercises_secure_session_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

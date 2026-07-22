@@ -40,6 +40,22 @@ are exposed for P-256, P-384, Ed25519, and X25519. Private key material remains
 on the card. RSA-3072, RSA-4096, Ed25519, and X25519 are only exposed on
 firmware 5.7 and later.
 
+## Object identifiers and raw data
+
+PIV key, certificate, and data objects use the YKCS11-compatible one-byte
+`CKA_ID` mapping. Related objects therefore share an ID even though their
+native PIV key references and data-object tags differ. Mapped `CKO_DATA`
+objects also expose `CKA_OBJECT_ID` as the value bytes of the corresponding
+PIV ASN.1 object identifier. Unmapped vendor data objects expose neither
+standard attribute.
+
+`CKA_PKCS11RS_PIV_OBJECT_TAG` (`CKA_VENDOR_DEFINED | 0x5056`) exposes the
+native one-to-three-byte PIV BER-TLV object tag on every PIV `CKO_DATA` object.
+For certificate containers, `CKA_VALUE` on the `CKO_CERTIFICATE` is the
+uncompressed DER certificate while `CKA_VALUE` on the matching `CKO_DATA` is
+the raw `70`/`71`/`FE` container returned by the card, including any stored
+compression.
+
 RSA raw, PKCS #1 v1.5, OAEP, PSS, and hashed RSA mechanisms are supported for
 the applicable slots. The host performs padding and digest encoding while the
 YubiKey performs the private RSA operation. `CKM_ECDSA` and its hashed variants

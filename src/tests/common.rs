@@ -1989,6 +1989,70 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
         object.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
         Some(vec![CK_TRUE as CK_BBOOL])
     );
+
+    let vendor = objects
+        .iter()
+        .find(|object| matches!(object.material, crate::KeyMaterial::PivData { object_id: 0x5f_ff10, .. }))
+        .unwrap();
+    assert_eq!(vendor.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
+    assert_eq!(
+        vendor.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        None
+    );
+    assert_eq!(
+        vendor.attribute_value(crate::CKA_PKCS11RS_PIV_OBJECT_TAG),
+        Some(vec![0x5f, 0xff, 0x10])
+    );
+}
+
+#[cfg(feature = "abi-tests")]
+#[test]
+fn piv_key_related_objects_share_ykcs11_id_and_keep_raw_certificate_data() {
+    let slot = crate::abi_test_piv_slot().unwrap();
+    let objects = crate::Slot::token_objects(&slot, 7).unwrap();
+    let related = objects
+        .iter()
+        .filter(|object| object.token && object.id == [2])
+        .collect::<Vec<_>>();
+    assert_eq!(related.len(), 4);
+    for class in [CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_CERTIFICATE, CKO_DATA] {
+        assert_eq!(
+            related
+                .iter()
+                .filter(|object| object.class == class as CK_OBJECT_CLASS)
+                .count(),
+            1
+        );
+    }
+
+    let certificate = related
+        .iter()
+        .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+        .unwrap();
+    let certificate_value = certificate
+        .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert_eq!(certificate_value.first(), Some(&0x30));
+
+    let data = related
+        .iter()
+        .find(|object| object.class == CKO_DATA as CK_OBJECT_CLASS)
+        .unwrap();
+    let raw_value = data
+        .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert_eq!(raw_value.first(), Some(&0x70));
+    assert_ne!(raw_value, certificate_value);
+    assert_eq!(
+        data.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+        Some(vec![
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x00,
+        ])
+    );
+    assert_eq!(
+        crate::piv::decode_certificate_object(&raw_value).unwrap(),
+        certificate_value
+    );
 }
 
 #[cfg(feature = "abi-tests")]

@@ -1085,10 +1085,11 @@ impl Client {
         connector: &dyn Connector,
         slot: Slot,
         certificate: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<u8>, Error> {
         openssl::x509::X509::from_der(certificate).map_err(|_| Error::from(CKR_DATA_INVALID))?;
         let object = encode_certificate_object(certificate)?;
-        self.put_data(connector, slot.certificate_object(), &object)
+        self.put_data(connector, slot.certificate_object(), &object)?;
+        Ok(object)
     }
 
     pub(crate) fn delete_certificate(
@@ -1128,8 +1129,18 @@ impl Client {
         connector: &dyn Connector,
         slot: Slot,
     ) -> Result<Vec<u8>, Error> {
+        self.certificate_and_data(connector, slot)
+            .map(|(certificate, _)| certificate)
+    }
+
+    pub(crate) fn certificate_and_data(
+        &self,
+        connector: &dyn Connector,
+        slot: Slot,
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         let object = self.get_data(connector, slot.certificate_object())?;
-        decode_certificate_object(&object)
+        let certificate = decode_certificate_object(&object)?;
+        Ok((certificate, object))
     }
 
     pub(crate) fn attestation(
@@ -1389,7 +1400,7 @@ fn encode_tlv(tag: u32, value: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(encoded)
 }
 
-fn encode_certificate_object(certificate: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn encode_certificate_object(certificate: &[u8]) -> Result<Vec<u8>, Error> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(certificate)
@@ -1409,7 +1420,7 @@ fn encode_certificate_object(certificate: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(object)
 }
 
-fn decode_certificate_object(object: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn decode_certificate_object(object: &[u8]) -> Result<Vec<u8>, Error> {
     let fields = parse_tlvs(object)?;
     if fields.len() != 3
         || fields

@@ -196,9 +196,23 @@ impl Connector for AbiPivConnector {
 
 #[cfg(feature = "abi-tests")]
 pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
-    let public_key = Rsa::generate(2048)?;
+    let private_key = Rsa::generate(2048)?;
     let public_key =
-        Rsa::from_public_components(public_key.n().to_owned()?, public_key.e().to_owned()?)?;
+        Rsa::from_public_components(private_key.n().to_owned()?, private_key.e().to_owned()?)?;
+    let certificate_key = openssl::pkey::PKey::from_rsa(private_key)?;
+    let mut name = openssl::x509::X509Name::builder()?;
+    name.append_entry_by_text("CN", "PKCS11RS ABI PIV")?;
+    let name = name.build();
+    let mut certificate = openssl::x509::X509::builder()?;
+    certificate.set_version(2)?;
+    certificate.set_subject_name(&name)?;
+    certificate.set_issuer_name(&name)?;
+    certificate.set_pubkey(&certificate_key)?;
+    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
+    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
+    certificate.sign(&certificate_key, openssl::hash::MessageDigest::sha256())?;
+    let certificate = certificate.build().to_der()?;
+    let certificate_data = piv::encode_certificate_object(&certificate)?;
     let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
     Ok(PivSlot {
         connector,
@@ -222,8 +236,16 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             touch_policy: 1,
             origin: piv::ORIGIN_GENERATED,
         }],
-        certificates: Vec::new(),
-        data_objects: Vec::new(),
+        certificates: vec![PivCertificate {
+            slot: piv::Slot::Signature,
+            algorithm: piv::Algorithm::Rsa2048,
+            value: certificate,
+            attestation: false,
+        }],
+        data_objects: vec![PivDataObject {
+            object_id: piv::Slot::Signature.certificate_object(),
+            value: certificate_data,
+        }],
     })
 }
 
