@@ -98,11 +98,35 @@ struct ProtocolPeer {
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
     objects: RefCell<Vec<u16>>,
+    metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
     corrupt_card_cryptogram: bool,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
     authenticate_payload: Vec<u8>,
     closed_sessions: Cell<usize>,
+}
+
+fn encode_object_info(info: &ObjectInfo) -> Vec<u8> {
+    let mut encoded = vec![0; 66];
+    encoded[..8].copy_from_slice(&info.capabilities);
+    encoded[8..10].copy_from_slice(&info.id.to_be_bytes());
+    encoded[10..12].copy_from_slice(&info.length.to_be_bytes());
+    encoded[12..14].copy_from_slice(&info.domains.to_be_bytes());
+    encoded[14..18].copy_from_slice(&[
+        info.object_type,
+        info.algorithm,
+        info.sequence,
+        info.origin,
+    ]);
+    encoded[18..18 + info.label.len()].copy_from_slice(info.label.as_bytes());
+    encoded[58..].copy_from_slice(&info.delegated_capabilities);
+    encoded
+}
+
+fn encode_metadata_item(encoded: &mut Vec<u8>, tag: u8, value: &[u8]) {
+    encoded.push(tag);
+    encoded.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    encoded.extend_from_slice(value);
 }
 
 impl ProtocolPeer {
@@ -115,6 +139,7 @@ impl ProtocolPeer {
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             objects: RefCell::new(vec![1]),
+            metadata_objects: RefCell::new(HashMap::new()),
             x25519_private_keys: RefCell::new(x25519_private_keys),
             corrupt_card_cryptogram: false,
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
@@ -363,14 +388,22 @@ impl ProtocolPeer {
                     objects.extend_from_slice(&id.to_be_bytes());
                     objects.extend_from_slice(&[3, 1]);
                 }
+                for (id, (info, _)) in self.metadata_objects.borrow().iter() {
+                    objects.extend_from_slice(&id.to_be_bytes());
+                    objects.extend_from_slice(&[info.object_type, info.sequence]);
+                }
                 (inner.command | RESPONSE_BIT, objects)
             }
             value if value == CommandCode::GetObjectInfo as u8 => {
-                if inner.data.len() != 3 || inner.data[2] != 3 {
+                if inner.data.len() != 3 {
                     return Err(CKR_DEVICE_ERROR.into());
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                if self.x25519_private_keys.borrow().contains_key(&id) {
+                if let Some((info, _)) = self.metadata_objects.borrow().get(&id) {
+                    (inner.command | RESPONSE_BIT, encode_object_info(info))
+                } else if inner.data[2] != 3 {
+                    return Err(CKR_DEVICE_ERROR.into());
+                } else if self.x25519_private_keys.borrow().contains_key(&id) {
                     let mut info = vec![0; 66];
                     info[7 - 0x0b / 8] |= 1 << (0x0b % 8);
                     info[8..10].copy_from_slice(&id.to_be_bytes());
@@ -391,6 +424,19 @@ impl ProtocolPeer {
                     info[18..26].copy_from_slice(b"test-rsa");
                     (inner.command | RESPONSE_BIT, info)
                 }
+            }
+            value if value == CommandCode::GetOpaque as u8 => {
+                if inner.data.len() != 2 {
+                    return Err(CKR_DEVICE_ERROR.into());
+                }
+                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                let value = self
+                    .metadata_objects
+                    .borrow()
+                    .get(&id)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(|| inner.data.clone());
+                (inner.command | RESPONSE_BIT, value)
             }
             value if value == CommandCode::GetPublicKey as u8 => {
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
@@ -547,6 +593,41 @@ pub(crate) fn make_yubihsm_test_slot() -> (
     );
     slot.trust_prefix = Some(trust.prefix.clone());
     (Box::new(slot), commands, corrupt_response_mac, trust)
+}
+
+pub(crate) fn make_yubihsm_metadata_test_slot(valid: bool) -> Box<dyn crate::Slot> {
+    let peer = std::rc::Rc::new(ProtocolPeer::new());
+    let mut value = b"MDB1\x03\x00\x01\x01".to_vec();
+    encode_metadata_item(&mut value, 1, b"private-id");
+    encode_metadata_item(&mut value, 2, b"private label");
+    encode_metadata_item(&mut value, 3, b"public-id");
+    encode_metadata_item(&mut value, 4, b"public label");
+    if !valid {
+        value[0] = b'X';
+    }
+    peer.metadata_objects.borrow_mut().insert(
+        0x7000,
+        (
+            ObjectInfo {
+                capabilities: [0; 8],
+                id: 0x7000,
+                length: value.len() as u16,
+                domains: 0xffff,
+                object_type: crate::YUBIHSM_OPAQUE,
+                algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+                sequence: 1,
+                origin: 1,
+                label: "Meta object for 0x01030001".to_owned(),
+                delegated_capabilities: [0; 8],
+            },
+            value,
+        ),
+    );
+    Box::new(crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![1, 5, 9, 12, 19, 20, 21, 22, 25],
+    ))
 }
 
 impl Connector for ProtocolPeer {

@@ -597,7 +597,9 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
     let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
     let public = objects
         .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "p521-key"
+        })
         .unwrap();
     assert_eq!(
         public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
@@ -927,23 +929,175 @@ fn certificate_serial_numbers_are_der_integers() {
 }
 
 #[test]
-fn yubihsm_internal_metadata_opaque_objects_are_hidden() {
-    let label = "Meta object 0001".to_owned();
+fn yubihsm_reference_metadata_contents_are_parsed() {
     let info = crate::yubihsm::ObjectInfo {
         capabilities: [0; 8],
         id: 7,
-        length: 12,
+        length: 42,
         domains: 1,
         object_type: crate::YUBIHSM_OPAQUE,
         algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
         sequence: 1,
         origin: 1,
-        label,
+        label: "Meta object for 0x01031234".to_owned(),
         delegated_capabilities: [0; 8],
     };
-    assert!(crate::yubihsm_token_objects(99, info, None)
-        .unwrap()
-        .is_empty());
+    let mut value = b"MDB1\x03\x12\x34\x01".to_vec();
+    value.extend_from_slice(&[1, 0, 2, 0xaa, 0xbb]);
+    value.extend_from_slice(&[2, 0, 7]);
+    value.extend_from_slice(b"private");
+    value.extend_from_slice(&[3, 0, 1, 0xcc]);
+    value.extend_from_slice(&[4, 0, 6]);
+    value.extend_from_slice(b"public");
+
+    let metadata = crate::parse_yubihsm_pkcs11_metadata(&info, &value).unwrap();
+    assert_eq!(metadata.target_type, 3);
+    assert_eq!(metadata.target_id, 0x1234);
+    assert_eq!(metadata.target_sequence, 1);
+    assert_eq!(metadata.id, Some(vec![0xaa, 0xbb]));
+    assert_eq!(metadata.label.as_deref(), Some("private"));
+    assert_eq!(metadata.public_id, Some(vec![0xcc]));
+    assert_eq!(metadata.public_label.as_deref(), Some("public"));
+}
+
+#[test]
+fn yubihsm_user_opaque_objects_with_metadata_prefix_remain_visible() {
+    let object = |label: &str| crate::yubihsm::ObjectInfo {
+        capabilities: [0; 8],
+        id: 7,
+        length: 37,
+        domains: 1,
+        object_type: crate::YUBIHSM_OPAQUE,
+        algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 1,
+        origin: 1,
+        label: label.to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+
+    for info in [
+        object("Meta object for an application"),
+        object("Meta object 0001 extra"),
+        object("Meta object G001"),
+    ] {
+        assert_eq!(crate::yubihsm_token_objects(99, info, None).unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn yubihsm_invalid_reference_metadata_remains_an_opaque_object() {
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: [0; 8],
+        id: 7,
+        length: 8,
+        domains: 1,
+        object_type: crate::YUBIHSM_OPAQUE,
+        algorithm: crate::YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 1,
+        origin: 1,
+        label: "Meta object for 0x01031234".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    assert!(crate::parse_yubihsm_pkcs11_metadata(&info, b"not metadata").is_err());
+    assert_eq!(crate::yubihsm_token_objects(99, info, None).unwrap().len(), 1);
+}
+
+#[test]
+fn yubihsm_reference_metadata_overrides_private_and_public_attributes() {
+    let info = crate::yubihsm::ObjectInfo {
+        capabilities: crate::yubihsm_capabilities(&[0x07]),
+        id: 0x1234,
+        length: 32,
+        domains: 1,
+        object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        algorithm: crate::YUBIHSM_ALGO_EC_P256,
+        sequence: 1,
+        origin: 1,
+        label: "hardware label".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    let public_key = crate::yubihsm::PublicKey {
+        algorithm: crate::YUBIHSM_ALGO_EC_P256,
+        key: vec![0x5a; 64],
+    };
+    let metadata = crate::YubiHsmPkcs11Metadata {
+        target_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+        target_id: 0x1234,
+        target_sequence: 1,
+        id: Some(b"private-id".to_vec()),
+        label: Some("private label".to_owned()),
+        public_id: Some(b"public-id".to_vec()),
+        public_label: Some("public label".to_owned()),
+    };
+    let objects = crate::yubihsm_token_objects_with_generation(
+        99,
+        info,
+        Some(public_key),
+        1,
+        Some(&metadata),
+    )
+    .unwrap();
+    assert_eq!(objects[0].id, b"private-id");
+    assert_eq!(objects[0].label, "private label");
+    assert_eq!(objects[1].id, b"public-id");
+    assert_eq!(objects[1].label, "public label");
+}
+
+#[test]
+fn yubihsm_created_metadata_object_is_applied_during_discovery() {
+    let mut slot = crate::yubihsm::tests::make_yubihsm_metadata_test_slot(true);
+    slot.login(b"0001password").unwrap();
+
+    let objects = slot.token_objects(99).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && object.label == "private label"
+        })
+        .unwrap();
+    let public = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "public label"
+        })
+        .unwrap();
+    assert_eq!(private.id, b"private-id");
+    assert_eq!(private.label, "private label");
+    assert_eq!(public.id, b"public-id");
+    assert_eq!(public.label, "public label");
+    assert!(!objects
+        .iter()
+        .any(|object| object.label.starts_with("Meta object for ")));
+}
+
+#[test]
+fn yubihsm_created_invalid_metadata_object_remains_visible() {
+    let mut slot = crate::yubihsm::tests::make_yubihsm_metadata_test_slot(false);
+    slot.login(b"0001password").unwrap();
+
+    let objects = slot.token_objects(99).unwrap();
+    let metadata = objects
+        .iter()
+        .find(|object| object.label == "Meta object for 0x01030001")
+        .unwrap();
+    assert_eq!(metadata.class, CKO_DATA as CK_OBJECT_CLASS);
+
+    let private = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && object.label == "test-rsa"
+        })
+        .unwrap();
+    let public = objects
+        .iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "test-rsa"
+        })
+        .unwrap();
+    assert_eq!(private.id, [0, 1]);
+    assert_eq!(private.label, "test-rsa");
+    assert_eq!(public.id, [0, 1]);
+    assert_eq!(public.label, "test-rsa");
 }
 
 #[test]
@@ -1659,8 +1813,10 @@ fn yubihsm_object_identity_survives_device_sequence_wraps() {
         label: "authentication".to_owned(),
         delegated_capabilities: [0; 8],
     };
-    let first = crate::yubihsm_token_objects_with_generation(99, info.clone(), None, 1).unwrap();
-    let wrapped = crate::yubihsm_token_objects_with_generation(99, info, None, 257).unwrap();
+    let first =
+        crate::yubihsm_token_objects_with_generation(99, info.clone(), None, 1, None).unwrap();
+    let wrapped =
+        crate::yubihsm_token_objects_with_generation(99, info, None, 257, None).unwrap();
     assert_ne!(first[0].unique_id, wrapped[0].unique_id);
 }
 

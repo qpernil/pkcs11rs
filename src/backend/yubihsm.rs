@@ -238,7 +238,23 @@ struct YubiHsmSlot {
 }
 
 type YubiHsmObjectKey = (u8, u16);
-type YubiHsmObjectMetadata = (YubiHsmObjectInfo, Option<YubiHsmPublicKey>, u64);
+type YubiHsmObjectMetadata = (
+    YubiHsmObjectInfo,
+    Option<YubiHsmPublicKey>,
+    u64,
+    Option<YubiHsmPkcs11Metadata>,
+);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct YubiHsmPkcs11Metadata {
+    target_type: u8,
+    target_id: u16,
+    target_sequence: u8,
+    id: Option<Vec<u8>>,
+    label: Option<String>,
+    public_id: Option<Vec<u8>>,
+    public_label: Option<String>,
+}
 
 impl YubiHsmSlot {
     fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
@@ -430,6 +446,90 @@ fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
     ) || (info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm))
 }
 
+fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
+    let encoded = label.strip_prefix("Meta object for 0x")?;
+    if encoded.len() != 8 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&encoded[..2], 16).ok()?,
+        u8::from_str_radix(&encoded[2..4], 16).ok()?,
+        u16::from_str_radix(&encoded[4..], 16).ok()?,
+    ))
+}
+
+fn parse_yubihsm_pkcs11_metadata(
+    info: &YubiHsmObjectInfo,
+    value: &[u8],
+) -> Result<YubiHsmPkcs11Metadata, Error> {
+    if info.object_type != YUBIHSM_OPAQUE || info.algorithm != YUBIHSM_ALGO_OPAQUE_DATA {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let label_target = yubihsm_metadata_label_target(&info.label).ok_or(CKR_DATA_INVALID)?;
+    if value.len() < 8 || &value[..4] != b"MDB1" {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let target_type = value[4];
+    let target_id = u16::from_be_bytes([value[5], value[6]]);
+    let target_sequence = value[7];
+    if label_target != (target_sequence, target_type, target_id) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+
+    let mut metadata = YubiHsmPkcs11Metadata {
+        target_type,
+        target_id,
+        target_sequence,
+        id: None,
+        label: None,
+        public_id: None,
+        public_label: None,
+    };
+    let mut offset = 8;
+    while offset < value.len() {
+        if value.len() - offset < 3 {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let tag = value[offset];
+        let length = u16::from_be_bytes([value[offset + 1], value[offset + 2]]) as usize;
+        offset += 3;
+        let end = offset.checked_add(length).ok_or(CKR_DATA_INVALID)?;
+        let item = value.get(offset..end).ok_or(CKR_DATA_INVALID)?;
+        offset = end;
+        let destination = match tag {
+            1 => &mut metadata.id,
+            2 => {
+                if metadata.label.is_some() {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                metadata.label = Some(
+                    std::str::from_utf8(item)
+                        .map_err(|_| Error::from(CKR_DATA_INVALID))?
+                        .to_owned(),
+                );
+                continue;
+            }
+            3 => &mut metadata.public_id,
+            4 => {
+                if metadata.public_label.is_some() {
+                    return Err(CKR_DATA_INVALID.into());
+                }
+                metadata.public_label = Some(
+                    std::str::from_utf8(item)
+                        .map_err(|_| Error::from(CKR_DATA_INVALID))?
+                        .to_owned(),
+                );
+                continue;
+            }
+            _ => return Err(CKR_DATA_INVALID.into()),
+        };
+        if destination.replace(item.to_vec()).is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+    }
+    Ok(metadata)
+}
+
 #[cfg(any(test, feature = "abi-tests"))]
 fn yubihsm_token_objects(
     slot_id: CK_SLOT_ID,
@@ -437,7 +537,7 @@ fn yubihsm_token_objects(
     public_key: Option<YubiHsmPublicKey>,
 ) -> Result<Vec<TokenObject>, Error> {
     let generation = info.sequence as u64;
-    yubihsm_token_objects_with_generation(slot_id, info, public_key, generation)
+    yubihsm_token_objects_with_generation(slot_id, info, public_key, generation, None)
 }
 
 fn yubihsm_token_objects_with_generation(
@@ -445,16 +545,16 @@ fn yubihsm_token_objects_with_generation(
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
     generation: u64,
+    metadata: Option<&YubiHsmPkcs11Metadata>,
 ) -> Result<Vec<TokenObject>, Error> {
     let key_type = yubihsm_key_type(info.algorithm);
-    let label = yubihsm_object_label(&info);
-    if info.object_type == YUBIHSM_OPAQUE
-        && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
-        && label.starts_with("Meta object")
-    {
-        return Ok(Vec::new());
-    }
-    let id = info.id.to_be_bytes().to_vec();
+    let hardware_label = yubihsm_object_label(&info);
+    let label = metadata
+        .and_then(|metadata| metadata.label.clone())
+        .unwrap_or_else(|| hardware_label.clone());
+    let id = metadata
+        .and_then(|metadata| metadata.id.clone())
+        .unwrap_or_else(|| info.id.to_be_bytes().to_vec());
     let unique = format!(
         "yubihsm-{:02x}-{:04x}-{:02x}-{generation}",
         info.object_type, info.id, info.sequence
@@ -583,8 +683,12 @@ fn yubihsm_token_objects_with_generation(
             unique_id: format!("{unique}-public"),
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             key_type,
-            label,
-            id,
+            label: metadata
+                .and_then(|metadata| metadata.public_label.clone())
+                .unwrap_or(hardware_label),
+            id: metadata
+                .and_then(|metadata| metadata.public_id.clone())
+                .unwrap_or_else(|| info.id.to_be_bytes().to_vec()),
             token: true,
             private: false,
             encrypt: !rsa_wrap_key && algorithm_supported && is_yubihsm_rsa(info.algorithm),
@@ -824,6 +928,7 @@ impl Slot for YubiHsmSlot {
             &YubiHsmCommand::list_objects(&[])?,
         )?;
         let mut discovered = Vec::new();
+        let mut pkcs11_metadata = HashMap::new();
         for entry in parse_yubihsm_object_list(&listed)? {
             let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
                 self.connector.as_ref(),
@@ -835,6 +940,41 @@ impl Slot for YubiHsmSlot {
                 || info.sequence != entry.sequence
             {
                 return Err(CKR_DEVICE_ERROR.into());
+            }
+            if info.object_type == YUBIHSM_OPAQUE
+                && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
+                && yubihsm_metadata_label_target(&info.label).is_some()
+            {
+                let value = send_yubihsm_secure_command(
+                    self.connector.as_ref(),
+                    self.session.as_ref(),
+                    &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, info.id)?,
+                );
+                match value.and_then(|value| parse_yubihsm_pkcs11_metadata(&info, &value)) {
+                    Ok(metadata) => {
+                        let target = (
+                            metadata.target_type,
+                            metadata.target_id,
+                            metadata.target_sequence,
+                            info.domains,
+                        );
+                        if pkcs11_metadata.insert(target, metadata).is_some() {
+                            log!(
+                                2,
+                                "YubiHSM has duplicate PKCS11 metadata for object type {:02x} ID {:04x}",
+                                target.0,
+                                target.1
+                            );
+                        }
+                        continue;
+                    }
+                    Err(error) => log!(
+                        2,
+                        "YubiHSM opaque object {} has a metadata label but invalid contents: {:?}",
+                        info.id,
+                        error
+                    ),
+                }
             }
             let public_key = if yubihsm_object_has_public_key(&info) {
                 Some(YubiHsmPublicKey::parse(&send_yubihsm_secure_command(
@@ -881,12 +1021,23 @@ impl Slot for YubiHsmSlot {
                     generation
                 }
             };
-            metadata.insert(key, (info.clone(), public_key.clone(), generation));
+            let attribute_metadata = pkcs11_metadata
+                .remove(&(info.object_type, info.id, info.sequence, info.domains));
+            metadata.insert(
+                key,
+                (
+                    info.clone(),
+                    public_key.clone(),
+                    generation,
+                    attribute_metadata.clone(),
+                ),
+            );
             objects.extend(yubihsm_token_objects_with_generation(
                 slot_id,
                 info,
                 public_key,
                 generation,
+                attribute_metadata.as_ref(),
             )?);
         }
         drop(generations);
@@ -911,11 +1062,16 @@ impl Slot for YubiHsmSlot {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        for (info, public_key, generation) in metadata {
-            if let Some(object) =
-                yubihsm_token_objects_with_generation(slot_id, info, public_key, generation)?
-                .into_iter()
-                .find(|object| object.unique_id == unique_id)
+        for (info, public_key, generation, attribute_metadata) in metadata {
+            if let Some(object) = yubihsm_token_objects_with_generation(
+                slot_id,
+                info,
+                public_key,
+                generation,
+                attribute_metadata.as_ref(),
+            )?
+            .into_iter()
+            .find(|object| object.unique_id == unique_id)
             {
                 return Ok(Some(object));
             }
