@@ -36,6 +36,16 @@ fn debug_level_configuration_has_three_modes() {
     );
 }
 
+#[test]
+fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
+    assert!(crate::configured_yubihsm_usb(None).unwrap());
+    assert!(crate::configured_yubihsm_usb(Some("1".into())).unwrap());
+    assert!(!crate::configured_yubihsm_usb(Some("0".into())).unwrap());
+    for invalid in ["", "false", "2"] {
+        assert!(crate::configured_yubihsm_usb(Some(invalid.into())).is_err());
+    }
+}
+
 fn finalize_for_test() {
     let _ = crate::C_Finalize(::std::ptr::null_mut());
     crate::reset_object_handles();

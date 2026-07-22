@@ -1,3 +1,13 @@
+#[cfg(any(not(feature = "abi-tests"), test))]
+fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
+    match value {
+        None => Ok(true),
+        Some(value) if value == "0" => Ok(false),
+        Some(value) if value == "1" => Ok(true),
+        Some(_) => Err(CKR_ARGUMENTS_BAD.into()),
+    }
+}
+
 struct Context {
     libusb: Option<rusb::Context>,
     pcsc: Option<Rc<pcsc::Context>>,
@@ -89,16 +99,22 @@ impl Context {
         let slots = HashMap::new();
 
         let objects = default_objects()?;
+        #[cfg(not(feature = "abi-tests"))]
+        let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
         let mut context = Context {
             #[cfg(feature = "abi-tests")]
             libusb: None,
             #[cfg(not(feature = "abi-tests"))]
-            libusb: match rusb::Context::new() {
-                Ok(context) => Some(context),
-                Err(e) => {
-                    log!(1, "libusb::Context::new: {}", e);
-                    None
+            libusb: if yubihsm_usb {
+                match rusb::Context::new() {
+                    Ok(context) => Some(context),
+                    Err(e) => {
+                        log!(1, "libusb::Context::new: {}", e);
+                        None
+                    }
                 }
+            } else {
+                None
             },
             #[cfg(feature = "abi-tests")]
             pcsc: None,
