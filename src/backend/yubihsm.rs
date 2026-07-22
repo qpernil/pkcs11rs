@@ -722,6 +722,9 @@ impl Slot for YubiHsmSlot {
     fn product(&self) -> &str {
         self.connector.product()
     }
+    fn model(&self) -> &str {
+        "YubiHSM"
+    }
     fn serial(&self) -> &str {
         self.connector.serial()
     }
@@ -898,6 +901,10 @@ impl Slot for YubiHsmSlot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.format_token_info(info);
+        str_pad(
+            &format!("{} #{}", self.model(), device_info.serial),
+            &mut info.label,
+        );
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;

@@ -23,7 +23,6 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ffi::CStr,
-    io::Write,
     ptr,
     rc::Rc,
     slice,
@@ -462,8 +461,8 @@ use abi_test_backend::*;
 
 mod connector;
 pub(crate) use connector::{
-    bulk_out_packet_size, Connector, PcscAppletConnector, PcscConnector, SecureChannelState,
-    UsbConnector,
+    bulk_out_packet_size, Connector, CurlConnector, PcscAppletConnector, PcscConnector,
+    SecureChannelState, UsbConnector,
 };
 #[cfg(test)]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet};

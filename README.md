@@ -16,8 +16,9 @@ appropriate PKCS #11 error instead of being omitted.
   certificates, metadata, attestation, PIN policy, and random generation.
 - **YubiKey OpenPGP** over PC/SC, including signing, RSA deciphering, ECDH,
   certificates, OpenPGP PIN KDFs, and random generation.
-- **YubiHSM 2** over USB, including authenticated sessions, hardware-backed
-  asymmetric, symmetric, HMAC, wrapping, opaque, and authentication objects.
+- **YubiHSM 2** over direct USB or the HTTP YubiHSM Connector, including
+  authenticated sessions, hardware-backed asymmetric, symmetric, HMAC,
+  wrapping, opaque, and authentication objects.
 - **YubiHSM Auth** as a discoverable CCID applet whose credentials can
   authenticate sessions on YubiHSM USB slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
@@ -78,7 +79,17 @@ pkcs11-tool \
 No configuration is required for normal discovery. The module probes supported
 YubiHSM USB devices and the default CCID applets available through PC/SC.
 
-Disable direct YubiHSM USB discovery:
+Add remote YubiHSM Connector instances with a comma-separated URL list:
+
+```sh
+export PKCS11RS_YUBIHSM_URLS=http://hsm-a:12345,http://hsm-b:12345
+```
+
+Remote connector slots are added alongside directly attached USB devices. Each
+configured URL always has a slot; an unreachable connector or a connector with
+no device is reported as an empty slot until the module is reinitialized.
+
+Disable direct YubiHSM USB discovery while retaining configured remote slots:
 
 ```sh
 export PKCS11RS_YUBIHSM_USB=0
