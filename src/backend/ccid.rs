@@ -110,6 +110,13 @@ fn ccid_application_aid(
     configured_ccid_aid(name, default)
 }
 
+pub(crate) fn configured_issuer_security_domain_aid() -> Result<Vec<u8>, Error> {
+    configured_ccid_aid(
+        "PKCS11RS_ISSUER_SD_AID",
+        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
+    )
+}
+
 fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
     let aid = match std::env::var(name) {
         Ok(value) => parse_hex(&value)?,
@@ -423,6 +430,10 @@ impl Slot for IssuerSecurityDomainSlot {
             flags,
             connector: self.connector.clone(),
         })
+    }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn security_domain_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
+        Some(self.connector.clone())
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
         self.connector

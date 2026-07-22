@@ -247,6 +247,8 @@ fn secure_channel_connector_wraps_encoded_apdus() {
         state: std::rc::Rc::new(RefCell::new(crate::SecureChannelState {
             application_aid,
             session: Some(test_session(0x01)),
+            validated_scp11_keys: std::collections::HashMap::new(),
+            connection_epoch: 0,
         })),
         enabled: std::cell::Cell::new(true),
         applet_present: std::cell::Cell::new(true),

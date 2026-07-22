@@ -13,6 +13,7 @@ use openssl::{
     memcmp,
     nid::Nid,
     pkey::{PKey, Private, Public},
+    sha::sha256,
     x509::X509,
 };
 use std::{env, fs};
@@ -27,6 +28,8 @@ const KEY_TYPE_AES: u8 = 0x88;
 const KEY_LENGTH_AES_128: u8 = 16;
 const SESSION_KEY_LENGTH: usize = 16;
 const DERIVED_KEY_COUNT: usize = 5;
+
+pub(crate) type Scp11CertificateCacheKey = (u8, u8, [u8; 32]);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Scp11Variant {
@@ -71,7 +74,8 @@ struct Scp11aHostCredentials {
 pub(crate) struct Scp11KeySet {
     variant: Scp11Variant,
     key_version: u8,
-    card_public_key: EcKey<Public>,
+    card_public_key: Option<EcKey<Public>>,
+    trust_anchors: Vec<Vec<u8>>,
     host: Option<Scp11aHostCredentials>,
 }
 
@@ -89,10 +93,18 @@ impl std::fmt::Debug for Scp11KeySet {
 impl Scp11KeySet {
     pub(crate) fn from_environment(variant: Scp11Variant) -> Result<Self, Error> {
         let point = env::var("PKCS11RS_SCP11_SD_PUBLIC_KEY");
-        let certificate = env::var("PKCS11RS_SCP11_SD_CERTIFICATE");
-        let card_public_key = match (point, certificate) {
-            (Ok(point), Err(env::VarError::NotPresent)) => parse_public_point(&parse_hex(&point)?)?,
-            (Err(env::VarError::NotPresent), Ok(path)) => public_key_from_certificate(&path)?,
+        let ca_certificate = env::var("PKCS11RS_SCP11_SD_CA_CERTIFICATE");
+        let (card_public_key, trust_anchors) = match (point, ca_certificate) {
+            (Ok(point), Err(env::VarError::NotPresent)) => {
+                (Some(parse_public_point(&parse_hex(&point)?)?), Vec::new())
+            }
+            (Err(env::VarError::NotPresent), Ok(path)) => {
+                let anchors = load_certificates(&path)?;
+                if anchors.len() != 1 {
+                    return Err(CKR_ARGUMENTS_BAD.into());
+                }
+                (None, anchors)
+            }
             (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
                 return Err(CKR_USER_PIN_NOT_INITIALIZED.into());
             }
@@ -112,7 +124,29 @@ impl Scp11KeySet {
             variant,
             key_version,
             card_public_key,
+            trust_anchors,
             host,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scp11b_from_certificates(
+        key_version: u8,
+        certificates: &[Vec<u8>],
+        trust_anchors: &[Vec<u8>],
+    ) -> Result<Self, Error> {
+        if key_version == 0 || key_version & 0x80 != 0 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Self {
+            variant: Scp11Variant::B,
+            key_version,
+            card_public_key: Some(card_public_key_from_certificates(
+                certificates,
+                trust_anchors,
+            )?),
+            trust_anchors: Vec::new(),
+            host: None,
         })
     }
 
@@ -120,15 +154,77 @@ impl Scp11KeySet {
         &self,
         connector: &dyn Connector,
     ) -> Result<Scp03Session, Error> {
+        let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
         let group = p256_group()?;
         let ephemeral = EcKey::generate(&group)?;
-        self.establish_with_ephemeral(connector, ephemeral)
+        self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
+    }
+
+    pub(crate) fn authenticate_application(
+        &self,
+        connector: &dyn Connector,
+        application_aid: &[u8],
+        cached_public_point: Option<&[u8]>,
+    ) -> Result<(Scp03Session, Option<Vec<u8>>), Error> {
+        if self.card_public_key.is_some() {
+            return self
+                .authenticate_selected(connector)
+                .map(|session| (session, None));
+        }
+        if let Some(point) = cached_public_point {
+            let card_public_key = parse_public_point(point)?;
+            let group = p256_group()?;
+            let ephemeral = EcKey::generate(&group)?;
+            return self
+                .establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
+                .map(|session| (session, None));
+        }
+
+        let issuer_sd_aid = crate::configured_issuer_security_domain_aid()?;
+        let certificates = (|| {
+            crate::scp03::select_application(connector, &issuer_sd_aid)?;
+            crate::SecurityDomainClient.get_certificate_bundle(
+                connector,
+                crate::security_domain::KeyRef {
+                    kid: self.variant.key_id(),
+                    kvn: self.key_version,
+                },
+            )
+        })();
+        crate::scp03::select_application(connector, application_aid)?;
+        let card_public_key =
+            card_public_key_from_certificates(&certificates?, &self.trust_anchors)?;
+        let group = p256_group()?;
+        let ephemeral = EcKey::generate(&group)?;
+        let point = encode_public_point(&card_public_key)?;
+        self.establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
+            .map(|session| (session, Some(point)))
+    }
+
+    pub(crate) fn certificate_cache_key(&self) -> Option<Scp11CertificateCacheKey> {
+        self.card_public_key.is_none().then(|| {
+            (
+                self.variant.key_id(),
+                self.key_version,
+                sha256(&self.trust_anchors[0]),
+            )
+        })
     }
 
     fn establish_with_ephemeral(
         &self,
         connector: &dyn Connector,
         ephemeral: EcKey<Private>,
+    ) -> Result<Scp03Session, Error> {
+        let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
+        self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
+    }
+
+    fn establish_with_ephemeral_and_card_key(
+        &self,
+        connector: &dyn Connector,
+        ephemeral: EcKey<Private>,
+        card_public_key: &EcKey<Public>,
     ) -> Result<Scp03Session, Error> {
         validate_p256_private_key(&ephemeral)?;
         self.upload_host_certificates(connector)?;
@@ -155,7 +251,7 @@ impl Scp11KeySet {
             .as_ref()
             .map(|host| &host.private_key)
             .unwrap_or(&ephemeral);
-        let ka2 = Zeroizing::new(ecdh(static_or_ephemeral, &self.card_public_key)?);
+        let ka2 = Zeroizing::new(ecdh(static_or_ephemeral, card_public_key)?);
         if ka1.len() != 32 || ka2.len() != 32 {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -244,20 +340,7 @@ impl Scp11aHostCredentials {
 }
 
 fn load_certificates(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
-    let mut certificates = Vec::new();
-    for path in env::split_paths(paths) {
-        let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let parsed = X509::stack_from_pem(&encoded)
-            .or_else(|_| X509::from_der(&encoded).map(|certificate| vec![certificate]))
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        for certificate in parsed {
-            certificates.push(certificate.to_der().map_err(Error::from)?);
-        }
-    }
-    if certificates.is_empty() {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-
+    let certificates = crate::certificate_chain::load(paths)?;
     let parsed: Vec<X509> = certificates
         .iter()
         .map(|certificate| X509::from_der(certificate).map_err(Error::from))
@@ -298,22 +381,14 @@ fn parse_public_point(encoded: &[u8]) -> Result<EcKey<Public>, Error> {
     Ok(key)
 }
 
-fn public_key_from_certificate(path: &str) -> Result<EcKey<Public>, Error> {
-    let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let certificate = X509::from_pem(&encoded)
-        .or_else(|_| X509::from_der(&encoded))
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let key = certificate
-        .public_key()
-        .and_then(|key| key.ec_key())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    if key.group().curve_name() != Some(Nid::X9_62_PRIME256V1) {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    key.check_key()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let encoded = encode_public_point(&key)?;
-    parse_public_point(&encoded)
+fn card_public_key_from_certificates(
+    certificates: &[Vec<u8>],
+    trust_anchors: &[Vec<u8>],
+) -> Result<EcKey<Public>, Error> {
+    parse_public_point(&crate::certificate_chain::validate_p256_public_point(
+        certificates,
+        trust_anchors,
+    )?)
 }
 
 fn encode_public_point<T>(key: &EcKey<T>) -> Result<Vec<u8>, Error>
