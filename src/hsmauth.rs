@@ -711,12 +711,9 @@ fn validate_public_key(public_key: &[u8]) -> Result<(), Error> {
     if public_key.len() != P256_PUBLIC_KEY_LENGTH || public_key[0] != 0x04 {
         return Err(CKR_DATA_INVALID.into());
     }
-    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)?;
-    let mut context = openssl::bn::BigNumContext::new()?;
-    let point = openssl::ec::EcPoint::from_bytes(&group, public_key, &mut context)?;
-    let key = openssl::ec::EcKey::from_public_key(&group, &point)?;
-    key.check_key()?;
-    Ok(())
+    p256::PublicKey::from_sec1_bytes(public_key)
+        .map(|_| ())
+        .map_err(|_| Error::from(CKR_DATA_INVALID))
 }
 
 fn encode_tlv(tag: u8, value: &[u8]) -> Result<Vec<u8>, Error> {
@@ -853,17 +850,13 @@ mod tests {
     }
 
     fn p256_public_key() -> Vec<u8> {
-        let group =
-            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
-        let key = openssl::ec::EcKey::generate(&group).unwrap();
-        let mut context = openssl::bn::BigNumContext::new().unwrap();
-        key.public_key()
-            .to_bytes(
-                &group,
-                openssl::ec::PointConversionForm::UNCOMPRESSED,
-                &mut context,
-            )
-            .unwrap()
+        use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+        p256::SecretKey::random(&mut rand_core::OsRng)
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec()
     }
 
     #[test]
