@@ -48,6 +48,3 @@ subtle = "2.6.1"
 x509-cert = { version = "0.3.0", features = ["builder", "pem", "std"] }
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"] }
-
-[build-dependencies]
-bindgen = "0.72.1"
