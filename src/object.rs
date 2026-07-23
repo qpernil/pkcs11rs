@@ -371,7 +371,7 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
         }
         x if x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(0)),
         x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE => {
-            Some(hash(MessageDigest::sha1(), value).ok()?.as_ref()[..3].to_vec())
+            Some(hash(MessageDigest::sha1(), value).ok()?[..3].to_vec())
         }
         x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
             .ok()?

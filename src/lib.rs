@@ -12,7 +12,6 @@ use openssl::{
     bn::BigNum,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     ecdsa::EcdsaSig,
-    hash::{hash, MessageDigest},
     nid::Nid,
     pkey::{Id, PKey, Private, Public},
     rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
@@ -33,6 +32,73 @@ use std::{
     time::Duration,
 };
 use zeroize::Zeroizing;
+
+#[derive(Clone, Copy)]
+enum MessageDigest {
+    Sha1,
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+    Sha3_224,
+    Sha3_256,
+    Sha3_384,
+    Sha3_512,
+}
+
+impl MessageDigest {
+    const fn sha1() -> Self {
+        Self::Sha1
+    }
+    const fn sha224() -> Self {
+        Self::Sha224
+    }
+    const fn sha256() -> Self {
+        Self::Sha256
+    }
+    const fn sha384() -> Self {
+        Self::Sha384
+    }
+    const fn sha512() -> Self {
+        Self::Sha512
+    }
+    const fn sha3_224() -> Self {
+        Self::Sha3_224
+    }
+    const fn sha3_256() -> Self {
+        Self::Sha3_256
+    }
+    const fn sha3_384() -> Self {
+        Self::Sha3_384
+    }
+    const fn sha3_512() -> Self {
+        Self::Sha3_512
+    }
+    const fn size(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha224 | Self::Sha3_224 => 28,
+            Self::Sha256 | Self::Sha3_256 => 32,
+            Self::Sha384 | Self::Sha3_384 => 48,
+            Self::Sha512 | Self::Sha3_512 => 64,
+        }
+    }
+}
+
+fn hash(digest: MessageDigest, data: &[u8]) -> Result<Vec<u8>, Error> {
+    use sha2::Digest;
+    Ok(match digest {
+        MessageDigest::Sha1 => sha1::Sha1::digest(data).to_vec(),
+        MessageDigest::Sha224 => sha2::Sha224::digest(data).to_vec(),
+        MessageDigest::Sha256 => sha2::Sha256::digest(data).to_vec(),
+        MessageDigest::Sha384 => sha2::Sha384::digest(data).to_vec(),
+        MessageDigest::Sha512 => sha2::Sha512::digest(data).to_vec(),
+        MessageDigest::Sha3_224 => sha3::Sha3_224::digest(data).to_vec(),
+        MessageDigest::Sha3_256 => sha3::Sha3_256::digest(data).to_vec(),
+        MessageDigest::Sha3_384 => sha3::Sha3_384::digest(data).to_vec(),
+        MessageDigest::Sha3_512 => sha3::Sha3_512::digest(data).to_vec(),
+    })
+}
 
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
 
