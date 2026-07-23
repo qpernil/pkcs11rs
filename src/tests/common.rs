@@ -513,7 +513,7 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     let commands = connector.commands.borrow();
     let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
     let key = crate::yubico_kdf::yubico_password_p256_key(derivation_password).unwrap();
-    let private_key = key.private_key().to_vec_padded(32).unwrap();
+    let private_key = key.to_bytes();
     assert_short_tlv(put, 0x7d, &private_key);
     assert_short_tlv(put, 0x74, &[39]);
     drop(commands);
