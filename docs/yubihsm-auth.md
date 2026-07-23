@@ -34,6 +34,52 @@ The following vendor attributes are available on credential objects:
 | `CKA_YUBICO_HSMAUTH_RETRIES` | Remaining credential-password retries |
 | `CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED` | Whether the credential requires touch |
 
+## Public object discovery
+
+Every present YubiHSM slot exposes public, immutable `CKO_PROFILE` objects for
+`CKP_BASELINE_PROVIDER`, `CKP_EXTENDED_PROVIDER`, and
+`CKP_AUTHENTICATION_TOKEN`. Configure both of the following values to enable
+pre-login certificate discovery:
+
+```sh
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
+```
+
+The ID is exactly four hexadecimal digits and the password is 8 through 64
+UTF-8 bytes. The same configured credential is tried independently against
+each local and remote YubiHSM. A failure affects only that slot and does not
+interfere with ordinary user login.
+
+The discovery Authentication Key must have `get-opaque`, and its domains must
+include every certificate exposed before login plus the associated metadata
+records. Certificates and their matching asymmetric keys must have equal
+PKCS #11 `CKA_ID` values, either from their common YubiHSM object ID or from
+valid metadata records. Provision the credential in a domain containing only
+data suitable for this service-owned public view.
+
+After successful authentication, the module reads the metadata and certificate
+values needed to construct the public view. Before PKCS #11 login it exposes
+only X.509 certificates, their matching synthesized public keys, and a
+`CKP_PUBLIC_CERTIFICATES_TOKEN` profile object. Certificate values are
+therefore readable without `C_Login`. The discovery secure session is then
+closed so it does not occupy a YubiHSM session slot.
+
+The slot retains one object set and one lazy opaque-value cache shared by
+pre-login and post-login enumeration. Discovery and ordinary user sessions
+upsert observations into that set by stable `CKA_UNIQUE_ID`; there are no
+separate discovery and login views. Attribute access reads an uncached opaque
+value through whichever secure session is active and later reconstructions of
+the same YubiHSM ID and sequence reuse that cache cell. Logout retains the set
+but normal `CKA_PRIVATE` filtering hides private objects. Successful module
+mutations update the set, while reinitializing or reconnecting the slot
+discards it and probes the discovery credential again.
+
+The ephemeral discovery session is separate from the PKCS #11 user-login
+session and is never used for private or mutating operations. The password is
+not logged. A plaintext service configuration is acceptable when protected by
+normal file permissions; do not commit the credential.
+
 ## YubiHSM login
 
 An ordinary YubiHSM slot supports three `C_Login` PIN forms:

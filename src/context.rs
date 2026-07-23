@@ -30,6 +30,7 @@ struct Context {
     libusb: Option<rusb::Context>,
     pcsc: Option<Rc<pcsc::Context>>,
     yubihsm_urls: Vec<String>,
+    yubihsm_public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
     slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     dynamic_slots: HashSet<CK_SLOT_ID>,
     slots_discovered: bool,
@@ -79,6 +80,10 @@ impl std::fmt::Debug for Context {
             .field("libusb", &self.libusb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
+            .field(
+                "yubihsm_public_discovery_credential",
+                &self.yubihsm_public_discovery_credential,
+            )
             .field("slots", &self.slots)
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
@@ -122,6 +127,14 @@ impl Context {
         let objects = default_objects()?;
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
+        let yubihsm_public_discovery_credential =
+            configured_yubihsm_public_discovery_credential(
+                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID_ENV),
+                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_PASSWORD_ENV),
+            )?;
+        #[cfg(feature = "abi-tests")]
+        let yubihsm_public_discovery_credential = None;
+        #[cfg(not(feature = "abi-tests"))]
         let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
         let mut context = Context {
             #[cfg(feature = "abi-tests")]
@@ -149,6 +162,7 @@ impl Context {
                 }
             },
             yubihsm_urls,
+            yubihsm_public_discovery_credential,
             slots,
             dynamic_slots: HashSet::new(),
             slots_discovered: false,
@@ -587,17 +601,32 @@ impl Context {
                                         continue;
                                     }
                                     let slot_id = next_key(&self.slots, 0);
-                                    let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers(
-                                        Rc::new(connector),
-                                        (0, 0, 0),
-                                        Vec::new(),
-                                        hsmauth_providers.clone(),
-                                    ));
+                                    let mut slot = Box::new(
+                                        YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+                                            Rc::new(connector),
+                                            (0, 0, 0),
+                                            Vec::new(),
+                                            hsmauth_providers.clone(),
+                                            self.yubihsm_public_discovery_credential.clone(),
+                                        ),
+                                    );
                                     if let Err(error) = slot.init_slot() {
                                         log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
                                     }
+                                    let token_objects = match slot.token_objects(slot_id) {
+                                        Ok(objects) => objects,
+                                        Err(error) => {
+                                            log!(2, "YubiHSM public object discovery: {:?}", error);
+                                            yubihsm_profile_objects(slot_id, false)
+                                        }
+                                    };
                                     self.slots.insert(slot_id, slot);
+                                    if let Err(error) =
+                                        self.reconcile_slot_token_objects(slot_id, token_objects)
+                                    {
+                                        log!(2, "YubiHSM object registration: {:?}", error);
+                                    }
                                     self.dynamic_slots.insert(slot_id);
                                     seen_dynamic_slots.insert(slot_id);
                                 }
@@ -629,19 +658,40 @@ impl Context {
             log!(2, "{} at {}", name, url);
             let slot_id = next_key(&self.slots, 0);
             let connector = Rc::new(connector);
-            let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers(
-                connector.clone(),
-                (0, 0, 0),
-                Vec::new(),
-                hsmauth_providers.clone(),
-            ));
+            let mut slot = Box::new(
+                YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+                    connector.clone(),
+                    (0, 0, 0),
+                    Vec::new(),
+                    hsmauth_providers.clone(),
+                    self.yubihsm_public_discovery_credential.clone(),
+                ),
+            );
             if connected {
                 if let Err(error) = slot.init_slot() {
                     log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
                     connector.set_unavailable();
                 }
             }
+            let token_objects = if slot.is_present() {
+                match slot.token_objects(slot_id) {
+                    Ok(objects) => objects,
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiHSM public object discovery through {url}: {:?}",
+                            error
+                        );
+                        yubihsm_profile_objects(slot_id, false)
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             self.slots.insert(slot_id, slot);
+            if let Err(error) = self.reconcile_slot_token_objects(slot_id, token_objects) {
+                log!(2, "YubiHSM object registration through {url}: {:?}", error);
+            }
             self.dynamic_slots.insert(slot_id);
             seen_dynamic_slots.insert(slot_id);
         }

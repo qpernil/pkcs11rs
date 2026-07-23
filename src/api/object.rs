@@ -161,14 +161,15 @@ fn create_object(
         let mut object = parse_create_object_template(templ)?;
         validate_new_object_access(&object, flags, logged_in)?;
         if ctx.get_slot(slot_id)?.is_yubihsm() {
-            let (command, expected_class) = yubihsm_import_command(&object)?;
+            let hardware_object = yubihsm_hardware_import_object(&object)?;
+            let (command, expected_class) = yubihsm_import_command(&hardware_object)?;
             let response = ctx
                 ._get_session(session_handle)?
                 .1
                 .yubihsm_command(&command)?;
             let id = parse_yubihsm_object_id(&response)?;
             ctx.refresh_slot_token_objects(slot_id)?;
-            *object_handle = ctx
+            let (handle, imported) = ctx
                 .resolved_objects()?
                 .into_iter()
                 .find(|(_, object)| {
@@ -176,8 +177,20 @@ fn create_object(
                         && object.class == expected_class
                         && matches!(object.material, KeyMaterial::YubiHsm { id: object_id, .. } if object_id == id)
                 })
-                .map(|(handle, _)| handle)
                 .ok_or(CKR_DEVICE_ERROR)?;
+            let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+                slot_id,
+                &imported.unique_id,
+                (!object.id.is_empty()).then_some(object.id.as_slice()),
+                (!object.label.is_empty()).then_some(object.label.as_str()),
+            );
+            let refresh = ctx.refresh_slot_token_objects(slot_id);
+            if let Err(error) = metadata_result {
+                let _ = refresh;
+                return Err(error);
+            }
+            refresh?;
+            *object_handle = handle;
             return Ok(());
         }
         object.set_owner(session_handle, slot_id);
@@ -766,6 +779,33 @@ fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
     }
 }
 
+fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<TokenObject, Error> {
+    const HARDWARE_LABEL_LENGTH: usize = 40;
+    const METADATA_ATTRIBUTE_LENGTH: usize = 256;
+
+    if object.id.len() > METADATA_ATTRIBUTE_LENGTH
+        || object.label.len() > METADATA_ATTRIBUTE_LENGTH
+    {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+    }
+    let mut hardware = object.clone();
+    if !matches!(hardware.id.as_slice(), [] | [_, _]) {
+        hardware.id.clear();
+    }
+    if hardware.label.len() > HARDWARE_LABEL_LENGTH {
+        let mut end = 0;
+        for (offset, character) in hardware.label.char_indices() {
+            let next = offset + character.len_utf8();
+            if next > HARDWARE_LABEL_LENGTH {
+                break;
+            }
+            end = next;
+        }
+        hardware.label.truncate(end);
+    }
+    Ok(hardware)
+}
+
 fn padded_big_num(value: &BigUint, length: usize) -> Result<Vec<u8>, Error> {
     let encoded = value.to_bytes_be();
     if encoded.len() > length {
@@ -1083,7 +1123,8 @@ fn copy_object(
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if matches!(
             copied_object.material,
-            KeyMaterial::IssuerSecurityDomainData { .. }
+            KeyMaterial::Profile { .. }
+                | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
@@ -1141,7 +1182,8 @@ fn destroy_object(
         }
         if matches!(
             stored_object.material,
-            KeyMaterial::IssuerSecurityDomainData { .. }
+            KeyMaterial::Profile { .. }
+                | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
@@ -1197,9 +1239,36 @@ fn destroy_object(
             if matches!(object_type, YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC) {
                 return Ok(());
             }
+            let related_metadata = ctx
+                .get_slot(slot_id)?
+                .yubihsm_related_metadata_object(id, object_type)?;
             ctx._get_session(session_handle)?
                 .1
                 .yubihsm_command(&YubiHsmCommand::delete_object(id, object_type & !0x80))?;
+            ctx.get_slot(slot_id)?
+                .yubihsm_forget_object(id, object_type)?;
+            let mut cleanup_error = None;
+            for (metadata_id, _metadata_sequence) in related_metadata {
+                match ctx
+                    ._get_session(session_handle)?
+                    .1
+                    .yubihsm_command(&YubiHsmCommand::delete_object(
+                        metadata_id,
+                        YUBIHSM_OPAQUE,
+                    )) {
+                    Ok(_) => {
+                        if let Err(error) = ctx
+                            .get_slot(slot_id)?
+                            .yubihsm_forget_object(metadata_id, YUBIHSM_OPAQUE)
+                        {
+                            cleanup_error.get_or_insert(error);
+                        }
+                    }
+                    Err(error) => {
+                        cleanup_error.get_or_insert(error);
+                    }
+                }
+            }
             let removed: Vec<_> = ctx
                 .resolved_objects()?
                 .into_iter()
@@ -1220,7 +1289,10 @@ fn destroy_object(
             for handle in removed {
                 ctx.remove_object_handle(handle);
             }
-            return Ok(());
+            return match cleanup_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
         }
         ctx.remove_object_handle(object);
         Ok(())
@@ -1365,9 +1437,10 @@ fn get_attribute_value(
                         ..
                     } if *object_type == YUBIHSM_OPAQUE => {
                         if value.borrow().is_none() {
-                            let payload = ctx._get_session(session_handle)?.1.yubihsm_command(
-                                &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, *id)?,
-                            )?;
+                            let payload = ctx
+                                ._get_session(session_handle)?
+                                .0
+                                .yubihsm_read_opaque(*id)?;
                             *value.borrow_mut() = Some(payload);
                         }
                         let payload = value.borrow();
@@ -1417,9 +1490,10 @@ fn yubihsm_opaque_value(
         .map_err(|_| Error::from(CKR_CANT_LOCK))?
         .is_none()
     {
-        let payload = ctx._get_session(session_handle)?.1.yubihsm_command(
-            &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?,
-        )?;
+        let payload = ctx
+            ._get_session(session_handle)?
+            .0
+            .yubihsm_read_opaque(id)?;
         *value.try_borrow_mut()? = Some(payload);
     }
     value
@@ -1556,6 +1630,42 @@ fn set_attribute_value(
             ctx._get_slot_mut(slot_id)?
                 .openpgp_set_touch_policy(key_ref, policy as u8)?;
             ctx.refresh_slot_token_objects(slot_id)?;
+            return Ok(());
+        }
+        if stored_object.token && ctx.get_slot(slot_id)?.is_yubihsm() {
+            if templ.is_empty() {
+                return Ok(());
+            }
+            let mut id = None;
+            let mut label = None;
+            for attribute in templ {
+                match attribute.type_ {
+                    x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
+                        id = Some(read_attribute_value(attribute).map_err(Error::from)?);
+                    }
+                    x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
+                        label = Some(
+                            String::from_utf8(
+                                read_attribute_value(attribute).map_err(Error::from)?,
+                            )
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                        );
+                    }
+                    _ => return Err(CKR_ATTRIBUTE_READ_ONLY.into()),
+                }
+            }
+            let result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+                slot_id,
+                &stored_object.unique_id,
+                id.as_deref(),
+                label.as_deref(),
+            );
+            let refresh = ctx.refresh_slot_token_objects(slot_id);
+            if let Err(error) = result {
+                let _ = refresh;
+                return Err(error);
+            }
+            refresh?;
             return Ok(());
         }
         if ctx.token_object_handles.contains_key(&object)
