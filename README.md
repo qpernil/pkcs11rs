@@ -50,11 +50,11 @@ Building requires a Rust toolchain plus the development files for:
 
 - PC/SC
 - libusb 1.0
-- libcurl
 - Clang/libclang, used by `bindgen` for the vendored PKCS #11 3.2 headers
 
 The exact package names depend on the operating system and package manager.
-The selected libcurl package may itself use a platform TLS provider.
+Remote YubiHSM Connector HTTPS uses rustls and does not require OpenSSL or
+libcurl.
 
 ## Build
 

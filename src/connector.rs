@@ -852,15 +852,15 @@ fn parse_yubihsm_connector_status(value: &[u8]) -> Result<YubiHsmConnectorStatus
 }
 
 #[derive(Debug)]
-pub(crate) struct CurlConnector {
+pub(crate) struct HttpConnector {
     serial: String,
     url: String,
     version: (u8, u8, u8),
     connected: Cell<bool>,
-    curl: RefCell<curl::easy::Easy>,
+    agent: ureq::Agent,
 }
 
-impl Connector for CurlConnector {
+impl Connector for HttpConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -894,32 +894,41 @@ impl Connector for CurlConnector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let mut received = Vec::new();
-        let mut curl = self.curl.try_borrow_mut()?;
-        curl.url(&format!("{}/connector/api", self.url))?;
-        curl.timeout(timeout)?;
-        curl.fail_on_error(true)?;
-        curl.post(true)?;
-        curl.post_fields_copy(send_buffer)?;
-        let mut headers = curl::easy::List::new();
-        headers.append("Content-Type: application/octet-stream")?;
-        curl.http_headers(headers)?;
-        {
-            let mut transfer = curl.transfer();
-            transfer.write_function(|slice| {
-                received.extend_from_slice(slice);
-                Ok(slice.len())
-            })?;
-            if let Err(error) = transfer.perform() {
+        let response = self
+            .agent
+            .post(format!("{}/connector/api", self.url))
+            .content_type("application/octet-stream")
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
+            .send(send_buffer);
+        let mut response = match response {
+            Ok(response) => response,
+            Err(error) => {
                 self.connected.set(false);
                 return Err(error.into());
             }
-        }
+        };
+        let received = response
+            .body_mut()
+            .with_config()
+            .limit((receive_buffer.len() + 1) as u64)
+            .read_to_vec();
+        let received = match received {
+            Ok(received) => received,
+            Err(ureq::Error::BodyExceedsLimit(_)) => {
+                return Err(CKR_DEVICE_MEMORY.into());
+            }
+            Err(error) => {
+                self.connected.set(false);
+                return Err(error.into());
+            }
+        };
         if received.len() > receive_buffer.len() {
             return Err(CKR_DEVICE_MEMORY.into());
         }
         receive_buffer[..received.len()].copy_from_slice(&received);
-        log!(2, "curl.post({:?}) -> {:?}", send_buffer, received);
+        log!(2, "http.post({:?}) -> {:?}", send_buffer, received);
         self.connected.set(true);
         Ok(&receive_buffer[..received.len()])
     }
@@ -940,39 +949,38 @@ impl Connector for CurlConnector {
     }
 }
 
-impl CurlConnector {
+impl HttpConnector {
     pub(crate) fn new(url: String) -> Result<Self, Error> {
         let url = url.trim_end_matches('/').to_owned();
         if url.is_empty() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        let mut curl = curl::easy::Easy::new();
-        curl.useragent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))?;
+        let config = ureq::Agent::config_builder()
+            .user_agent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))
+            .build();
         Ok(Self {
             serial: String::new(),
             url,
             version: (0, 0, 0),
             connected: Cell::new(false),
-            curl: RefCell::new(curl),
+            agent: ureq::Agent::new_with_config(config),
         })
     }
 
     fn status(&self, timeout: Duration) -> Result<YubiHsmConnectorStatus, Error> {
-        let mut received = Vec::new();
-        let mut curl = self.curl.try_borrow_mut()?;
-        curl.url(&format!("{}/connector/status", self.url))?;
-        curl.timeout(timeout)?;
-        curl.fail_on_error(true)?;
-        curl.get(true)?;
-        {
-            let mut transfer = curl.transfer();
-            transfer.write_function(|slice| {
-                received.extend(slice);
-                Ok(slice.len())
-            })?;
-            transfer.perform()?;
-        }
-        log!(2, "curl.get() -> {:?}", String::from_utf8_lossy(&received));
+        let mut response = self
+            .agent
+            .get(format!("{}/connector/status", self.url))
+            .config()
+            .timeout_global(Some(timeout))
+            .build()
+            .call()?;
+        let received = response
+            .body_mut()
+            .with_config()
+            .limit(YUBIHSM_CONNECTOR_BUFFER_SIZE as u64)
+            .read_to_vec()?;
+        log!(2, "http.get() -> {:?}", String::from_utf8_lossy(&received));
         parse_yubihsm_connector_status(&received)
     }
 
@@ -980,9 +988,6 @@ impl CurlConnector {
         let status = self.status(Duration::from_secs(5))?;
         self.serial = status.serial;
         self.version = status.version;
-        let mut curl = self.curl.try_borrow_mut()?;
-        curl.url(&format!("{}/connector/api", self.url))?;
-        curl.post(true)?;
         self.connected.set(true);
         Ok(())
     }
@@ -1027,11 +1032,12 @@ mod tests {
         request
     }
 
-    fn write_http_response(stream: &mut std::net::TcpStream, body: &[u8]) {
+    fn write_http_response(stream: &mut std::net::TcpStream, body: &[u8], close: bool) {
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
+            body.len(),
+            if close { "close" } else { "keep-alive" }
         )
         .unwrap();
         stream.write_all(body).unwrap();
@@ -1058,8 +1064,8 @@ mod tests {
     }
 
     #[test]
-    fn unconnected_curl_connector_has_a_stable_url_identity() {
-        let connector = CurlConnector::new("http://127.0.0.1:12345/".to_owned()).unwrap();
+    fn unconnected_http_connector_has_a_stable_url_identity() {
+        let connector = HttpConnector::new("http://127.0.0.1:12345/".to_owned()).unwrap();
         assert_eq!(
             connector.name(),
             "Yubico YubiHSM Connector http://127.0.0.1:12345"
@@ -1068,25 +1074,31 @@ mod tests {
     }
 
     #[test]
-    fn curl_connector_uses_status_and_binary_api_endpoints() {
+    fn http_connector_reuses_a_connection_for_status_and_binary_api_endpoints() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let (mut status, _) = listener.accept().unwrap();
-            let request = read_http_request(&mut status);
-            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
-            write_http_response(&mut status, b"status=OK\nserial=12345678\nversion=3.0.7\n");
-
-            let (mut refreshed_status, _) = listener.accept().unwrap();
-            let request = read_http_request(&mut refreshed_status);
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            let request = read_http_request(&mut connection);
             assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
             write_http_response(
-                &mut refreshed_status,
+                &mut connection,
                 b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                false,
             );
 
-            let (mut api, _) = listener.accept().unwrap();
-            let request = read_http_request(&mut api);
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            write_http_response(
+                &mut connection,
+                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                false,
+            );
+
+            let request = read_http_request(&mut connection);
             assert!(request.starts_with(b"POST /connector/api HTTP/1.1\r\n"));
             let header_end = request
                 .windows(4)
@@ -1098,10 +1110,10 @@ mod tests {
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case("Content-Type: application/octet-stream")));
             assert_eq!(&request[header_end..], b"\x03\x00\x01\x42");
-            write_http_response(&mut api, b"\x83\x00\x01\x42");
+            write_http_response(&mut connection, b"\x83\x00\x01\x42", true);
         });
 
-        let mut connector = CurlConnector::new(format!("http://{address}")).unwrap();
+        let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
         connector.connect().unwrap();
         assert!(connector.is_present());
         assert_eq!(connector.serial(), "12345678");

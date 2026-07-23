@@ -1,7 +1,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-extern crate curl;
 extern crate pcsc;
 extern crate rusb;
 
@@ -517,7 +516,7 @@ use abi_test_backend::*;
 
 mod connector;
 pub(crate) use connector::{
-    bulk_out_packet_size, Connector, CurlConnector, PcscAppletConnector, PcscConnector,
+    bulk_out_packet_size, Connector, HttpConnector, PcscAppletConnector, PcscConnector,
     SecureChannelState, UsbConnector,
 };
 #[cfg(test)]
