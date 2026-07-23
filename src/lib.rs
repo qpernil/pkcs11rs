@@ -70,6 +70,9 @@ use error::*;
 
 mod secure_channel_crypto;
 
+mod yubico_kdf;
+use yubico_kdf::yubico_password_kdf;
+
 mod certificate_chain;
 
 mod iso7816;

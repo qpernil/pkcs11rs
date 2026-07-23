@@ -17,7 +17,6 @@ use openssl::{
     bn::{BigNum, BigNumContext},
     derive::Deriver,
     ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
-    hash::MessageDigest,
     memcmp,
     nid::Nid,
     pkey::{PKey, Private},
@@ -51,8 +50,6 @@ const ASYMMETRIC_RECEIPT_LENGTH: usize = 16;
 const EC_P256_AUTHENTICATION_ALGORITHM: u8 = 49;
 const SCP11_SHARED_INFO: [u8; 3] = [0x3c, 0x88, 0x10];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
-const DEFAULT_SALT: &[u8] = b"Yubico";
-const DEFAULT_ITERATIONS: usize = 10_000;
 const MODERN_MESSAGE_SIZE: usize = 3136;
 const PRE_2_4_MESSAGE_SIZE: usize = 2048;
 
@@ -227,14 +224,7 @@ impl SecureSession {
         password: &[u8],
         host_challenge: [u8; CHALLENGE_LENGTH],
     ) -> Result<Self, Error> {
-        let mut static_keys = Zeroizing::new([0u8; AES_BLOCK_SIZE * 2]);
-        openssl::pkcs5::pbkdf2_hmac(
-            password,
-            DEFAULT_SALT,
-            DEFAULT_ITERATIONS,
-            MessageDigest::sha256(),
-            static_keys.as_mut(),
-        )?;
+        let static_keys = crate::yubico_password_kdf(password)?;
 
         let handshake = Self::begin_symmetric(connector, authkey_id, host_challenge)?;
 
@@ -631,14 +621,7 @@ fn derive_p256_key(password: &[u8]) -> Result<EcKey<Private>, Error> {
     input.push(0);
     for perturbation in 0..=u8::MAX {
         *input.last_mut().unwrap() = perturbation;
-        let mut private = Zeroizing::new([0; P256_PRIVATE_KEY_LENGTH]);
-        openssl::pkcs5::pbkdf2_hmac(
-            &input,
-            DEFAULT_SALT,
-            DEFAULT_ITERATIONS,
-            MessageDigest::sha256(),
-            private.as_mut(),
-        )?;
+        let private = crate::yubico_password_kdf(&input)?;
         if let Ok(key) = p256_private_key(&group, &private[..]) {
             return Ok(key);
         }
