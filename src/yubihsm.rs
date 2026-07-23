@@ -1,7 +1,5 @@
 #[cfg(test)]
 use crate::secure_channel_crypto::aes_ecb;
-#[cfg(test)]
-use crate::yubico_kdf::p256_private_key;
 use crate::{
     error::Error,
     secure_channel_crypto::{
@@ -15,13 +13,11 @@ use crate::{
 };
 #[cfg(test)]
 use openssl::pkey::Id;
-use openssl::{
-    bn::BigNumContext,
-    derive::Deriver,
-    ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
-    nid::Nid,
-    pkey::{PKey, Private},
+use p256::{
+    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey as P256PublicKey,
+    SecretKey as P256SecretKey,
 };
+use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -436,8 +432,7 @@ impl SecureSession {
     ) -> Result<Self, Error> {
         let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
         let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
-        let group = p256_group()?;
-        let host_ephemeral_key = EcKey::generate(&group)?;
+        let host_ephemeral_key = P256SecretKey::random(&mut OsRng);
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
 
         let mut create_data = Vec::with_capacity(2 + P256_PUBLIC_KEY_LENGTH);
@@ -618,40 +613,30 @@ impl SecureSession {
     }
 }
 
-fn p256_group() -> Result<EcGroup, Error> {
-    EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(Error::from)
-}
-
-fn p256_public_key(key: &EcKeyRef<Private>) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
-    let group = p256_group()?;
-    let mut context = BigNumContext::new()?;
+fn p256_public_key(key: &P256SecretKey) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
     key.public_key()
-        .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)?
+        .to_encoded_point(false)
+        .as_bytes()
         .try_into()
         .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-fn parse_p256_public_key(encoded: &[u8]) -> Result<EcKey<openssl::pkey::Public>, Error> {
+fn parse_p256_public_key(encoded: &[u8]) -> Result<P256PublicKey, Error> {
     if encoded.len() != P256_PUBLIC_KEY_LENGTH || encoded[0] != 0x04 {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    let group = p256_group()?;
-    let mut context = BigNumContext::new()?;
-    let point = EcPoint::from_bytes(&group, encoded, &mut context)?;
-    let key = EcKey::from_public_key(&group, &point)?;
-    key.check_key()?;
-    Ok(key)
+    P256PublicKey::from_sec1_bytes(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 
 #[allow(dead_code)]
-fn device_public_key(connector: &dyn Connector) -> Result<EcKey<openssl::pkey::Public>, Error> {
+fn device_public_key(connector: &dyn Connector) -> Result<P256PublicKey, Error> {
     parse_p256_public_key(&device_public_key_bytes(connector)?)
 }
 
 fn trusted_device_public_key(
     connector: &dyn Connector,
     trust_prefix: Option<&std::ffi::OsStr>,
-) -> Result<EcKey<openssl::pkey::Public>, Error> {
+) -> Result<P256PublicKey, Error> {
     let encoded = device_public_key_bytes(connector)?;
     trust::validate_device_public_key(&encoded, trust_prefix)?;
     parse_p256_public_key(&encoded)
@@ -675,15 +660,12 @@ pub(crate) fn device_public_key_bytes(
     encoded.try_into().map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-fn p256_ecdh(
-    private: &EcKeyRef<Private>,
-    public: &EcKeyRef<openssl::pkey::Public>,
-) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let private = PKey::from_ec_key(private.to_owned())?;
-    let public = PKey::from_ec_key(public.to_owned())?;
-    let mut deriver = Deriver::new(&private)?;
-    deriver.set_peer(&public)?;
-    let secret = Zeroizing::new(deriver.derive_to_vec()?);
+fn p256_ecdh(private: &P256SecretKey, public: &P256PublicKey) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let secret = Zeroizing::new(
+        diffie_hellman(private.to_nonzero_scalar(), public.as_affine())
+            .raw_secret_bytes()
+            .to_vec(),
+    );
     if secret.len() != P256_PRIVATE_KEY_LENGTH {
         return Err(CKR_DEVICE_ERROR.into());
     }
