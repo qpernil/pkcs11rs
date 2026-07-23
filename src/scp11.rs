@@ -7,11 +7,10 @@ use crate::{
 };
 use p256::{
     ecdh::diffie_hellman,
-    elliptic_curve::sec1::ToEncodedPoint,
+    elliptic_curve::{sec1::ToSec1Point, Generate},
     pkcs8::{DecodePrivateKey, DecodePublicKey},
     PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
-use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::{env, fs};
 use subtle::ConstantTimeEq;
@@ -160,7 +159,7 @@ impl Scp11KeySet {
         connector: &dyn Connector,
     ) -> Result<Scp03Session, Error> {
         let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
-        let ephemeral = P256SecretKey::random(&mut OsRng);
+        let ephemeral = P256SecretKey::generate();
         self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
     }
 
@@ -177,7 +176,7 @@ impl Scp11KeySet {
         }
         if let Some(point) = cached_public_point {
             let card_public_key = parse_public_point(point)?;
-            let ephemeral = P256SecretKey::random(&mut OsRng);
+            let ephemeral = P256SecretKey::generate();
             return self
                 .establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
                 .map(|session| (session, None));
@@ -199,7 +198,7 @@ impl Scp11KeySet {
             &certificates?,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )?;
-        let ephemeral = P256SecretKey::random(&mut OsRng);
+        let ephemeral = P256SecretKey::generate();
         let point = encode_public_point(&card_public_key);
         self.establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
             .map(|session| (session, Some(point)))
@@ -376,7 +375,7 @@ fn encode_private_public_point(key: &P256SecretKey) -> Vec<u8> {
 }
 
 fn encode_public_point(key: &P256PublicKey) -> Vec<u8> {
-    key.to_encoded_point(false).as_bytes().to_vec()
+    key.to_sec1_point(false).as_bytes().to_vec()
 }
 
 fn ecdh(private: &P256SecretKey, peer: &P256PublicKey) -> Result<Vec<u8>, Error> {

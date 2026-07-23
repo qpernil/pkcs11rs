@@ -483,7 +483,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             let public = if algorithm == piv::Algorithm::EccP256 {
                 let key = p256::SecretKey::from_slice(&scalar)
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(
+                p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
                     &key.public_key(),
                     false,
                 )
@@ -492,7 +492,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             } else {
                 let key = p384::SecretKey::from_slice(&scalar)
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p384::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(
+                p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
                     &key.public_key(),
                     false,
                 )

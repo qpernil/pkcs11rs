@@ -304,7 +304,7 @@ mod tests {
     fn fingerprint_is_sha256_of_canonical_spki() {
         let (key, point) = test_key();
         let expected: String = Sha256::digest(
-            SubjectPublicKeyInfoOwned::from_key(key)
+            SubjectPublicKeyInfoOwned::from_key(&key)
                 .unwrap()
                 .to_der()
                 .unwrap(),

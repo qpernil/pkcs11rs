@@ -12,10 +12,10 @@ use crate::{
     CKR_SESSION_COUNT,
 };
 use p256::{
-    ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey as P256PublicKey,
-    SecretKey as P256SecretKey,
+    ecdh::diffie_hellman,
+    elliptic_curve::{sec1::ToSec1Point, Generate},
+    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
-use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -430,7 +430,7 @@ impl SecureSession {
     ) -> Result<Self, Error> {
         let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
         let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
-        let host_ephemeral_key = P256SecretKey::random(&mut OsRng);
+        let host_ephemeral_key = P256SecretKey::generate();
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
 
         let mut create_data = Vec::with_capacity(2 + P256_PUBLIC_KEY_LENGTH);
@@ -613,7 +613,7 @@ impl SecureSession {
 
 fn p256_public_key(key: &P256SecretKey) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
     key.public_key()
-        .to_encoded_point(false)
+        .to_sec1_point(false)
         .as_bytes()
         .try_into()
         .map_err(|_| CKR_DEVICE_ERROR.into())
