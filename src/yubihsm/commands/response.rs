@@ -72,7 +72,7 @@ pub(crate) struct ObjectEntry {
 }
 
 pub(crate) fn parse_object_list(data: &[u8]) -> Result<Vec<ObjectEntry>, Error> {
-    if !data.len().is_multiple_of(4) || data.len() / 4 > MAX_OBJECT_COUNT {
+    if !crate::is_multiple_of(data.len(), 4) || data.len() / 4 > MAX_OBJECT_COUNT {
         return Err(CKR_DATA_INVALID.into());
     }
     data.chunks_exact(4)

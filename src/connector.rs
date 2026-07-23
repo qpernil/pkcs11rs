@@ -569,7 +569,7 @@ pub(crate) fn ensure_complete_write(actual: usize, expected: usize) -> Result<()
 }
 
 pub(crate) fn needs_zero_length_packet(length: usize, packet_size: usize) -> bool {
-    packet_size != 0 && length.is_multiple_of(packet_size)
+    packet_size != 0 && crate::is_multiple_of(length, packet_size)
 }
 
 pub(crate) fn bulk_out_packet_size(device: &rusb::Device<rusb::Context>) -> Result<usize, Error> {

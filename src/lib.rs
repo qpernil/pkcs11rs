@@ -88,6 +88,13 @@ fn hash(digest: MessageDigest, data: &[u8]) -> Result<Vec<u8>, Error> {
     })
 }
 
+fn is_multiple_of<T>(value: T, divisor: T) -> bool
+where
+    T: Copy + Eq + From<u8> + std::ops::Rem<Output = T>,
+{
+    divisor != T::from(0) && value % divisor == T::from(0)
+}
+
 static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
 
 fn parse_debug_level(value: Option<&str>) -> Result<u8, CK_RV> {

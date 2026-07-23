@@ -2,6 +2,7 @@
 name = "pkcs11rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "PKCS #11 provider for YubiKey CCID applets and YubiHSM devices"
 readme = "README.md"
 repository = "https://github.com/qpernil/pkcs11rs"
