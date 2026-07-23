@@ -373,31 +373,15 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
         x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE => {
             Some(hash(MessageDigest::sha1(), value).ok()?[..3].to_vec())
         }
-        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
-            .ok()?
-            .subject_name()
-            .to_der()
-            .ok(),
-        x if x == CKA_ISSUER as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
-            .ok()?
-            .issuer_name()
-            .to_der()
-            .ok(),
+        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => crate::certificate_chain::subject(value).ok(),
+        x if x == CKA_ISSUER as CK_ATTRIBUTE_TYPE => crate::certificate_chain::issuer(value).ok(),
         x if x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE => {
-            let serial = openssl::x509::X509::from_der(value)
-                .ok()?
-                .serial_number()
-                .to_bn()
-                .ok()?
-                .to_vec();
+            let serial = crate::certificate_chain::serial_number(value).ok()?;
             der_integer(&serial)
         }
-        x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => openssl::x509::X509::from_der(value)
-            .ok()?
-            .public_key()
-            .ok()?
-            .public_key_to_der()
-            .ok(),
+        x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => {
+            crate::certificate_chain::public_key_info(value).ok()
+        }
         _ => None,
     }
 }
@@ -476,7 +460,7 @@ fn lazy_yubihsm_attestation_certificate(
         &YubiHsmCommand::sign_attestation_certificate(id, 0),
     )
     .ok()?;
-    openssl::x509::X509::from_der(&certificate).ok()?;
+    crate::certificate_chain::validate(&certificate).ok()?;
     *value.borrow_mut() = Some(certificate.clone());
     Some(certificate)
 }

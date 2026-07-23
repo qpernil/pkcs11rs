@@ -21,6 +21,7 @@ abi-tests = []
 [dependencies]
 aes = "0.8.4"
 cmac = "0.7.2"
+des = "0.8.1"
 getrandom = "0.3.4"
 hmac = "0.12.1"
 pbkdf2 = "0.12.2"
