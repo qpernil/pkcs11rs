@@ -184,7 +184,7 @@ fn generate_key_object(
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
     let mut value = vec![0; value_len as usize];
-    openssl::rand::rand_bytes(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    getrandom::fill(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
     key.material = KeyMaterial::Secret(Zeroizing::new(value));
     key.local = true;
     key.key_gen_mechanism = Some(mechanism.mechanism);

@@ -103,7 +103,7 @@ fn rsa_oaep_pad(
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let mut seed = vec![0; hash_len];
-    openssl::rand::rand_bytes(&mut seed).map_err(|_| CKR_RANDOM_NO_RNG)?;
+    getrandom::fill(&mut seed).map_err(|_| CKR_RANDOM_NO_RNG)?;
     let mut db = label_digest.to_vec();
     db.extend(std::iter::repeat_n(
         0,

@@ -2,14 +2,14 @@ use crate::{
     error::Error,
     secure_channel_crypto::{
         aes_cbc, aes_cmac, aes_encrypt_block as aes_block, pad_iso7816 as pad, scp03_kdf as derive,
-        unpad_iso7816 as unpad, AES_BLOCK_SIZE,
+        unpad_iso7816 as unpad, Direction, AES_BLOCK_SIZE,
     },
     Connector, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
     CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
     CKR_USER_PIN_NOT_INITIALIZED,
 };
-use openssl::{memcmp, symm::Mode};
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub(crate) const DEFAULT_ISSUER_SECURITY_DOMAIN_AID: [u8; 8] =
@@ -617,8 +617,7 @@ impl Scp03Session {
     ) -> Result<Self, Error> {
         validate_security_level(security_level)?;
         let mut host_challenge = [0u8; 8];
-        openssl::rand::rand_bytes(&mut host_challenge)
-            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        getrandom::fill(&mut host_challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
         Self::establish_with_challenge(
             connector,
             keys,
@@ -664,7 +663,7 @@ impl Scp03Session {
                 &challenge_context,
                 64,
             )?;
-            if !memcmp::eq(&expected_challenge, &update.card_challenge) {
+            if !bool::from(expected_challenge.ct_eq(&update.card_challenge)) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
         }
@@ -733,7 +732,7 @@ impl Scp03Session {
             mac_bits,
         )?);
         let expected_card_cryptogram = derive(&s_mac, DERIVATION_CARD_CRYPTOGRAM, &context, 64)?;
-        if !memcmp::eq(&expected_card_cryptogram, card_cryptogram) {
+        if !bool::from(expected_card_cryptogram.ct_eq(card_cryptogram)) {
             return Err(CKR_PIN_INCORRECT.into());
         }
         let host_cryptogram = derive(&s_mac, DERIVATION_HOST_CRYPTOGRAM, &context, 64)?;
@@ -870,7 +869,7 @@ impl Scp03Session {
         if self.security_level & SECURITY_C_ENCRYPTION != 0 && !data.is_empty() {
             let padded = pad(&data);
             let iv = self.command_iv(false)?;
-            data = aes_cbc(&self.s_enc, &iv, &padded, Mode::Encrypt)?;
+            data = aes_cbc(&self.s_enc, &iv, &padded, Direction::Encrypt)?;
         }
 
         let mut protected = CommandApdu {
@@ -921,7 +920,7 @@ impl Scp03Session {
             mac_input.extend_from_slice(&data);
             mac_input.extend_from_slice(&response.status.to_be_bytes());
             let expected_mac = aes_cmac(&self.s_rmac, &mac_input)?;
-            if !memcmp::eq(&expected_mac[..MAC_LENGTH], &received_mac) {
+            if !bool::from(expected_mac[..MAC_LENGTH].ct_eq(&received_mac)) {
                 return Err(CKR_ENCRYPTED_DATA_INVALID.into());
             }
         }
@@ -930,7 +929,7 @@ impl Scp03Session {
                 return Err(CKR_ENCRYPTED_DATA_INVALID.into());
             }
             let iv = self.command_iv(true)?;
-            data = unpad(aes_cbc(&self.s_enc, &iv, &data, Mode::Decrypt)?)?;
+            data = unpad(aes_cbc(&self.s_enc, &iv, &data, Direction::Decrypt)?)?;
         }
         Ok(ResponseApdu {
             data,

@@ -347,8 +347,12 @@ fn abi_scp03_put_key_response(encoded: &[u8]) -> Result<Vec<u8>, Error> {
             return Ok(vec![0x6a, 0x80]);
         }
         let wrapped = &data[2..18];
-        let key =
-            crate::secure_channel_crypto::aes_cbc(&[0; 16], &[0; 16], wrapped, Mode::Decrypt)?;
+        let key = crate::secure_channel_crypto::aes_cbc(
+            &[0; 16],
+            &[0; 16],
+            wrapped,
+            crate::secure_channel_crypto::Direction::Decrypt,
+        )?;
         let encrypted_ones = crate::secure_channel_crypto::aes_encrypt_block(
             &key,
             &[1; crate::secure_channel_crypto::AES_BLOCK_SIZE],
