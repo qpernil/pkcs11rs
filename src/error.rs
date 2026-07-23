@@ -9,7 +9,7 @@ pub enum Error {
     Generic(CK_RV),
     Usb(rusb::Error),
     Pcsc(pcsc::Error),
-    Curl(curl::Error),
+    Http(ureq::Error),
     Io(std::io::Error),
 }
 
@@ -25,9 +25,9 @@ impl From<pcsc::Error> for Error {
     }
 }
 
-impl From<curl::Error> for Error {
-    fn from(e: curl::Error) -> Self {
-        Self::Curl(e)
+impl From<ureq::Error> for Error {
+    fn from(e: ureq::Error) -> Self {
+        Self::Http(e)
     }
 }
 
@@ -63,7 +63,7 @@ impl From<Error> for CK_RV {
             Error::Generic(rv) => rv,
             Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
-            Error::Curl(_) => CKR_DEVICE_REMOVED as CK_RV,
+            Error::Http(_) => CKR_DEVICE_REMOVED as CK_RV,
             Error::Io(_) => CKR_FUNCTION_FAILED as CK_RV,
         }
     }

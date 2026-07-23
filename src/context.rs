@@ -570,7 +570,6 @@ impl Context {
                                         packet_size,
                                         claimed: false,
                                     };
-                                    //let mut connector = CurlConnector { serial, url: String::from("http://127.0.0.1:12345"), connected: false, curl: RefCell::new(curl::easy::Easy::new()) };
                                     let name = connector.name();
                                     log!(2, "{}", name);
                                     if let Some(slot_id) =
@@ -612,7 +611,7 @@ impl Context {
             }
         }
         for url in self.yubihsm_urls.clone() {
-            let mut connector = match CurlConnector::new(url.clone()) {
+            let mut connector = match HttpConnector::new(url.clone()) {
                 Ok(connector) => connector,
                 Err(error) => {
                     log!(1, "YubiHSM connector configuration for {url}: {:?}", error);

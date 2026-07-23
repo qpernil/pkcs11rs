@@ -63,7 +63,7 @@ fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
 
 #[test]
 fn unavailable_yubihsm_connector_is_an_empty_slot() {
-    let connector = crate::CurlConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
+    let connector = crate::HttpConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
     let slot = crate::YubiHsmSlot::new(std::rc::Rc::new(connector), (0, 0, 0), Vec::new());
     let mut info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
 
