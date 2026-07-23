@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 
+use crate::secure_channel_crypto::{aes_ecb, Direction};
 use crate::{
     error::Error, CommandApdu, Connector, ResponseApdu, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE,
     CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use des::TdesEde3;
 use flate2::{read::GzDecoder, read::ZlibDecoder, write::GzEncoder, Compression};
-use openssl::symm::{Cipher, Crypter, Mode};
 use std::io::{Read, Write};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -83,20 +85,18 @@ impl ManagementAlgorithm {
         }
     }
 
-    fn cipher(self) -> Cipher {
-        match self {
-            Self::TripleDes => Cipher::des_ede3_ecb(),
-            Self::Aes128 => Cipher::aes_128_ecb(),
-            Self::Aes192 => Cipher::aes_192_ecb(),
-            Self::Aes256 => Cipher::aes_256_ecb(),
-        }
-    }
-
     fn key_length(self) -> usize {
         match self {
             Self::TripleDes | Self::Aes192 => 24,
             Self::Aes128 => 16,
             Self::Aes256 => 32,
+        }
+    }
+
+    fn block_size(self) -> usize {
+        match self {
+            Self::TripleDes => 8,
+            Self::Aes128 | Self::Aes192 | Self::Aes256 => 16,
         }
     }
 }
@@ -934,12 +934,13 @@ impl Client {
         let dynamic = field(&outer, 0x7c).ok_or(CKR_DATA_INVALID)?;
         let fields = parse_tlvs(dynamic)?;
         let card_challenge = field(&fields, 0x80).ok_or(CKR_DATA_INVALID)?;
-        if card_challenge.len() != algorithm.cipher().block_size() {
+        if card_challenge.len() != algorithm.block_size() {
             return Err(CKR_DATA_INVALID.into());
         }
 
-        let card_response = crypt_management_block(algorithm, key, card_challenge, Mode::Decrypt)?;
-        let mut host_challenge = Zeroizing::new(vec![0; algorithm.cipher().block_size()]);
+        let card_response =
+            crypt_management_block(algorithm, key, card_challenge, Direction::Decrypt)?;
+        let mut host_challenge = Zeroizing::new(vec![0; algorithm.block_size()]);
         getrandom::fill(&mut host_challenge).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let mut dynamic = encode_tlv(0x80, &card_response)?;
         dynamic.extend_from_slice(&encode_tlv(0x81, &host_challenge)?);
@@ -955,7 +956,7 @@ impl Client {
         let dynamic = field(&outer, 0x7c).ok_or(CKR_DATA_INVALID)?;
         let fields = parse_tlvs(dynamic)?;
         let card_cryptogram = field(&fields, 0x82).ok_or(CKR_DATA_INVALID)?;
-        let expected = crypt_management_block(algorithm, key, &host_challenge, Mode::Encrypt)?;
+        let expected = crypt_management_block(algorithm, key, &host_challenge, Direction::Encrypt)?;
         if !bool::from(card_cryptogram.ct_eq(&expected)) {
             return Err(CKR_PIN_INCORRECT.into());
         }
@@ -1083,7 +1084,8 @@ impl Client {
         slot: Slot,
         certificate: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        openssl::x509::X509::from_der(certificate).map_err(|_| Error::from(CKR_DATA_INVALID))?;
+        crate::certificate_chain::validate(certificate)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
         let object = encode_certificate_object(certificate)?;
         self.put_data(connector, slot.certificate_object(), &object)?;
         Ok(object)
@@ -1275,21 +1277,22 @@ fn crypt_management_block(
     algorithm: ManagementAlgorithm,
     key: &[u8],
     input: &[u8],
-    mode: Mode,
+    direction: Direction,
 ) -> Result<Vec<u8>, Error> {
-    let cipher = algorithm.cipher();
-    if key.len() != algorithm.key_length() || input.len() != cipher.block_size() {
+    if key.len() != algorithm.key_length() || input.len() != algorithm.block_size() {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
-    let mut crypter = Crypter::new(cipher, mode, key, None).map_err(Error::from)?;
-    crypter.pad(false);
-    let mut output = vec![0; input.len() + cipher.block_size()];
-    let mut length = crypter.update(input, &mut output).map_err(Error::from)?;
-    length += crypter
-        .finalize(&mut output[length..])
-        .map_err(Error::from)?;
-    output.truncate(length);
-    Ok(output)
+    if algorithm != ManagementAlgorithm::TripleDes {
+        return aes_ecb(key, input, direction);
+    }
+    let cipher = TdesEde3::new_from_slice(key).map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+    let mut block = des::cipher::Block::<TdesEde3>::default();
+    block.copy_from_slice(input);
+    match direction {
+        Direction::Encrypt => cipher.encrypt_block(&mut block),
+        Direction::Decrypt => cipher.decrypt_block(&mut block),
+    }
+    Ok(block.to_vec())
 }
 
 fn require_success(status: u16) -> Result<(), Error> {

@@ -401,6 +401,36 @@ pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
+pub(crate) fn subject(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    Certificate::from_der(encoded)
+        .and_then(|certificate| certificate.tbs_certificate.subject.to_der())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn issuer(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    Certificate::from_der(encoded)
+        .and_then(|certificate| certificate.tbs_certificate.issuer.to_der())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn serial_number(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    Certificate::from_der(encoded)
+        .map(|certificate| {
+            certificate
+                .tbs_certificate
+                .serial_number
+                .as_bytes()
+                .to_vec()
+        })
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn validate(encoded: &[u8]) -> Result<(), Error> {
+    Certificate::from_der(encoded)
+        .map(|_| ())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
 pub(crate) fn verify_signed_by(certificate: &[u8], signer: &[u8]) -> Result<(), Error> {
     ParsedCertificate::parse(&decode(certificate)?)?
         .verify_signature(&ParsedCertificate::parse(&decode(signer)?)?)

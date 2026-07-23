@@ -113,7 +113,7 @@ impl Connector for ManagementConnector {
                     ManagementAlgorithm::TripleDes,
                     &key,
                     &[0x5a; 8],
-                    Mode::Encrypt,
+                    Direction::Encrypt,
                 )?;
                 response(
                     &encode_tlv(0x7c, &encode_tlv(0x80, &challenge)?)?,
@@ -132,7 +132,7 @@ impl Connector for ManagementConnector {
                     ManagementAlgorithm::TripleDes,
                     &key,
                     host,
-                    Mode::Encrypt,
+                    Direction::Encrypt,
                 )?;
                 response(
                     &encode_tlv(0x7c, &encode_tlv(0x82, &cryptogram)?)?,
