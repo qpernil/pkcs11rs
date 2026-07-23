@@ -466,50 +466,69 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
         let (algorithm, component_tag, public_key) = if key_type == CKK_EC as CK_KEY_TYPE {
             let params = required_template_value(templ, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            let (algorithm, nid, length) = match params.as_slice() {
+            let (algorithm, length) = match params.as_slice() {
                 [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => {
-                    (piv::Algorithm::EccP256, Nid::X9_62_PRIME256V1, 32)
+                    (piv::Algorithm::EccP256, 32)
                 }
                 [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => {
-                    (piv::Algorithm::EccP384, Nid::SECP384R1, 48)
+                    (piv::Algorithm::EccP384, 48)
                 }
                 _ => return Err(CKR_CURVE_NOT_SUPPORTED.into()),
             };
             if private.len() > length {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let group = EcGroup::from_curve_name(nid).map_err(Error::from)?;
-            let scalar = BigNum::from_slice(&private).map_err(Error::from)?;
-            let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
-            let mut point = EcPoint::new(&group).map_err(Error::from)?;
-            point
-                .mul_generator2(&group, &scalar, &mut context)
-                .map_err(Error::from)?;
-            let public = point
-                .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)
-                .map_err(Error::from)?;
+            let mut scalar = vec![0; length - private.len()];
+            scalar.extend_from_slice(&private);
+            let public = if algorithm == piv::Algorithm::EccP256 {
+                let key = p256::SecretKey::from_slice(&scalar)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+                p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(
+                    &key.public_key(),
+                    false,
+                )
+                .as_bytes()
+                .to_vec()
+            } else {
+                let key = p384::SecretKey::from_slice(&scalar)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+                p384::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(
+                    &key.public_key(),
+                    false,
+                )
+                .as_bytes()
+                .to_vec()
+            };
             (algorithm, 0x06, MetadataPublicKey::Ec(public))
         } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let key = PKey::private_key_from_raw_bytes(&private, Id::ED25519)
+            let private_bytes: &[u8; 32] = private
+                .as_slice()
+                .try_into()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            let key = ed25519_dalek::SigningKey::from_bytes(private_bytes);
             (
                 piv::Algorithm::Ed25519,
                 0x07,
-                MetadataPublicKey::Raw(key.raw_public_key().map_err(Error::from)?),
+                MetadataPublicKey::Raw(key.verifying_key().to_bytes().to_vec()),
             )
         } else if key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let key = PKey::private_key_from_raw_bytes(&private, Id::X25519)
+            let private_bytes: [u8; 32] = private
+                .as_slice()
+                .try_into()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            let key = x25519_dalek::StaticSecret::from(private_bytes);
             (
                 piv::Algorithm::X25519,
                 0x08,
-                MetadataPublicKey::Raw(key.raw_public_key().map_err(Error::from)?),
+                MetadataPublicKey::Raw(
+                    x25519_dalek::PublicKey::from(&key).as_bytes().to_vec(),
+                ),
             )
         } else {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
