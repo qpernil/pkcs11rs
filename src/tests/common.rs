@@ -2134,7 +2134,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     assert!(ecb_commands.len() > 3);
     assert!(ecb_commands
         .iter()
-        .all(|data| data.len() <= 2018 && (data.len() - 2).is_multiple_of(16)));
+        .all(|data| data.len() <= 2018 && crate::is_multiple_of(data.len() - 2, 16)));
     drop(ecb_commands);
     drop(commands);
 

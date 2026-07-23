@@ -314,7 +314,7 @@ fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) {
 fn gcm_tag(full_tag: [u8; AES_BLOCK_LENGTH], tag_bits: usize) -> Vec<u8> {
     let tag_length = tag_bits.div_ceil(8);
     let mut tag = full_tag[..tag_length].to_vec();
-    if !tag_bits.is_multiple_of(8) {
+    if !crate::is_multiple_of(tag_bits, 8) {
         let mask = 0xff << (8 - tag_bits % 8);
         if let Some(last) = tag.last_mut() {
             *last &= mask;
@@ -431,7 +431,7 @@ fn yubihsm_encrypt_ecb_blocks(
     key_id: u16,
     blocks: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    if !blocks.len().is_multiple_of(AES_BLOCK_LENGTH) {
+    if !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let mut encrypted = Vec::with_capacity(blocks.len());

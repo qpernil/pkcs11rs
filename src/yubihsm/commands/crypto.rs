@@ -16,7 +16,7 @@ impl Command {
             ],
         )?;
         if matches!(code, CommandCode::DecryptEcb | CommandCode::EncryptEcb)
-            && !value.len().is_multiple_of(16)
+            && !crate::is_multiple_of(value.len(), 16)
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
@@ -30,7 +30,7 @@ impl Command {
         value: &[u8],
     ) -> Result<Self, Error> {
         ensure_code(code, &[CommandCode::DecryptCbc, CommandCode::EncryptCbc])?;
-        if !value.len().is_multiple_of(16) {
+        if !crate::is_multiple_of(value.len(), 16) {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         let mut data = prefixed_u16(key_id, iv);
