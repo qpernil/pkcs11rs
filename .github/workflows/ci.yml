@@ -73,6 +73,32 @@ jobs:
           command: check advisories licenses
           manifest-path: ./xtask/Cargo.toml
 
+  macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          brew install libusb pkg-config
+
+      - name: Check generated PKCS #11 bindings
+        run: cargo xtask bindings --check
+
+      - name: Build dylib
+        run: cargo build --locked
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Check ABI test backend
+        run: cargo check --locked --features abi-tests
+
   windows:
     runs-on: windows-latest
 
