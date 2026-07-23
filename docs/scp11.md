@@ -28,11 +28,11 @@ one of:
 
 In factory or configured CA-certificate mode, the module temporarily selects
 the Issuer SD, reads the chain for the configured SCP11 KID/KVN, and reselects
-the target applet. OpenSSL validates the chain against the selected CA,
-including validity periods and CA constraints, before the leaf P-256 key is
-used for SCP11 authentication. The SCP11 receipt then proves that the card owns
-the matching private key. The module never implicitly trusts a certificate
-obtained from the card.
+the target applet. The Rust certificate verifier validates the chain against
+the selected CA, including validity periods and CA constraints, before the leaf
+P-256 key is used for SCP11 authentication. The SCP11 receipt then proves that
+the card owns the matching private key. The module never implicitly trusts a
+certificate obtained from the card.
 
 Optional configuration:
 
