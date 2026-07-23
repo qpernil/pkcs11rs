@@ -915,8 +915,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
 
 #[cfg(any(test, feature = "abi-tests"))]
 fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
-    let private_key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
-        .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+    let private_key = crate::certificate_builder::rsa_key();
     let public_key = RsaPublicKey::from(&private_key);
     let objects = HashMap::from([
         (
