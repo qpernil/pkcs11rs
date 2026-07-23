@@ -2181,6 +2181,128 @@ done
                 (0, 0, 0, 0, 0),
             )
 
+    def test_abi_yubihsm_public_object_mutation_requires_login(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session),
+            ),
+            CKR_OK,
+        )
+
+        def find_one(object_id: int, object_class: int) -> int:
+            encoded_id = (CK_BYTE * 2)(*object_id.to_bytes(2, "big"))
+            encoded_class = CK_ULONG(object_class)
+            template = (CK_ATTRIBUTE * 2)(
+                CK_ATTRIBUTE(CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), 2),
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(encoded_class), CK_VOID_PTR),
+                    ctypes.sizeof(encoded_class),
+                ),
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handle = CK_ULONG()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session, ctypes.byref(handle), 1, ctypes.byref(found)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            return handle.value
+
+        def policy(handle: int) -> tuple[int, int, int]:
+            values = [CK_BYTE() for _ in range(3)]
+            attributes = (CK_ATTRIBUTE * 3)(
+                *[
+                    CK_ATTRIBUTE(
+                        attribute_type,
+                        ctypes.cast(ctypes.byref(value), CK_VOID_PTR),
+                        ctypes.sizeof(value),
+                    )
+                    for attribute_type, value in zip(
+                        (CKA_MODIFIABLE, CKA_COPYABLE, CKA_DESTROYABLE), values
+                    )
+                ]
+            )
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, attributes, len(attributes)
+                ),
+                CKR_OK,
+            )
+            return tuple(value.value for value in values)
+
+        public_key = find_one(1, CKO_PUBLIC_KEY)
+        opaque_data = find_one(5, CKO_DATA)
+        self.assertEqual(policy(public_key), (1, 0, 0))
+        self.assertEqual(policy(opaque_data), (1, 0, 1))
+
+        label = (CK_BYTE * len(b"updated public key"))(*b"updated public key")
+        attribute = CK_ATTRIBUTE(
+            CKA_LABEL, ctypes.cast(label, CK_VOID_PTR), len(label)
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(
+                session, public_key, ctypes.byref(attribute), 1
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(
+                session, opaque_data, ctypes.byref(attribute), 1
+            ),
+            CKR_USER_NOT_LOGGED_IN,
+        )
+        self.assertEqual(
+            self.lib.C_DestroyObject(session, public_key), CKR_ACTION_PROHIBITED
+        )
+        self.assertEqual(
+            self.lib.C_DestroyObject(session, opaque_data), CKR_USER_NOT_LOGGED_IN
+        )
+        copied = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_CopyObject(
+                session, public_key, None, 0, ctypes.byref(copied)
+            ),
+            CKR_ACTION_PROHIBITED,
+        )
+
+        self.login_session(session)
+        self.assertEqual(
+            self.lib.C_SetAttributeValue(
+                session, public_key, ctypes.byref(attribute), 1
+            ),
+            CKR_OK,
+        )
+        label_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_LABEL, ctypes.cast(label, CK_VOID_PTR), len(label))
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, label_template, 1), CKR_OK
+        )
+        updated = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session, ctypes.byref(updated), 1, ctypes.byref(found)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(updated.value, public_key)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
     def test_abi_yubihsm_wrap_key_object_types_match_reference(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
@@ -2357,7 +2479,7 @@ done
             (CKA_TOKEN, 1),
             (CKA_PRIVATE, 0),
             (CKA_SENSITIVE, 0),
-            (CKA_MODIFIABLE, 0),
+            (CKA_MODIFIABLE, 1),
             (CKA_COPYABLE, 0),
             (CKA_DESTROYABLE, 1),
         ]:

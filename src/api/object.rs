@@ -1132,7 +1132,7 @@ fn copy_object(
             return Err(CKR_ACTION_PROHIBITED.into());
         }
         if matches!(copied_object.material, KeyMaterial::YubiHsm { .. }) {
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            return Err(CKR_ACTION_PROHIBITED.into());
         }
 
         let mut rv = CKR_OK as CK_RV;
@@ -1194,6 +1194,12 @@ fn destroy_object(
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
+        if stored_object.is_yubihsm_synthetic_public() {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        if stored_object.token && ctx.get_slot(slot_id)?.is_yubihsm() && !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         let piv_action = match &stored_object.material {
             KeyMaterial::PivPrivate { slot, .. } => Some((true, *slot)),
             KeyMaterial::PivCertificate { .. } => {
@@ -1236,9 +1242,6 @@ fn destroy_object(
             id, object_type, ..
         } = stored_object.material
         {
-            if matches!(object_type, YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC) {
-                return Ok(());
-            }
             let related_metadata = ctx
                 .get_slot(slot_id)?
                 .yubihsm_related_metadata_object(id, object_type)?;
@@ -1636,6 +1639,9 @@ fn set_attribute_value(
             if templ.is_empty() {
                 return Ok(());
             }
+            if !matches!(stored_object.material, KeyMaterial::YubiHsm { .. }) {
+                return Err(CKR_ACTION_PROHIBITED.into());
+            }
             let mut id = None;
             let mut label = None;
             for attribute in templ {
@@ -1653,6 +1659,9 @@ fn set_attribute_value(
                     }
                     _ => return Err(CKR_ATTRIBUTE_READ_ONLY.into()),
                 }
+            }
+            if !logged_in {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
                 slot_id,
