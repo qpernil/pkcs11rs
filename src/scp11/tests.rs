@@ -204,7 +204,7 @@ fn authenticates_scp11b_against_fixed_p256_vector() {
         variant: Scp11Variant::B,
         key_version: 1,
         card_public_key: Some(parse_public_point(&static_public).unwrap()),
-        trust_anchors: Vec::new(),
+        certificate_trust: None,
         host: None,
     };
     let session = keys
@@ -261,7 +261,7 @@ fn authenticates_scp11a_with_oce_certificate_upload_and_static_ecdh() {
         variant: Scp11Variant::A,
         key_version: 1,
         card_public_key: Some(parse_public_point(&static_public).unwrap()),
-        trust_anchors: Vec::new(),
+        certificate_trust: None,
         host: Some(Scp11aHostCredentials {
             key_version: 0,
             key_id: 0,

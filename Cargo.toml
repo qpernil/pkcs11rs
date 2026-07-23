@@ -25,6 +25,18 @@ curl = "0.4.50"
 flate2 = "1.1.9"
 openssl = "0.10.81"
 zeroize = "1.9.0"
+const-oid = "0.9.6"
+der = { version = "0.7.10", features = ["alloc", "pem", "std"] }
+p256 = { version = "0.13.2", features = ["ecdh", "ecdsa", "pem", "pkcs8"] }
+p384 = { version = "0.13.1", features = ["ecdsa", "pem", "pkcs8"] }
+rsa = { version = "0.9.8", features = ["pem", "sha2"] }
+rustls-pki-types = "1.15.1"
+sha1 = { version = "0.10.6", features = ["oid"] }
+sha2 = { version = "0.10.9", features = ["oid"] }
+signature = "2.2.0"
+spki = { version = "0.7.3", features = ["alloc", "pem", "std"] }
+x509-cert = { version = "0.2.5", features = ["builder", "pem", "std"] }
+webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"] }
 
 [build-dependencies]
 bindgen = "0.72.1"
