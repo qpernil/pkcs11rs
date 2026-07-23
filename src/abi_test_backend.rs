@@ -196,22 +196,11 @@ impl Connector for AbiPivConnector {
 
 #[cfg(feature = "abi-tests")]
 pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
-    let private_key = Rsa::generate(2048)?;
-    let public_key =
-        Rsa::from_public_components(private_key.n().to_owned()?, private_key.e().to_owned()?)?;
-    let certificate_key = openssl::pkey::PKey::from_rsa(private_key)?;
-    let mut name = openssl::x509::X509Name::builder()?;
-    name.append_entry_by_text("CN", "PKCS11RS ABI PIV")?;
-    let name = name.build();
-    let mut certificate = openssl::x509::X509::builder()?;
-    certificate.set_version(2)?;
-    certificate.set_subject_name(&name)?;
-    certificate.set_issuer_name(&name)?;
-    certificate.set_pubkey(&certificate_key)?;
-    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
-    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-    certificate.sign(&certificate_key, openssl::hash::MessageDigest::sha256())?;
-    let certificate = certificate.build().to_der()?;
+    let private_key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let public_key = RsaPublicKey::from(&private_key);
+    let certificate =
+        certificate_builder::rsa_certificate(&private_key, "CN=PKCS11RS ABI PIV", &[1]);
     let certificate_data = piv::encode_certificate_object(&certificate)?;
     let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
     Ok(PivSlot {
@@ -544,7 +533,7 @@ impl Session for AbiYubiHsmSession {
         } else {
             &[0; 16]
         };
-        let (cipher, mode, iv, input) = match command.code() {
+        let (direction, iv, input) = match command.code() {
             YubiHsmCommandCode::GetOpaque => {
                 return match id {
                     0 => abi_yubihsm_attestation_signer_certificate(),
@@ -559,21 +548,23 @@ impl Session for AbiYubiHsmSession {
                 }
                 return abi_yubihsm_device_attestation();
             }
-            YubiHsmCommandCode::EncryptEcb => {
-                (Cipher::aes_128_ecb(), Mode::Encrypt, None, data.get(2..))
-            }
-            YubiHsmCommandCode::DecryptEcb => {
-                (Cipher::aes_128_ecb(), Mode::Decrypt, None, data.get(2..))
-            }
+            YubiHsmCommandCode::EncryptEcb => (
+                secure_channel_crypto::Direction::Encrypt,
+                None,
+                data.get(2..),
+            ),
+            YubiHsmCommandCode::DecryptEcb => (
+                secure_channel_crypto::Direction::Decrypt,
+                None,
+                data.get(2..),
+            ),
             YubiHsmCommandCode::EncryptCbc => (
-                Cipher::aes_128_cbc(),
-                Mode::Encrypt,
+                secure_channel_crypto::Direction::Encrypt,
                 data.get(2..18),
                 data.get(18..),
             ),
             YubiHsmCommandCode::DecryptCbc => (
-                Cipher::aes_128_cbc(),
-                Mode::Decrypt,
+                secure_channel_crypto::Direction::Decrypt,
                 data.get(2..18),
                 data.get(18..),
             ),
@@ -583,13 +574,11 @@ impl Session for AbiYubiHsmSession {
         if !input.len().is_multiple_of(AES_BLOCK_LENGTH) {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let mut crypter = Crypter::new(cipher, mode, key, iv)?;
-        crypter.pad(false);
-        let mut output = vec![0; input.len() + AES_BLOCK_LENGTH];
-        let written = crypter.update(input, &mut output)?;
-        let final_written = crypter.finalize(&mut output[written..])?;
-        output.truncate(written + final_written);
-        Ok(output)
+        if let Some(iv) = iv {
+            secure_channel_crypto::aes_cbc(key, iv, input, direction)
+        } else {
+            secure_channel_crypto::aes_ecb(key, input, direction)
+        }
     }
 }
 
@@ -605,64 +594,52 @@ const ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID: u16 = 6;
 const ABI_YUBIHSM_OPAQUE_DATA: &[u8] = b"ABI opaque data";
 
 #[cfg(feature = "abi-tests")]
-fn abi_yubihsm_private_key(scalar: u32) -> Result<PKey<Private>, Error> {
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
-    let private = BigNum::from_u32(scalar)?;
-    let mut public = EcPoint::new(&group)?;
-    let mut context = openssl::bn::BigNumContext::new()?;
-    public.mul_generator2(&group, &private, &mut context)?;
-    Ok(PKey::from_ec_key(EcKey::from_private_components(
-        &group, &private, &public,
-    )?)?)
+fn abi_yubihsm_private_key(scalar: u32) -> Result<p256::ecdsa::SigningKey, Error> {
+    let mut encoded = [0; 32];
+    encoded[28..].copy_from_slice(&scalar.to_be_bytes());
+    p256::SecretKey::from_slice(&encoded)
+        .map(p256::ecdsa::SigningKey::from)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 
 #[cfg(feature = "abi-tests")]
-fn abi_yubihsm_public_key(key: &PKey<Private>) -> Result<PKey<Public>, Error> {
-    Ok(PKey::public_key_from_der(&key.public_key_to_der()?)?)
+fn abi_yubihsm_public_key(key: &p256::ecdsa::SigningKey) -> p256::ecdsa::VerifyingKey {
+    *key.verifying_key()
 }
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_device_public_key() -> Result<Vec<u8>, Error> {
-    let key = abi_yubihsm_private_key(1)?.ec_key()?;
-    let mut context = openssl::bn::BigNumContext::new()?;
-    Ok(key
-        .public_key()
-        .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut context)?)
+    let key = abi_yubihsm_private_key(1)?;
+    Ok(certificate_builder::p256_public_point(key.verifying_key()))
 }
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_certificate(
-    public_key: &PKey<Public>,
-    signer: &PKey<Private>,
+    public_key: &p256::ecdsa::VerifyingKey,
+    signer: &p256::ecdsa::SigningKey,
     serial: u32,
 ) -> Result<Vec<u8>, Error> {
-    let mut name = openssl::x509::X509Name::builder()?;
-    name.append_entry_by_text("CN", "PKCS11RS ABI YubiHSM attestation")?;
-    let name = name.build();
-    let serial = BigNum::from_u32(serial)?.to_asn1_integer()?;
-    let mut certificate = openssl::x509::X509::builder()?;
-    certificate.set_version(2)?;
-    certificate.set_serial_number(&serial)?;
-    certificate.set_subject_name(&name)?;
-    certificate.set_issuer_name(&name)?;
-    certificate.set_pubkey(public_key)?;
-    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
-    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-    certificate.sign(signer, openssl::hash::MessageDigest::sha256())?;
-    Ok(certificate.build().to_der()?)
+    Ok(certificate_builder::p256_certificate(
+        public_key,
+        signer,
+        "CN=PKCS11RS ABI YubiHSM attestation",
+        "CN=PKCS11RS ABI YubiHSM attestation",
+        serial,
+        false,
+    ))
 }
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_attestation_signer_certificate() -> Result<Vec<u8>, Error> {
     let signer = abi_yubihsm_private_key(2)?;
-    abi_yubihsm_certificate(&abi_yubihsm_public_key(&signer)?, &signer, 1)
+    abi_yubihsm_certificate(&abi_yubihsm_public_key(&signer), &signer, 1)
 }
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_device_attestation() -> Result<Vec<u8>, Error> {
     let device = abi_yubihsm_private_key(1)?;
     let signer = abi_yubihsm_private_key(2)?;
-    abi_yubihsm_certificate(&abi_yubihsm_public_key(&device)?, &signer, 2)
+    abi_yubihsm_certificate(&abi_yubihsm_public_key(&device), &signer, 2)
 }
 
 #[cfg(feature = "abi-tests")]
@@ -671,23 +648,10 @@ fn abi_yubihsm_opaque_certificate() -> Result<Vec<u8>, Error> {
     if let Some(certificate) = CERTIFICATE.get() {
         return Ok(certificate.clone());
     }
-    let private_key = Rsa::generate(2048)?;
-    let certificate_key = PKey::from_rsa(private_key)?;
-    let mut name = openssl::x509::X509Name::builder()?;
-    name.append_entry_by_text("CN", "PKCS11RS ABI YubiHSM")?;
-    let name = name.build();
-    let serial_number = BigNum::from_slice(&[0x80])?;
-    let serial = openssl::asn1::Asn1Integer::from_bn(&serial_number)?;
-    let mut certificate = openssl::x509::X509::builder()?;
-    certificate.set_version(2)?;
-    certificate.set_serial_number(&serial)?;
-    certificate.set_subject_name(&name)?;
-    certificate.set_issuer_name(&name)?;
-    certificate.set_pubkey(&certificate_key)?;
-    certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
-    certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-    certificate.sign(&certificate_key, openssl::hash::MessageDigest::sha256())?;
-    let certificate = certificate.build().to_der()?;
+    let private_key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let certificate =
+        certificate_builder::rsa_certificate(&private_key, "CN=PKCS11RS ABI YubiHSM", &[0x80]);
     let _ = CERTIFICATE.set(certificate);
     CERTIFICATE.get().cloned().ok_or(CKR_DEVICE_ERROR.into())
 }

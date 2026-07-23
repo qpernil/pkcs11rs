@@ -166,7 +166,7 @@ fn verify(
         let signature = from_raw_parts(signature, signature_len as usize)?;
         match &operation.key {
             KeyMaterial::RsaPublic(public_key) => {
-                if signature.len() != public_key.size() as usize {
+                if signature.len() != public_key.size() {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
                 let recovered = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
@@ -178,10 +178,10 @@ fn verify(
                 }
                 .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
                 let expected = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-                    if data.len() > public_key.size() as usize {
+                    if data.len() > public_key.size() {
                         return Err(CKR_DATA_LEN_RANGE.into());
                     }
-                    let mut expected = vec![0; public_key.size() as usize - data.len()];
+                    let mut expected = vec![0; public_key.size() - data.len()];
                     expected.extend_from_slice(data);
                     expected
                 } else if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {

@@ -60,7 +60,7 @@ impl PivPublicKey {
 }
 
 fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
-    let digest = hash(MessageDigest::sha256(), value).map_err(Error::from)?;
+    let digest = hash(MessageDigest::sha256(), value)?;
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
@@ -147,7 +147,7 @@ fn piv_public_key_from_metadata(
                 BigUint::from_bytes_be(&exponent),
             )
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
-            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+            if public_key.size() != algorithm.rsa_input_length().unwrap_or_default() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Ok(PivPublicKey::Rsa(public_key))
@@ -207,7 +207,7 @@ fn piv_public_key_from_certificate(
         | piv::Algorithm::Rsa4096 => {
             let public_key = RsaPublicKey::from_pkcs1_der(&certificate_key)
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?;
-            if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
+            if public_key.size() != algorithm.rsa_input_length().unwrap_or_default() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Ok(PivPublicKey::Rsa(public_key))

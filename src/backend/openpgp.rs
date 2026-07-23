@@ -778,7 +778,7 @@ fn openpgp_private_key_template(
     };
     match (algorithm, material) {
         (OpenPgpAlgorithm::Rsa { bits }, KeyMaterial::RsaPrivate(key)) => {
-            if key.size() as usize * 8 != bits
+            if key.size() * 8 != bits
                 || algorithm_attributes.len() < 6
                 || algorithm_attributes[0] != 1
                 || usize::from(u16::from_be_bytes([

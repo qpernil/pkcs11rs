@@ -1,18 +1,7 @@
 #[cfg(not(feature = "abi-tests"))]
 mod hardware_provisioning {
     use super::*;
-    use openssl::{
-        asn1::Asn1Time,
-        bn::{BigNum, BigNumContext},
-        ec::{EcGroup, EcKey, EcPoint},
-        hash::MessageDigest,
-        nid::Nid,
-        pkey::PKey,
-        x509::{
-            extension::{BasicConstraints, KeyUsage},
-            X509NameBuilder,
-        },
-    };
+    use p256::ecdsa::SigningKey;
     use std::rc::Rc;
 
     const ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH";
@@ -57,75 +46,31 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     }
 
     fn scp11b_certificate_chain(public_point: &[u8], kvn: u8) -> Vec<Vec<u8>> {
-        let ca_key = EcKey::private_key_from_pem(SCP11B_TEST_CA_KEY)
-            .expect("invalid embedded SCP11B test CA key");
-        let ca_pkey = PKey::from_ec_key(ca_key).expect("invalid SCP11B test CA key");
-        let mut ca_name = X509NameBuilder::new().expect("failed to build test CA name");
-        ca_name
-            .append_entry_by_text("CN", "pkcs11rs SCP11 test CA")
-            .expect("failed to set test CA name");
-        let ca_name = ca_name.build();
-        let mut ca = openssl::x509::X509::builder().expect("failed to build test CA certificate");
-        ca.set_version(2).unwrap();
-        let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
-        ca.set_serial_number(&serial).unwrap();
-        ca.set_subject_name(&ca_name).unwrap();
-        ca.set_issuer_name(&ca_name).unwrap();
-        ca.set_pubkey(&ca_pkey).unwrap();
-        ca.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-            .unwrap();
-        ca.set_not_after(Asn1Time::days_from_now(3650).unwrap().as_ref())
-            .unwrap();
-        ca.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-            .unwrap();
-        ca.append_extension(
-            KeyUsage::new()
-                .critical()
-                .key_cert_sign()
-                .crl_sign()
-                .build()
-                .unwrap(),
+        let ca_secret = p256::SecretKey::from_sec1_pem(
+            std::str::from_utf8(SCP11B_TEST_CA_KEY).unwrap(),
         )
-        .unwrap();
-        ca.sign(&ca_pkey, MessageDigest::sha256()).unwrap();
-        let ca = ca.build();
-
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-        let mut context = BigNumContext::new().unwrap();
-        let point = EcPoint::from_bytes(&group, public_point, &mut context)
-            .expect("device returned an invalid P-256 public point");
-        let leaf_key = EcKey::from_public_key(&group, &point)
+        .expect("invalid embedded SCP11B test CA key");
+        let ca_key = SigningKey::from(ca_secret);
+        let ca_name = "CN=pkcs11rs SCP11 test CA";
+        let ca = crate::certificate_builder::p256_certificate(
+            ca_key.verifying_key(),
+            &ca_key,
+            ca_name,
+            ca_name,
+            1,
+            true,
+        );
+        let leaf_key = p256::ecdsa::VerifyingKey::from_sec1_bytes(public_point)
             .expect("device returned an invalid P-256 public key");
-        leaf_key
-            .check_key()
-            .expect("device returned an invalid P-256 public key");
-        let leaf_pkey = PKey::from_ec_key(leaf_key).unwrap();
-        let mut leaf_name = X509NameBuilder::new().unwrap();
-        leaf_name
-            .append_entry_by_text("CN", &format!("pkcs11rs SCP11B KVN {kvn}"))
-            .unwrap();
-        let leaf_name = leaf_name.build();
-        let mut leaf = openssl::x509::X509::builder().unwrap();
-        leaf.set_version(2).unwrap();
-        let serial = BigNum::from_u32(u32::from(kvn) + 1)
-            .unwrap()
-            .to_asn1_integer()
-            .unwrap();
-        leaf.set_serial_number(&serial).unwrap();
-        leaf.set_subject_name(&leaf_name).unwrap();
-        leaf.set_issuer_name(ca.subject_name()).unwrap();
-        leaf.set_pubkey(&leaf_pkey).unwrap();
-        leaf.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-            .unwrap();
-        leaf.set_not_after(Asn1Time::days_from_now(3650).unwrap().as_ref())
-            .unwrap();
-        leaf.append_extension(BasicConstraints::new().critical().build().unwrap())
-            .unwrap();
-        leaf.append_extension(KeyUsage::new().critical().key_agreement().build().unwrap())
-            .unwrap();
-        leaf.sign(&ca_pkey, MessageDigest::sha256()).unwrap();
-
-        vec![ca.to_der().unwrap(), leaf.build().to_der().unwrap()]
+        let leaf = crate::certificate_builder::p256_certificate(
+            &leaf_key,
+            &ca_key,
+            &format!("CN=pkcs11rs SCP11B KVN {kvn}"),
+            ca_name,
+            u32::from(kvn) + 1,
+            false,
+        );
+        vec![ca, leaf]
     }
 
     fn select_connector(

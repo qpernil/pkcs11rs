@@ -513,7 +513,7 @@ fn crypt(
             required
         } else {
             match &operation.key {
-                KeyMaterial::RsaPublic(key) => key.size() as usize,
+                KeyMaterial::RsaPublic(key) => key.size(),
                 KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
                 KeyMaterial::OpenPgpPrivate { modulus, .. } if !encrypting => modulus.len(),
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
@@ -547,7 +547,7 @@ fn crypt(
                 KeyMaterial::RsaPublic(key)
                     if encrypting && operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE =>
                 {
-                    if input.len() != key.size() as usize {
+                    if input.len() != key.size() {
                         return Err(CKR_DATA_LEN_RANGE.into());
                     }
                     rsa_public_operation(key, input)
@@ -560,7 +560,7 @@ fn crypt(
                         operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
                     let encoded = rsa_oaep_pad(
                         input,
-                        key.size() as usize,
+                        key.size(),
                         *mgf,
                         *hash_mechanism,
                         label_digest,

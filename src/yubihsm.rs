@@ -11,8 +11,6 @@ use crate::{
     CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, CKR_SESSION_CLOSED,
     CKR_SESSION_COUNT,
 };
-#[cfg(test)]
-use openssl::pkey::Id;
 use p256::{
     ecdh::diffie_hellman, elliptic_curve::sec1::ToEncodedPoint, PublicKey as P256PublicKey,
     SecretKey as P256SecretKey,
