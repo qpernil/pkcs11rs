@@ -801,7 +801,7 @@ fn parse_certificate_bundle(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
             if tlv.tag != 0x30 {
                 return Err(CKR_DATA_INVALID.into());
             }
-            openssl::x509::X509::from_der(tlv.encoded)?;
+            crate::certificate_chain::validate(tlv.encoded)?;
             Ok(tlv.encoded.to_vec())
         })
         .collect()
