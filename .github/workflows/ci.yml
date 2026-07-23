@@ -26,10 +26,10 @@ jobs:
         run: cargo xtask bindings --check
 
       - name: Run Rust tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run Python ABI tests
         run: python3 test_pkcs11.py
@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Compile Rust tests
-        run: cargo test --no-run
+        run: cargo test --locked --no-run
 
       - name: Check ABI test backend
-        run: cargo check --features abi-tests
+        run: cargo check --locked --features abi-tests

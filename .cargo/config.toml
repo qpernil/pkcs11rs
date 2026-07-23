@@ -1,2 +1,2 @@
 [alias]
-xtask = "run --manifest-path xtask/Cargo.toml --target-dir target/xtask --"
+xtask = "run --locked --manifest-path xtask/Cargo.toml --target-dir target/xtask --"

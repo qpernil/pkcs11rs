@@ -24,7 +24,9 @@ class HardwareDiscoveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         subprocess.run(
-            ["cargo", "build", "--no-default-features"], cwd=ROOT, check=True
+            ["cargo", "build", "--locked", "--no-default-features"],
+            cwd=ROOT,
+            check=True,
         )
         cls.lib = ctypes.CDLL(str(library_path()))
         cls.lib.C_Initialize.argtypes = [ctypes.c_void_p]
