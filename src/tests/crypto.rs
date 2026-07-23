@@ -383,7 +383,7 @@ pub fn piv_rsa_pss_hash_mapping_preserves_sha3_variants() {
 
 #[test]
 pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
-    let private = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
+    let private = crate::certificate_builder::rsa_key();
     let public = rsa::RsaPublicKey::from(&private);
     let data = b"padding test";
     let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
@@ -1199,8 +1199,10 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
 
 #[test]
 fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
-    let private_key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
-    let public_key = rsa::RsaPublicKey::from(&private_key);
+    let private_key = crate::certificate_builder::p256_key();
+    let public_key = crate::PivPublicKey::Ec(
+        crate::certificate_builder::p256_public_point(private_key.verifying_key()),
+    );
     let slot = crate::PivSlot {
         connector: std::rc::Rc::new(FailingConnector),
         application_aid: crate::piv::PIV_AID.to_vec(),
@@ -1215,8 +1217,8 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
         serial: String::from("TEST0001"),
         keys: vec![crate::PivKey {
             slot: crate::piv::Slot::Attestation,
-            algorithm: crate::piv::Algorithm::Rsa2048,
-            public_key: crate::PivPublicKey::Rsa(public_key),
+            algorithm: crate::piv::Algorithm::EccP256,
+            public_key,
             attestation: std::rc::Rc::new(std::cell::RefCell::new(None)),
             attestation_attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
             pin_policy: 0,

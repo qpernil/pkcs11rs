@@ -2,15 +2,15 @@ use der::Encode;
 #[cfg(test)]
 use der::{pem::LineEnding, EncodePem};
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
-#[cfg(test)]
+#[cfg(any(test, feature = "abi-tests"))]
 use rand_core::OsRng;
-use rsa::{
-    pkcs1v15::{Signature as RsaSignature, SigningKey as RsaSigningKey},
-    RsaPrivateKey,
-};
-use sha2::Sha256;
-use signature::Keypair;
+#[cfg(feature = "abi-tests")]
+use rsa::RsaPublicKey;
+#[cfg(any(test, feature = "abi-tests"))]
+use rsa::{pkcs8::DecodePrivateKey, RsaPrivateKey};
 use spki::SubjectPublicKeyInfoOwned;
+#[cfg(any(test, feature = "abi-tests"))]
+use std::sync::OnceLock;
 use std::{str::FromStr, time::Duration};
 use x509_cert::{
     builder::{Builder, CertificateBuilder, Profile},
@@ -19,9 +19,19 @@ use x509_cert::{
     time::Validity,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "abi-tests"))]
 pub(crate) fn p256_key() -> SigningKey {
     SigningKey::random(&mut OsRng)
+}
+
+#[cfg(any(test, feature = "abi-tests"))]
+pub(crate) fn rsa_key() -> RsaPrivateKey {
+    static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+    KEY.get_or_init(|| {
+        RsaPrivateKey::from_pkcs8_pem(include_str!("fixtures/test-rsa-private-key.pem"))
+            .expect("valid RSA test fixture")
+    })
+    .clone()
 }
 
 pub(crate) fn p256_public_point(key: &VerifyingKey) -> Vec<u8> {
@@ -73,20 +83,26 @@ pub(crate) fn p256_certificate(
     builder.build::<DerSignature>().unwrap().to_der().unwrap()
 }
 
-pub(crate) fn rsa_certificate(
-    private_key: &RsaPrivateKey,
+#[cfg(feature = "abi-tests")]
+pub(crate) fn p256_certificate_for_rsa(
+    public_key: &RsaPublicKey,
+    signer: &SigningKey,
     subject: &str,
-    serial: &[u8],
+    issuer: &str,
+    serial: u32,
 ) -> Vec<u8> {
-    let signer = RsaSigningKey::<Sha256>::new(private_key.clone());
     let builder = CertificateBuilder::new(
-        Profile::Root,
-        SerialNumber::new(serial).unwrap(),
+        Profile::Leaf {
+            issuer: Name::from_str(issuer).unwrap(),
+            enable_key_agreement: false,
+            enable_key_encipherment: true,
+        },
+        SerialNumber::from(serial),
         Validity::from_now(Duration::from_secs(86_400 * 3_650)).unwrap(),
         Name::from_str(subject).unwrap(),
-        SubjectPublicKeyInfoOwned::from_key(signer.verifying_key()).unwrap(),
-        &signer,
+        SubjectPublicKeyInfoOwned::from_key(public_key.clone()).unwrap(),
+        signer,
     )
     .unwrap();
-    builder.build::<RsaSignature>().unwrap().to_der().unwrap()
+    builder.build::<DerSignature>().unwrap().to_der().unwrap()
 }

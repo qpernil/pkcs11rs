@@ -500,8 +500,9 @@ fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
 
 #[test]
 fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities() {
-    let generated = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
-    let public_key = rsa::RsaPublicKey::from(&generated);
+    let generated = crate::certificate_builder::p256_key();
+    let public_key =
+        crate::certificate_builder::p256_public_point(generated.verifying_key());
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot {
         connector,
@@ -516,15 +517,18 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
         kdf: None,
         keys: vec![crate::openpgp::KeyInfo {
             key_ref: crate::openpgp::KeyRef::Attestation,
-            algorithm: crate::openpgp::Algorithm::Rsa { bits: 2048 },
-            public_key: crate::openpgp::PublicKey::Rsa(public_key),
+            algorithm: crate::openpgp::Algorithm::Ecdsa(crate::openpgp::Curve::P256),
+            public_key: crate::openpgp::PublicKey::Ec {
+                curve: crate::openpgp::Curve::P256,
+                point: public_key,
+            },
             pin_policy: 0,
             touch_policy: 1,
             local: false,
         }],
         certificates: vec![crate::OpenPgpCertificate {
             key_ref: crate::openpgp::KeyRef::Attestation,
-            key_type: CKK_RSA as CK_KEY_TYPE,
+            key_type: CKK_EC as CK_KEY_TYPE,
             value: vec![0x30, 0],
         }],
         data_objects: Vec::new(),
