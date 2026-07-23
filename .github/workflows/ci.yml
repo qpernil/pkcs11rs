@@ -18,10 +18,12 @@ jobs:
           sudo apt-get install -y \
             clang \
             libclang-dev \
-            libcurl4-openssl-dev \
             libpcsclite-dev \
             libusb-1.0-0-dev \
             pkg-config
+
+      - name: Check generated PKCS #11 bindings
+        run: cargo xtask bindings --check
 
       - name: Run Rust tests
         run: cargo test
@@ -34,8 +36,6 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    env:
-      LIBCLANG_PATH: C:\Program Files\LLVM\bin
 
     steps:
       - name: Check out repository

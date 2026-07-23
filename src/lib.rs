@@ -407,7 +407,7 @@ pub mod pkcs11 {
         non_upper_case_globals
     )]
 
-    include!(concat!(env!("OUT_DIR"), "/pkcs11.rs"));
+    include!("pkcs11.rs");
 }
 use pkcs11::*;
 

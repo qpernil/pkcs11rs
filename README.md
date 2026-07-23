@@ -50,7 +50,6 @@ Building requires a Rust toolchain plus the development files for:
 
 - PC/SC
 - libusb 1.0
-- Clang/libclang, used by `bindgen` for the vendored PKCS #11 3.2 headers
 
 The exact package names depend on the operating system and package manager.
 Remote YubiHSM Connector HTTPS uses rustls and does not require OpenSSL or
@@ -203,10 +202,14 @@ is not intended for a normal module build.
 
 [`pkcs11.h`](pkcs11.h), [`pkcs11f.h`](pkcs11f.h), and
 [`pkcs11t.h`](pkcs11t.h) are byte-for-byte copies of the final OASIS PKCS #11
-3.2 Standard header artifacts and retain the OASIS notices. `build.rs` runs
-`bindgen` against these repository inputs and writes the generated Rust
-bindings to Cargo's `OUT_DIR`; generated bindings are not checked into source
-control.
+3.2 Standard header artifacts and retain the OASIS notices. The generated Rust
+bindings are checked in at [`src/pkcs11.rs`](src/pkcs11.rs), so normal builds do
+not require Clang or libclang.
+
+Maintainers can regenerate the bindings with `cargo xtask bindings`. This
+explicit command requires Clang/libclang. Run `cargo xtask bindings --check` to
+verify that the checked-in bindings match the vendored headers; CI performs the
+same check.
 
 See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for provenance and licensing
 details.
