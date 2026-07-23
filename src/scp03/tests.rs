@@ -750,7 +750,7 @@ fn response_chain_is_verified_and_decrypted_as_one_response() {
     preview.protect_command(&command).unwrap();
     let plaintext: Vec<u8> = (0..300).map(|value| value as u8).collect();
     let iv = preview.command_iv(true).unwrap();
-    let ciphertext = aes_cbc(&preview.s_enc, &iv, &pad(&plaintext), Mode::Encrypt).unwrap();
+    let ciphertext = aes_cbc(&preview.s_enc, &iv, &pad(&plaintext), Direction::Encrypt).unwrap();
     let mut rmac_input = preview.mac_chaining_value.to_vec();
     rmac_input.extend_from_slice(&ciphertext);
     rmac_input.extend_from_slice(&RESPONSE_OK.to_be_bytes());

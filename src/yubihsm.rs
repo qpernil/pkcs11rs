@@ -6,7 +6,7 @@ use crate::{
     error::Error,
     secure_channel_crypto::{
         aes_cbc, aes_cmac, aes_encrypt_block as aes_block, pad_iso7816 as pad, scp03_kdf,
-        unpad_iso7816 as unpad, AES_BLOCK_SIZE,
+        unpad_iso7816 as unpad, Direction, AES_BLOCK_SIZE,
     },
     Connector, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
     CKR_DEVICE_MEMORY, CKR_ENCRYPTED_DATA_INVALID, CKR_FUNCTION_FAILED, CKR_FUNCTION_REJECTED,
@@ -19,14 +19,12 @@ use openssl::{
     bn::BigNumContext,
     derive::Deriver,
     ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
-    memcmp,
     nid::Nid,
     pkey::{PKey, Private},
-    rand::rand_bytes,
     sha::sha256,
-    symm::Mode,
 };
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 #[allow(dead_code)]
@@ -223,7 +221,7 @@ impl SecureSession {
         password: &[u8],
     ) -> Result<Self, Error> {
         let mut challenge = [0u8; CHALLENGE_LENGTH];
-        rand_bytes(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
         Self::authenticate_with_challenge(connector, authkey_id, password, challenge)
     }
 
@@ -347,7 +345,8 @@ impl SecureSession {
             let _ = session.send_command(connector, &Command::close_session());
             return Err(error);
         }
-        if expected_card.is_some_and(|expected| !memcmp::eq(&expected, &handshake.card_cryptogram))
+        if expected_card
+            .is_some_and(|expected| !bool::from(expected.ct_eq(&handshake.card_cryptogram)))
         {
             let _ = session.send_command(connector, &Command::close_session());
             return Err(CKR_ENCRYPTED_DATA_INVALID.into());
@@ -468,7 +467,7 @@ impl SecureSession {
         receipt_input.extend_from_slice(&device_ephemeral_public);
         receipt_input.extend_from_slice(&host_ephemeral_public);
         let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
-        if !memcmp::eq(&expected_receipt, &receipt) {
+        if !bool::from(expected_receipt.ct_eq(&receipt)) {
             return Err(CKR_PIN_INCORRECT.into());
         }
 
@@ -510,7 +509,7 @@ impl SecureSession {
         let data = command.data();
         let inner = Frame::new(code, data.to_vec())?.encode();
         let iv = aes_block(&self.s_enc[..], &self.counter)?;
-        let ciphertext = aes_cbc(&self.s_enc[..], &iv, &pad(&inner), Mode::Encrypt)?;
+        let ciphertext = aes_cbc(&self.s_enc[..], &iv, &pad(&inner), Direction::Encrypt)?;
         let mut outer_data = Vec::with_capacity(1 + ciphertext.len());
         outer_data.push(self.sid);
         outer_data.extend_from_slice(&ciphertext);
@@ -524,7 +523,7 @@ impl SecureSession {
         {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        let clear = aes_cbc(&self.s_enc[..], &iv, &encrypted[1..], Mode::Decrypt)?;
+        let clear = aes_cbc(&self.s_enc[..], &iv, &encrypted[1..], Direction::Decrypt)?;
         let response = Frame::parse(&unpad(clear)?)?;
         increment_counter(&mut self.counter);
         self.valid = true;
@@ -612,7 +611,7 @@ impl SecureSession {
         rmac_input.extend_from_slice(&self.mac_chaining_value);
         rmac_input.extend_from_slice(&authenticated_response);
         let expected = aes_cmac(&self.s_rmac[..], &rmac_input)?;
-        if !memcmp::eq(&expected[..MAC_LENGTH], &response.data[payload_length..]) {
+        if !bool::from(expected[..MAC_LENGTH].ct_eq(&response.data[payload_length..])) {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Frame::new(response.command, response.data[..payload_length].to_vec())

@@ -10,12 +10,12 @@ use openssl::{
     derive::Deriver,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     hash::{Hasher, MessageDigest},
-    memcmp,
     nid::Nid,
     pkey::{PKey, Private, Public},
     x509::X509,
 };
 use std::{env, fs};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 const SCP11A_KEY_ID: u8 = 0x11;
@@ -105,9 +105,7 @@ impl Scp11KeySet {
                 let anchors = load_certificates(&path)?;
                 (
                     None,
-                    Some(crate::certificate_chain::CertificateTrust::new(
-                        &anchors,
-                    )?),
+                    Some(crate::certificate_chain::CertificateTrust::new(&anchors)?),
                 )
             }
             (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => (
@@ -202,9 +200,7 @@ impl Scp11KeySet {
         crate::scp03::select_application(connector, application_aid)?;
         let card_public_key = card_public_key_from_certificates(
             &certificates?,
-            self.certificate_trust
-                .as_ref()
-                .ok_or(CKR_ARGUMENTS_BAD)?,
+            self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )?;
         let group = p256_group()?;
         let ephemeral = EcKey::generate(&group)?;
@@ -281,7 +277,7 @@ impl Scp11KeySet {
         receipt_input.extend_from_slice(&request_data);
         receipt_input.extend_from_slice(authentication.card_ephemeral_tlv);
         let expected_receipt = aes_cmac(&key_material[..SESSION_KEY_LENGTH], &receipt_input)?;
-        if !memcmp::eq(&expected_receipt, authentication.receipt) {
+        if !bool::from(expected_receipt.ct_eq(authentication.receipt)) {
             return Err(CKR_PIN_INCORRECT.into());
         }
 

@@ -1,5 +1,5 @@
 use crate::{
-    secure_channel_crypto::{aes_cbc, aes_encrypt_block, AES_BLOCK_SIZE},
+    secure_channel_crypto::{aes_cbc, aes_encrypt_block, Direction, AES_BLOCK_SIZE},
     CommandApdu, Connector, Error, ResponseApdu, Scp03Session, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
     CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
 };
@@ -8,7 +8,6 @@ use openssl::{
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     nid::Nid,
     pkey::PKey,
-    symm::Mode,
     x509::X509,
 };
 use zeroize::Zeroizing;
@@ -218,7 +217,7 @@ impl Client {
                     wrapping_dek,
                     &[0; AES_BLOCK_SIZE],
                     scalar.as_slice(),
-                    Mode::Encrypt,
+                    Direction::Encrypt,
                 )?;
                 let data = put_ec_key_data(key_ref.kvn, KEY_TYPE_ECC_PRIVATE, &wrapped, curve)?;
                 (
@@ -685,7 +684,7 @@ fn scp03_put_key_command(
     let mut data = vec![new_kvn];
     let mut expected = vec![new_kvn];
     for key in [keys.enc, keys.mac, keys.dek] {
-        let wrapped = aes_cbc(wrapping_dek, &[0; AES_BLOCK_SIZE], key, Mode::Encrypt)?;
+        let wrapped = aes_cbc(wrapping_dek, &[0; AES_BLOCK_SIZE], key, Direction::Encrypt)?;
         data.extend_from_slice(&encode_tlv(KEY_TYPE_AES, &wrapped)?);
         let encrypted_ones = aes_encrypt_block(key, &[1; AES_BLOCK_SIZE])?;
         let kcv = &encrypted_ones[..3];

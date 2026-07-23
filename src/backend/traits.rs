@@ -243,7 +243,7 @@ trait Session {
     #[allow(dead_code)]
     fn get_session_info(&self) -> Result<(), Error>;
     fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
-        openssl::rand::rand_bytes(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
+        getrandom::fill(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
     }
     fn piv_sign(
         &self,

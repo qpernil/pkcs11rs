@@ -334,7 +334,7 @@ impl ProtocolPeer {
         mac_input.extend_from_slice(&request[..3 + payload_length]);
         let command_mac = aes_cmac(&session.s_mac, &mac_input)?;
         if frame.data[1..9] != session.expected_host_cryptogram
-            || !memcmp::eq(&command_mac[..MAC_LENGTH], &frame.data[payload_length..])
+            || !bool::from(command_mac[..MAC_LENGTH].ct_eq(&frame.data[payload_length..]))
         {
             *session_slot = None;
             self.closed_sessions.set(self.closed_sessions.get() + 1);
@@ -360,7 +360,7 @@ impl ProtocolPeer {
         let mut mac_input = session.mac_chaining_value.to_vec();
         mac_input.extend_from_slice(&request[..3 + payload_length]);
         let command_mac = aes_cmac(&session.s_mac, &mac_input)?;
-        if !memcmp::eq(&command_mac[..MAC_LENGTH], &frame.data[payload_length..]) {
+        if !bool::from(command_mac[..MAC_LENGTH].ct_eq(&frame.data[payload_length..])) {
             *session_slot = None;
             self.closed_sessions.set(self.closed_sessions.get() + 1);
             return Frame::new(COMMAND_ERROR, vec![0x04]).map(|frame| frame.encode());
@@ -375,7 +375,7 @@ impl ProtocolPeer {
             &session.s_enc,
             &iv,
             &frame.data[1..payload_length],
-            Mode::Decrypt,
+            Direction::Decrypt,
         )?;
         let inner = Frame::parse(&unpad(clear)?)?;
         self.inner_commands
@@ -492,7 +492,8 @@ impl ProtocolPeer {
                         8 => RFC7748_BOB_PRIVATE_KEY,
                         _ => {
                             let mut private_key = [0; 32];
-                            rand_bytes(&mut private_key)?;
+                            getrandom::fill(&mut private_key)
+                                .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
                             private_key
                         }
                     };
@@ -538,9 +539,9 @@ impl ProtocolPeer {
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                 let mode = if value == CommandCode::EncryptEcb as u8 {
-                    Mode::Encrypt
+                    Direction::Encrypt
                 } else {
-                    Mode::Decrypt
+                    Direction::Decrypt
                 };
                 (
                     inner.command | RESPONSE_BIT,
@@ -556,9 +557,9 @@ impl ProtocolPeer {
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                 let mode = if value == CommandCode::EncryptCbc as u8 {
-                    Mode::Encrypt
+                    Direction::Encrypt
                 } else {
-                    Mode::Decrypt
+                    Direction::Decrypt
                 };
                 (
                     inner.command | RESPONSE_BIT,
@@ -576,7 +577,12 @@ impl ProtocolPeer {
             _ => (inner.command | RESPONSE_BIT, inner.data),
         };
         let clear_response = Frame::new(response_command, response_data)?.encode();
-        let ciphertext = aes_cbc(&session.s_enc, &iv, &pad(&clear_response), Mode::Encrypt)?;
+        let ciphertext = aes_cbc(
+            &session.s_enc,
+            &iv,
+            &pad(&clear_response),
+            Direction::Encrypt,
+        )?;
         let mut response_data = vec![session.sid];
         response_data.extend_from_slice(&ciphertext);
 
@@ -911,7 +917,7 @@ impl Connector for AsymmetricHsmAuthPeer {
         let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
         receipt_input.extend_from_slice(&context[P256_PUBLIC_KEY_LENGTH..]);
         receipt_input.extend_from_slice(&context[..P256_PUBLIC_KEY_LENGTH]);
-        if !memcmp::eq(&aes_cmac(&keys[..16], &receipt_input)?, receipt) {
+        if !bool::from(aes_cmac(&keys[..16], &receipt_input)?.ct_eq(receipt)) {
             return Ok(crate::ResponseApdu {
                 data: Vec::new(),
                 status: 0x6a80,

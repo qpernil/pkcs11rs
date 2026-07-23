@@ -1,7 +1,6 @@
 use super::parse_p256_public_key;
 use crate::{Error, CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT};
 use openssl::{
-    memcmp,
     nid::Nid,
     pkey::{PKey, Public},
     sha::sha256,
@@ -15,6 +14,7 @@ use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
+use subtle::ConstantTimeEq;
 
 pub(crate) const TRUST_PREFIX_ENV: &str = "PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX";
 const YUBICO_ROOT: &[u8] = include_bytes!(concat!(
@@ -82,7 +82,7 @@ pub(crate) fn validate_device_public_key(
     let pem = fs::read(path).map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
     let pinned = public_key_from_pem(&pem)?;
     let pinned = pinned.public_key_to_der().map_err(Error::from)?;
-    if memcmp::eq(&expected, &pinned) {
+    if bool::from(expected.ct_eq(&pinned)) {
         Ok(())
     } else {
         Err(CKR_PIN_INCORRECT.into())
@@ -145,10 +145,7 @@ pub(crate) fn install_attestation(
         }
     }
     let attested_key = public_key_from_pem(&attestation.to_pem()?)?;
-    if !memcmp::eq(
-        &device_spki(encoded_public_point)?,
-        &attested_key.public_key_to_der()?,
-    ) {
+    if !bool::from(device_spki(encoded_public_point)?.ct_eq(&attested_key.public_key_to_der()?)) {
         return Err(CKR_PIN_INCORRECT.into());
     }
     install_pem(encoded_public_point, &attestation.to_pem()?, prefix, true)
