@@ -40,7 +40,7 @@ struct PivDataObject {
 
 #[derive(Clone, Debug)]
 enum PivPublicKey {
-    Rsa(Rsa<Public>),
+    Rsa(RsaPublicKey),
     Ec(Vec<u8>),
     Raw(Vec<u8>),
 }
@@ -68,8 +68,8 @@ fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
     let mut encoded = vec![key.algorithm as u8];
     match &key.public_key {
         PivPublicKey::Rsa(public_key) => {
-            encoded.extend(public_key.n().to_vec());
-            encoded.extend(public_key.e().to_vec());
+            encoded.extend(public_key.n().to_bytes_be());
+            encoded.extend(public_key.e().to_bytes_be());
         }
         PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
             encoded.extend_from_slice(public_key);
@@ -142,9 +142,11 @@ fn piv_public_key_from_metadata(
             | piv::Algorithm::Rsa4096,
             MetadataPublicKey::Rsa { modulus, exponent },
         ) => {
-            let modulus = BigNum::from_slice(&modulus).map_err(Error::from)?;
-            let exponent = BigNum::from_slice(&exponent).map_err(Error::from)?;
-            let public_key = Rsa::from_public_components(modulus, exponent).map_err(Error::from)?;
+            let public_key = RsaPublicKey::new(
+                BigUint::from_bytes_be(&modulus),
+                BigUint::from_bytes_be(&exponent),
+            )
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
             if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
@@ -168,26 +170,24 @@ fn piv_public_key_from_metadata(
 }
 
 fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> {
-    let certificate = openssl::x509::X509::from_der(certificate).ok()?;
-    let key = certificate.public_key().ok()?;
-    match key.id() {
-        Id::RSA => match key.rsa().ok()?.size() {
+    use rsa::pkcs1::DecodeRsaPublicKey;
+
+    let (algorithm, parameters, key) = crate::certificate_chain::public_key_parts(certificate).ok()?;
+    match algorithm.to_string().as_str() {
+        "1.2.840.113549.1.1.1" => match RsaPublicKey::from_pkcs1_der(&key).ok()?.size() {
             128 => Some(piv::Algorithm::Rsa1024),
             256 => Some(piv::Algorithm::Rsa2048),
             384 => Some(piv::Algorithm::Rsa3072),
             512 => Some(piv::Algorithm::Rsa4096),
             _ => None,
         },
-        Id::EC => {
-            let curve = key.ec_key().ok()?.group().curve_name()?;
-            match curve {
-                Nid::X9_62_PRIME256V1 => Some(piv::Algorithm::EccP256),
-                Nid::SECP384R1 => Some(piv::Algorithm::EccP384),
-                _ => None,
-            }
-        }
-        Id::ED25519 => Some(piv::Algorithm::Ed25519),
-        Id::X25519 => Some(piv::Algorithm::X25519),
+        "1.2.840.10045.2.1" => match parameters?.to_string().as_str() {
+            "1.2.840.10045.3.1.7" => Some(piv::Algorithm::EccP256),
+            "1.3.132.0.34" => Some(piv::Algorithm::EccP384),
+            _ => None,
+        },
+        "1.3.101.112" => Some(piv::Algorithm::Ed25519),
+        "1.3.101.110" => Some(piv::Algorithm::X25519),
         _ => None,
     }
 }
@@ -196,48 +196,52 @@ fn piv_public_key_from_certificate(
     algorithm: piv::Algorithm,
     certificate_der: &[u8],
 ) -> Result<PivPublicKey, Error> {
-    let certificate = openssl::x509::X509::from_der(certificate_der).map_err(Error::from)?;
-    let certificate_key = certificate.public_key().map_err(Error::from)?;
+    use rsa::pkcs1::DecodeRsaPublicKey;
+
+    let (key_algorithm, _, certificate_key) =
+        crate::certificate_chain::public_key_parts(certificate_der)?;
     match algorithm {
         piv::Algorithm::Rsa1024
         | piv::Algorithm::Rsa2048
         | piv::Algorithm::Rsa3072
         | piv::Algorithm::Rsa4096 => {
-            let public_key = certificate_key.rsa().map_err(Error::from)?;
+            let public_key = RsaPublicKey::from_pkcs1_der(&certificate_key)
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?;
             if public_key.size() as usize != algorithm.rsa_input_length().unwrap_or_default() {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Ok(PivPublicKey::Rsa(public_key))
         }
         piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
-            let public_key = certificate_key.ec_key().map_err(Error::from)?;
             let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
-            let mut context = openssl::bn::BigNumContext::new().map_err(Error::from)?;
-            let point = public_key
-                .public_key()
-                .to_bytes(
-                    public_key.group(),
-                    PointConversionForm::UNCOMPRESSED,
-                    &mut context,
-                )
-                .map_err(Error::from)?;
+            let point = certificate_key;
+            match algorithm {
+                piv::Algorithm::EccP256 => p256::PublicKey::from_sec1_bytes(&point)
+                    .map(|_| ())
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                piv::Algorithm::EccP384 => p384::PublicKey::from_sec1_bytes(&point)
+                    .map(|_| ())
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                _ => unreachable!(),
+            }
             if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Ok(PivPublicKey::Ec(point[1..].to_vec()))
         }
         piv::Algorithm::Ed25519 | piv::Algorithm::X25519 => {
-            if !matches!(
-                (algorithm, certificate_key.id()),
-                (piv::Algorithm::Ed25519, Id::ED25519) | (piv::Algorithm::X25519, Id::X25519)
-            ) {
+            let expected_oid = match algorithm {
+                piv::Algorithm::Ed25519 => "1.3.101.112",
+                piv::Algorithm::X25519 => "1.3.101.110",
+                _ => unreachable!(),
+            };
+            if key_algorithm.to_string() != expected_oid {
                 return Err(CKR_DATA_INVALID.into());
             }
-            let public_key = certificate_key.raw_public_key().map_err(Error::from)?;
-            if public_key.len() != 32 {
+            if certificate_key.len() != 32 {
                 return Err(CKR_DEVICE_ERROR.into());
             }
-            Ok(PivPublicKey::Raw(public_key))
+            Ok(PivPublicKey::Raw(certificate_key))
         }
     }
 }
@@ -1015,7 +1019,9 @@ impl Slot for PivSlot {
                 }
             };
             let (modulus, public_exponent) = match &key.public_key {
-                PivPublicKey::Rsa(public_key) => (public_key.n().to_vec(), public_key.e().to_vec()),
+                PivPublicKey::Rsa(public_key) => {
+                    (public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
+                }
                 _ => (Vec::new(), Vec::new()),
             };
             objects.push(TokenObject {

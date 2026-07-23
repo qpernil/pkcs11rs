@@ -13,9 +13,12 @@ use openssl::{
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     ecdsa::EcdsaSig,
     nid::Nid,
-    pkey::{Id, PKey, Private, Public},
-    rsa::{Padding, Rsa, RsaPrivateKeyBuilder},
+    pkey::{Id, PKey, Public},
     sign::Verifier,
+};
+use rsa::{
+    traits::{PrivateKeyParts, PublicKeyParts},
+    BigUint, RsaPrivateKey, RsaPublicKey,
 };
 use rusb::UsbContext;
 use std::{

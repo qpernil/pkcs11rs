@@ -401,6 +401,27 @@ pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
+pub(crate) fn public_key_parts(
+    encoded: &[u8],
+) -> Result<(ObjectIdentifier, Option<ObjectIdentifier>, Vec<u8>), Error> {
+    let certificate =
+        Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let spki = certificate.tbs_certificate.subject_public_key_info;
+    let parameters = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|parameters| parameters.decode_as::<ObjectIdentifier>().ok());
+    Ok((
+        spki.algorithm.oid,
+        parameters,
+        spki.subject_public_key
+            .as_bytes()
+            .ok_or(CKR_ARGUMENTS_BAD)?
+            .to_vec(),
+    ))
+}
+
 pub(crate) fn subject(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Certificate::from_der(encoded)
         .and_then(|certificate| certificate.tbs_certificate.subject.to_der())

@@ -7,7 +7,7 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_KEY_TYPE_INCONSISTENT, CKR_PIN_INCORRECT,
     CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
-use openssl::{bn::BigNum, rsa::Rsa};
+use rsa::{BigUint, RsaPublicKey};
 use sha2::{Digest, Sha256, Sha512};
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -276,7 +276,7 @@ impl Algorithm {
 
 #[derive(Clone, Debug)]
 pub(crate) enum PublicKey {
-    Rsa(Rsa<openssl::pkey::Public>),
+    Rsa(RsaPublicKey),
     Ec { curve: Curve, point: Vec<u8> },
     Raw { curve: Curve, key: Vec<u8> },
 }
@@ -1197,10 +1197,13 @@ fn parse_generated_public_key(algorithm: Algorithm, response: &[u8]) -> Result<P
             if modulus.len() * 8 != bits {
                 return Err(CKR_DATA_INVALID.into());
             }
-            Ok(PublicKey::Rsa(Rsa::from_public_components(
-                BigNum::from_slice(modulus)?,
-                BigNum::from_slice(exponent)?,
-            )?))
+            Ok(PublicKey::Rsa(
+                RsaPublicKey::new(
+                    BigUint::from_bytes_be(modulus),
+                    BigUint::from_bytes_be(exponent),
+                )
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+            ))
         }
         Algorithm::Ecdsa(curve) | Algorithm::Ecdh(curve) if curve.coordinate_length().is_some() => {
             let point = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;

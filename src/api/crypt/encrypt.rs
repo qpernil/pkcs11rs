@@ -542,10 +542,7 @@ fn crypt(
                 KeyMaterial::RsaPublic(key)
                     if encrypting && operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE =>
                 {
-                    let mut encrypted = vec![0; key.size() as usize];
-                    let written = key.public_encrypt(input, &mut encrypted, Padding::PKCS1)?;
-                    encrypted.truncate(written);
-                    Ok(encrypted)
+                    rsa_pkcs1_encrypt(key, input)
                 }
                 KeyMaterial::RsaPublic(key)
                     if encrypting && operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE =>
@@ -553,10 +550,7 @@ fn crypt(
                     if input.len() != key.size() as usize {
                         return Err(CKR_DATA_LEN_RANGE.into());
                     }
-                    let mut encrypted = vec![0; key.size() as usize];
-                    let written = key.public_encrypt(input, &mut encrypted, Padding::NONE)?;
-                    encrypted.truncate(written);
-                    Ok(encrypted)
+                    rsa_public_operation(key, input)
                 }
                 KeyMaterial::RsaPublic(key)
                     if encrypting
@@ -571,10 +565,7 @@ fn crypt(
                         *hash_mechanism,
                         label_digest,
                     )?;
-                    let mut encrypted = vec![0; key.size() as usize];
-                    let written = key.public_encrypt(&encoded, &mut encrypted, Padding::NONE)?;
-                    encrypted.truncate(written);
-                    Ok(encrypted)
+                    rsa_public_operation(key, &encoded)
                 }
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
