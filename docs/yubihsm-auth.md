@@ -36,10 +36,19 @@ The following vendor attributes are available on credential objects:
 
 ## Public object discovery
 
-Every present YubiHSM slot exposes public, immutable `CKO_PROFILE` objects for
-`CKP_BASELINE_PROVIDER`, `CKP_EXTENDED_PROVIDER`, and
-`CKP_AUTHENTICATION_TOKEN`. Configure both of the following values to enable
-pre-login certificate discovery:
+Every profile is represented by a public, immutable, token-resident
+`CKO_PROFILE` object with a stable, distinct `CKA_UNIQUE_ID` and the
+corresponding `CKA_PROFILE_ID`:
+
+| Profile | When advertised |
+| --- | --- |
+| `CKP_BASELINE_PROVIDER` | Every present YubiHSM slot |
+| `CKP_EXTENDED_PROVIDER` | Every present YubiHSM slot |
+| `CKP_AUTHENTICATION_TOKEN` | Every present YubiHSM slot |
+| `CKP_PUBLIC_CERTIFICATES_TOKEN` | Successful public discovery on that slot |
+
+Profile objects cannot be modified, copied, or destroyed. Configure both of
+the following values to enable pre-login certificate discovery:
 
 ```sh
 export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
@@ -47,38 +56,71 @@ export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
 ```
 
 The ID is exactly four hexadecimal digits and the password is 8 through 64
-UTF-8 bytes. The same configured credential is tried independently against
-each local and remote YubiHSM. A failure affects only that slot and does not
-interfere with ordinary user login.
+UTF-8 bytes. Supplying only one variable makes `C_Initialize` return
+`CKR_ARGUMENTS_BAD`. The same configured credential is tried independently
+against each local and remote YubiHSM. A failure affects only that slot and
+does not interfere with ordinary user login.
 
-The discovery Authentication Key must have `get-opaque`, and its domains must
-include every certificate exposed before login plus the associated metadata
-records. Certificates and their matching asymmetric keys must have equal
-PKCS #11 `CKA_ID` values, either from their common YubiHSM object ID or from
-valid metadata records. Provision the credential in a domain containing only
-data suitable for this service-owned public view.
+The symmetric discovery Authentication Key must have `get-opaque`, and its
+domains must include every certificate exposed before login plus the associated
+metadata records. Certificates and their matching asymmetric keys must have
+equal PKCS #11 `CKA_ID` values, either from their common YubiHSM object ID or
+from valid metadata records. Provision the credential in a domain containing
+only data suitable for this service-owned public view.
 
-After successful authentication, the module reads the metadata and certificate
-values needed to construct the public view. Before PKCS #11 login it exposes
-only X.509 certificates, their matching synthesized public keys, and a
-`CKP_PUBLIC_CERTIFICATES_TOKEN` profile object. Certificate values are
-therefore readable without `C_Login`. The discovery secure session is then
-closed so it does not occupy a YubiHSM session slot.
+After successful authentication, the module enumerates the credential-visible
+objects and reads object information. PKCS #11 metadata opaque objects are read
+because their sparse `CKA_ID` and `CKA_LABEL` overrides affect object
+construction, matching, searches, and later operations. X.509 opaque values
+are read to validate and construct the pre-login certificate view. Before
+PKCS #11 login the module exposes only those X.509 certificates, their matching
+synthesized public keys, and the `CKP_PUBLIC_CERTIFICATES_TOKEN` profile.
+Certificate values are therefore readable without `C_Login`. Other opaque
+values remain lazy.
 
 The slot retains one object set and one lazy opaque-value cache shared by
 pre-login and post-login enumeration. Discovery and ordinary user sessions
 upsert observations into that set by stable `CKA_UNIQUE_ID`; there are no
-separate discovery and login views. Attribute access reads an uncached opaque
-value through whichever secure session is active and later reconstructions of
-the same YubiHSM ID and sequence reuse that cache cell. Logout retains the set
-but normal `CKA_PRIVATE` filtering hides private objects. Successful module
-mutations update the set, while reinitializing or reconnecting the slot
-discards it and probes the discovery credential again.
+separate discovery and login views. A user login may therefore add public and
+private objects that were outside the discovery credential's domains.
+
+Attribute access reads an uncached opaque value through the active user session
+and later reconstructions of the same YubiHSM object ID and sequence reuse that
+cache cell. Logout retains public objects and successful public value reads,
+but removes every private object and the metadata and attestation state that
+could reconstruct it. The next user login enumerates its private view again.
+A public opaque object first seen through user login remains discoverable after
+logout, but an uncached `CKA_VALUE` requires another user login.
+
+Successful PKCS #11 mutations update or evict the corresponding cached
+objects. Module reinitialization clears the object, metadata, attestation, and
+opaque-value caches and retries public discovery. Reinitialize the module after
+replacing a USB device, changing a remote connector's attached device, or
+changing the domains visible to an authentication credential.
 
 The ephemeral discovery session is separate from the PKCS #11 user-login
-session and is never used for private or mutating operations. The password is
-not logged. A plaintext service configuration is acceptable when protected by
-normal file permissions; do not commit the credential.
+session, is closed after discovery, and is never used for private or mutating
+operations. Public-object mutation still requires an ordinary user login and a
+read/write PKCS #11 session. The password is not logged. A plaintext service
+configuration is acceptable when protected by normal file permissions; do not
+commit the credential.
+
+### PKCS #11 metadata
+
+YubiHSM PKCS #11 metadata objects are internal opaque-data companions and are
+never exposed as PKCS #11 objects. Metadata may contain any subset of the
+private object's `CKA_ID` and `CKA_LABEL` and the corresponding synthetic
+public object's values. Valid overrides apply regardless of whether the target
+was first seen by public discovery, user login, or a successful mutation.
+
+Metadata is linked to the target's native object type, ID, sequence, and
+domains. Invalid metadata is hidden and ignored. If multiple valid metadata
+objects claim the same target, none is selected until a later attribute update
+repairs the ambiguity. `C_SetAttributeValue` writes a replacement metadata
+object before removing older companions, and creating an object automatically
+creates metadata when requested attributes cannot be encoded by the native
+YubiHSM object. New metadata uses YubiHSM auto-allocation. Destroying the main
+object also deletes every linked metadata companion.
 
 ## YubiHSM login
 
