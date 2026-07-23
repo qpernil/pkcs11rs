@@ -50,7 +50,7 @@ impl HsmAuthProvider {
                     authkey_id
                 );
                 let mut challenge = [0; 8];
-                openssl::rand::rand_bytes(&mut challenge)
+                getrandom::fill(&mut challenge)
                     .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
                 let handshake = YubiHsmSecureSession::begin_symmetric(
                     yubihsm_connector,

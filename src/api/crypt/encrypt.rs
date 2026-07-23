@@ -411,7 +411,10 @@ where
     }
     let expected_tag = gcm_tag(full_tag, parameters.tag_bits);
     if let Some(supplied_tag) = supplied_tag {
-        if !openssl::memcmp::eq(&expected_tag, supplied_tag) {
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(
+            expected_tag.as_slice(),
+            supplied_tag,
+        )) {
             transformed.fill(0);
             return Err(CKR_ENCRYPTED_DATA_INVALID.into());
         }

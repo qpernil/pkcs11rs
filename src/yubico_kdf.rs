@@ -2,10 +2,10 @@ use crate::{Error, CKR_FUNCTION_FAILED};
 use openssl::{
     bn::{BigNum, BigNumContext},
     ec::{EcGroup, EcKey, EcPoint},
-    hash::MessageDigest,
     nid::Nid,
     pkey::Private,
 };
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 const SALT: &[u8] = b"Yubico";
@@ -16,13 +16,7 @@ pub(crate) fn yubico_password_kdf(
     password: &[u8],
 ) -> Result<Zeroizing<[u8; OUTPUT_LENGTH]>, Error> {
     let mut output = Zeroizing::new([0; OUTPUT_LENGTH]);
-    openssl::pkcs5::pbkdf2_hmac(
-        password,
-        SALT,
-        ITERATIONS,
-        MessageDigest::sha256(),
-        output.as_mut(),
-    )?;
+    pbkdf2::pbkdf2_hmac::<Sha256>(password, SALT, ITERATIONS as u32, output.as_mut());
     Ok(output)
 }
 

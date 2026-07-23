@@ -284,7 +284,7 @@ fn encode_rsa_pss(
         return Err(CKR_DATA_LEN_RANGE.into());
     }
     let mut salt = vec![0; salt_length];
-    openssl::rand::rand_bytes(&mut salt).map_err(|_| CKR_RANDOM_NO_RNG)?;
+    getrandom::fill(&mut salt).map_err(|_| CKR_RANDOM_NO_RNG)?;
     let mut m_prime = vec![0; 8];
     m_prime.extend_from_slice(digest);
     m_prime.extend_from_slice(&salt);

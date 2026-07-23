@@ -2,80 +2,134 @@ use crate::{
     error::Error, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
     CKR_ENCRYPTED_DATA_INVALID,
 };
-use openssl::{
-    pkey::PKey,
-    sign::Signer,
-    symm::{Cipher, Crypter, Mode},
+use aes::{
+    cipher::{consts::U16, Block, BlockDecrypt, BlockEncrypt, BlockSizeUser, KeyInit},
+    Aes128, Aes192, Aes256,
 };
+use cmac::{Cmac, Mac};
 
 pub(crate) const AES_BLOCK_SIZE: usize = 16;
 
 #[derive(Clone, Copy)]
-enum AesMode {
-    Cbc,
-    Ecb,
-}
-
-fn aes_cipher(key_len: usize, mode: AesMode) -> Result<Cipher, Error> {
-    match (key_len, mode) {
-        (16, AesMode::Cbc) => Ok(Cipher::aes_128_cbc()),
-        (24, AesMode::Cbc) => Ok(Cipher::aes_192_cbc()),
-        (32, AesMode::Cbc) => Ok(Cipher::aes_256_cbc()),
-        (16, AesMode::Ecb) => Ok(Cipher::aes_128_ecb()),
-        (24, AesMode::Ecb) => Ok(Cipher::aes_192_ecb()),
-        (32, AesMode::Ecb) => Ok(Cipher::aes_256_ecb()),
-        _ => Err(CKR_ARGUMENTS_BAD.into()),
-    }
+pub(crate) enum Direction {
+    Encrypt,
+    Decrypt,
 }
 
 pub(crate) fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
-    let cipher = aes_cipher(key.len(), AesMode::Cbc)?;
-    let pkey = PKey::cmac(&cipher, key)?;
-    let mut signer = Signer::new_without_digest(&pkey)?;
-    signer.update(data)?;
-    signer
-        .sign_to_vec()?
-        .try_into()
-        .map_err(|_| CKR_DEVICE_ERROR.into())
+    macro_rules! calculate {
+        ($cipher:ty) => {{
+            let mut mac = <Cmac<$cipher> as Mac>::new_from_slice(key)
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            mac.update(data);
+            let bytes = mac.finalize().into_bytes();
+            let mut output = [0; AES_BLOCK_SIZE];
+            output.copy_from_slice(&bytes);
+            Ok(output)
+        }};
+    }
+
+    match key.len() {
+        16 => calculate!(Aes128),
+        24 => calculate!(Aes192),
+        32 => calculate!(Aes256),
+        _ => Err(CKR_ARGUMENTS_BAD.into()),
+    }
 }
 
 pub(crate) fn aes_encrypt_block(
     key: &[u8],
     block: &[u8; AES_BLOCK_SIZE],
 ) -> Result<[u8; AES_BLOCK_SIZE], Error> {
-    aes_ecb(key, block, Mode::Encrypt)?
+    aes_ecb(key, block, Direction::Encrypt)?
         .try_into()
         .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-pub(crate) fn aes_ecb(key: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
-    crypt(key, None, data, mode, AesMode::Ecb)
+pub(crate) fn aes_ecb(key: &[u8], data: &[u8], direction: Direction) -> Result<Vec<u8>, Error> {
+    crypt(key, None, data, direction)
 }
 
-pub(crate) fn aes_cbc(key: &[u8], iv: &[u8], data: &[u8], mode: Mode) -> Result<Vec<u8>, Error> {
+pub(crate) fn aes_cbc(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    direction: Direction,
+) -> Result<Vec<u8>, Error> {
     if iv.len() != AES_BLOCK_SIZE {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    crypt(key, Some(iv), data, mode, AesMode::Cbc)
+    crypt(key, Some(iv), data, direction)
 }
 
 fn crypt(
     key: &[u8],
     iv: Option<&[u8]>,
     data: &[u8],
-    mode: Mode,
-    aes_mode: AesMode,
+    direction: Direction,
 ) -> Result<Vec<u8>, Error> {
     if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
-    let mut crypter = Crypter::new(aes_cipher(key.len(), aes_mode)?, mode, key, iv)?;
-    crypter.pad(false);
-    let mut output = vec![0; data.len() + AES_BLOCK_SIZE];
-    let written = crypter.update(data, &mut output)?;
-    let final_written = crypter.finalize(&mut output[written..])?;
-    output.truncate(written + final_written);
-    Ok(output)
+
+    fn apply<C>(
+        key: &[u8],
+        iv: Option<&[u8]>,
+        data: &[u8],
+        direction: Direction,
+    ) -> Result<Vec<u8>, Error>
+    where
+        C: BlockEncrypt + BlockDecrypt + BlockSizeUser<BlockSize = U16> + KeyInit,
+    {
+        let cipher = C::new_from_slice(key).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let mut output = Vec::with_capacity(data.len());
+        let mut chaining = iv.map(|value| {
+            let mut block = [0; AES_BLOCK_SIZE];
+            block.copy_from_slice(value);
+            block
+        });
+
+        for input in data.chunks_exact(AES_BLOCK_SIZE) {
+            let mut block = Block::<C>::default();
+            block.copy_from_slice(input);
+            match direction {
+                Direction::Encrypt => {
+                    if let Some(previous) = chaining {
+                        for (byte, previous) in block.iter_mut().zip(previous) {
+                            *byte ^= previous;
+                        }
+                    }
+                    cipher.encrypt_block(&mut block);
+                    if chaining.is_some() {
+                        let mut ciphertext = [0; AES_BLOCK_SIZE];
+                        ciphertext.copy_from_slice(&block);
+                        chaining = Some(ciphertext);
+                    }
+                    output.extend_from_slice(&block);
+                }
+                Direction::Decrypt => {
+                    let mut ciphertext = [0; AES_BLOCK_SIZE];
+                    ciphertext.copy_from_slice(&block);
+                    cipher.decrypt_block(&mut block);
+                    if let Some(previous) = chaining {
+                        for (byte, previous) in block.iter_mut().zip(previous) {
+                            *byte ^= previous;
+                        }
+                        chaining = Some(ciphertext);
+                    }
+                    output.extend_from_slice(&block);
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    match key.len() {
+        16 => apply::<Aes128>(key, iv, data, direction),
+        24 => apply::<Aes192>(key, iv, data, direction),
+        32 => apply::<Aes256>(key, iv, data, direction),
+        _ => Err(CKR_ARGUMENTS_BAD.into()),
+    }
 }
 
 pub(crate) fn pad_iso7816(data: &[u8]) -> Vec<u8> {
@@ -160,7 +214,7 @@ mod tests {
                 &key,
                 &hex("000102030405060708090a0b0c0d0e0f"),
                 &plaintext,
-                Mode::Encrypt,
+                Direction::Encrypt,
             )
             .unwrap(),
             hex("7649abac8119b246cee98e9b12e9197d")

@@ -6,11 +6,9 @@ use crate::{
     CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
 use flate2::{read::GzDecoder, read::ZlibDecoder, write::GzEncoder, Compression};
-use openssl::{
-    memcmp,
-    symm::{Cipher, Crypter, Mode},
-};
+use openssl::symm::{Cipher, Crypter, Mode};
 use std::io::{Read, Write};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
@@ -942,8 +940,7 @@ impl Client {
 
         let card_response = crypt_management_block(algorithm, key, card_challenge, Mode::Decrypt)?;
         let mut host_challenge = Zeroizing::new(vec![0; algorithm.cipher().block_size()]);
-        openssl::rand::rand_bytes(&mut host_challenge)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        getrandom::fill(&mut host_challenge).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let mut dynamic = encode_tlv(0x80, &card_response)?;
         dynamic.extend_from_slice(&encode_tlv(0x81, &host_challenge)?);
         let request = encode_tlv(0x7c, &dynamic)?;
@@ -959,7 +956,7 @@ impl Client {
         let fields = parse_tlvs(dynamic)?;
         let card_cryptogram = field(&fields, 0x82).ok_or(CKR_DATA_INVALID)?;
         let expected = crypt_management_block(algorithm, key, &host_challenge, Mode::Encrypt)?;
-        if !memcmp::eq(card_cryptogram, &expected) {
+        if !bool::from(card_cryptogram.ct_eq(&expected)) {
             return Err(CKR_PIN_INCORRECT.into());
         }
         Ok(())
