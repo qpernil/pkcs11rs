@@ -965,6 +965,17 @@ impl Slot for AbiYubiHsmSlot {
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         if pin == b"1234" {
             Ok(())
+        } else if pin == b":0001default" {
+            let password = pinentry::request(pinentry::Prompt {
+                title: "YubiHSM Auth #AUTH0001 accessing ABI YubiHSM #HSM00001",
+                description: "Enter the authentication password for \"default\".",
+                label: "Authentication password:",
+            })?;
+            if password.as_slice() == b"1234" {
+                Ok(())
+            } else {
+                Err(CKR_PIN_INCORRECT.into())
+            }
         } else {
             Err(CKR_PIN_INCORRECT.into())
         }

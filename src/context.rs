@@ -95,6 +95,7 @@ impl std::fmt::Debug for Context {
 impl Context {
     #[allow(unused_mut)]
     fn new() -> Result<Context, Error> {
+        pinentry::configure_from_environment()?;
         #[cfg(feature = "abi-tests")]
         let slots = HashMap::from([
             (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),

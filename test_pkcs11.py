@@ -53,6 +53,7 @@ CKF_SERIAL_SESSION = 0x00000004
 CKF_ASYNC_SESSION = 0x00000008
 CKF_OS_LOCKING_OK = 0x00000002
 CKF_INTERFACE_FORK_SAFE = 0x00000001
+CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
@@ -1607,6 +1608,104 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_USER_TYPE_INVALID,
         )
+
+    def test_yubihsm_login_uses_configured_pinentry_when_password_is_omitted(
+        self,
+    ) -> None:
+        previous = os.environ.get("PKCS11RS_PINENTRY")
+        with tempfile.TemporaryDirectory() as directory:
+            pinentry = pathlib.Path(directory) / "pinentry"
+            pinentry.write_text(
+                """#!/bin/sh
+printf '%s\\n' 'OK ready'
+while IFS= read -r command; do
+    case "$command" in
+        GETPIN)
+            printf '%s\\n' 'D 1234' 'OK'
+            ;;
+        BYE)
+            printf '%s\\n' 'OK'
+            exit 0
+            ;;
+        *)
+            printf '%s\\n' 'OK'
+            ;;
+    esac
+done
+""",
+                encoding="utf-8",
+            )
+            pinentry.chmod(0o700)
+            os.environ["PKCS11RS_PINENTRY"] = str(pinentry)
+            try:
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                info = CK_TOKEN_INFO()
+                self.assertEqual(
+                    self.lib.C_GetTokenInfo(
+                        ABI_TEST_YUBIHSM_SLOT_ID,
+                        ctypes.byref(info),
+                    ),
+                    CKR_OK,
+                )
+                self.assertTrue(
+                    info.flags & CKF_PROTECTED_AUTHENTICATION_PATH,
+                )
+
+                session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+                username = (CK_BYTE * 4)(*b"0001")
+                self.assertEqual(
+                    self.lib.C_LoginUser(
+                        session,
+                        CKU_USER,
+                        None,
+                        0,
+                        username,
+                        len(username),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+
+                empty_pin = (CK_BYTE * 0)()
+                self.assertEqual(
+                    self.lib.C_LoginUser(
+                        session,
+                        CKU_USER,
+                        empty_pin,
+                        0,
+                        username,
+                        len(username),
+                    ),
+                    CKR_PIN_INCORRECT,
+                )
+                self.assertEqual(
+                    self.lib.C_LoginUser(
+                        session,
+                        CKU_USER,
+                        None,
+                        1,
+                        username,
+                        len(username),
+                    ),
+                    CKR_ARGUMENTS_BAD,
+                )
+
+                combined = (CK_BYTE * len(b":0001default"))(*b":0001default")
+                self.assertEqual(
+                    self.lib.C_Login(
+                        session,
+                        CKU_USER,
+                        combined,
+                        len(combined),
+                    ),
+                    CKR_OK,
+                )
+            finally:
+                self.lib.C_Finalize(None)
+                if previous is None:
+                    os.environ.pop("PKCS11RS_PINENTRY", None)
+                else:
+                    os.environ["PKCS11RS_PINENTRY"] = previous
 
     def test_yubihsm_key_pair_generation_requires_token_objects(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::pkcs11::*;
 
-static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static TEST_SLOT_LOGIN_COUNT: std::sync::atomic::AtomicUsize =
@@ -255,6 +255,59 @@ fn install_hsmauth_admin_slot(
     (connector, session)
 }
 
+#[cfg(unix)]
+pub(crate) struct TestPinentry {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl TestPinentry {
+    pub(crate) fn new(secret: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "pkcs11rs-api-pinentry-{}-{secret}",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' 'OK ready'
+while IFS= read -r command; do
+    case "$command" in
+        GETPIN)
+            printf '%s\n' 'D {secret}' 'OK'
+            ;;
+        BYE)
+            printf '%s\n' 'OK'
+            exit 0
+            ;;
+        *)
+            printf '%s\n' 'OK'
+            ;;
+    esac
+done
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        crate::pinentry::configure_for_test(Some(path.clone().into_os_string())).unwrap();
+        Self { path }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TestPinentry {
+    fn drop(&mut self) {
+        crate::pinentry::configure_for_test(None).unwrap();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn assert_short_tlv(command: &crate::CommandApdu, tag: u8, value: &[u8]) {
     let expected = [&[tag, value.len() as u8][..], value].concat();
     assert!(
@@ -267,6 +320,49 @@ fn assert_short_tlv(command: &crate::CommandApdu, tag: u8, value: &[u8]) {
         tag,
         value
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    let _pinentry = TestPinentry::new("admin");
+    let (connector, session) = install_hsmauth_admin_slot();
+
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            ::std::ptr::null_mut(),
+            0,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(connector.secure_channel_starts.get(), 1);
+
+    let label = b"prompted";
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthDeleteCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let commands = connector.commands.borrow();
+    let delete = commands
+        .iter()
+        .find(|command| command.ins == 0x02)
+        .unwrap();
+    let mut management_key = [0; 16];
+    management_key[..5].copy_from_slice(b"admin");
+    assert_short_tlv(delete, 0x7b, &management_key);
+    drop(commands);
+
+    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    finalize_for_test();
 }
 
 #[test]
