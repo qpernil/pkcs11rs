@@ -1069,6 +1069,66 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
 }
 
 #[test]
+fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
+    fn padded(value: &rsa::BigUint, length: usize) -> Vec<u8> {
+        let encoded = value.to_bytes_be();
+        let mut output = vec![0; length - encoded.len()];
+        output.extend_from_slice(&encoded);
+        output
+    }
+
+    for curve in [
+        crate::EcCurve::P224,
+        crate::EcCurve::P256,
+        crate::EcCurve::P384,
+        crate::EcCurve::P521,
+        crate::EcCurve::K256,
+        crate::EcCurve::BrainpoolP256,
+        crate::EcCurve::BrainpoolP384,
+        crate::EcCurve::BrainpoolP512,
+    ] {
+        let parameters = crate::ec_parameters(curve);
+        let generator = crate::EcPointValue {
+            x: parameters.gx.clone(),
+            y: parameters.gy.clone(),
+            z: rsa::BigUint::from(1u8),
+        };
+        let digest = [0x42; 64];
+        let nonce = rsa::BigUint::from(2u8);
+        let nonce_point = crate::ec_multiply(&nonce, &generator, &parameters);
+        let inverse = nonce_point
+            .z
+            .modpow(
+                &(&parameters.p - rsa::BigUint::from(2u8)),
+                &parameters.p,
+            );
+        let r =
+            (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
+        let mut z = rsa::BigUint::from_bytes_be(&digest);
+        if digest.len() * 8 > parameters.n.bits() as usize {
+            z >>= digest.len() * 8 - parameters.n.bits() as usize;
+        }
+        let nonce_inverse =
+            nonce.modpow(&(&parameters.n - rsa::BigUint::from(2u8)), &parameters.n);
+        let s = ((z + &r) * nonce_inverse) % &parameters.n;
+        let mut public_key = padded(&parameters.gx, parameters.coordinate_length);
+        public_key.extend_from_slice(&padded(
+            &parameters.gy,
+            parameters.coordinate_length,
+        ));
+        let mut signature = padded(&r, parameters.coordinate_length);
+        signature.extend_from_slice(&padded(&s, parameters.coordinate_length));
+
+        assert!(crate::verify_ecdsa(curve, &public_key, &digest, &signature).is_ok());
+        *signature.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            crate::verify_ecdsa(curve, &public_key, &digest, &signature),
+            Err(crate::error::Error::Generic(rv)) if rv == CKR_SIGNATURE_INVALID as CK_RV
+        ));
+    }
+}
+
+#[test]
 fn piv_attestation_certificate_supplies_public_key_for_metadata_fallback() {
     let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
     let signing_key = openssl::ec::EcKey::generate(&group).unwrap();

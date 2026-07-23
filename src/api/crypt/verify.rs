@@ -251,15 +251,12 @@ fn verify(
                 if signature.len() != coordinate_length * 2 {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                let r = BigNum::from_slice(&signature[..coordinate_length])?;
-                let s = BigNum::from_slice(&signature[coordinate_length..])?;
-                let signature = EcdsaSig::from_private_components(r, s)?;
-                let key = piv_ec_public_key(*algorithm, public_key)?;
-                if signature.verify(&digest, &key)? {
-                    Ok(())
-                } else {
-                    Err(CKR_SIGNATURE_INVALID.into())
-                }
+                verify_ecdsa(
+                    piv_ec_curve(*algorithm)?,
+                    public_key,
+                    &digest,
+                    signature,
+                )
             }
             KeyMaterial::OpenPgpPublic {
                 algorithm: OpenPgpAlgorithm::Ed25519,
@@ -288,15 +285,12 @@ fn verify(
                 if signature.len() != coordinate_length * 2 {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                let r = BigNum::from_slice(&signature[..coordinate_length])?;
-                let s = BigNum::from_slice(&signature[coordinate_length..])?;
-                let signature = EcdsaSig::from_private_components(r, s)?;
-                let key = openpgp_ec_public_key(*curve, public_key)?;
-                if signature.verify(&digest, &key)? {
-                    Ok(())
-                } else {
-                    Err(CKR_SIGNATURE_INVALID.into())
-                }
+                verify_ecdsa(
+                    openpgp_ec_curve(*curve)?,
+                    public_key,
+                    &digest,
+                    signature,
+                )
             }
             KeyMaterial::YubiHsm {
                 algorithm,
@@ -316,15 +310,12 @@ fn verify(
                 if signature.len() != coordinate_length * 2 {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                let r = BigNum::from_slice(&signature[..coordinate_length])?;
-                let s = BigNum::from_slice(&signature[coordinate_length..])?;
-                let signature = EcdsaSig::from_private_components(r, s)?;
-                let key = yubihsm_ec_public_key(*algorithm, public_key)?;
-                if signature.verify(&digest, &key)? {
-                    Ok(())
-                } else {
-                    Err(CKR_SIGNATURE_INVALID.into())
-                }
+                verify_ecdsa(
+                    yubihsm_ec_curve(*algorithm)?,
+                    public_key,
+                    &digest,
+                    signature,
+                )
             }
             KeyMaterial::YubiHsm {
                 algorithm: YUBIHSM_ALGO_ED25519,
