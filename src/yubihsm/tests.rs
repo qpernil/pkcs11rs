@@ -255,14 +255,7 @@ impl ProtocolPeer {
         let mut context = [0u8; 16];
         context[..8].copy_from_slice(&host_challenge);
         context[8..].copy_from_slice(&CARD_CHALLENGE);
-        let mut static_keys = Zeroizing::new([0u8; 32]);
-        openssl::pkcs5::pbkdf2_hmac(
-            PASSWORD,
-            DEFAULT_SALT,
-            DEFAULT_ITERATIONS,
-            MessageDigest::sha256(),
-            static_keys.as_mut(),
-        )?;
+        let static_keys = crate::yubico_password_kdf(PASSWORD)?;
         let s_enc = derive_key(&static_keys[..16], 0x04, &context)?;
         let s_mac = derive_key(&static_keys[16..], 0x06, &context)?;
         let s_rmac = derive_key(&static_keys[16..], 0x07, &context)?;
@@ -790,14 +783,7 @@ impl Connector for SymmetricHsmAuthPeer {
                 status: 0x63c7,
             });
         }
-        let mut static_keys = Zeroizing::new([0; 32]);
-        openssl::pkcs5::pbkdf2_hmac(
-            PASSWORD,
-            DEFAULT_SALT,
-            DEFAULT_ITERATIONS,
-            MessageDigest::sha256(),
-            static_keys.as_mut(),
-        )?;
+        let static_keys = crate::yubico_password_kdf(PASSWORD)?;
         let s_enc = derive_key(&static_keys[..16], 0x04, context)?;
         let s_mac = derive_key(&static_keys[16..], 0x06, context)?;
         let s_rmac = derive_key(&static_keys[16..], 0x07, context)?;
@@ -1042,17 +1028,9 @@ fn yubihsm_login_rejects_malformed_usernames() {
 
 #[test]
 fn password_derivation_matches_yubihsm_defaults() {
-    let mut keys = [0u8; 32];
-    openssl::pkcs5::pbkdf2_hmac(
-        PASSWORD,
-        DEFAULT_SALT,
-        DEFAULT_ITERATIONS,
-        MessageDigest::sha256(),
-        &mut keys,
-    )
-    .unwrap();
+    let keys = crate::yubico_password_kdf(PASSWORD).unwrap();
     assert_eq!(
-        keys,
+        keys.as_slice(),
         [
             0x09, 0x0b, 0x47, 0xdb, 0xed, 0x59, 0x56, 0x54, 0x90, 0x1d, 0xee, 0x1c, 0xc6, 0x55,
             0xe4, 0x20, 0x59, 0x2f, 0xd4, 0x83, 0xf7, 0x59, 0xe2, 0x99, 0x09, 0xa0, 0x4c, 0x45,
