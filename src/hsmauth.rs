@@ -850,11 +850,11 @@ mod tests {
     }
 
     fn p256_public_key() -> Vec<u8> {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use p256::elliptic_curve::{sec1::ToSec1Point, Generate};
 
-        p256::SecretKey::random(&mut rand_core::OsRng)
+        p256::SecretKey::generate()
             .public_key()
-            .to_encoded_point(false)
+            .to_sec1_point(false)
             .as_bytes()
             .to_vec()
     }

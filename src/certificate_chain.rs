@@ -63,18 +63,18 @@ impl ParsedCertificate {
     fn parse(encoded: &[u8]) -> Result<Self, Error> {
         let certificate =
             Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        if certificate.signature_algorithm != certificate.tbs_certificate.signature {
+        if certificate.signature_algorithm() != certificate.tbs_certificate().signature() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         validate_critical_extensions(&certificate)?;
         let basic_constraints = certificate
-            .tbs_certificate
-            .get::<BasicConstraints>()
+            .tbs_certificate()
+            .get_extension::<BasicConstraints>()
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
             .map(|(_, constraints)| constraints);
         let key_usage = certificate
-            .tbs_certificate
-            .get::<KeyUsage>()
+            .tbs_certificate()
+            .get_extension::<KeyUsage>()
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
             .map(|(_, usage)| usage);
         let encoded = certificate
@@ -83,25 +83,25 @@ impl ParsedCertificate {
 
         Ok(Self {
             subject: certificate
-                .tbs_certificate
-                .subject
+                .tbs_certificate()
+                .subject()
                 .to_der()
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
             issuer: certificate
-                .tbs_certificate
-                .issuer
+                .tbs_certificate()
+                .issuer()
                 .to_der()
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
             fingerprint: Sha256::digest(&encoded).into(),
             not_before: certificate
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_before
                 .to_unix_duration()
                 .as_secs(),
             not_after: certificate
-                .tbs_certificate
-                .validity
+                .tbs_certificate()
+                .validity()
                 .not_after
                 .to_unix_duration()
                 .as_secs(),
@@ -126,7 +126,7 @@ impl ParsedCertificate {
     }
 
     fn p256_public_point(&self) -> Result<Vec<u8>, Error> {
-        let spki = &self.certificate.tbs_certificate.subject_public_key_info;
+        let spki = &self.certificate.tbs_certificate().subject_public_key_info();
         if spki.algorithm.oid != EC_PUBLIC_KEY || algorithm_parameter_oid(spki)? != P256_CURVE {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
@@ -278,10 +278,9 @@ fn validate_critical_extensions(certificate: &Certificate) -> Result<(), Error> 
         AUTHORITY_INFORMATION_ACCESS,
     ];
     if certificate
-        .tbs_certificate
-        .extensions
-        .as_deref()
-        .unwrap_or_default()
+        .tbs_certificate()
+        .extensions()
+        .map_or(&[][..], Vec::as_slice)
         .iter()
         .any(|extension| extension.critical && !SUPPORTED.contains(&extension.extn_id))
     {
@@ -323,12 +322,12 @@ fn verify_certificate_signature(
     certificate: &Certificate,
     issuer: &Certificate,
 ) -> Result<(), Error> {
-    if certificate.signature_algorithm != certificate.tbs_certificate.signature {
+    if certificate.signature_algorithm() != certificate.tbs_certificate().signature() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    let signature_algorithm = algorithm_identifier_contents(&certificate.signature_algorithm)?;
+    let signature_algorithm = algorithm_identifier_contents(certificate.signature_algorithm())?;
     let public_key_algorithm = algorithm_identifier_contents(
-        &issuer.tbs_certificate.subject_public_key_info.algorithm,
+        &issuer.tbs_certificate().subject_public_key_info().algorithm,
     )?;
     let algorithm = supported_signature_algorithms()
         .iter()
@@ -346,11 +345,11 @@ fn verify_certificate_signature(
     let issuer =
         EndEntityCert::try_from(&issuer_der).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
     let message = certificate
-        .tbs_certificate
+        .tbs_certificate()
         .to_der()
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
     let signature = certificate
-        .signature
+        .signature()
         .as_bytes()
         .ok_or(CKR_ARGUMENTS_BAD)?;
     issuer
@@ -395,8 +394,8 @@ pub(crate) fn encode_pem(encoded: &[u8]) -> Result<String, Error> {
 pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     ParsedCertificate::parse(&decode(encoded)?)?
         .certificate
-        .tbs_certificate
-        .subject_public_key_info
+        .tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
@@ -405,7 +404,7 @@ pub(crate) fn public_key_parts(
     encoded: &[u8],
 ) -> Result<(ObjectIdentifier, Option<ObjectIdentifier>, Vec<u8>), Error> {
     let certificate = Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let spki = certificate.tbs_certificate.subject_public_key_info;
+    let spki = certificate.tbs_certificate().subject_public_key_info();
     let parameters = spki
         .algorithm
         .parameters
@@ -423,13 +422,13 @@ pub(crate) fn public_key_parts(
 
 pub(crate) fn subject(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Certificate::from_der(encoded)
-        .and_then(|certificate| certificate.tbs_certificate.subject.to_der())
+        .and_then(|certificate| certificate.tbs_certificate().subject().to_der())
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 pub(crate) fn issuer(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Certificate::from_der(encoded)
-        .and_then(|certificate| certificate.tbs_certificate.issuer.to_der())
+        .and_then(|certificate| certificate.tbs_certificate().issuer().to_der())
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
@@ -437,8 +436,8 @@ pub(crate) fn serial_number(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Certificate::from_der(encoded)
         .map(|certificate| {
             certificate
-                .tbs_certificate
-                .serial_number
+                .tbs_certificate()
+                .serial_number()
                 .as_bytes()
                 .to_vec()
         })
@@ -574,8 +573,8 @@ mod tests {
             .iter()
             .map(|certificate| {
                 certificate
-                    .tbs_certificate
-                    .subject
+                    .tbs_certificate()
+                    .subject()
                     .to_string()
                     .strip_prefix("CN=")
                     .unwrap()
@@ -594,10 +593,12 @@ mod tests {
         for certificate in &intermediates {
             assert_current(certificate);
 
-            let issuer_der = certificate.tbs_certificate.issuer.to_der().unwrap();
+            let issuer_der = certificate.tbs_certificate().issuer().to_der().unwrap();
             let issuer = std::iter::once(&root)
                 .chain(intermediates.iter())
-                .find(|candidate| candidate.tbs_certificate.subject.to_der().unwrap() == issuer_der)
+                .find(|candidate| {
+                    candidate.tbs_certificate().subject().to_der().unwrap() == issuer_der
+                })
                 .expect("published intermediate has no exact-DER issuer");
             ParsedCertificate::parse(&certificate.to_der().unwrap())
                 .unwrap()
@@ -612,8 +613,8 @@ mod tests {
         let intermediate = pem_certificate(YUBIHSM_INTERMEDIATE);
         assert_current(&intermediate);
         assert_eq!(
-            intermediate.tbs_certificate.issuer.to_der().unwrap(),
-            root.tbs_certificate.subject.to_der().unwrap()
+            intermediate.tbs_certificate().issuer().to_der().unwrap(),
+            root.tbs_certificate().subject().to_der().unwrap()
         );
         ParsedCertificate::parse(&intermediate.to_der().unwrap())
             .unwrap()

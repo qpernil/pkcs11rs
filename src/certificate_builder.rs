@@ -1,19 +1,25 @@
+#[cfg(feature = "abi-tests")]
+use der::Decode;
 use der::Encode;
 #[cfg(test)]
 use der::{pem::LineEnding, EncodePem};
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
-#[cfg(any(test, feature = "abi-tests"))]
-use rand_core::OsRng;
-#[cfg(feature = "abi-tests")]
-use rsa::RsaPublicKey;
+use p256::elliptic_curve::Generate;
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::{pkcs8::DecodePrivateKey, RsaPrivateKey};
-use spki::SubjectPublicKeyInfoOwned;
+#[cfg(feature = "abi-tests")]
+use rsa::{pkcs8::EncodePublicKey, RsaPublicKey};
+use spki::{SubjectPublicKeyInfoOwned, SubjectPublicKeyInfoRef};
 #[cfg(any(test, feature = "abi-tests"))]
 use std::sync::OnceLock;
 use std::{str::FromStr, time::Duration};
 use x509_cert::{
-    builder::{Builder, CertificateBuilder, Profile},
+    builder::{profile::BuilderProfile, Builder, CertificateBuilder},
+    certificate::TbsCertificate,
+    ext::{
+        pkix::{BasicConstraints, KeyUsage, KeyUsages},
+        Extension, ToExtension,
+    },
     name::Name,
     serial_number::SerialNumber,
     time::Validity,
@@ -21,7 +27,7 @@ use x509_cert::{
 
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) fn p256_key() -> SigningKey {
-    SigningKey::random(&mut OsRng)
+    SigningKey::generate()
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -35,16 +41,62 @@ pub(crate) fn rsa_key() -> RsaPrivateKey {
 }
 
 pub(crate) fn p256_public_point(key: &VerifyingKey) -> Vec<u8> {
-    key.to_encoded_point(false).as_bytes().to_vec()
+    key.to_sec1_point(false).as_bytes().to_vec()
 }
 
 #[cfg(test)]
 pub(crate) fn p256_public_key_pem(key: &VerifyingKey) -> Vec<u8> {
-    SubjectPublicKeyInfoOwned::from_key(*key)
+    SubjectPublicKeyInfoOwned::from_key(key)
         .unwrap()
         .to_pem(LineEnding::LF)
         .unwrap()
         .into_bytes()
+}
+
+struct TestProfile {
+    subject: Name,
+    issuer: Name,
+    is_ca: bool,
+    enable_key_agreement: bool,
+    enable_key_encipherment: bool,
+}
+
+impl BuilderProfile for TestProfile {
+    fn get_issuer(&self, _subject: &Name) -> Name {
+        self.issuer.clone()
+    }
+
+    fn get_subject(&self) -> Name {
+        self.subject.clone()
+    }
+
+    fn build_extensions(
+        &self,
+        _subject_key: SubjectPublicKeyInfoRef<'_>,
+        _issuer_key: SubjectPublicKeyInfoRef<'_>,
+        tbs: &TbsCertificate,
+    ) -> x509_cert::builder::Result<Vec<Extension>> {
+        let mut extensions = Vec::new();
+        extensions.push(
+            BasicConstraints {
+                ca: self.is_ca,
+                path_len_constraint: None,
+            }
+            .to_extension(tbs.subject(), &extensions)?,
+        );
+        let mut usages = KeyUsages::DigitalSignature.into();
+        if self.is_ca {
+            usages |= KeyUsages::KeyCertSign | KeyUsages::CRLSign;
+        }
+        if self.enable_key_agreement {
+            usages |= KeyUsages::KeyAgreement;
+        }
+        if self.enable_key_encipherment {
+            usages |= KeyUsages::KeyEncipherment;
+        }
+        extensions.push(KeyUsage(usages).to_extension(tbs.subject(), &extensions)?);
+        Ok(extensions)
+    }
 }
 
 pub(crate) fn p256_certificate(
@@ -55,32 +107,25 @@ pub(crate) fn p256_certificate(
     serial: u32,
     is_ca: bool,
 ) -> Vec<u8> {
-    let profile = if is_ca {
-        if subject == issuer {
-            Profile::Root
-        } else {
-            Profile::SubCA {
-                issuer: Name::from_str(issuer).unwrap(),
-                path_len_constraint: None,
-            }
-        }
-    } else {
-        Profile::Leaf {
-            issuer: Name::from_str(issuer).unwrap(),
-            enable_key_agreement: true,
-            enable_key_encipherment: false,
-        }
+    let profile = TestProfile {
+        subject: Name::from_str(subject).unwrap(),
+        issuer: Name::from_str(issuer).unwrap(),
+        is_ca,
+        enable_key_agreement: !is_ca,
+        enable_key_encipherment: false,
     };
     let builder = CertificateBuilder::new(
         profile,
         SerialNumber::from(serial),
         Validity::from_now(Duration::from_secs(86_400 * 3_650)).unwrap(),
-        Name::from_str(subject).unwrap(),
-        SubjectPublicKeyInfoOwned::from_key(*subject_key).unwrap(),
-        signer,
+        SubjectPublicKeyInfoOwned::from_key(subject_key).unwrap(),
     )
     .unwrap();
-    builder.build::<DerSignature>().unwrap().to_der().unwrap()
+    builder
+        .build::<_, DerSignature>(signer)
+        .unwrap()
+        .to_der()
+        .unwrap()
 }
 
 #[cfg(feature = "abi-tests")]
@@ -91,18 +136,23 @@ pub(crate) fn p256_certificate_for_rsa(
     issuer: &str,
     serial: u32,
 ) -> Vec<u8> {
+    let public_key_der = public_key.to_public_key_der().unwrap();
     let builder = CertificateBuilder::new(
-        Profile::Leaf {
+        TestProfile {
+            subject: Name::from_str(subject).unwrap(),
             issuer: Name::from_str(issuer).unwrap(),
+            is_ca: false,
             enable_key_agreement: false,
             enable_key_encipherment: true,
         },
         SerialNumber::from(serial),
         Validity::from_now(Duration::from_secs(86_400 * 3_650)).unwrap(),
-        Name::from_str(subject).unwrap(),
-        SubjectPublicKeyInfoOwned::from_key(public_key.clone()).unwrap(),
-        signer,
+        SubjectPublicKeyInfoOwned::from_der(public_key_der.as_bytes()).unwrap(),
     )
     .unwrap();
-    builder.build::<DerSignature>().unwrap().to_der().unwrap()
+    builder
+        .build::<_, DerSignature>(signer)
+        .unwrap()
+        .to_der()
+        .unwrap()
 }

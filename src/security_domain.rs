@@ -586,7 +586,7 @@ fn put_ec_key_data(
 }
 
 fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>), Error> {
-    let (curve, scalar) = if let Ok(key) = pkcs8::PrivateKeyInfo::from_der(encoded) {
+    let (curve, scalar) = if let Ok(key) = pkcs8::PrivateKeyInfoRef::from_der(encoded) {
         if key.algorithm.oid != EC_PUBLIC_KEY {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
@@ -598,7 +598,7 @@ fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>),
             .decode_as::<ObjectIdentifier>()
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         let curve = Scp11Curve::from_oid(oid)?;
-        let key = sec1::EcPrivateKey::from_der(key.private_key)
+        let key = sec1::EcPrivateKey::from_der(key.private_key.as_bytes())
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         if let Some(parameters) = key.parameters {
             if parameters.named_curve() != Some(oid) {
