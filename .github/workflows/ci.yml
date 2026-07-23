@@ -34,6 +34,27 @@ jobs:
       - name: Run Python ABI tests
         run: python3 test_pkcs11.py
 
+  msrv:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpcsclite-dev \
+            libusb-1.0-0-dev \
+            pkg-config
+
+      - name: Check minimum supported Rust version
+        run: cargo check --locked --all-features
+
   windows:
     runs-on: windows-latest
 

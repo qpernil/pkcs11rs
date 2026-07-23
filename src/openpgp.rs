@@ -851,7 +851,7 @@ impl Client {
         connector: &dyn Connector,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        if plaintext.is_empty() || !plaintext.len().is_multiple_of(16) {
+        if plaintext.is_empty() || !crate::is_multiple_of(plaintext.len(), 16) {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         let response_length = plaintext
@@ -1333,7 +1333,7 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
 }
 
 fn parse_key_information(encoded: &[u8]) -> Result<Vec<(KeyRef, KeyStatus)>, Error> {
-    if !encoded.len().is_multiple_of(2) {
+    if !crate::is_multiple_of(encoded.len(), 2) {
         return Err(CKR_DATA_INVALID.into());
     }
     encoded

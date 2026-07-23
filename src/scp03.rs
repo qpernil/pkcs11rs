@@ -499,7 +499,9 @@ pub(crate) fn parse_hex(value: &str) -> Result<Vec<u8>, Error> {
             .filter(|character| !character.is_ascii_whitespace() && *character != ':')
             .collect::<String>(),
     );
-    if !compact.len().is_multiple_of(2) || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !crate::is_multiple_of(compact.len(), 2)
+        || !compact.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     compact
@@ -925,7 +927,7 @@ impl Scp03Session {
             }
         }
         if self.security_level & SECURITY_R_ENCRYPTION != 0 && !data.is_empty() {
-            if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+            if !crate::is_multiple_of(data.len(), AES_BLOCK_SIZE) {
                 return Err(CKR_ENCRYPTED_DATA_INVALID.into());
             }
             let iv = self.command_iv(true)?;

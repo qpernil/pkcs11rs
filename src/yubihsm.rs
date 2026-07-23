@@ -512,7 +512,7 @@ impl SecureSession {
         let encrypted = outer.require_response(COMMAND_SESSION_MESSAGE)?;
         if encrypted.len() < 1 + AES_BLOCK_SIZE
             || encrypted[0] != self.sid
-            || !(encrypted.len() - 1).is_multiple_of(AES_BLOCK_SIZE)
+            || !crate::is_multiple_of(encrypted.len() - 1, AES_BLOCK_SIZE)
         {
             return Err(CKR_DEVICE_ERROR.into());
         }

@@ -68,7 +68,7 @@ fn crypt(
     data: &[u8],
     direction: Direction,
 ) -> Result<Vec<u8>, Error> {
-    if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+    if !crate::is_multiple_of(data.len(), AES_BLOCK_SIZE) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
 
@@ -158,7 +158,7 @@ pub(crate) fn scp03_kdf(
     context: &[u8],
     output_bits: u16,
 ) -> Result<Vec<u8>, Error> {
-    if output_bits == 0 || !output_bits.is_multiple_of(8) {
+    if output_bits == 0 || !crate::is_multiple_of(output_bits, 8) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let output_len = output_bits as usize / 8;

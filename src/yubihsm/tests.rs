@@ -528,7 +528,7 @@ impl ProtocolPeer {
                 if value == CommandCode::EncryptEcb as u8
                     || value == CommandCode::DecryptEcb as u8 =>
             {
-                if inner.data.len() < 2 || !(inner.data.len() - 2).is_multiple_of(16) {
+                if inner.data.len() < 2 || !crate::is_multiple_of(inner.data.len() - 2, 16) {
                     return Err(CKR_DATA_LEN_RANGE.into());
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
@@ -546,7 +546,7 @@ impl ProtocolPeer {
                 if value == CommandCode::EncryptCbc as u8
                     || value == CommandCode::DecryptCbc as u8 =>
             {
-                if inner.data.len() < 18 || !(inner.data.len() - 18).is_multiple_of(16) {
+                if inner.data.len() < 18 || !crate::is_multiple_of(inner.data.len() - 18, 16) {
                     return Err(CKR_DATA_LEN_RANGE.into());
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());

@@ -581,7 +581,7 @@ impl Session for AbiYubiHsmSession {
             _ => return Ok(vec![0x5a; 256]),
         };
         let input = input.ok_or(CKR_DATA_LEN_RANGE)?;
-        if !input.len().is_multiple_of(AES_BLOCK_LENGTH) {
+        if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         if let Some(iv) = iv {
