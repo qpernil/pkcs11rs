@@ -6,10 +6,13 @@ mod hardware_provisioning {
 
     const ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH";
     const AUTHKEY_ID_ENV: &str = "PKCS11RS_TEST_YUBIHSM_AUTHKEY_ID";
+    const TOUCH_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_TOUCH_ASYMMETRIC_HSMAUTH";
+    const TOUCH_AUTHKEY_ID_ENV: &str = "PKCS11RS_TEST_YUBIHSM_TOUCH_AUTHKEY_ID";
     const SCP11B_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_SCP11B";
     const SCP11B_KVN_ENV: &str = "PKCS11RS_TEST_SCP11B_KVN";
     const DEFAULT_MANAGEMENT_KEY: &str = "00000000000000000000000000000000";
     const DEFAULT_LABEL: &str = "pkcs11rs-asymmetric";
+    const DEFAULT_TOUCH_LABEL: &str = "pkcs11rs-asymmetric-touch";
     const DEFAULT_CREDENTIAL_PASSWORD: &str = "password";
     const DEFAULT_ADMIN_ID: &str = "0001";
     const DEFAULT_ADMIN_PASSWORD: &str = "password";
@@ -231,8 +234,41 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     #[test]
     #[ignore = "provisions persistent keys on a live YubiKey and YubiHSM"]
     fn provisions_asymmetric_hsmauth_credential_on_yubihsm() {
-        if std::env::var(ENABLE_ENV).as_deref() != Ok("1") {
-            eprintln!("skipped persistent provisioning; set {ENABLE_ENV}=1 to enable it");
+        provision_asymmetric_hsmauth_credential(HsmAuthProvisioningCase {
+            enable_env: ENABLE_ENV,
+            authkey_id_env: AUTHKEY_ID_ENV,
+            label_env: "PKCS11RS_TEST_HSMAUTH_LABEL",
+            default_label: DEFAULT_LABEL,
+            touch_required: false,
+        });
+    }
+
+    #[test]
+    #[ignore = "provisions persistent touch-required keys on a live YubiKey and YubiHSM"]
+    fn provisions_touch_required_asymmetric_hsmauth_credential_on_yubihsm() {
+        provision_asymmetric_hsmauth_credential(HsmAuthProvisioningCase {
+            enable_env: TOUCH_ENABLE_ENV,
+            authkey_id_env: TOUCH_AUTHKEY_ID_ENV,
+            label_env: "PKCS11RS_TEST_HSMAUTH_TOUCH_LABEL",
+            default_label: DEFAULT_TOUCH_LABEL,
+            touch_required: true,
+        });
+    }
+
+    struct HsmAuthProvisioningCase {
+        enable_env: &'static str,
+        authkey_id_env: &'static str,
+        label_env: &'static str,
+        default_label: &'static str,
+        touch_required: bool,
+    }
+
+    fn provision_asymmetric_hsmauth_credential(case: HsmAuthProvisioningCase) {
+        if std::env::var(case.enable_env).as_deref() != Ok("1") {
+            eprintln!(
+                "skipped persistent provisioning; set {}=1 to enable it",
+                case.enable_env
+            );
             return;
         }
 
@@ -241,11 +277,16 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         crate::initialize_debug_logging().expect("invalid PKCS11RS_DEBUG level");
 
         let authkey_id = hex_u16(
-            AUTHKEY_ID_ENV,
-            &std::env::var(AUTHKEY_ID_ENV)
-                .unwrap_or_else(|_| panic!("{AUTHKEY_ID_ENV} is required when provisioning")),
+            case.authkey_id_env,
+            &std::env::var(case.authkey_id_env).unwrap_or_else(|_| {
+                panic!("{} is required when provisioning", case.authkey_id_env)
+            }),
         );
-        assert_ne!(authkey_id, 0, "{AUTHKEY_ID_ENV} must not be zero");
+        assert_ne!(
+            authkey_id, 0,
+            "{} must not be zero",
+            case.authkey_id_env
+        );
         let admin_id = hex_u16(
             "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
             &environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
@@ -256,7 +297,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         );
         assert_ne!(domains, 0, "PKCS11RS_TEST_YUBIHSM_DOMAINS must not be zero");
 
-        let label = environment("PKCS11RS_TEST_HSMAUTH_LABEL", DEFAULT_LABEL);
+        let label = environment(case.label_env, case.default_label);
         assert!(!label.is_empty() && label.len() <= 40, "label must be 1..=40 bytes");
         let credential_password = crate::Zeroizing::new(environment(
             "PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD",
@@ -315,6 +356,10 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                 credential.algorithm,
                 crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
                 "existing YubiHSM Auth credential {label:?} is not asymmetric P-256"
+            );
+            assert_eq!(
+                credential.touch_required, case.touch_required,
+                "existing YubiHSM Auth credential {label:?} has the wrong touch policy"
             );
         }
 
@@ -404,7 +449,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                 &label,
                 None,
                 credential_password.as_bytes(),
-                false,
+                case.touch_required,
             )
             .expect("failed to generate the YubiHSM Auth asymmetric credential");
         let public_key = crate::HsmAuthClient
@@ -457,6 +502,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             .into_iter()
             .find(|credential| credential.label == label)
             .expect("generated YubiHSM Auth credential was not rediscovered");
+        assert_eq!(credential.touch_required, case.touch_required);
         let mut session = crate::HsmAuthProvider {
             connector: hsmauth,
             credential,
@@ -474,7 +520,8 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             .expect("failed to close the verification session");
 
         eprintln!(
-            "provisioned persistent YubiHSM Auth credential {label:?} and YubiHSM authentication key {authkey_id:04x}"
+            "provisioned persistent YubiHSM Auth credential {label:?} (touch required {}) and YubiHSM authentication key {authkey_id:04x}",
+            case.touch_required
         );
     }
 }
