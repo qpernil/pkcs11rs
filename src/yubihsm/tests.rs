@@ -283,7 +283,7 @@ impl ProtocolPeer {
 
     fn create_asymmetric_session(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
         let host_ephemeral_public = parse_p256_public_key(&data[2..])?;
-        let host_static_key = derive_p256_key(PASSWORD)?;
+        let host_static_key = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
         let host_static_public = parse_p256_public_key(&p256_public_key(&host_static_key)?)?;
         let group = p256_group()?;
         let device_static_key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
@@ -904,7 +904,7 @@ impl Connector for AsymmetricHsmAuthPeer {
         }
         let device_ephemeral = parse_p256_public_key(&context[P256_PUBLIC_KEY_LENGTH..])?;
         let device_static = parse_p256_public_key(device_public_key)?;
-        let host_static = derive_p256_key(PASSWORD)?;
+        let host_static = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
         let ephemeral_secret = p256_ecdh(&self.ephemeral_key, &device_ephemeral)?;
         let static_secret = p256_ecdh(&host_static, &device_static)?;
         let keys = x963_session_keys(&ephemeral_secret, &static_secret);
