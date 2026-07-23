@@ -3,14 +3,19 @@ use crate::{
     CommandApdu, Connector, Error, ResponseApdu, Scp03Session, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
     CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
 };
+use const_oid::ObjectIdentifier;
+use der::Decode;
+use zeroize::Zeroizing;
+
+#[cfg(test)]
 use openssl::{
-    bn::BigNumContext,
-    ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
+    ec::{EcGroup, EcKey},
     nid::Nid,
     pkey::PKey,
-    x509::X509,
 };
-use zeroize::Zeroizing;
+
+const EC_PUBLIC_KEY: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 
 const INS_GET_DATA: u8 = 0xca;
 const INS_PUT_KEY: u8 = 0xd8;
@@ -485,14 +490,14 @@ impl Scp11Curve {
         }
     }
 
-    fn from_nid(nid: Nid) -> Result<Self, Error> {
-        match nid {
-            Nid::X9_62_PRIME256V1 => Ok(Self::Secp256r1),
-            Nid::SECP384R1 => Ok(Self::Secp384r1),
-            Nid::SECP521R1 => Ok(Self::Secp521r1),
-            Nid::BRAINPOOL_P256R1 => Ok(Self::BrainpoolP256r1),
-            Nid::BRAINPOOL_P384R1 => Ok(Self::BrainpoolP384r1),
-            Nid::BRAINPOOL_P512R1 => Ok(Self::BrainpoolP512r1),
+    fn from_oid(oid: ObjectIdentifier) -> Result<Self, Error> {
+        match oid.to_string().as_str() {
+            "1.2.840.10045.3.1.7" => Ok(Self::Secp256r1),
+            "1.3.132.0.34" => Ok(Self::Secp384r1),
+            "1.3.132.0.35" => Ok(Self::Secp521r1),
+            "1.3.36.3.3.2.8.1.1.7" => Ok(Self::BrainpoolP256r1),
+            "1.3.36.3.3.2.8.1.1.11" => Ok(Self::BrainpoolP384r1),
+            "1.3.36.3.3.2.8.1.1.13" => Ok(Self::BrainpoolP512r1),
             _ => Err(CKR_ARGUMENTS_BAD.into()),
         }
     }
@@ -508,20 +513,19 @@ impl Scp11Curve {
         }
     }
 
-    fn nid(self) -> Nid {
+    fn ec_curve(self) -> crate::EcCurve {
         match self {
-            Self::Secp256r1 => Nid::X9_62_PRIME256V1,
-            Self::Secp384r1 => Nid::SECP384R1,
-            Self::Secp521r1 => Nid::SECP521R1,
-            Self::BrainpoolP256r1 => Nid::BRAINPOOL_P256R1,
-            Self::BrainpoolP384r1 => Nid::BRAINPOOL_P384R1,
-            Self::BrainpoolP512r1 => Nid::BRAINPOOL_P512R1,
+            Self::Secp256r1 => crate::EcCurve::P256,
+            Self::Secp384r1 => crate::EcCurve::P384,
+            Self::Secp521r1 => crate::EcCurve::P521,
+            Self::BrainpoolP256r1 => crate::EcCurve::BrainpoolP256,
+            Self::BrainpoolP384r1 => crate::EcCurve::BrainpoolP384,
+            Self::BrainpoolP512r1 => crate::EcCurve::BrainpoolP512,
         }
     }
 
     fn public_point_length(self) -> Result<usize, Error> {
-        let group = EcGroup::from_curve_name(self.nid())?;
-        Ok(1 + 2 * group.degree().div_ceil(8) as usize)
+        Ok(1 + 2 * crate::ec_parameters(self.ec_curve()).coordinate_length)
     }
 }
 
@@ -590,32 +594,67 @@ fn put_ec_key_data(
 }
 
 fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>), Error> {
-    let key = PKey::private_key_from_pkcs8(encoded)
-        .or_else(|_| PKey::private_key_from_der(encoded))
-        .and_then(|key| key.ec_key())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    key.check_key()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let curve = Scp11Curve::from_nid(key.group().curve_name().ok_or(CKR_ARGUMENTS_BAD)?)?;
-    let length = key.group().degree().div_ceil(8);
-    let scalar = key
-        .private_key()
-        .to_vec_padded(i32::try_from(length).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?)
-        .map_err(Error::from)?;
-    Ok((curve, Zeroizing::new(scalar)))
+    let (curve, scalar) = if let Ok(key) = pkcs8::PrivateKeyInfo::from_der(encoded) {
+        if key.algorithm.oid != EC_PUBLIC_KEY {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let oid = key
+            .algorithm
+            .parameters
+            .as_ref()
+            .ok_or(CKR_ARGUMENTS_BAD)?
+            .decode_as::<ObjectIdentifier>()
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let curve = Scp11Curve::from_oid(oid)?;
+        let key = sec1::EcPrivateKey::from_der(key.private_key)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        if let Some(parameters) = key.parameters {
+            if parameters.named_curve() != Some(oid) {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+        }
+        (curve, key.private_key)
+    } else {
+        let key =
+            sec1::EcPrivateKey::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let oid = key
+            .parameters
+            .and_then(|parameters| parameters.named_curve())
+            .ok_or(CKR_ARGUMENTS_BAD)?;
+        (Scp11Curve::from_oid(oid)?, key.private_key)
+    };
+    let parameters = crate::ec_parameters(curve.ec_curve());
+    let scalar = rsa::BigUint::from_bytes_be(scalar);
+    if scalar == rsa::BigUint::from(0u8) || scalar >= parameters.n {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let scalar = scalar.to_bytes_be();
+    let mut padded = vec![0; parameters.coordinate_length - scalar.len()];
+    padded.extend_from_slice(&scalar);
+    Ok((curve, Zeroizing::new(padded)))
 }
 
 fn parse_public_key(encoded: &[u8]) -> Result<(Scp11Curve, Vec<u8>), Error> {
-    let key = PKey::public_key_from_der(encoded)
-        .and_then(|key| key.ec_key())
+    let key = spki::SubjectPublicKeyInfoRef::from_der(encoded)
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    key.check_key()
+    if key.algorithm.oid != EC_PUBLIC_KEY {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let curve = Scp11Curve::from_oid(
+        key.algorithm
+            .parameters
+            .as_ref()
+            .ok_or(CKR_ARGUMENTS_BAD)?
+            .decode_as::<ObjectIdentifier>()
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
+    )?;
+    let point = key
+        .subject_public_key
+        .as_bytes()
+        .ok_or(CKR_ARGUMENTS_BAD)?
+        .to_vec();
+    crate::validate_ec_public_point(curve.ec_curve(), &point)
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let curve = Scp11Curve::from_nid(key.group().curve_name().ok_or(CKR_ARGUMENTS_BAD)?)?;
-    let mut context = BigNumContext::new()?;
-    let point =
-        key.public_key()
-            .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut context)?;
     Ok((curve, point))
 }
 
@@ -624,12 +663,8 @@ fn parse_generated_public_key(encoded: &[u8], curve: Scp11Curve) -> Result<Vec<u
     if tlvs.len() != 1 || tlvs[0].tag != KEY_TYPE_ECC_PUBLIC {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    let group = EcGroup::from_curve_name(curve.nid())?;
-    let mut context = BigNumContext::new()?;
-    let point = EcPoint::from_bytes(&group, tlvs[0].value, &mut context)
+    crate::validate_ec_public_point(curve.ec_curve(), tlvs[0].value)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let key = EcKey::from_public_key(&group, &point).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    key.check_key().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     Ok(tlvs[0].value.to_vec())
 }
 
@@ -637,15 +672,13 @@ fn validate_certificate_chain(certificates: &[Vec<u8>]) -> Result<(), Error> {
     if certificates.is_empty() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    let certificates = certificates
-        .iter()
-        .map(|encoded| X509::from_der(encoded).map_err(|_| Error::from(CKR_DATA_INVALID)))
-        .collect::<Result<Vec<_>, _>>()?;
+    for certificate in certificates {
+        crate::certificate_chain::validate(certificate)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    }
     for pair in certificates.windows(2) {
-        let issuer = pair[0].public_key()?;
-        if !pair[1].verify(&issuer)? {
-            return Err(CKR_DATA_INVALID.into());
-        }
+        crate::certificate_chain::verify_signed_by(&pair[1], &pair[0])
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     }
     Ok(())
 }

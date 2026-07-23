@@ -8,6 +8,7 @@ extern crate rusb;
 
 #[cfg(feature = "abi-tests")]
 use openssl::symm::{Cipher, Crypter, Mode};
+#[cfg(feature = "abi-tests")]
 use openssl::{
     bn::BigNum,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
@@ -406,16 +407,7 @@ fn der_octet_string_value(value: &[u8]) -> Option<&[u8]> {
 }
 
 fn piv_ecdsa_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
-    let signature = EcdsaSig::from_der(signature).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let mut output = vec![0; coordinate_length * 2];
-    let r = signature.r().to_vec();
-    let s = signature.s().to_vec();
-    if r.len() > coordinate_length || s.len() > coordinate_length {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    output[coordinate_length - r.len()..coordinate_length].copy_from_slice(&r);
-    output[2 * coordinate_length - s.len()..].copy_from_slice(&s);
-    Ok(output)
+    ecdsa_der_to_raw(signature, coordinate_length)
 }
 
 pub mod pkcs11 {

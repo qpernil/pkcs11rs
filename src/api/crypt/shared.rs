@@ -10,17 +10,7 @@ fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
 }
 
 fn yubihsm_ecdsa_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
-    let signature = EcdsaSig::from_der(signature).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let mut output = Vec::with_capacity(coordinate_length * 2);
-    for coordinate in [signature.r(), signature.s()] {
-        let encoded = coordinate.to_vec();
-        if encoded.len() > coordinate_length {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        output.resize(output.len() + coordinate_length - encoded.len(), 0);
-        output.extend_from_slice(&encoded);
-    }
-    Ok(output)
+    ecdsa_der_to_raw(signature, coordinate_length)
 }
 
 fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result<Vec<u8>, Error> {
