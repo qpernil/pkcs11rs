@@ -1,11 +1,9 @@
-use super::parse_p256_public_key;
 use crate::{Error, CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT};
-use openssl::{
-    nid::Nid,
-    pkey::{PKey, Public},
-    sha::sha256,
-    x509::X509,
+use p256::{
+    pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
+    PublicKey,
 };
+use sha2::{Digest, Sha256};
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -45,7 +43,7 @@ pub(crate) fn fingerprint(encoded_public_point: &[u8]) -> Result<String, Error> 
 }
 
 pub(crate) fn fingerprint_bytes(encoded_public_point: &[u8]) -> Result<[u8; 32], Error> {
-    Ok(sha256(&device_spki(encoded_public_point)?))
+    Ok(Sha256::digest(device_spki(encoded_public_point)?).into())
 }
 
 pub(crate) fn entry_path(
@@ -81,7 +79,6 @@ pub(crate) fn validate_device_public_key(
     let path = entry_path(encoded_public_point, Some(prefix.as_os_str()))?;
     let pem = fs::read(path).map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
     let pinned = public_key_from_pem(&pem)?;
-    let pinned = pinned.public_key_to_der().map_err(Error::from)?;
     if bool::from(expected.ct_eq(&pinned)) {
         Ok(())
     } else {
@@ -89,26 +86,29 @@ pub(crate) fn validate_device_public_key(
     }
 }
 
-pub(crate) fn public_key_from_pem(pem: &[u8]) -> Result<PKey<Public>, Error> {
-    let key = match X509::from_pem(pem) {
-        Ok(certificate) => certificate.public_key().map_err(Error::from)?,
-        Err(_) => PKey::public_key_from_pem(pem).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
-    };
-    let ec = key.ec_key().map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    if ec.group().curve_name() != Some(Nid::X9_62_PRIME256V1) {
-        return Err(CKR_ARGUMENTS_BAD.into());
+pub(crate) fn public_key_from_pem(pem: &[u8]) -> Result<Vec<u8>, Error> {
+    if let Ok(public_key_info) = crate::certificate_chain::public_key_info(pem) {
+        PublicKey::from_public_key_der(&public_key_info)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        return Ok(public_key_info);
     }
-    ec.check_key().map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    PKey::from_ec_key(ec).map_err(Error::from)
+    let pem = std::str::from_utf8(pem).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    PublicKey::from_public_key_pem(pem)
+        .and_then(|key| key.to_public_key_der())
+        .map(|document| document.as_bytes().to_vec())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 pub(crate) fn install_public_key(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    let key = parse_p256_public_key(encoded_public_point)?;
-    let pem = PKey::from_ec_key(key)?.public_key_to_pem()?;
-    install_pem(encoded_public_point, &pem, prefix, false)
+    let key = PublicKey::from_sec1_bytes(encoded_public_point)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let pem = key
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    install_pem(encoded_public_point, pem.as_bytes(), prefix, false)
 }
 
 pub(crate) fn install_attestation(
@@ -118,37 +118,30 @@ pub(crate) fn install_attestation(
     validation: AttestationValidation,
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    let attestation = X509::from_der(attestation)
-        .or_else(|_| X509::from_pem(attestation))
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let device_certificate = X509::from_der(device_certificate)
-        .or_else(|_| X509::from_pem(device_certificate))
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let attestation = crate::certificate_chain::decode(attestation)?;
+    let device_certificate = crate::certificate_chain::decode(device_certificate)?;
     match validation {
         AttestationValidation::ExplicitSigner => {
-            let signer = device_certificate.public_key()?;
-            if !attestation.verify(&signer)? {
-                return Err(CKR_PIN_INCORRECT.into());
-            }
+            crate::certificate_chain::verify_signed_by(&attestation, &device_certificate)
+                .map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
         }
         AttestationValidation::Yubico => {
-            let intermediate = X509::from_pem(YUBICO_INTERMEDIATE)?;
-            let root = X509::from_pem(YUBICO_ROOT)?;
+            let intermediate = crate::certificate_chain::decode(YUBICO_INTERMEDIATE)?;
+            let root = crate::certificate_chain::decode(YUBICO_ROOT)?;
             crate::certificate_chain::validate_p256_public_point(
-                &[
-                    intermediate.to_der()?,
-                    device_certificate.to_der()?,
-                    attestation.to_der()?,
-                ],
-                &[root.to_der()?],
+                &[intermediate, device_certificate, attestation.clone()],
+                &[root],
             )?;
         }
     }
-    let attested_key = public_key_from_pem(&attestation.to_pem()?)?;
-    if !bool::from(device_spki(encoded_public_point)?.ct_eq(&attested_key.public_key_to_der()?)) {
+    if !bool::from(
+        device_spki(encoded_public_point)?
+            .ct_eq(&crate::certificate_chain::public_key_info(&attestation)?),
+    ) {
         return Err(CKR_PIN_INCORRECT.into());
     }
-    install_pem(encoded_public_point, &attestation.to_pem()?, prefix, true)
+    let pem = crate::certificate_chain::encode_pem(&attestation)?;
+    install_pem(encoded_public_point, pem.as_bytes(), prefix, true)
 }
 
 fn install_pem(
@@ -191,21 +184,24 @@ fn install_pem(
 }
 
 pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error> {
-    let key = parse_p256_public_key(encoded_public_point)?;
-    PKey::from_ec_key(key)?
-        .public_key_to_der()
-        .map_err(Error::from)
+    let key = PublicKey::from_sec1_bytes(encoded_public_point)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    key.to_public_key_der()
+        .map(|document| document.as_bytes().to_vec())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::yubihsm::parse_p256_public_key;
     use openssl::{
         asn1::Asn1Time,
         bn::BigNum,
         ec::{EcGroup, EcKey, PointConversionForm},
         hash::MessageDigest,
-        pkey::Private,
+        nid::Nid,
+        pkey::{PKey, Private, Public},
         x509::{X509NameBuilder, X509},
     };
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -345,7 +341,7 @@ mod tests {
     #[test]
     fn fingerprint_is_sha256_of_canonical_spki() {
         let (key, point) = test_key();
-        let expected: String = sha256(&key.public_key_to_der().unwrap())
+        let expected: String = Sha256::digest(key.public_key_to_der().unwrap())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
