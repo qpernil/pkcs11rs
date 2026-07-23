@@ -169,18 +169,14 @@ fn verify(
                 if signature.len() != public_key.size() as usize {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                let mut recovered = vec![0; public_key.size() as usize];
-                let padding = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                let recovered = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                     || piv_is_pss_mechanism(operation.mechanism)
                 {
-                    Padding::NONE
+                    rsa_public_operation(public_key, signature)
                 } else {
-                    Padding::PKCS1
-                };
-                let recovered_len = public_key
-                    .public_decrypt(signature, &mut recovered, padding)
-                    .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-                recovered.truncate(recovered_len);
+                    rsa_pkcs1_recover(public_key, signature)
+                }
+                .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
                 let expected = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
                     if data.len() > public_key.size() as usize {
                         return Err(CKR_DATA_LEN_RANGE.into());

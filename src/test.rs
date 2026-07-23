@@ -1,3 +1,5 @@
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+
 include!("tests/common.rs");
 include!("tests/general.rs");
 include!("tests/crypto.rs");

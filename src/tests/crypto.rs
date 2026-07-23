@@ -383,47 +383,36 @@ pub fn piv_rsa_pss_hash_mapping_preserves_sha3_variants() {
 
 #[test]
 pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
-    let private = openssl::rsa::Rsa::generate(2048).unwrap();
-    let public = openssl::rsa::Rsa::from_public_components(
-        private.n().to_owned().unwrap(),
-        private.e().to_owned().unwrap(),
-    )
-    .unwrap();
+    let private = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
+    let public = rsa::RsaPublicKey::from(&private);
     let data = b"padding test";
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data).unwrap();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
     let pss = crate::encode_rsa_pss(
-        digest.as_ref(),
+        &digest,
         private.size() as usize,
         CKM_SHA256 as CK_MECHANISM_TYPE,
         33,
         32,
     )
     .unwrap();
-    let mut signature = vec![0; private.size() as usize];
-    let written = private
-        .private_encrypt(&pss, &mut signature, openssl::rsa::Padding::NONE)
-        .unwrap();
-    signature.truncate(written);
-    let mut recovered = vec![0; public.size() as usize];
-    let recovered_len = public
-        .public_decrypt(&signature, &mut recovered, openssl::rsa::Padding::NONE)
-        .unwrap();
+    let signature = crate::rsa_private_operation(&private, &pss).unwrap();
+    let recovered = crate::rsa_public_operation(&public, &signature).unwrap();
     assert!(crate::verify_rsa_pss(
-        &recovered[..recovered_len],
-        digest.as_ref(),
+        &recovered,
+        &digest,
         CKM_SHA256 as CK_MECHANISM_TYPE,
         33,
         32,
     )
     .unwrap());
 
-    let label = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), b"").unwrap();
+    let label = <sha2::Sha256 as sha2::Digest>::digest(b"");
     let encoded = crate::rsa_oaep_pad(
         data,
         private.size() as usize,
         33,
         CKM_SHA256 as CK_MECHANISM_TYPE,
-        label.as_ref(),
+        &label,
     )
     .unwrap();
     assert_eq!(
@@ -431,32 +420,19 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
             &encoded,
             33,
             CKM_SHA256 as CK_MECHANISM_TYPE,
-            label.as_ref(),
+            &label,
         )
         .unwrap(),
         data
     );
-    let mut ciphertext = vec![0; public.size() as usize];
-    let written = public
-        .public_encrypt(&encoded, &mut ciphertext, openssl::rsa::Padding::NONE)
-        .unwrap();
-    ciphertext.truncate(written);
-    let mut plaintext = vec![0; private.size() as usize];
-    let written = private
-        .private_decrypt(&ciphertext, &mut plaintext, openssl::rsa::Padding::NONE)
-        .unwrap();
-    plaintext.truncate(written);
-    if plaintext.len() < private.size() as usize {
-        let mut padded = vec![0; private.size() as usize - plaintext.len()];
-        padded.extend_from_slice(&plaintext);
-        plaintext = padded;
-    }
+    let ciphertext = crate::rsa_public_operation(&public, &encoded).unwrap();
+    let plaintext = crate::rsa_private_operation(&private, &ciphertext).unwrap();
     assert_eq!(
         crate::rsa_oaep_unpad(
             &plaintext,
             33,
             CKM_SHA256 as CK_MECHANISM_TYPE,
-            label.as_ref(),
+            &label,
         )
         .unwrap(),
         data
@@ -622,10 +598,7 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
     let mut raw_data = b"raw RSA input".to_vec();
     let mut encoded = vec![0; key_size - raw_data.len()];
     encoded.extend_from_slice(&raw_data);
-    let mut raw_signature = vec![0; key_size];
-    private_key
-        .private_encrypt(&encoded, &mut raw_signature, openssl::rsa::Padding::NONE)
-        .unwrap();
+    let mut raw_signature = crate::rsa_private_operation(&private_key, &encoded).unwrap();
     let mut raw_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_X_509 as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
@@ -646,12 +619,8 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         CKR_OK as CK_RV
     );
 
-    let mut digest = openssl::hash::hash(
-        openssl::hash::MessageDigest::sha256(),
-        b"RSA-PSS verification",
-    )
-    .unwrap()
-    .to_vec();
+    let mut digest =
+        <sha2::Sha256 as sha2::Digest>::digest(b"RSA-PSS verification").to_vec();
     let pss = crate::encode_rsa_pss(
         &digest,
         key_size,
@@ -660,10 +629,7 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         32,
     )
     .unwrap();
-    let mut pss_signature = vec![0; key_size];
-    private_key
-        .private_encrypt(&pss, &mut pss_signature, openssl::rsa::Padding::NONE)
-        .unwrap();
+    let mut pss_signature = crate::rsa_private_operation(&private_key, &pss).unwrap();
     let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
         hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
         mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
@@ -1205,12 +1171,8 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
 
 #[test]
 fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
-    let private_key = openssl::rsa::Rsa::generate(2048).unwrap();
-    let public_key = openssl::rsa::Rsa::from_public_components(
-        private_key.n().to_owned().unwrap(),
-        private_key.e().to_owned().unwrap(),
-    )
-    .unwrap();
+    let private_key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
+    let public_key = rsa::RsaPublicKey::from(&private_key);
     let slot = crate::PivSlot {
         connector: std::rc::Rc::new(FailingConnector),
         application_aid: crate::piv::PIV_AID.to_vec(),

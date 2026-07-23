@@ -422,15 +422,44 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         piv::PrivateKeyImport {
             algorithm,
             components: vec![
-                (0x01, Zeroizing::new(key.p().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec())),
-                (0x02, Zeroizing::new(key.q().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec())),
-                (0x03, Zeroizing::new(key.dmp1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec())),
-                (0x04, Zeroizing::new(key.dmq1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec())),
-                (0x05, Zeroizing::new(key.iqmp().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec())),
+                (
+                    0x01,
+                    Zeroizing::new(
+                        key.primes()
+                            .first()
+                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                            .to_bytes_be(),
+                    ),
+                ),
+                (
+                    0x02,
+                    Zeroizing::new(
+                        key.primes()
+                            .get(1)
+                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                            .to_bytes_be(),
+                    ),
+                ),
+                (
+                    0x03,
+                    Zeroizing::new(key.dp().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_bytes_be()),
+                ),
+                (
+                    0x04,
+                    Zeroizing::new(key.dq().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_bytes_be()),
+                ),
+                (
+                    0x05,
+                    Zeroizing::new(
+                        key.qinv()
+                            .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                            .to_signed_bytes_be(),
+                    ),
+                ),
             ],
             public_key: MetadataPublicKey::Rsa {
-                modulus: key.n().to_vec(),
-                exponent: key.e().to_vec(),
+                modulus: key.n().to_bytes_be(),
+                exponent: key.e().to_bytes_be(),
             },
         }
     } else {
@@ -718,8 +747,8 @@ fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
     }
 }
 
-fn padded_big_num(value: &openssl::bn::BigNumRef, length: usize) -> Result<Vec<u8>, Error> {
-    let encoded = value.to_vec();
+fn padded_big_num(value: &BigUint, length: usize) -> Result<Vec<u8>, Error> {
+    let encoded = value.to_bytes_be();
     if encoded.len() > length {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
@@ -791,10 +820,12 @@ fn yubihsm_import_command(
                 512 => (YUBIHSM_ALGO_RSA_4096, 256),
                 _ => return Err(CKR_KEY_SIZE_RANGE.into()),
             };
-            let mut value =
-                padded_big_num(key.p().ok_or(CKR_TEMPLATE_INCOMPLETE)?, component_length)?;
+            let mut value = padded_big_num(
+                key.primes().first().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+                component_length,
+            )?;
             value.extend_from_slice(&padded_big_num(
-                key.q().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+                key.primes().get(1).ok_or(CKR_TEMPLATE_INCOMPLETE)?,
                 component_length,
             )?);
             Ok((
@@ -881,29 +912,27 @@ fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
 fn required_big_num(
     components: &mut HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
     attribute_type: CK_ATTRIBUTE_TYPE,
-) -> Result<BigNum, Error> {
+) -> Result<BigUint, Error> {
     let value = components
         .remove(&attribute_type)
         .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     if value.is_empty() {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
-    BigNum::from_slice(&value).map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID.into())
+    Ok(BigUint::from_bytes_be(&value))
 }
 
 fn optional_big_num(
     components: &mut HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
     attribute_type: CK_ATTRIBUTE_TYPE,
-) -> Result<Option<BigNum>, Error> {
+) -> Result<Option<BigUint>, Error> {
     components
         .remove(&attribute_type)
         .map(|value| {
             if value.is_empty() {
                 Err(CKR_ATTRIBUTE_VALUE_INVALID.into())
             } else {
-                BigNum::from_slice(&value)
-                    .map(Some)
-                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID.into())
+                Ok(Some(BigUint::from_bytes_be(&value)))
             }
         })
         .unwrap_or(Ok(None))
@@ -940,7 +969,7 @@ fn build_imported_key_material(
             let modulus = required_big_num(&mut components, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
             let exponent =
                 required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
-            let key = Rsa::from_public_components(modulus, exponent)
+            let key = RsaPublicKey::new(modulus, exponent)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             KeyMaterial::RsaPublic(key)
         }
@@ -953,17 +982,12 @@ fn build_imported_key_material(
                 required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
             let private_exponent =
                 required_big_num(&mut components, CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE)?;
-            let mut builder = RsaPrivateKeyBuilder::new(modulus, public_exponent, private_exponent)
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-
             let prime_1 = optional_big_num(&mut components, CKA_PRIME_1 as CK_ATTRIBUTE_TYPE)?;
             let prime_2 = optional_big_num(&mut components, CKA_PRIME_2 as CK_ATTRIBUTE_TYPE)?;
             let has_factors = prime_1.is_some() || prime_2.is_some();
-            builder = match (prime_1, prime_2) {
-                (Some(prime_1), Some(prime_2)) => builder
-                    .set_factors(prime_1, prime_2)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                (None, None) => builder,
+            let primes = match (prime_1, prime_2) {
+                (Some(prime_1), Some(prime_2)) => vec![prime_1, prime_2],
+                (None, None) => Vec::new(),
                 _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
             };
 
@@ -973,14 +997,17 @@ fn build_imported_key_material(
                 optional_big_num(&mut components, CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE)?;
             let coefficient =
                 optional_big_num(&mut components, CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE)?;
-            builder = match (exponent_1, exponent_2, coefficient) {
-                (Some(exponent_1), Some(exponent_2), Some(coefficient)) if has_factors => builder
-                    .set_crt_params(exponent_1, exponent_2, coefficient)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                (None, None, None) => builder,
+            match (exponent_1, exponent_2, coefficient) {
+                (Some(_), Some(_), Some(_)) if has_factors => {}
+                (None, None, None) => {}
                 _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
-            };
-            KeyMaterial::RsaPrivate(builder.build())
+            }
+            let mut key =
+                RsaPrivateKey::from_components(modulus, public_exponent, private_exponent, primes)
+                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            key.precompute()
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            KeyMaterial::RsaPrivate(key)
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };

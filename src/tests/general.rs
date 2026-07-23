@@ -500,12 +500,8 @@ fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
 
 #[test]
 fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities() {
-    let generated = openssl::rsa::Rsa::generate(2048).unwrap();
-    let public_key = openssl::rsa::Rsa::from_public_components(
-        generated.n().to_owned().unwrap(),
-        generated.e().to_owned().unwrap(),
-    )
-    .unwrap();
+    let generated = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048).unwrap();
+    let public_key = rsa::RsaPublicKey::from(&generated);
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot {
         connector,
