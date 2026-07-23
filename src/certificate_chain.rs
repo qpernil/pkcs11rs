@@ -1,6 +1,9 @@
 use crate::{Error, CKR_ARGUMENTS_BAD};
 use const_oid::ObjectIdentifier;
-use der::{asn1::ObjectIdentifier as DerObjectIdentifier, Decode, Encode};
+use der::{
+    asn1::ObjectIdentifier as DerObjectIdentifier, pem::LineEnding, Decode, DecodePem, Encode,
+    EncodePem,
+};
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use sha2::{Digest, Sha256};
@@ -374,6 +377,33 @@ pub(crate) fn load(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(certificates)
+}
+
+pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    Certificate::from_der(encoded)
+        .or_else(|_| Certificate::from_pem(encoded))
+        .and_then(|certificate| certificate.to_der())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn encode_pem(encoded: &[u8]) -> Result<String, Error> {
+    Certificate::from_der(encoded)
+        .and_then(|certificate| certificate.to_pem(LineEnding::LF))
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    ParsedCertificate::parse(&decode(encoded)?)?
+        .certificate
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn verify_signed_by(certificate: &[u8], signer: &[u8]) -> Result<(), Error> {
+    ParsedCertificate::parse(&decode(certificate)?)?
+        .verify_signature(&ParsedCertificate::parse(&decode(signer)?)?)
 }
 
 pub(crate) fn validate_p256_public_point(
