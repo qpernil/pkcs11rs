@@ -33,7 +33,7 @@ fn configure(value: Option<OsString>) -> Result<(), Error> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn configure_for_test(value: Option<OsString>) -> Result<(), Error> {
     configure(value)
 }
