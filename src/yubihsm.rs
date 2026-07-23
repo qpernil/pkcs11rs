@@ -101,7 +101,14 @@ impl Frame {
 
     fn require_response(self, request: u8) -> Result<Vec<u8>, Error> {
         if self.command == COMMAND_ERROR {
-            return Err(map_device_error(self.data.first().copied()));
+            let error = self.data.first().copied();
+            log!(
+                2,
+                "YubiHSM command {:02x} returned device error {}",
+                request,
+                format_device_error(error)
+            );
+            return Err(map_device_error(error));
         }
         if self.command != request | RESPONSE_BIT {
             return Err(CKR_DEVICE_ERROR.into());
@@ -745,6 +752,27 @@ fn map_device_error(error: Option<u8>) -> Error {
         Some(0x11) => CKR_ATTRIBUTE_VALUE_INVALID.into(),
         Some(0xff) => CKR_FUNCTION_FAILED.into(),
         _ => CKR_DEVICE_ERROR.into(),
+    }
+}
+
+fn format_device_error(error: Option<u8>) -> String {
+    match error {
+        Some(0x03) => "0x03 (invalid session)".to_owned(),
+        Some(0x05) => "0x05 (sessions full)".to_owned(),
+        Some(0x07) => "0x07 (storage full)".to_owned(),
+        Some(0x08) => "0x08 (wrong length)".to_owned(),
+        Some(0x09) => "0x09 (invalid permissions)".to_owned(),
+        Some(0x0a) => "0x0a (log full)".to_owned(),
+        Some(0x0b) => "0x0b (object not found)".to_owned(),
+        Some(0x0c) => "0x0c (invalid ID)".to_owned(),
+        Some(0x0e) => "0x0e (SSH CA constraint violation)".to_owned(),
+        Some(0x0f) => "0x0f (invalid OTP)".to_owned(),
+        Some(0x10) => "0x10 (demo mode)".to_owned(),
+        Some(0x11) => "0x11 (object exists)".to_owned(),
+        Some(0x12) => "0x12 (algorithm disabled)".to_owned(),
+        Some(0xff) => "0xff (command unexecuted)".to_owned(),
+        Some(error) => format!("0x{error:02x}"),
+        None => "missing status".to_owned(),
     }
 }
 
