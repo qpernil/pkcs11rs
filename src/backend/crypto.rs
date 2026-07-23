@@ -435,5 +435,5 @@ fn verify_rsa_pss(
     let mut m_prime = vec![0; 8];
     m_prime.extend_from_slice(digest);
     m_prime.extend_from_slice(&db[separator + 1..]);
-    Ok(hash(hash_digest, &m_prime)?.as_ref() == h)
+    Ok(hash(hash_digest, &m_prime)?.as_slice() == h)
 }

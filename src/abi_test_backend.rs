@@ -648,7 +648,7 @@ fn abi_yubihsm_certificate(
     certificate.set_pubkey(public_key)?;
     certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
     certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-    certificate.sign(signer, MessageDigest::sha256())?;
+    certificate.sign(signer, openssl::hash::MessageDigest::sha256())?;
     Ok(certificate.build().to_der()?)
 }
 
@@ -686,7 +686,7 @@ fn abi_yubihsm_opaque_certificate() -> Result<Vec<u8>, Error> {
     certificate.set_pubkey(&certificate_key)?;
     certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
     certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-    certificate.sign(&certificate_key, MessageDigest::sha256())?;
+    certificate.sign(&certificate_key, openssl::hash::MessageDigest::sha256())?;
     let certificate = certificate.build().to_der()?;
     let _ = CERTIFICATE.set(certificate);
     CERTIFICATE.get().cloned().ok_or(CKR_DEVICE_ERROR.into())
