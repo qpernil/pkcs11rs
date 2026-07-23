@@ -1182,13 +1182,13 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
 
 #[test]
 pub fn create_object_requires_and_imports_real_key_material() {
-    let rsa = openssl::rsa::Rsa::generate(1024).unwrap();
+    let rsa = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
     let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut private_class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
-    let mut modulus = rsa.n().to_vec();
-    let mut public_exponent = rsa.e().to_vec();
-    let mut private_exponent = rsa.d().to_vec();
+    let mut modulus = rsa.n().to_bytes_be();
+    let mut public_exponent = rsa.e().to_bytes_be();
+    let mut private_exponent = rsa.d().to_bytes_be();
     let class_attribute = |class: &mut CK_OBJECT_CLASS| CK_ATTRIBUTE {
         type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
         pValue: class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,

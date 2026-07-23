@@ -335,14 +335,7 @@ fn sign(
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
                 KeyMaterial::RsaPrivate(private_key) => {
-                    let mut signature = vec![0; required];
-                    private_key
-                        .private_encrypt(data, &mut signature, Padding::PKCS1)
-                        .map(|written| {
-                            signature.truncate(written);
-                            signature
-                        })
-                        .map_err(Error::from)
+                    rsa_pkcs1_sign(private_key, data)
                 }
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..

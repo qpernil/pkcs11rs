@@ -27,8 +27,8 @@ struct TokenObject {
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
 enum KeyMaterial {
     None,
-    RsaPrivate(Rsa<Private>),
-    RsaPublic(Rsa<Public>),
+    RsaPrivate(RsaPrivateKey),
+    RsaPublic(RsaPublicKey),
     PivPrivate {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
@@ -731,8 +731,8 @@ impl TokenObject {
                 ))
             }
             x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(key.n().to_vec()),
-                KeyMaterial::RsaPublic(key) => Some(key.n().to_vec()),
+                KeyMaterial::RsaPrivate(key) => Some(key.n().to_bytes_be()),
+                KeyMaterial::RsaPublic(key) => Some(key.n().to_bytes_be()),
                 KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
                     Some(modulus.clone())
                 }
@@ -749,8 +749,8 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(key.e().to_vec()),
-                KeyMaterial::RsaPublic(key) => Some(key.e().to_vec()),
+                KeyMaterial::RsaPrivate(key) => Some(key.e().to_bytes_be()),
+                KeyMaterial::RsaPublic(key) => Some(key.e().to_bytes_be()),
                 KeyMaterial::PivPrivate {
                     public_exponent, ..
                 } if !public_exponent.is_empty() => Some(public_exponent.clone()),

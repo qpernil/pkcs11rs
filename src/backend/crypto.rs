@@ -395,6 +395,95 @@ fn point_with_prefix(point: &[u8]) -> Vec<u8> {
     encoded
 }
 
+fn rsa_operation(
+    input: &[u8],
+    exponent: &BigUint,
+    modulus: &BigUint,
+    size: usize,
+) -> Result<Vec<u8>, Error> {
+    if input.len() > size {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let value = BigUint::from_bytes_be(input);
+    if &value >= modulus {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let encoded = value.modpow(exponent, modulus).to_bytes_be();
+    let mut output = vec![0; size];
+    output[size - encoded.len()..].copy_from_slice(&encoded);
+    Ok(output)
+}
+
+pub(crate) fn rsa_public_operation(
+    key: &RsaPublicKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    rsa_operation(input, key.e(), key.n(), key.size())
+}
+
+pub(crate) fn rsa_private_operation(
+    key: &RsaPrivateKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    rsa_operation(input, key.d(), key.n(), key.size())
+}
+
+pub(crate) fn rsa_pkcs1_encrypt(
+    key: &RsaPublicKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let size = key.size();
+    if input.len() > size.saturating_sub(11) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let padding_length = size - input.len() - 3;
+    let mut encoded = vec![0, 2];
+    while encoded.len() < padding_length + 2 {
+        let mut byte = [0];
+        getrandom::fill(&mut byte).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        if byte[0] != 0 {
+            encoded.push(byte[0]);
+        }
+    }
+    encoded.push(0);
+    encoded.extend_from_slice(input);
+    rsa_public_operation(key, &encoded)
+}
+
+pub(crate) fn rsa_pkcs1_sign(
+    key: &RsaPrivateKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let size = key.size();
+    if input.len() > size.saturating_sub(11) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut encoded = vec![0, 1];
+    encoded.resize(size - input.len() - 1, 0xff);
+    encoded.push(0);
+    encoded.extend_from_slice(input);
+    rsa_private_operation(key, &encoded)
+}
+
+pub(crate) fn rsa_pkcs1_recover(
+    key: &RsaPublicKey,
+    signature: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let encoded = rsa_public_operation(key, signature)?;
+    if encoded.len() < 11 || encoded[..2] != [0, 1] {
+        return Err(CKR_SIGNATURE_INVALID.into());
+    }
+    let separator = encoded[2..]
+        .iter()
+        .position(|byte| *byte != 0xff)
+        .map(|position| position + 2)
+        .ok_or(CKR_SIGNATURE_INVALID)?;
+    if separator < 10 || encoded[separator] != 0 {
+        return Err(CKR_SIGNATURE_INVALID.into());
+    }
+    Ok(encoded[separator + 1..].to_vec())
+}
+
 fn verify_rsa_pss(
     encoded: &[u8],
     digest: &[u8],

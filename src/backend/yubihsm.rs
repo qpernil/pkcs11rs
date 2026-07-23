@@ -730,10 +730,12 @@ fn yubihsm_token_objects_with_generation(
                 public_key.key.clone(),
             )
         } else if is_yubihsm_rsa(info.algorithm) {
-            let modulus = BigNum::from_slice(&public_key.key).map_err(Error::from)?;
-            let exponent = BigNum::from_u32(65537).map_err(Error::from)?;
             KeyMaterial::RsaPublic(
-                Rsa::from_public_components(modulus, exponent).map_err(Error::from)?,
+                RsaPublicKey::new(
+                    BigUint::from_bytes_be(&public_key.key),
+                    BigUint::from(65537u32),
+                )
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
             )
         } else {
             yubihsm_remote_material(&info, public_key.key)

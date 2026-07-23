@@ -93,7 +93,7 @@ impl OpenPgpSlot {
 
 fn openpgp_public_material(key: &OpenPgpPublicKey) -> Vec<u8> {
     match key {
-        OpenPgpPublicKey::Rsa(key) => key.n().to_vec(),
+        OpenPgpPublicKey::Rsa(key) => key.n().to_bytes_be(),
         OpenPgpPublicKey::Ec { point, .. } | OpenPgpPublicKey::Raw { key: point, .. } => {
             point.clone()
         }
@@ -102,7 +102,7 @@ fn openpgp_public_material(key: &OpenPgpPublicKey) -> Vec<u8> {
 
 fn openpgp_rsa_components(key: &OpenPgpPublicKey) -> (Vec<u8>, Vec<u8>) {
     match key {
-        OpenPgpPublicKey::Rsa(key) => (key.n().to_vec(), key.e().to_vec()),
+        OpenPgpPublicKey::Rsa(key) => (key.n().to_bytes_be(), key.e().to_bytes_be()),
         _ => (Vec::new(), Vec::new()),
     }
 }
@@ -792,20 +792,26 @@ fn openpgp_private_key_template(
                 algorithm_attributes[3],
                 algorithm_attributes[4],
             ])).div_ceil(8);
-            let exponent = openpgp_pad_integer(&key.e().to_vec(), exponent_length)?;
+            let exponent = openpgp_pad_integer(&key.e().to_bytes_be(), exponent_length)?;
             let prime_length = bits / 16;
             append(0x91, &exponent)?;
             append(
                 0x92,
                 &openpgp_pad_integer(
-                    &key.p().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                    &key.primes()
+                        .first()
+                        .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                        .to_bytes_be(),
                     prime_length,
                 )?,
             )?;
             append(
                 0x93,
                 &openpgp_pad_integer(
-                    &key.q().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                    &key.primes()
+                        .get(1)
+                        .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                        .to_bytes_be(),
                     prime_length,
                 )?,
             )?;
@@ -814,21 +820,27 @@ fn openpgp_private_key_template(
                     append(
                         0x94,
                         &openpgp_pad_integer(
-                            &key.iqmp().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            &key.qinv()
+                                .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                                .to_signed_bytes_be(),
                             prime_length,
                         )?,
                     )?;
                     append(
                         0x95,
                         &openpgp_pad_integer(
-                            &key.dmp1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            &key.dp()
+                                .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                                .to_bytes_be(),
                             prime_length,
                         )?,
                     )?;
                     append(
                         0x96,
                         &openpgp_pad_integer(
-                            &key.dmq1().ok_or(CKR_TEMPLATE_INCOMPLETE)?.to_vec(),
+                            &key.dq()
+                                .ok_or(CKR_TEMPLATE_INCOMPLETE)?
+                                .to_bytes_be(),
                             prime_length,
                         )?,
                     )?;
@@ -837,7 +849,7 @@ fn openpgp_private_key_template(
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }
             if matches!(algorithm_attributes[5], 1 | 3) {
-                append(0x97, &key.n().to_vec())?;
+                append(0x97, &key.n().to_bytes_be())?;
             }
         }
         (algorithm, KeyMaterial::Secret(value))
