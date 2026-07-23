@@ -13,7 +13,6 @@ use openssl::{
     memcmp,
     nid::Nid,
     pkey::{PKey, Private, Public},
-    sha::sha256,
     x509::X509,
 };
 use std::{env, fs};
@@ -79,7 +78,7 @@ pub(crate) struct Scp11KeySet {
     variant: Scp11Variant,
     key_version: u8,
     card_public_key: Option<EcKey<Public>>,
-    trust_anchors: Vec<Vec<u8>>,
+    certificate_trust: Option<crate::certificate_chain::CertificateTrust>,
     host: Option<Scp11aHostCredentials>,
 }
 
@@ -98,20 +97,24 @@ impl Scp11KeySet {
     pub(crate) fn from_environment(variant: Scp11Variant) -> Result<Self, Error> {
         let point = env::var("PKCS11RS_SCP11_SD_PUBLIC_KEY");
         let ca_certificate = env::var("PKCS11RS_SCP11_SD_CA_CERTIFICATE");
-        let (card_public_key, trust_anchors) = match (point, ca_certificate) {
+        let (card_public_key, certificate_trust) = match (point, ca_certificate) {
             (Ok(point), Err(env::VarError::NotPresent)) => {
-                (Some(parse_public_point(&parse_hex(&point)?)?), Vec::new())
+                (Some(parse_public_point(&parse_hex(&point)?)?), None)
             }
             (Err(env::VarError::NotPresent), Ok(path)) => {
                 let anchors = load_certificates(&path)?;
-                if anchors.len() != 1 {
-                    return Err(CKR_ARGUMENTS_BAD.into());
-                }
-                (None, anchors)
+                (
+                    None,
+                    Some(crate::certificate_chain::CertificateTrust::new(
+                        &anchors,
+                    )?),
+                )
             }
             (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => (
                 None,
-                vec![X509::from_pem(YUBICO_ATTESTATION_ROOT)?.to_der()?],
+                Some(crate::certificate_chain::CertificateTrust::new(&[
+                    X509::from_pem(YUBICO_ATTESTATION_ROOT)?.to_der()?,
+                ])?),
             ),
             (Err(env::VarError::NotUnicode(_)), _)
             | (_, Err(env::VarError::NotUnicode(_)))
@@ -129,7 +132,7 @@ impl Scp11KeySet {
             variant,
             key_version,
             card_public_key,
-            trust_anchors,
+            certificate_trust,
             host,
         })
     }
@@ -148,9 +151,9 @@ impl Scp11KeySet {
             key_version,
             card_public_key: Some(card_public_key_from_certificates(
                 certificates,
-                trust_anchors,
+                &crate::certificate_chain::CertificateTrust::new(trust_anchors)?,
             )?),
-            trust_anchors: Vec::new(),
+            certificate_trust: None,
             host: None,
         })
     }
@@ -197,8 +200,12 @@ impl Scp11KeySet {
             )
         })();
         crate::scp03::select_application(connector, application_aid)?;
-        let card_public_key =
-            card_public_key_from_certificates(&certificates?, &self.trust_anchors)?;
+        let card_public_key = card_public_key_from_certificates(
+            &certificates?,
+            self.certificate_trust
+                .as_ref()
+                .ok_or(CKR_ARGUMENTS_BAD)?,
+        )?;
         let group = p256_group()?;
         let ephemeral = EcKey::generate(&group)?;
         let point = encode_public_point(&card_public_key)?;
@@ -211,7 +218,10 @@ impl Scp11KeySet {
             (
                 self.variant.key_id(),
                 self.key_version,
-                sha256(&self.trust_anchors[0]),
+                self.certificate_trust
+                    .as_ref()
+                    .expect("certificate trust exists without a static card key")
+                    .fingerprint(),
             )
         })
     }
@@ -346,18 +356,7 @@ impl Scp11aHostCredentials {
 }
 
 fn load_certificates(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
-    let certificates = crate::certificate_chain::load(paths)?;
-    let parsed: Vec<X509> = certificates
-        .iter()
-        .map(|certificate| X509::from_der(certificate).map_err(Error::from))
-        .collect::<Result<_, _>>()?;
-    for pair in parsed.windows(2) {
-        let issuer = pair[0].public_key().map_err(Error::from)?;
-        if !pair[1].verify(&issuer).map_err(Error::from)? {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-    }
-    Ok(certificates)
+    crate::certificate_chain::load(paths)
 }
 
 fn p256_group() -> Result<EcGroup, Error> {
@@ -389,12 +388,9 @@ fn parse_public_point(encoded: &[u8]) -> Result<EcKey<Public>, Error> {
 
 fn card_public_key_from_certificates(
     certificates: &[Vec<u8>],
-    trust_anchors: &[Vec<u8>],
+    trust: &crate::certificate_chain::CertificateTrust,
 ) -> Result<EcKey<Public>, Error> {
-    parse_public_point(&crate::certificate_chain::validate_p256_public_point(
-        certificates,
-        trust_anchors,
-    )?)
+    parse_public_point(&trust.validate_p256_public_point(certificates)?)
 }
 
 fn encode_public_point<T>(key: &EcKey<T>) -> Result<Vec<u8>, Error>
