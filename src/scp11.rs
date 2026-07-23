@@ -9,11 +9,11 @@ use openssl::{
     bn::BigNumContext,
     derive::Deriver,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
-    hash::{Hasher, MessageDigest},
     nid::Nid,
     pkey::{PKey, Private, Public},
     x509::X509,
 };
+use sha2::{Digest, Sha256};
 use std::{env, fs};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -433,11 +433,11 @@ fn derive_key_material(key_agreement: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error
     let required = SESSION_KEY_LENGTH * DERIVED_KEY_COUNT;
     let mut output = Zeroizing::new(Vec::with_capacity(96));
     for counter in 1u32..=3 {
-        let mut hasher = Hasher::new(MessageDigest::sha256())?;
-        hasher.update(key_agreement)?;
-        hasher.update(&counter.to_be_bytes())?;
-        hasher.update(&shared_info)?;
-        output.extend_from_slice(&hasher.finish()?);
+        let mut hasher = Sha256::new();
+        hasher.update(key_agreement);
+        hasher.update(counter.to_be_bytes());
+        hasher.update(shared_info);
+        output.extend_from_slice(&hasher.finalize());
     }
     output.truncate(required);
     Ok(output)

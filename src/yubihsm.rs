@@ -21,8 +21,8 @@ use openssl::{
     ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
     nid::Nid,
     pkey::{PKey, Private},
-    sha::sha256,
 };
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -700,7 +700,7 @@ fn x963_session_keys(ephemeral: &[u8], static_secret: &[u8]) -> Zeroizing<[u8; 6
         input.extend_from_slice(static_secret);
         input.extend_from_slice(&((index + 1) as u32).to_be_bytes());
         input.extend_from_slice(&SCP11_SHARED_INFO);
-        chunk.copy_from_slice(&sha256(&input));
+        chunk.copy_from_slice(&Sha256::digest(&input));
     }
     output
 }

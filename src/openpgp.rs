@@ -7,11 +7,8 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_KEY_TYPE_INCONSISTENT, CKR_PIN_INCORRECT,
     CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
 };
-use openssl::{
-    bn::BigNum,
-    hash::{Hasher, MessageDigest},
-    rsa::Rsa,
-};
+use openssl::{bn::BigNum, rsa::Rsa};
+use sha2::{Digest, Sha256, Sha512};
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
 pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
@@ -343,11 +340,6 @@ impl KdfParams {
     }
 
     fn derive_with_salt(&self, salt: &[u8], pin: &[u8]) -> Result<Vec<u8>, Error> {
-        let digest = match self.hash_algorithm {
-            0x08 => MessageDigest::sha256(),
-            0x0a => MessageDigest::sha512(),
-            _ => return Err(CKR_DATA_INVALID.into()),
-        };
         if self.iteration_count == 0 || salt.is_empty() {
             return Err(CKR_DATA_INVALID.into());
         }
@@ -358,17 +350,22 @@ impl KdfParams {
             return Err(CKR_DATA_INVALID.into());
         }
 
-        let digest_length = digest.size();
-        let mut hasher = Hasher::new(digest)?;
-        let mut remaining = self.iteration_count as usize;
-        while remaining > 0 {
-            let length = remaining.min(salted_pin.len());
-            hasher.update(&salted_pin[..length])?;
-            remaining -= length;
+        fn derive<D: Digest>(salted_pin: &[u8], iteration_count: usize) -> Vec<u8> {
+            let mut hasher = D::new();
+            let mut remaining = iteration_count;
+            while remaining > 0 {
+                let length = remaining.min(salted_pin.len());
+                hasher.update(&salted_pin[..length]);
+                remaining -= length;
+            }
+            hasher.finalize().to_vec()
         }
-        let mut derived = hasher.finish()?.to_vec();
-        derived.truncate(digest_length);
-        Ok(derived)
+
+        match self.hash_algorithm {
+            0x08 => Ok(derive::<Sha256>(&salted_pin, self.iteration_count as usize)),
+            0x0a => Ok(derive::<Sha512>(&salted_pin, self.iteration_count as usize)),
+            _ => Err(CKR_DATA_INVALID.into()),
+        }
     }
 }
 
