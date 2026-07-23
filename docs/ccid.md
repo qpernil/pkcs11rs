@@ -31,11 +31,11 @@ case-insensitive and duplicates are ignored.
 
 ## Secure channels
 
-Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, or `scp11b` to use
-that transport for every selected CCID applet. The secure channel is scoped to
-the selected AID. Selecting another applet invalidates the previous channel,
-so the module selects the requested AID and renegotiates before sending the
-next protected command.
+Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, `scp11b`, or `scp11c`
+to use that transport for every selected CCID applet. The secure channel is
+scoped to the selected AID. Selecting another applet invalidates the previous
+channel, so the module selects the requested AID and renegotiates before
+sending the next protected command.
 
 The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,

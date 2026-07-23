@@ -10,6 +10,8 @@ The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
 appropriate PKCS #11 error instead of being omitted.
 
+The minimum supported Rust version is 1.85.
+
 ## Backends
 
 - **YubiKey PIV** over PC/SC, including RSA, ECDSA, Ed25519, ECDH/X25519,
@@ -20,7 +22,7 @@ appropriate PKCS #11 error instead of being omitted.
   authenticated sessions, hardware-backed asymmetric, symmetric, HMAC,
   wrapping, opaque, and authentication objects.
 - **YubiHSM Auth** as a discoverable CCID applet whose credentials can
-  authenticate sessions on YubiHSM USB slots.
+  authenticate sessions on local or remote YubiHSM slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
@@ -29,6 +31,23 @@ appropriate PKCS #11 error instead of being omitted.
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
 
+## PKCS #11 3.2 profiles
+
+Every present YubiHSM slot advertises public, immutable, token-resident
+`CKO_PROFILE` objects for:
+
+| Profile | Availability |
+| --- | --- |
+| `CKP_BASELINE_PROVIDER` | Every present YubiHSM slot |
+| `CKP_EXTENDED_PROVIDER` | Every present YubiHSM slot |
+| `CKP_AUTHENTICATION_TOKEN` | Every present YubiHSM slot |
+| `CKP_PUBLIC_CERTIFICATES_TOKEN` | Only after successful configured public discovery |
+
+Each object exposes its profile through `CKA_PROFILE_ID` and has a stable,
+distinct `CKA_UNIQUE_ID`. The public-certificates profile is based on an
+actual authenticated discovery result, not merely on the presence of
+configuration.
+
 ## Compatibility and Validation
 
 | Area | Status |
@@ -36,7 +55,9 @@ available in a particular slot.
 | PKCS #11 ABI | Function-list layouts and behavior for 2.40, 3.0, 3.1, and 3.2 are covered by Rust and Python tests. |
 | Linux | The complete hardware-independent Rust and Python suites run in GitHub Actions. |
 | Windows | Rust tests and the synthetic ABI backend are compiled on a native Windows runner. |
-| macOS | The module builds as a `.dylib`; it is not currently exercised by continuous integration. |
+| macOS | The `.dylib`, Rust tests, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
+| MSRV | An all-features build is checked with Rust 1.85. |
+| Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
 | Live hardware | Opt-in Rust and Python smoke tests verify slot and token metadata on attached YubiKey and YubiHSM devices. |
 
 Protocol tests use deterministic mock transports and official cryptographic
@@ -100,7 +121,7 @@ The setting defaults to `1`. Any value other than `0` or `1` makes
 `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
 Optionally expose YubiHSM certificates and matching public keys before PKCS #11
-login with one low-privilege discovery Authentication Key:
+login with one low-privilege symmetric discovery Authentication Key:
 
 ```sh
 export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
@@ -108,9 +129,13 @@ export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
 ```
 
 The credential is tried independently on every YubiHSM. The public-certificate
-profile is advertised only on slots where authentication and opaque-object
-discovery succeed. See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
-for provisioning and caching requirements.
+profile is advertised only on slots where authentication succeeds and the
+module can build a valid public certificate and matching public-key view. The
+short-lived discovery session is separate from an ordinary PKCS #11 login and
+is closed after discovery. Both variables must be supplied together.
+
+See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
+for credential provisioning, metadata, caching, and logout behavior.
 
 Enable protected password entry for YubiHSM and YubiHSM Auth login by naming a
 compatible pinentry executable:
@@ -149,6 +174,7 @@ Enable secure messaging for selected applets with one of:
 export PKCS11RS_CCID_SECURE_CHANNEL=scp03
 export PKCS11RS_CCID_SECURE_CHANNEL=scp11a
 export PKCS11RS_CCID_SECURE_CHANNEL=scp11b
+export PKCS11RS_CCID_SECURE_CHANNEL=scp11c
 ```
 
 Detailed configuration:
@@ -158,7 +184,7 @@ Detailed configuration:
 - [PIV backend](docs/piv.md)
 - [OpenPGP backend](docs/openpgp.md)
 - [SCP03](docs/scp03.md)
-- [SCP11a and SCP11b](docs/scp11.md)
+- [SCP11a, SCP11b, and SCP11c](docs/scp11.md)
 
 ## Diagnostics
 
@@ -206,6 +232,10 @@ is not intended for a normal module build.
 - OpenPGP key generation and private-key import are restricted to references
   that the card reports as empty, so PKCS #11 operations cannot overwrite an
   existing OpenPGP key. Readable OpenPGP data objects are exported read-only.
+- YubiHSM object inventories and opaque values are cached per slot. Reinitialize
+  the module after replacing a device or changing the domains available to an
+  authentication credential. A public opaque object first seen during user
+  login may require another login to read an uncached value after logout.
 - Secure-channel credential provisioning and trust-anchor selection are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader

@@ -14,6 +14,8 @@ Do not open a public issue for an undisclosed vulnerability.
 Include the affected backend and device, firmware version, PKCS #11 operation,
 mechanism, configuration, and a minimal reproducer when possible. Do not send
 production PINs, private keys, secure-channel keys, or other live credentials.
+This includes YubiHSM public-discovery passwords and Authentication Key
+credentials.
 
 If private vulnerability reporting is unavailable, contact the repository
 owner privately through the contact information on their GitHub profile before
