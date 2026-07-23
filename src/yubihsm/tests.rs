@@ -195,12 +195,14 @@ impl ProtocolPeer {
     }
 
     fn attestation_certificate(id: u16) -> Result<Vec<u8>, Error> {
-        let key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        Ok(crate::certificate_builder::rsa_certificate(
+        let key = crate::certificate_builder::p256_key();
+        Ok(crate::certificate_builder::p256_certificate(
+            key.verifying_key(),
             &key,
             &format!("CN=YubiHSM key {id} attestation"),
-            &id.to_be_bytes(),
+            &format!("CN=YubiHSM key {id} attestation"),
+            u32::from(id),
+            true,
         ))
     }
 

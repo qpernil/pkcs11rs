@@ -196,11 +196,21 @@ impl Connector for AbiPivConnector {
 
 #[cfg(feature = "abi-tests")]
 pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
-    let private_key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    static CERTIFICATE: OnceLock<Vec<u8>> = OnceLock::new();
+    let private_key = certificate_builder::rsa_key();
     let public_key = RsaPublicKey::from(&private_key);
-    let certificate =
-        certificate_builder::rsa_certificate(&private_key, "CN=PKCS11RS ABI PIV", &[1]);
+    let certificate = CERTIFICATE
+        .get_or_init(|| {
+            let signer = certificate_builder::p256_key();
+            certificate_builder::p256_certificate_for_rsa(
+                &public_key,
+                &signer,
+                "CN=PKCS11RS ABI PIV",
+                "CN=PKCS11RS ABI test CA",
+                1,
+            )
+        })
+        .clone();
     let certificate_data = piv::encode_certificate_object(&certificate)?;
     let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
     Ok(PivSlot {
@@ -648,10 +658,15 @@ fn abi_yubihsm_opaque_certificate() -> Result<Vec<u8>, Error> {
     if let Some(certificate) = CERTIFICATE.get() {
         return Ok(certificate.clone());
     }
-    let private_key = RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let certificate =
-        certificate_builder::rsa_certificate(&private_key, "CN=PKCS11RS ABI YubiHSM", &[0x80]);
+    let signer = certificate_builder::p256_key();
+    let certificate = certificate_builder::p256_certificate(
+        signer.verifying_key(),
+        &signer,
+        "CN=PKCS11RS ABI YubiHSM",
+        "CN=PKCS11RS ABI YubiHSM",
+        0x80,
+        true,
+    );
     let _ = CERTIFICATE.set(certificate);
     CERTIFICATE.get().cloned().ok_or(CKR_DEVICE_ERROR.into())
 }

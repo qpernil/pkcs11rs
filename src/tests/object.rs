@@ -1182,7 +1182,7 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
 
 #[test]
 pub fn create_object_requires_and_imports_real_key_material() {
-    let rsa = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 1024).unwrap();
+    let rsa = crate::certificate_builder::rsa_key();
     let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut private_class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
