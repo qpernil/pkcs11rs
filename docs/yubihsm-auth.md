@@ -67,6 +67,16 @@ selector from the password, so the password itself may contain colons. The
 selected credential and target YubiHSM authentication key must form a
 compatible symmetric or asymmetric authentication pair.
 
+When `PKCS11RS_PINENTRY` is configured, the password and its separating colon
+may be omitted to request it through pinentry:
+
+```text
+:0001default@12345678
+```
+
+The form `:0001default@12345678:` still supplies an explicitly empty password
+and does not open pinentry.
+
 PKCS #11 3.x callers may instead pass the authentication selector and password
 separately with `C_LoginUser`:
 
@@ -75,6 +85,11 @@ separately with `C_LoginUser`:
 | Direct symmetric key | `AAAA` | Password |
 | Direct asymmetric key | `@AAAA` | Password |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
+
+Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
+password through pinentry while retaining the username as the authentication
+selector. A nonnull pointer with zero length remains an explicitly empty
+password.
 
 The module asks the YubiHSM Auth applet to calculate the session keys and keeps
 those keys in zeroizing memory only for the life of the authenticated YubiHSM
@@ -151,10 +166,43 @@ The YubiHSM Auth slot uses `C_Login` roles as follows:
   is retained in zeroizing per-slot memory until logout, device removal,
   application reset, or module finalization.
 
+With pinentry configured, `C_Login` with `CKU_SO`, a null PIN pointer, and zero
+PIN length obtains the management password through pinentry. `CKU_USER` never
+prompts because its PIN is intentionally unused.
+
 Yubico's password input convention is used for both management and credential
 passwords. A printable UTF-8 value of at most 16 bytes is padded on the right
 with zero bytes. Exactly 32 hexadecimal characters provide the raw 16-byte
 value. Other lengths and malformed hexadecimal values are rejected.
+
+## Protected password entry
+
+Set `PKCS11RS_PINENTRY` to the pinentry executable name or path:
+
+```sh
+export PKCS11RS_PINENTRY=pinentry
+export PKCS11RS_PINENTRY=pinentry-mac
+```
+
+Bare executable names are resolved through the process's inherited `PATH`. An
+explicit path, such as `/opt/homebrew/bin/pinentry-mac`, may instead be used to
+select a particular installation. The value names one executable and cannot
+contain command-line arguments. Terminal frontends on Unix use `GPG_TTY` when
+set and otherwise fall back to the process's controlling terminal at
+`/dev/tty`. No terminal name is sent on Windows. On macOS, use `pinentry-mac`
+for a native dialog that does not require a controlling terminal.
+
+The variable is read during `C_Initialize`; leaving it unset disables
+interactive prompting, and an empty value makes initialization return
+`CKR_ARGUMENTS_BAD`. When enabled, YubiHSM and YubiHSM Auth token information
+includes `CKF_PROTECTED_AUTHENTICATION_PATH`.
+
+The module starts one configured process per prompt and communicates through
+the Assuan protocol over pipes. Prompts are serialized, secrets are never
+placed in process arguments or environment variables, and returned passwords
+are held in zeroizing memory only for the login call. Pinentry cancellation
+returns `CKR_CANCEL`; startup or protocol failures return
+`CKR_FUNCTION_FAILED`.
 
 `pkcs11rs.h` declares proprietary administration functions. Every function
 requires a read/write session on the YubiHSM Auth slot with an active `CKU_SO`

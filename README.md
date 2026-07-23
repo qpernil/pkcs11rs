@@ -98,6 +98,25 @@ export PKCS11RS_YUBIHSM_USB=0
 The setting defaults to `1`. Any value other than `0` or `1` makes
 `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
+Enable protected password entry for YubiHSM and YubiHSM Auth login by naming a
+compatible pinentry executable:
+
+```sh
+export PKCS11RS_PINENTRY=pinentry
+export PKCS11RS_PINENTRY=pinentry-mac
+```
+
+Bare executable names are resolved through the process's inherited `PATH`; an
+explicit path may be used to select a particular installation. Terminal
+frontends on Unix use `GPG_TTY` when set and otherwise fall back to the
+process's controlling terminal at `/dev/tty`. No terminal name is sent on
+Windows. On macOS, `pinentry-mac` is recommended because Homebrew's plain
+`pinentry` is a curses frontend.
+
+Callers request the protected path with a null PIN pointer. Combined YubiHSM
+Auth `C_Login` selectors may omit their password separator instead. See
+[YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md) for the exact forms.
+
 ## CCID Configuration
 
 The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, and the

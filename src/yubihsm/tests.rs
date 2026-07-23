@@ -994,15 +994,23 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
 fn yubihsm_login_splits_username_from_password() {
     assert_eq!(
         crate::split_yubihsm_login(b"00fFpassword").unwrap(),
-        (b"00fF".as_slice(), PASSWORD)
+        (b"00fF".as_slice(), Some(PASSWORD))
     );
     assert_eq!(
         crate::split_yubihsm_login(b"@00fFpassword").unwrap(),
-        (b"@00fF".as_slice(), PASSWORD)
+        (b"@00fF".as_slice(), Some(PASSWORD))
     );
     assert_eq!(
         crate::split_yubihsm_login(b":0001default:pass:word").unwrap(),
-        (b":0001default".as_slice(), b"pass:word".as_slice())
+        (b":0001default".as_slice(), Some(b"pass:word".as_slice()))
+    );
+    assert_eq!(
+        crate::split_yubihsm_login(b":0001default@12345678").unwrap(),
+        (b":0001default@12345678".as_slice(), None)
+    );
+    assert_eq!(
+        crate::split_yubihsm_login(b":0001default:").unwrap(),
+        (b":0001default".as_slice(), Some(b"".as_slice()))
     );
 }
 
@@ -1088,6 +1096,10 @@ fn device_public_key_uses_the_asymmetric_authentication_algorithm() {
 
 #[test]
 fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
+    #[cfg(unix)]
+    let _guard = crate::test::TEST_LOCK.lock().unwrap();
+    #[cfg(unix)]
+    let _pinentry = crate::test::TestPinentry::new("password");
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let provider = crate::HsmAuthProvider {
         connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
@@ -1116,6 +1128,9 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         crate::Slot::login(&mut slot, b":000164656661756c74206b6579:password"),
         Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
     ));
+    #[cfg(unix)]
+    crate::Slot::login(&mut slot, b":0001default key@12345678").unwrap();
+    #[cfg(not(unix))]
     crate::Slot::login_user(&mut slot, b":0001default key@12345678", b"password").unwrap();
     let session =
         crate::Slot::open_session(&mut slot, 91, crate::CKF_SERIAL_SESSION as crate::CK_FLAGS);

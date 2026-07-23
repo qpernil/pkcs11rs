@@ -70,6 +70,8 @@ use error::*;
 
 mod secure_channel_crypto;
 
+mod pinentry;
+
 mod yubico_kdf;
 use yubico_kdf::yubico_password_kdf;
 

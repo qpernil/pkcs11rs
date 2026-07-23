@@ -381,13 +381,45 @@ fn login(
             value if value == CKU_SO as CK_USER_TYPE => LoginRole::So,
             _ => return Err(CKR_USER_TYPE_INVALID.into()),
         };
-        with_pin(pin, pin_len, |pin| {
+        with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, role, |slot| match role {
-                LoginRole::User => slot.login(pin),
-                LoginRole::So => slot.login_so(pin),
+                LoginRole::User => match pin {
+                    Some(pin) => slot.login(pin),
+                    None if slot.is_hsmauth() => slot.login(&[]),
+                    None => Err(CKR_ARGUMENTS_BAD.into()),
+                },
+                LoginRole::So => match pin {
+                    Some(pin) => slot.login_so(pin),
+                    None if slot.is_hsmauth() => {
+                        let title = slot.label();
+                        let description =
+                            format!("Enter the YubiHSM Auth management password for {title}.");
+                        let pin = pinentry::request(pinentry::Prompt {
+                            title: &title,
+                            description: &description,
+                            label: "Management password:",
+                        })?;
+                        slot.login_so(pin.as_slice())
+                    }
+                    None => Err(CKR_ARGUMENTS_BAD.into()),
+                },
             })
         })
     })
+}
+
+fn with_optional_pin<R>(
+    pin: *const CK_UTF8CHAR,
+    pin_len: CK_ULONG,
+    use_pin: impl for<'a> FnOnce(Option<&'a [u8]>) -> Result<R, Error>,
+) -> Result<R, Error> {
+    if pin.is_null() {
+        if pin_len != 0 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        return use_pin(None);
+    }
+    with_pin(pin, pin_len, |pin| use_pin(Some(pin)))
 }
 
 fn with_pin<R>(
@@ -430,13 +462,25 @@ fn login_user(
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        with_pin(pin, pin_len, |pin| {
-            let username = from_raw_parts(username, username_len as usize)?;
-            if std::str::from_utf8(username).is_err() {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
+        let username = from_raw_parts(username, username_len as usize)?;
+        let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, LoginRole::User, |slot| {
-                slot.login_user(username, pin)
+                if let Some(pin) = pin {
+                    return slot.login_user(username.as_bytes(), pin);
+                }
+                if !slot.is_yubihsm() {
+                    return Err(CKR_ARGUMENTS_BAD.into());
+                }
+                let title = slot.label();
+                let description =
+                    format!("Enter the authentication password for {username} on {title}.");
+                let pin = pinentry::request(pinentry::Prompt {
+                    title: &title,
+                    description: &description,
+                    label: "Authentication password:",
+                })?;
+                slot.login_user(username.as_bytes(), pin.as_slice())
             })
         })
     })
