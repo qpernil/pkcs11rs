@@ -609,7 +609,7 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
     let pem = std::fs::read(&path).unwrap();
     let key = crate::yubihsm::trust::public_key_from_pem(&pem).unwrap();
     assert_eq!(
-        openssl::sha::sha256(&key.public_key_to_der().unwrap()),
+        <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&key)),
         fingerprint
     );
 
