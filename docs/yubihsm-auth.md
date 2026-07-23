@@ -243,12 +243,13 @@ YubiHSM Auth credential.
 
 ## Asymmetric hardware provisioning test
 
-The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` test deletes
-the configured test credential and authentication key if they already exist,
-generates a fresh persistent asymmetric credential on a YubiKey, reads its
-P-256 public key, installs that public key as a YubiHSM authentication key, and
-verifies an actual asymmetric session. It leaves the newly provisioned pair in
-place after the test.
+The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` and
+`provisions_touch_required_asymmetric_hsmauth_credential_on_yubihsm` tests
+delete their configured test credential and authentication key if they already
+exist, generate a fresh persistent asymmetric credential on a YubiKey, read
+its P-256 public key, install that public key as a YubiHSM authentication key,
+and verify an actual asymmetric session. The second test requires a physical
+touch during authentication. Both leave the newly provisioned pair in place.
 
 Provisioning requires an explicit enable flag and target object ID:
 
@@ -258,14 +259,25 @@ PKCS11RS_TEST_YUBIHSM_AUTHKEY_ID=1234 \
 cargo test provisions_asymmetric_hsmauth_credential_on_yubihsm -- --ignored --nocapture
 ```
 
+The touch-required variant is independently enabled and uses a separate target
+ID and label:
+
+```sh
+PKCS11RS_TEST_PROVISION_TOUCH_ASYMMETRIC_HSMAUTH=1 \
+PKCS11RS_TEST_YUBIHSM_TOUCH_AUTHKEY_ID=1235 \
+cargo test provisions_touch_required_asymmetric_hsmauth_credential_on_yubihsm -- --ignored --nocapture
+```
+
 The defaults are YubiHSM Auth management key
 `00000000000000000000000000000000`, credential label
-`pkcs11rs-asymmetric`, credential password `password`, YubiHSM administrator
-key `0001` with password `password`, domain `0001`, and no operational or
-delegated capabilities on the new key. Override them with:
+`pkcs11rs-asymmetric` (`pkcs11rs-asymmetric-touch` for the touch-required
+variant), credential password `password`, YubiHSM administrator key `0001`
+with password `password`, domain `0001`, and no operational or delegated
+capabilities on the new key. Override them with:
 
 - `PKCS11RS_TEST_HSMAUTH_MANAGEMENT_KEY`
 - `PKCS11RS_TEST_HSMAUTH_LABEL`
+- `PKCS11RS_TEST_HSMAUTH_TOUCH_LABEL`
 - `PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD`
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_ID`
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`
