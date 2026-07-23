@@ -194,97 +194,56 @@ pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openssl::{
-        asn1::Asn1Time,
-        bn::BigNum,
-        ec::{EcGroup, EcKey, PointConversionForm},
-        hash::MessageDigest,
-        nid::Nid,
-        pkey::{PKey, Private, Public},
-        x509::{X509NameBuilder, X509},
-    };
+    use der::Encode;
+    use p256::ecdsa::{SigningKey, VerifyingKey};
+    use spki::SubjectPublicKeyInfoOwned;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
 
-    fn test_key() -> (PKey<Public>, Vec<u8>) {
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-        let private = EcKey::generate(&group).unwrap();
-        let mut context = openssl::bn::BigNumContext::new().unwrap();
-        let point = private
-            .public_key()
-            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)
-            .unwrap();
-        let public = EcKey::from_public_key(&group, private.public_key()).unwrap();
-        (PKey::from_ec_key(public).unwrap(), point)
+    fn test_key() -> (VerifyingKey, Vec<u8>) {
+        let private = crate::certificate_builder::p256_key();
+        let public = *private.verifying_key();
+        let point = crate::certificate_builder::p256_public_point(&public);
+        (public, point)
     }
 
-    fn certificate_pem(key: &PKey<Public>) -> Vec<u8> {
-        let signing =
-            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap();
-        let signing = PKey::from_ec_key(signing).unwrap();
-        let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "pkcs11rs YubiHSM pin")
-            .unwrap();
-        let name = name.build();
-        let mut certificate = X509::builder().unwrap();
-        certificate.set_version(2).unwrap();
-        certificate
-            .set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
-            .unwrap();
-        certificate.set_subject_name(&name).unwrap();
-        certificate.set_issuer_name(&name).unwrap();
-        certificate.set_pubkey(key).unwrap();
-        certificate
-            .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-            .unwrap();
-        certificate
-            .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
-            .unwrap();
-        certificate.sign(&signing, MessageDigest::sha256()).unwrap();
-        certificate.build().to_pem().unwrap()
-    }
-
-    fn signed_certificate(key: &PKey<Public>, signer: &PKey<Private>, serial: u32) -> X509 {
-        let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "pkcs11rs YubiHSM attestation")
-            .unwrap();
-        let name = name.build();
-        let mut certificate = X509::builder().unwrap();
-        certificate.set_version(2).unwrap();
-        certificate
-            .set_serial_number(&BigNum::from_u32(serial).unwrap().to_asn1_integer().unwrap())
-            .unwrap();
-        certificate.set_subject_name(&name).unwrap();
-        certificate.set_issuer_name(&name).unwrap();
-        certificate.set_pubkey(key).unwrap();
-        certificate
-            .set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-            .unwrap();
-        certificate
-            .set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
-            .unwrap();
-        certificate.sign(signer, MessageDigest::sha256()).unwrap();
-        certificate.build()
-    }
-
-    fn private_key() -> PKey<Private> {
-        PKey::from_ec_key(
-            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn public_point(key: &PKey<Private>) -> Vec<u8> {
-        let ec = key.ec_key().unwrap();
-        let mut context = openssl::bn::BigNumContext::new().unwrap();
-        ec.public_key()
-            .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED, &mut context)
+    fn certificate_pem(key: &VerifyingKey) -> Vec<u8> {
+        let signing = crate::certificate_builder::p256_key();
+        let certificate = crate::certificate_builder::p256_certificate(
+            key,
+            &signing,
+            "CN=pkcs11rs YubiHSM pin",
+            "CN=pkcs11rs YubiHSM pin",
+            1,
+            false,
+        );
+        crate::certificate_chain::encode_pem(&certificate)
             .unwrap()
+            .into_bytes()
     }
 
-    fn public_key(key: &PKey<Private>) -> PKey<Public> {
-        PKey::public_key_from_der(&key.public_key_to_der().unwrap()).unwrap()
+    fn signed_certificate(key: &VerifyingKey, signer: &SigningKey, serial: u32) -> Vec<u8> {
+        crate::certificate_builder::p256_certificate(
+            key,
+            signer,
+            "CN=pkcs11rs YubiHSM attestation",
+            "CN=pkcs11rs YubiHSM attestation",
+            serial,
+            false,
+        )
+    }
+
+    fn private_key() -> SigningKey {
+        crate::certificate_builder::p256_key()
+    }
+
+    fn public_point(key: &SigningKey) -> Vec<u8> {
+        crate::certificate_builder::p256_public_point(key.verifying_key())
+    }
+
+    fn public_key(key: &SigningKey) -> VerifyingKey {
+        *key.verifying_key()
     }
 
     fn unused_prefix() -> PathBuf {
@@ -304,9 +263,13 @@ mod tests {
     #[test]
     fn accepts_public_key_and_certificate_pem_entries() {
         let (key, point) = test_key();
-        with_entry(&key.public_key_to_pem().unwrap(), &point, |prefix| {
-            validate_device_public_key(&point, Some(prefix)).unwrap();
-        });
+        with_entry(
+            &crate::certificate_builder::p256_public_key_pem(&key),
+            &point,
+            |prefix| {
+                validate_device_public_key(&point, Some(prefix)).unwrap();
+            },
+        );
         with_entry(&certificate_pem(&key), &point, |prefix| {
             validate_device_public_key(&point, Some(prefix)).unwrap();
         });
@@ -340,10 +303,15 @@ mod tests {
     #[test]
     fn fingerprint_is_sha256_of_canonical_spki() {
         let (key, point) = test_key();
-        let expected: String = Sha256::digest(key.public_key_to_der().unwrap())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let expected: String = Sha256::digest(
+            SubjectPublicKeyInfoOwned::from_key(key)
+                .unwrap()
+                .to_der()
+                .unwrap(),
+        )
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
         assert_eq!(fingerprint(&point).unwrap(), expected);
     }
 
@@ -358,8 +326,8 @@ mod tests {
 
         let digest = install_attestation(
             &device_point,
-            &attestation.to_der().unwrap(),
-            &signer_certificate.to_der().unwrap(),
+            &attestation,
+            &signer_certificate,
             AttestationValidation::ExplicitSigner,
             Some(prefix.as_os_str()),
         )
@@ -382,8 +350,8 @@ mod tests {
         assert!(matches!(
             install_attestation(
                 &device_point,
-                &attestation.to_der().unwrap(),
-                &wrong_certificate.to_der().unwrap(),
+                &attestation,
+                &wrong_certificate,
                 AttestationValidation::ExplicitSigner,
                 Some(unused_prefix().as_os_str()),
             ),
@@ -393,8 +361,6 @@ mod tests {
 
     #[test]
     fn embedded_yubico_intermediate_is_signed_by_embedded_root() {
-        let intermediate = X509::from_pem(YUBICO_INTERMEDIATE).unwrap();
-        let root = X509::from_pem(YUBICO_ROOT).unwrap();
-        assert!(intermediate.verify(&root.public_key().unwrap()).unwrap());
+        crate::certificate_chain::verify_signed_by(YUBICO_INTERMEDIATE, YUBICO_ROOT).unwrap();
     }
 }

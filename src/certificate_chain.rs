@@ -404,8 +404,7 @@ pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
 pub(crate) fn public_key_parts(
     encoded: &[u8],
 ) -> Result<(ObjectIdentifier, Option<ObjectIdentifier>, Vec<u8>), Error> {
-    let certificate =
-        Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let certificate = Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
     let spki = certificate.tbs_certificate.subject_public_key_info;
     let parameters = spki
         .algorithm
@@ -467,14 +466,10 @@ pub(crate) fn validate_p256_public_point(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openssl::{
-        asn1::Asn1Time,
-        hash::MessageDigest,
-        nid::Nid,
-        stack::Stack,
-        x509::{store::X509StoreBuilder, X509StoreContext, X509},
+    use std::{
+        collections::HashSet,
+        time::{SystemTime, UNIX_EPOCH},
     };
-    use std::{cmp::Ordering, collections::HashSet};
 
     const YUBICO_ATTESTATION_ROOT: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -497,37 +492,31 @@ mod tests {
         "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem"
     ));
 
-    fn sha256(certificate: &X509) -> Vec<u8> {
-        certificate
-            .digest(MessageDigest::sha256())
-            .unwrap()
-            .to_vec()
+    fn pem_certificate(encoded: &[u8]) -> Certificate {
+        Certificate::from_pem(encoded).unwrap()
+    }
+
+    fn sha256(certificate: &Certificate) -> Vec<u8> {
+        Sha256::digest(certificate.to_der().unwrap()).to_vec()
     }
 
     fn encode_hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
-    fn assert_current(certificate: &X509) {
-        let now = Asn1Time::days_from_now(0).unwrap();
-        assert_ne!(
-            certificate.not_before().compare(&now).unwrap(),
-            Ordering::Greater
-        );
-        assert_ne!(
-            certificate.not_after().compare(&now).unwrap(),
-            Ordering::Less
-        );
+    fn assert_current(certificate: &Certificate) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let parsed = ParsedCertificate::parse(&certificate.to_der().unwrap()).unwrap();
+        assert!(parsed.is_valid_at(now));
     }
 
-    fn assert_self_signed(certificate: &X509) {
-        assert_eq!(
-            certificate.subject_name().to_der().unwrap(),
-            certificate.issuer_name().to_der().unwrap()
-        );
-        assert!(certificate
-            .verify(&certificate.public_key().unwrap())
-            .unwrap());
+    fn assert_self_signed(certificate: &Certificate) {
+        let parsed = ParsedCertificate::parse(&certificate.to_der().unwrap()).unwrap();
+        assert!(parsed.is_self_issued());
+        parsed.verify_signature(&parsed).unwrap();
     }
 
     #[test]
@@ -548,7 +537,7 @@ mod tests {
         ];
 
         for (encoded, expected_fingerprint) in fixtures {
-            let certificate = X509::from_pem(encoded).unwrap();
+            let certificate = pem_certificate(encoded);
             assert_current(&certificate);
             assert_self_signed(&certificate);
             assert_eq!(encode_hex(&sha256(&certificate)), expected_fingerprint);
@@ -557,8 +546,8 @@ mod tests {
 
     #[test]
     fn every_published_yubico_intermediate_has_an_exact_der_path_to_the_root() {
-        let root = X509::from_pem(YUBICO_ATTESTATION_ROOT).unwrap();
-        let intermediates = X509::stack_from_pem(YUBICO_INTERMEDIATES).unwrap();
+        let root = pem_certificate(YUBICO_ATTESTATION_ROOT);
+        let intermediates = Certificate::load_pem_chain(YUBICO_INTERMEDIATES).unwrap();
         assert_eq!(intermediates.len(), 15);
 
         let expected_subjects = [
@@ -585,60 +574,51 @@ mod tests {
             .iter()
             .map(|certificate| {
                 certificate
-                    .subject_name()
-                    .entries_by_nid(Nid::COMMONNAME)
-                    .next()
-                    .unwrap()
-                    .data()
+                    .tbs_certificate
+                    .subject
                     .to_string()
+                    .strip_prefix("CN=")
                     .unwrap()
+                    .to_owned()
             })
             .collect::<HashSet<_>>();
         assert_eq!(subjects, expected_subjects);
 
-        let mut store = X509StoreBuilder::new().unwrap();
-        store.add_cert(root.clone()).unwrap();
-        let store = store.build();
+        let mut all = vec![root.to_der().unwrap()];
+        all.extend(
+            intermediates
+                .iter()
+                .map(|certificate| certificate.to_der().unwrap()),
+        );
+        CertificateTrust::new(&all).unwrap();
         for certificate in &intermediates {
             assert_current(certificate);
 
-            let issuer_der = certificate.issuer_name().to_der().unwrap();
+            let issuer_der = certificate.tbs_certificate.issuer.to_der().unwrap();
             let issuer = std::iter::once(&root)
                 .chain(intermediates.iter())
-                .find(|candidate| candidate.subject_name().to_der().unwrap() == issuer_der)
+                .find(|candidate| candidate.tbs_certificate.subject.to_der().unwrap() == issuer_der)
                 .expect("published intermediate has no exact-DER issuer");
-            assert!(certificate.verify(&issuer.public_key().unwrap()).unwrap());
-
-            let mut untrusted = Stack::new().unwrap();
-            for candidate in &intermediates {
-                if candidate.digest(MessageDigest::sha256()).unwrap().as_ref()
-                    != certificate
-                        .digest(MessageDigest::sha256())
-                        .unwrap()
-                        .as_ref()
-                {
-                    untrusted.push(candidate.clone()).unwrap();
-                }
-            }
-            let mut context = X509StoreContext::new().unwrap();
-            assert!(context
-                .init(&store, certificate, &untrusted, |context| {
-                    context.verify_cert()
-                })
-                .unwrap());
+            ParsedCertificate::parse(&certificate.to_der().unwrap())
+                .unwrap()
+                .verify_signature(&ParsedCertificate::parse(&issuer.to_der().unwrap()).unwrap())
+                .unwrap();
         }
     }
 
     #[test]
     fn published_yubihsm_intermediate_matches_its_public_root() {
-        let root = X509::from_pem(YUBIHSM_ROOT).unwrap();
-        let intermediate = X509::from_pem(YUBIHSM_INTERMEDIATE).unwrap();
+        let root = pem_certificate(YUBIHSM_ROOT);
+        let intermediate = pem_certificate(YUBIHSM_INTERMEDIATE);
         assert_current(&intermediate);
         assert_eq!(
-            intermediate.issuer_name().to_der().unwrap(),
-            root.subject_name().to_der().unwrap()
+            intermediate.tbs_certificate.issuer.to_der().unwrap(),
+            root.tbs_certificate.subject.to_der().unwrap()
         );
-        assert!(intermediate.verify(&root.public_key().unwrap()).unwrap());
+        ParsedCertificate::parse(&intermediate.to_der().unwrap())
+            .unwrap()
+            .verify_signature(&ParsedCertificate::parse(&root.to_der().unwrap()).unwrap())
+            .unwrap();
         assert_eq!(
             encode_hex(&sha256(&intermediate)),
             "d7c6d8f45208e2a53996fb5a8f4d631b33ebabb64956b37b2ac151fbdbaf4ae9"
@@ -698,4 +678,40 @@ mod tests {
         assert!(forest.local_intermediates.is_empty());
     }
 
+    #[test]
+    fn webpki_uses_configured_intermediate_to_validate_presented_leaf() {
+        let root_key = crate::certificate_builder::p256_key();
+        let intermediate_key = crate::certificate_builder::p256_key();
+        let leaf_key = crate::certificate_builder::p256_key();
+        let root = crate::certificate_builder::p256_certificate(
+            root_key.verifying_key(),
+            &root_key,
+            "CN=Root",
+            "CN=Root",
+            1,
+            true,
+        );
+        let intermediate = crate::certificate_builder::p256_certificate(
+            intermediate_key.verifying_key(),
+            &root_key,
+            "CN=Intermediate",
+            "CN=Root",
+            2,
+            true,
+        );
+        let leaf = crate::certificate_builder::p256_certificate(
+            leaf_key.verifying_key(),
+            &intermediate_key,
+            "CN=Leaf",
+            "CN=Intermediate",
+            3,
+            false,
+        );
+        let trust = CertificateTrust::new(&[root, intermediate]).unwrap();
+
+        assert_eq!(
+            trust.validate_p256_public_point(&[leaf]).unwrap(),
+            crate::certificate_builder::p256_public_point(leaf_key.verifying_key())
+        );
+    }
 }

@@ -968,7 +968,7 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
                 local: true,
                 key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
                 owner_session: None,
-                material: KeyMaterial::RsaPrivate(private_key),
+                material: KeyMaterial::RsaPrivate(Box::new(private_key)),
             },
         ),
     ]);

@@ -562,7 +562,7 @@ fn verify_ecdsa(
         return Err(CKR_SIGNATURE_INVALID.into());
     }
     let mut z = BigUint::from_bytes_be(digest);
-    let n_bits = parameters.n.bits() as usize;
+    let n_bits = parameters.n.bits();
     if digest.len() * 8 > n_bits {
         z >>= digest.len() * 8 - n_bits;
     }

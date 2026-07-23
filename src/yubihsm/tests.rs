@@ -1,5 +1,4 @@
 use super::*;
-use openssl::{derive::Deriver, pkey::PKey};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -179,11 +178,12 @@ impl ProtocolPeer {
         if public_key.len() != 32 {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let private_key = PKey::private_key_from_raw_bytes(&private_key, Id::X25519)?;
-        let public_key = PKey::public_key_from_raw_bytes(public_key, Id::X25519)?;
-        let mut deriver = Deriver::new(&private_key)?;
-        deriver.set_peer(&public_key)?;
-        deriver.derive_to_vec().map_err(Error::from)
+        let private_key = x25519_dalek::StaticSecret::from(private_key);
+        let public_key_bytes: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+        let public_key = x25519_dalek::PublicKey::from(public_key_bytes);
+        Ok(private_key.diffie_hellman(&public_key).as_bytes().to_vec())
     }
 
     fn aes_key(id: u16) -> &'static [u8; 16] {
@@ -195,22 +195,13 @@ impl ProtocolPeer {
     }
 
     fn attestation_certificate(id: u16) -> Result<Vec<u8>, Error> {
-        let key = PKey::from_rsa(openssl::rsa::Rsa::generate(2048)?)?;
-        let mut name = openssl::x509::X509Name::builder()?;
-        name.append_entry_by_text("CN", &format!("YubiHSM key {id} attestation"))?;
-        let name = name.build();
-        let mut certificate = openssl::x509::X509::builder()?;
-        certificate.set_version(2)?;
-        let serial = openssl::bn::BigNum::from_u32(id as u32)?;
-        let serial = openssl::asn1::Asn1Integer::from_bn(&serial)?;
-        certificate.set_serial_number(&serial)?;
-        certificate.set_subject_name(&name)?;
-        certificate.set_issuer_name(&name)?;
-        certificate.set_pubkey(&key)?;
-        certificate.set_not_before(openssl::asn1::Asn1Time::days_from_now(0)?.as_ref())?;
-        certificate.set_not_after(openssl::asn1::Asn1Time::days_from_now(1)?.as_ref())?;
-        certificate.sign(&key, openssl::hash::MessageDigest::sha256())?;
-        certificate.build().to_der().map_err(Error::from)
+        let key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(crate::certificate_builder::rsa_certificate(
+            &key,
+            &format!("CN=YubiHSM key {id} attestation"),
+            &id.to_be_bytes(),
+        ))
     }
 
     fn reply(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
@@ -458,9 +449,9 @@ impl ProtocolPeer {
             value if value == CommandCode::GetPublicKey as u8 => {
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                 if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
-                    let private_key = PKey::private_key_from_raw_bytes(private_key, Id::X25519)?;
+                    let private_key = x25519_dalek::StaticSecret::from(*private_key);
                     let mut key = vec![56];
-                    key.extend_from_slice(&private_key.raw_public_key()?);
+                    key.extend_from_slice(x25519_dalek::PublicKey::from(&private_key).as_bytes());
                     (inner.command | RESPONSE_BIT, key)
                 } else {
                     let mut key = vec![9, 0xc5];
