@@ -1532,16 +1532,12 @@ fn yubihsm_token_objects_with_generation(
                 YUBIHSM_WRAP_KEY_PUBLIC,
                 public_key.key.clone(),
             )
-        } else if is_yubihsm_rsa(info.algorithm) {
-            KeyMaterial::RsaPublic(
-                RsaPublicKey::new(
-                    BigUint::from_bytes_be(&public_key.key),
-                    BigUint::from(65537u32),
-                )
-                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-            )
         } else {
-            yubihsm_remote_material(&info, public_key.key)
+            yubihsm_remote_material_with_type(
+                &info,
+                YUBIHSM_PUBLIC_KEY,
+                public_key.key,
+            )
         };
         objects.push(TokenObject {
             slot_id: Some(slot_id),

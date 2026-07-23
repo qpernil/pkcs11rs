@@ -83,7 +83,7 @@ fn verify_init(
         if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
             || (rsa_mechanism
                 && (object.key_type != CKK_RSA as CK_KEY_TYPE
-                    || !matches!(object.material, KeyMaterial::RsaPublic(_))))
+                    || rsa_public_key_material(&object.material)?.is_none()))
             || (ecdsa_mechanism
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
                     || (!matches!(
@@ -164,69 +164,16 @@ fn verify(
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let signature = from_raw_parts(signature, signature_len as usize)?;
+        if let Some(public_key) = rsa_public_key_material(&operation.key)? {
+            return verify_rsa_signature(
+                &public_key,
+                operation.mechanism,
+                operation.pss,
+                data,
+                signature,
+            );
+        }
         match &operation.key {
-            KeyMaterial::RsaPublic(public_key) => {
-                if signature.len() != public_key.size() {
-                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
-                }
-                let recovered = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                    || piv_is_pss_mechanism(operation.mechanism)
-                {
-                    rsa_public_operation(public_key, signature)
-                } else {
-                    rsa_pkcs1_recover(public_key, signature)
-                }
-                .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-                let expected = if operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-                    if data.len() > public_key.size() {
-                        return Err(CKR_DATA_LEN_RANGE.into());
-                    }
-                    let mut expected = vec![0; public_key.size() - data.len()];
-                    expected.extend_from_slice(data);
-                    expected
-                } else if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
-                    data.to_vec()
-                } else if piv_is_hashed_rsa_pkcs(operation.mechanism) {
-                    let digest = hash(
-                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
-                        data,
-                    )?;
-                    piv_digest_info(operation.mechanism, digest.as_ref())
-                        .ok_or(CKR_MECHANISM_INVALID)?
-                } else if piv_is_pss_mechanism(operation.mechanism) {
-                    let (mgf, salt_length, hash_mechanism) =
-                        operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                    let digest = if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
-                        let expected_length = digest_for_hash_mechanism(hash_mechanism)?.size();
-                        if data.len() != expected_length {
-                            return Err(CKR_DATA_LEN_RANGE.into());
-                        }
-                        data.to_vec()
-                    } else {
-                        hash(
-                            piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
-                            data,
-                        )?
-                        .to_vec()
-                    };
-                    if !verify_rsa_pss(
-                        &recovered,
-                        &digest,
-                        hash_mechanism,
-                        mgf,
-                        salt_length as usize,
-                    )? {
-                        return Err(CKR_SIGNATURE_INVALID.into());
-                    }
-                    return Ok(());
-                } else {
-                    return Err(CKR_MECHANISM_INVALID.into());
-                };
-                if recovered != expected {
-                    return Err(CKR_SIGNATURE_INVALID.into());
-                }
-                Ok(())
-            }
             KeyMaterial::PivPublic {
                 algorithm,
                 public_key,
@@ -330,6 +277,72 @@ fn verify(
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }
     })
+}
+
+fn verify_rsa_signature(
+    public_key: &RsaPublicKey,
+    mechanism: CK_MECHANISM_TYPE,
+    pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    data: &[u8],
+    signature: &[u8],
+) -> Result<(), Error> {
+    if signature.len() != public_key.size() {
+        return Err(CKR_SIGNATURE_LEN_RANGE.into());
+    }
+    let recovered =
+        if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE || piv_is_pss_mechanism(mechanism) {
+            rsa_public_operation(public_key, signature)
+        } else {
+            rsa_pkcs1_recover(public_key, signature)
+        }
+        .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
+    let expected = if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+        if data.len() > public_key.size() {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let mut expected = vec![0; public_key.size() - data.len()];
+        expected.extend_from_slice(data);
+        expected
+    } else if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+        data.to_vec()
+    } else if piv_is_hashed_rsa_pkcs(mechanism) {
+        let digest = hash(
+            piv_hash_mechanism(mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+            data,
+        )?;
+        piv_digest_info(mechanism, digest.as_ref()).ok_or(CKR_MECHANISM_INVALID)?
+    } else if piv_is_pss_mechanism(mechanism) {
+        let (mgf, salt_length, hash_mechanism) = pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        let digest = if mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+            let expected_length = digest_for_hash_mechanism(hash_mechanism)?.size();
+            if data.len() != expected_length {
+                return Err(CKR_DATA_LEN_RANGE.into());
+            }
+            data.to_vec()
+        } else {
+            hash(
+                piv_hash_mechanism(mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                data,
+            )?
+            .to_vec()
+        };
+        if !verify_rsa_pss(
+            &recovered,
+            &digest,
+            hash_mechanism,
+            mgf,
+            salt_length as usize,
+        )? {
+            return Err(CKR_SIGNATURE_INVALID.into());
+        }
+        return Ok(());
+    } else {
+        return Err(CKR_MECHANISM_INVALID.into());
+    };
+    if recovered != expected {
+        return Err(CKR_SIGNATURE_INVALID.into());
+    }
+    Ok(())
 }
 
 #[no_mangle]

@@ -1253,6 +1253,25 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
             object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "p521-key"
         })
         .unwrap();
+    assert!(matches!(
+        public.material,
+        crate::KeyMaterial::YubiHsm {
+            object_type: crate::YUBIHSM_PUBLIC_KEY,
+            ..
+        }
+    ));
+    assert_eq!(
+        public.attribute_value(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE),
+        Some(crate::bool_attribute(true))
+    );
+    assert_eq!(
+        public.attribute_value(CKA_COPYABLE as CK_ATTRIBUTE_TYPE),
+        Some(crate::bool_attribute(false))
+    );
+    assert_eq!(
+        public.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
+        Some(crate::bool_attribute(false))
+    );
     assert_eq!(
         public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
         Some(vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23])
@@ -1804,12 +1823,14 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     if public_discovery {
         slot.token_objects(SLOT_ID).unwrap();
     }
-    crate::lock_context()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .slots
-        .insert(SLOT_ID, slot);
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context.slots.insert(SLOT_ID, slot);
+        if public_discovery {
+            context.refresh_slot_token_objects(SLOT_ID).unwrap();
+        }
+    }
 
     let mut session = 0;
     assert_eq!(
@@ -1822,6 +1843,86 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ),
         CKR_OK as CK_RV
     );
+    if public_discovery {
+        let public = find_yubihsm_object(
+            session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            b"shared-id",
+            "metadata public key",
+        );
+        let certificate = find_yubihsm_object(
+            session,
+            CKO_CERTIFICATE as CK_OBJECT_CLASS,
+            b"shared-id",
+            "metadata certificate",
+        );
+        assert_eq!(public.len(), 1);
+        assert_eq!(certificate.len(), 1);
+
+        let read_policy = |handle| {
+            let mut modifiable = CK_FALSE as CK_BBOOL;
+            let mut copyable = CK_TRUE as CK_BBOOL;
+            let mut destroyable = CK_TRUE as CK_BBOOL;
+            let mut attributes = [
+                scalar_attribute(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE, &mut modifiable),
+                scalar_attribute(CKA_COPYABLE as CK_ATTRIBUTE_TYPE, &mut copyable),
+                scalar_attribute(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE, &mut destroyable),
+            ];
+            assert_eq!(
+                crate::C_GetAttributeValue(
+                    session,
+                    handle,
+                    attributes.as_mut_ptr(),
+                    attributes.len() as CK_ULONG,
+                ),
+                CKR_OK as CK_RV
+            );
+            (modifiable, copyable, destroyable)
+        };
+        assert_eq!(
+            read_policy(public[0]),
+            (
+                CK_TRUE as CK_BBOOL,
+                CK_FALSE as CK_BBOOL,
+                CK_FALSE as CK_BBOOL,
+            )
+        );
+        assert_eq!(
+            read_policy(certificate[0]),
+            (
+                CK_TRUE as CK_BBOOL,
+                CK_FALSE as CK_BBOOL,
+                CK_TRUE as CK_BBOOL,
+            )
+        );
+
+        let command_count = commands.borrow().len();
+        let mut blocked_label = b"pre-login mutation".to_vec();
+        let mut blocked_attribute =
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut blocked_label);
+        assert_eq!(
+            crate::C_SetAttributeValue(session, public[0], &mut blocked_attribute, 1),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
+        assert_eq!(
+            crate::C_SetAttributeValue(session, certificate[0], &mut blocked_attribute, 1),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
+        assert_eq!(
+            crate::C_DestroyObject(session, public[0]),
+            CKR_ACTION_PROHIBITED as CK_RV
+        );
+        assert_eq!(
+            crate::C_DestroyObject(session, certificate[0]),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
+        let mut copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::C_CopyObject(session, public[0], std::ptr::null_mut(), 0, &mut copy),
+            CKR_ACTION_PROHIBITED as CK_RV
+        );
+        assert_eq!(commands.borrow().len(), command_count);
+    }
     let mut pin = *b"0001password";
     assert_eq!(
         crate::C_Login(

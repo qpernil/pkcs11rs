@@ -639,6 +639,16 @@ impl TokenObject {
             {
                 Some(bool_attribute(false))
             }
+            x if x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                && matches!(self.material, KeyMaterial::YubiHsm { .. }) =>
+            {
+                Some(bool_attribute(false))
+            }
+            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+                && self.is_yubihsm_synthetic_public() =>
+            {
+                Some(bool_attribute(false))
+            }
             x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }
@@ -1045,6 +1055,16 @@ impl TokenObject {
         )
     }
 
+    fn is_yubihsm_synthetic_public(&self) -> bool {
+        matches!(
+            self.material,
+            KeyMaterial::YubiHsm {
+                object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                ..
+            }
+        )
+    }
+
     fn is_immutable_object(&self) -> bool {
         matches!(
             &self.material,
@@ -1062,7 +1082,6 @@ impl TokenObject {
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
-                | KeyMaterial::YubiHsm { .. }
                 | KeyMaterial::YubiHsmDevicePublic { .. }
                 | KeyMaterial::YubiHsmAttestation { .. }
                 | KeyMaterial::DerivedSecret(_)
@@ -1131,6 +1150,24 @@ impl TokenObject {
                 .map(|value| expected == &value)
                 .unwrap_or(false)
         })
+    }
+}
+
+fn rsa_public_key_material(material: &KeyMaterial) -> Result<Option<RsaPublicKey>, Error> {
+    match material {
+        KeyMaterial::RsaPublic(key) => Ok(Some(key.clone())),
+        KeyMaterial::YubiHsm {
+            object_type: YUBIHSM_PUBLIC_KEY,
+            algorithm,
+            public_key,
+            ..
+        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => RsaPublicKey::new(
+            BigUint::from_bytes_be(public_key),
+            BigUint::from(65537u32),
+        )
+        .map(Some)
+        .map_err(|_| Error::from(CKR_DATA_INVALID)),
+        _ => Ok(None),
     }
 }
 
