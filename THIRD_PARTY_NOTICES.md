@@ -14,5 +14,6 @@ These files retain their OASIS copyright and distribution notices and are
 subject to the OASIS IPR Policy referenced in those notices. They are not
 relicensed under the repository's MIT or Apache-2.0 licenses.
 
-`build.rs` uses these files as `bindgen` inputs. The generated Rust source is
-written to Cargo's build output directory and is not stored in the repository.
+The explicit `cargo xtask bindings` maintenance command uses these files as
+`bindgen` inputs. The generated Rust source is stored in `src/pkcs11.rs`;
+ordinary builds do not invoke `bindgen`.
