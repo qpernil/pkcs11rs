@@ -1,12 +1,14 @@
 use super::*;
 use openssl::{
     asn1::Asn1Time,
-    bn::BigNum,
+    bn::{BigNum, BigNumContext},
+    ec::{EcGroup, EcKey, EcPoint},
     hash::MessageDigest,
-    pkey::PKey,
+    nid::Nid,
+    pkey::{PKey, Private},
     x509::{
         extension::{BasicConstraints, KeyUsage},
-        X509NameBuilder,
+        X509NameBuilder, X509,
     },
 };
 use std::{cell::RefCell, time::Duration};
@@ -54,8 +56,8 @@ impl Connector for ScriptedConnector {
     }
 }
 
-fn private_key(scalar: u32) -> EcKey<Private> {
-    let group = p256_group().unwrap();
+fn openssl_private_key(scalar: u32) -> EcKey<Private> {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
     let scalar = BigNum::from_u32(scalar).unwrap();
     let mut context = BigNumContext::new().unwrap();
     let mut public = EcPoint::new(&group).unwrap();
@@ -65,8 +67,14 @@ fn private_key(scalar: u32) -> EcKey<Private> {
     EcKey::from_private_components(&group, &scalar, &public).unwrap()
 }
 
+fn private_key(scalar: u32) -> P256SecretKey {
+    let mut encoded = [0; 32];
+    encoded[28..].copy_from_slice(&scalar.to_be_bytes());
+    P256SecretKey::from_slice(&encoded).unwrap()
+}
+
 fn certificate_chain(leaf_signer: &EcKey<Private>) -> Vec<Vec<u8>> {
-    let ca_key = private_key(4);
+    let ca_key = openssl_private_key(4);
     let ca_pkey = PKey::from_ec_key(ca_key.clone()).unwrap();
     let mut ca_name = X509NameBuilder::new().unwrap();
     ca_name
@@ -91,7 +99,7 @@ fn certificate_chain(leaf_signer: &EcKey<Private>) -> Vec<Vec<u8>> {
     ca.sign(&ca_pkey, MessageDigest::sha256()).unwrap();
     let ca = ca.build();
 
-    let leaf_key = private_key(5);
+    let leaf_key = openssl_private_key(5);
     let leaf_pkey = PKey::from_ec_key(leaf_key).unwrap();
     let mut leaf_name = X509NameBuilder::new().unwrap();
     leaf_name
@@ -118,12 +126,12 @@ fn certificate_chain(leaf_signer: &EcKey<Private>) -> Vec<Vec<u8>> {
 
 #[test]
 fn scp11b_card_key_requires_a_valid_certificate_chain() {
-    let certificates = certificate_chain(&private_key(4));
+    let certificates = certificate_chain(&openssl_private_key(4));
     assert!(
         Scp11KeySet::scp11b_from_certificates(1, &certificates[1..], &certificates[..1]).is_ok()
     );
 
-    let invalid = certificate_chain(&private_key(6));
+    let invalid = certificate_chain(&openssl_private_key(6));
     assert!(Scp11KeySet::scp11b_from_certificates(1, &invalid[1..], &invalid[..1]).is_err());
 }
 
