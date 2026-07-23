@@ -35,6 +35,7 @@ available in a particular slot.
 | --- | --- |
 | PKCS #11 ABI | Function-list layouts and behavior for 2.40, 3.0, 3.1, and 3.2 are covered by Rust and Python tests. |
 | Linux | The complete hardware-independent Rust and Python suites run in GitHub Actions. |
+| Windows | Rust tests and the synthetic ABI backend are compiled on a native Windows runner. |
 | macOS | The module builds as a `.dylib`; it is not currently exercised by continuous integration. |
 | Live hardware | Opt-in Rust and Python smoke tests verify slot and token metadata on attached YubiKey and YubiHSM devices. |
 
@@ -49,11 +50,11 @@ Building requires a Rust toolchain plus the development files for:
 
 - PC/SC
 - libusb 1.0
-- OpenSSL
 - libcurl
 - Clang/libclang, used by `bindgen` for the vendored PKCS #11 3.2 headers
 
 The exact package names depend on the operating system and package manager.
+The selected libcurl package may itself use a platform TLS provider.
 
 ## Build
 
@@ -66,6 +67,7 @@ The shared library is written to the Cargo target directory. Typical paths are:
 ```text
 target/debug/libpkcs11rs.so       Linux
 target/debug/libpkcs11rs.dylib    macOS
+target/debug/pkcs11rs.dll         Windows
 ```
 
 For example, using OpenSC `pkcs11-tool` on macOS:

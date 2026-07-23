@@ -7,15 +7,7 @@ use const_oid::ObjectIdentifier;
 use der::Decode;
 use zeroize::Zeroizing;
 
-#[cfg(test)]
-use openssl::{
-    ec::{EcGroup, EcKey},
-    nid::Nid,
-    pkey::PKey,
-};
-
-const EC_PUBLIC_KEY: ObjectIdentifier =
-    ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 
 const INS_GET_DATA: u8 = 0xca;
 const INS_PUT_KEY: u8 = 0xd8;
@@ -936,6 +928,7 @@ fn parse_length(encoded: &[u8]) -> Result<(usize, usize), Error> {
 mod tests {
     use super::*;
     use crate::ApduCapabilities;
+    use p256::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use std::{cell::RefCell, collections::VecDeque, time::Duration};
 
     #[derive(Debug)]
@@ -1015,29 +1008,15 @@ mod tests {
     }
 
     fn certificate() -> Vec<u8> {
-        let group =
-            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
-        let key = openssl::ec::EcKey::generate(&group).unwrap();
-        let key = openssl::pkey::PKey::from_ec_key(key).unwrap();
-        let mut name = openssl::x509::X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", "Security Domain test")
-            .unwrap();
-        let name = name.build();
-        let mut certificate = openssl::x509::X509::builder().unwrap();
-        certificate.set_version(2).unwrap();
-        certificate.set_subject_name(&name).unwrap();
-        certificate.set_issuer_name(&name).unwrap();
-        certificate.set_pubkey(&key).unwrap();
-        certificate
-            .set_not_before(openssl::asn1::Asn1Time::days_from_now(0).unwrap().as_ref())
-            .unwrap();
-        certificate
-            .set_not_after(openssl::asn1::Asn1Time::days_from_now(1).unwrap().as_ref())
-            .unwrap();
-        certificate
-            .sign(&key, openssl::hash::MessageDigest::sha256())
-            .unwrap();
-        certificate.build().to_der().unwrap()
+        let key = crate::certificate_builder::p256_key();
+        crate::certificate_builder::p256_certificate(
+            key.verifying_key(),
+            &key,
+            "CN=Security Domain test",
+            "CN=Security Domain test",
+            1,
+            false,
+        )
     }
 
     #[test]
@@ -1232,9 +1211,7 @@ mod tests {
 
     #[test]
     fn scp11_key_commands_match_yubico_wire_formats() {
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-        let ec_key = EcKey::generate(&group).unwrap();
-        let key = PKey::from_ec_key(ec_key).unwrap();
+        let key = crate::certificate_builder::p256_key();
         let mut session = Scp03Session::from_session_keys(
             vec![0; 16],
             vec![0; 16],
@@ -1279,7 +1256,12 @@ mod tests {
                         kvn: 3,
                     },
                     replace_kvn: 0,
-                    encoded: key.public_key_to_der().unwrap(),
+                    encoded: key
+                        .verifying_key()
+                        .to_public_key_der()
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec(),
                 },
             )
             .unwrap();
@@ -1303,7 +1285,7 @@ mod tests {
                         kvn: 4,
                     },
                     replace_kvn: 2,
-                    encoded: Zeroizing::new(key.private_key_to_pkcs8().unwrap()),
+                    encoded: Zeroizing::new(key.to_pkcs8_der().unwrap().as_bytes().to_vec()),
                 },
             )
             .unwrap();
@@ -1330,8 +1312,7 @@ mod tests {
 
     #[test]
     fn scp11_administration_requires_oce_authentication_and_dek_for_private_import() {
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-        let key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let key = crate::certificate_builder::p256_key();
         let operation = Scp11Administration::GenerateKey {
             key_ref: KeyRef {
                 kid: KID_SCP11B,
@@ -1373,7 +1354,7 @@ mod tests {
                         kvn: 1,
                     },
                     replace_kvn: 0,
-                    encoded: Zeroizing::new(key.private_key_to_pkcs8().unwrap()),
+                    encoded: Zeroizing::new(key.to_pkcs8_der().unwrap().as_bytes().to_vec(),),
                 },
             )
             .is_err());

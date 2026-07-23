@@ -389,7 +389,7 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
     let pss = crate::encode_rsa_pss(
         &digest,
-        private.size() as usize,
+        private.size(),
         CKM_SHA256 as CK_MECHANISM_TYPE,
         33,
         32,
@@ -409,7 +409,7 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     let label = <sha2::Sha256 as sha2::Digest>::digest(b"");
     let encoded = crate::rsa_oaep_pad(
         data,
-        private.size() as usize,
+        private.size(),
         33,
         CKM_SHA256 as CK_MECHANISM_TYPE,
         &label,
@@ -542,8 +542,8 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         ),
         CKR_OK as CK_RV
     );
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), &long_message).unwrap();
-    let digest_info = crate::piv_digest_info(mechanism.mechanism, digest.as_ref()).unwrap();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(&long_message);
+    let digest_info = crate::piv_digest_info(mechanism.mechanism, &digest).unwrap();
     assert_eq!(
         *captured.borrow(),
         crate::encode_pkcs1_v1_5_signature_input(&digest_info, 128).unwrap()
@@ -928,25 +928,16 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
-    let signing_key = openssl::ec::EcKey::generate(&group).unwrap();
-    let mut context = openssl::bn::BigNumContext::new().unwrap();
-    let point = signing_key
-        .public_key()
-        .to_bytes(
-            &group,
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut context,
-        )
-        .unwrap();
+    let signing_key = crate::certificate_builder::p256_key();
+    let point =
+        crate::certificate_builder::p256_public_point(signing_key.verifying_key());
     let public_key = point[1..].to_vec();
     let data = b"hardware-backed signature";
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), data).unwrap();
-    let signature = openssl::ecdsa::EcdsaSig::sign(&digest, &signing_key)
-        .unwrap()
-        .to_der()
-        .unwrap();
-    let signature = crate::piv_ecdsa_signature(&signature, 32).unwrap();
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
+    let signature: p256::ecdsa::Signature =
+        signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest).unwrap();
+    let signature =
+        crate::piv_ecdsa_signature(signature.to_der().as_bytes(), 32).unwrap();
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
@@ -1005,12 +996,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
         );
     }
 
-    let signing_key =
-        openssl::pkey::PKey::private_key_from_raw_bytes(&[0x42; 32], openssl::pkey::Id::ED25519)
-            .unwrap();
-    let mut signer = openssl::sign::Signer::new_without_digest(&signing_key).unwrap();
-    let signature = signer.sign_oneshot_to_vec(&data).unwrap();
-    let public_key = signing_key.raw_public_key().unwrap();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42; 32]);
+    let signature = signature::Signer::sign(&signing_key, &data)
+        .to_bytes()
+        .to_vec();
+    let public_key = signing_key.verifying_key().to_bytes().to_vec();
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_EDDSA as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
@@ -1105,8 +1095,8 @@ fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
         let r =
             (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
         let mut z = rsa::BigUint::from_bytes_be(&digest);
-        if digest.len() * 8 > parameters.n.bits() as usize {
-            z >>= digest.len() * 8 - parameters.n.bits() as usize;
+        if digest.len() * 8 > parameters.n.bits() {
+            z >>= digest.len() * 8 - parameters.n.bits();
         }
         let nonce_inverse =
             nonce.modpow(&(&parameters.n - rsa::BigUint::from(2u8)), &parameters.n);
@@ -1130,28 +1120,15 @@ fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
 
 #[test]
 fn piv_attestation_certificate_supplies_public_key_for_metadata_fallback() {
-    let group = openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
-    let signing_key = openssl::ec::EcKey::generate(&group).unwrap();
-    let signing_key = openssl::pkey::PKey::from_ec_key(signing_key).unwrap();
-    let mut name = openssl::x509::X509NameBuilder::new().unwrap();
-    name.append_entry_by_text("CN", "PIV attestation test")
-        .unwrap();
-    let name = name.build();
-    let mut builder = openssl::x509::X509::builder().unwrap();
-    builder.set_version(2).unwrap();
-    builder.set_subject_name(&name).unwrap();
-    builder.set_issuer_name(&name).unwrap();
-    builder.set_pubkey(&signing_key).unwrap();
-    builder
-        .set_not_before(openssl::asn1::Asn1Time::days_from_now(0).unwrap().as_ref())
-        .unwrap();
-    builder
-        .set_not_after(openssl::asn1::Asn1Time::days_from_now(1).unwrap().as_ref())
-        .unwrap();
-    builder
-        .sign(&signing_key, openssl::hash::MessageDigest::sha256())
-        .unwrap();
-    let attestation = builder.build().to_der().unwrap();
+    let signing_key = crate::certificate_builder::p256_key();
+    let attestation = crate::certificate_builder::p256_certificate(
+        signing_key.verifying_key(),
+        &signing_key,
+        "CN=PIV attestation test",
+        "CN=PIV attestation test",
+        1,
+        false,
+    );
 
     let parsed =
         crate::piv_public_key_from_certificate(crate::piv::Algorithm::EccP256, &attestation)
@@ -1159,17 +1136,8 @@ fn piv_attestation_certificate_supplies_public_key_for_metadata_fallback() {
     let crate::PivPublicKey::Ec(parsed) = parsed else {
         panic!("expected an EC public key");
     };
-    let mut context = openssl::bn::BigNumContext::new().unwrap();
-    let expected = signing_key
-        .ec_key()
-        .unwrap()
-        .public_key()
-        .to_bytes(
-            &group,
-            openssl::ec::PointConversionForm::UNCOMPRESSED,
-            &mut context,
-        )
-        .unwrap();
+    let expected =
+        crate::certificate_builder::p256_public_point(signing_key.verifying_key());
     assert_eq!(parsed, expected[1..]);
 }
 

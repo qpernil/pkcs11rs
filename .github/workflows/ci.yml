@@ -20,7 +20,6 @@ jobs:
             libclang-dev \
             libcurl4-openssl-dev \
             libpcsclite-dev \
-            libssl-dev \
             libusb-1.0-0-dev \
             pkg-config
 
@@ -32,3 +31,18 @@ jobs:
 
       - name: Run Python ABI tests
         run: python3 test_pkcs11.py
+
+  windows:
+    runs-on: windows-latest
+    env:
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Compile Rust tests
+        run: cargo test --no-run
+
+      - name: Check ABI test backend
+        run: cargo check --features abi-tests

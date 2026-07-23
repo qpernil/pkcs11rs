@@ -27,7 +27,7 @@ struct TokenObject {
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
 enum KeyMaterial {
     None,
-    RsaPrivate(RsaPrivateKey),
+    RsaPrivate(Box<RsaPrivateKey>),
     RsaPublic(RsaPublicKey),
     PivPrivate {
         slot: piv::Slot,

@@ -109,7 +109,7 @@ fn yubihsm_generated_key_attestation_is_a_lazy_session_object() {
     let certificate = attestation
         .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
         .unwrap();
-    assert!(openssl::x509::X509::from_der(&certificate).is_ok());
+    assert!(crate::certificate_chain::validate(&certificate).is_ok());
     assert_eq!(
         commands
             .borrow()
@@ -1650,19 +1650,11 @@ fn test_hex(value: &str) -> Vec<u8> {
 }
 
 fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error> {
-    let cipher = match key.len() {
-        16 => openssl::symm::Cipher::aes_128_ecb(),
-        24 => openssl::symm::Cipher::aes_192_ecb(),
-        32 => openssl::symm::Cipher::aes_256_ecb(),
-        _ => return Err(CKR_KEY_SIZE_RANGE.into()),
-    };
-    let mut crypter = openssl::symm::Crypter::new(cipher, openssl::symm::Mode::Encrypt, key, None)?;
-    crypter.pad(false);
-    let mut output = vec![0; input.len() + 16];
-    let written = crypter.update(input, &mut output)?;
-    let final_written = crypter.finalize(&mut output[written..])?;
-    output.truncate(written + final_written);
-    Ok(output)
+    crate::secure_channel_crypto::aes_ecb(
+        key,
+        input,
+        crate::secure_channel_crypto::Direction::Encrypt,
+    )
 }
 
 fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {

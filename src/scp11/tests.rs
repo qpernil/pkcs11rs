@@ -1,16 +1,5 @@
 use super::*;
-use openssl::{
-    asn1::Asn1Time,
-    bn::{BigNum, BigNumContext},
-    ec::{EcGroup, EcKey, EcPoint},
-    hash::MessageDigest,
-    nid::Nid,
-    pkey::{PKey, Private},
-    x509::{
-        extension::{BasicConstraints, KeyUsage},
-        X509NameBuilder, X509,
-    },
-};
+use p256::ecdsa::SigningKey;
 use std::{cell::RefCell, time::Duration};
 
 #[derive(Debug)]
@@ -56,89 +45,54 @@ impl Connector for ScriptedConnector {
     }
 }
 
-fn openssl_private_key(scalar: u32) -> EcKey<Private> {
-    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-    let scalar = BigNum::from_u32(scalar).unwrap();
-    let mut context = BigNumContext::new().unwrap();
-    let mut public = EcPoint::new(&group).unwrap();
-    public
-        .mul_generator2(&group, &scalar, &mut context)
-        .unwrap();
-    EcKey::from_private_components(&group, &scalar, &public).unwrap()
-}
-
 fn private_key(scalar: u32) -> P256SecretKey {
     let mut encoded = [0; 32];
     encoded[28..].copy_from_slice(&scalar.to_be_bytes());
     P256SecretKey::from_slice(&encoded).unwrap()
 }
 
-fn certificate_chain(leaf_signer: &EcKey<Private>) -> Vec<Vec<u8>> {
-    let ca_key = openssl_private_key(4);
-    let ca_pkey = PKey::from_ec_key(ca_key.clone()).unwrap();
-    let mut ca_name = X509NameBuilder::new().unwrap();
-    ca_name
-        .append_entry_by_text("CN", "pkcs11rs SCP11 test CA")
-        .unwrap();
-    let ca_name = ca_name.build();
-    let mut ca = X509::builder().unwrap();
-    ca.set_version(2).unwrap();
-    let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
-    ca.set_serial_number(&serial).unwrap();
-    ca.set_subject_name(&ca_name).unwrap();
-    ca.set_issuer_name(&ca_name).unwrap();
-    ca.set_pubkey(&ca_pkey).unwrap();
-    ca.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-        .unwrap();
-    ca.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
-        .unwrap();
-    ca.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
-        .unwrap();
-    ca.append_extension(KeyUsage::new().key_cert_sign().build().unwrap())
-        .unwrap();
-    ca.sign(&ca_pkey, MessageDigest::sha256()).unwrap();
-    let ca = ca.build();
+fn signing_key(scalar: u32) -> SigningKey {
+    SigningKey::from(private_key(scalar))
+}
 
-    let leaf_key = openssl_private_key(5);
-    let leaf_pkey = PKey::from_ec_key(leaf_key).unwrap();
-    let mut leaf_name = X509NameBuilder::new().unwrap();
-    leaf_name
-        .append_entry_by_text("CN", "pkcs11rs SCP11B card")
-        .unwrap();
-    let leaf_name = leaf_name.build();
-    let mut leaf = X509::builder().unwrap();
-    leaf.set_version(2).unwrap();
-    let serial = BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap();
-    leaf.set_serial_number(&serial).unwrap();
-    leaf.set_subject_name(&leaf_name).unwrap();
-    leaf.set_issuer_name(ca.subject_name()).unwrap();
-    leaf.set_pubkey(&leaf_pkey).unwrap();
-    leaf.set_not_before(Asn1Time::days_from_now(0).unwrap().as_ref())
-        .unwrap();
-    leaf.set_not_after(Asn1Time::days_from_now(1).unwrap().as_ref())
-        .unwrap();
-    leaf.append_extension(KeyUsage::new().key_agreement().build().unwrap())
-        .unwrap();
-    let signer = PKey::from_ec_key(leaf_signer.clone()).unwrap();
-    leaf.sign(&signer, MessageDigest::sha256()).unwrap();
-    vec![ca.to_der().unwrap(), leaf.build().to_der().unwrap()]
+fn certificate_chain(leaf_signer: &SigningKey) -> Vec<Vec<u8>> {
+    let ca_key = signing_key(4);
+    let ca_name = "CN=pkcs11rs SCP11 test CA";
+    let ca = crate::certificate_builder::p256_certificate(
+        ca_key.verifying_key(),
+        &ca_key,
+        ca_name,
+        ca_name,
+        1,
+        true,
+    );
+    let leaf_key = signing_key(5);
+    let leaf = crate::certificate_builder::p256_certificate(
+        leaf_key.verifying_key(),
+        leaf_signer,
+        "CN=pkcs11rs SCP11B card",
+        ca_name,
+        2,
+        false,
+    );
+    vec![ca, leaf]
 }
 
 #[test]
 fn scp11b_card_key_requires_a_valid_certificate_chain() {
-    let certificates = certificate_chain(&openssl_private_key(4));
+    let certificates = certificate_chain(&signing_key(4));
     assert!(
         Scp11KeySet::scp11b_from_certificates(1, &certificates[1..], &certificates[..1]).is_ok()
     );
 
-    let invalid = certificate_chain(&openssl_private_key(6));
+    let invalid = certificate_chain(&signing_key(6));
     assert!(Scp11KeySet::scp11b_from_certificates(1, &invalid[1..], &invalid[..1]).is_err());
 }
 
 #[test]
 fn embedded_yubico_attestation_root_is_self_signed() {
-    let root = X509::from_pem(YUBICO_ATTESTATION_ROOT).unwrap();
-    assert!(root.verify(&root.public_key().unwrap()).unwrap());
+    crate::certificate_chain::verify_signed_by(YUBICO_ATTESTATION_ROOT, YUBICO_ATTESTATION_ROOT)
+        .unwrap();
 }
 
 #[test]

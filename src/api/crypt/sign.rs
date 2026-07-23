@@ -260,7 +260,7 @@ fn sign(
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let required = match &operation.key {
-            KeyMaterial::RsaPrivate(key) => key.size() as usize,
+            KeyMaterial::RsaPrivate(key) => key.size(),
             KeyMaterial::PivPrivate {
                 algorithm, modulus, ..
             } => match algorithm {
@@ -342,8 +342,7 @@ fn sign(
                 } => {
                     let digest = piv_hash_mechanism(operation.mechanism)
                         .map(|digest| hash(digest, data).map(|value| value.to_vec()))
-                        .transpose()
-                        .map_err(Error::from)?;
+                        .transpose()?;
                     let input = if piv_is_pss_mechanism(operation.mechanism) {
                         let (mgf, salt_length, hash_mechanism) =
                             operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
@@ -390,8 +389,7 @@ fn sign(
                 } => {
                     let digest = piv_hash_mechanism(operation.mechanism)
                         .map(|digest| hash(digest, data).map(|value| value.to_vec()))
-                        .transpose()
-                        .map_err(Error::from)?;
+                        .transpose()?;
                     let input = match algorithm {
                         OpenPgpAlgorithm::Rsa { .. } => {
                             if piv_is_hashed_rsa_pkcs(operation.mechanism) {

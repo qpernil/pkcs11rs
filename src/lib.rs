@@ -2,21 +2,9 @@
 #![allow(non_snake_case)]
 
 extern crate curl;
-extern crate openssl;
 extern crate pcsc;
 extern crate rusb;
 
-#[cfg(feature = "abi-tests")]
-use openssl::symm::{Cipher, Crypter, Mode};
-#[cfg(feature = "abi-tests")]
-use openssl::{
-    bn::BigNum,
-    ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
-    ecdsa::EcdsaSig,
-    nid::Nid,
-    pkey::{Id, PKey, Public},
-    sign::Verifier,
-};
 use rsa::{
     traits::{PrivateKeyParts, PublicKeyParts},
     BigUint, RsaPrivateKey, RsaPublicKey,
@@ -145,6 +133,8 @@ mod pinentry;
 mod yubico_kdf;
 use yubico_kdf::yubico_password_kdf;
 
+#[cfg(any(test, feature = "abi-tests"))]
+mod certificate_builder;
 mod certificate_chain;
 
 mod iso7816;

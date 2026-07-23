@@ -232,7 +232,7 @@ fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error
         let KeyMaterial::RsaPrivate(key) = parsed.material else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
-        let bits = key.size() as usize * 8;
+        let bits = key.size() * 8;
         if !matches!(bits, 2048 | 3072 | 4096) {
             return Err(CKR_KEY_SIZE_RANGE.into());
         }
@@ -1026,7 +1026,7 @@ fn build_imported_key_material(
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             key.precompute()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::RsaPrivate(key)
+            KeyMaterial::RsaPrivate(Box::new(key))
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };
