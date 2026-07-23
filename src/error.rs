@@ -11,6 +11,7 @@ pub enum Error {
     Pcsc(pcsc::Error),
     Curl(curl::Error),
     OpenSsl(openssl::error::ErrorStack),
+    Io(std::io::Error),
 }
 
 impl From<rusb::Error> for Error {
@@ -34,6 +35,12 @@ impl From<curl::Error> for Error {
 impl From<openssl::error::ErrorStack> for Error {
     fn from(e: openssl::error::ErrorStack) -> Self {
         Self::OpenSsl(e)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
@@ -65,6 +72,7 @@ impl From<Error> for CK_RV {
             Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Curl(_) => CKR_DEVICE_REMOVED as CK_RV,
             Error::OpenSsl(_) => CKR_FUNCTION_FAILED as CK_RV,
+            Error::Io(_) => CKR_FUNCTION_FAILED as CK_RV,
         }
     }
 }

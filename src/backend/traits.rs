@@ -198,6 +198,9 @@ trait Slot {
         info.flags =
             (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED)
                 as CK_FLAGS;
+        if pinentry::is_configured() && (self.is_hsmauth() || self.is_yubihsm()) {
+            info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH as CK_FLAGS;
+        }
         info.ulMaxSessionCount = 0;
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = 0;
