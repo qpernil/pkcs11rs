@@ -1,4 +1,5 @@
 use super::*;
+use openssl::{derive::Deriver, pkey::PKey};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -22,6 +23,10 @@ pub(crate) const NIST_AES_KEY_ID: u16 = 3;
 const NIST_AES_128_KEY: [u8; 16] = [
     0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
 ];
+
+fn test_private_key(encoded: &[u8]) -> Result<P256SecretKey, Error> {
+    P256SecretKey::from_slice(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
+}
 const RFC7748_ALICE_PRIVATE_KEY: [u8; 32] = [
     0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
     0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
@@ -60,14 +65,12 @@ pub(crate) struct TestTrustEntry {
 
 impl TestTrustEntry {
     fn new() -> Self {
-        let group = p256_group().unwrap();
-        let private = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY).unwrap();
+        use p256::pkcs8::{EncodePublicKey, LineEnding};
+
+        let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY).unwrap();
         let point = p256_public_key(&private).unwrap();
         let public = parse_p256_public_key(&point).unwrap();
-        let pem = PKey::from_ec_key(public)
-            .unwrap()
-            .public_key_to_pem()
-            .unwrap();
+        let pem = public.to_public_key_pem(LineEnding::LF).unwrap();
         let prefix = unused_trust_prefix();
         let path = trust::entry_path(&point, Some(&prefix)).unwrap();
         fs::write(&path, pem).unwrap();
@@ -222,8 +225,7 @@ impl ProtocolPeer {
             )
             .map(|frame| frame.encode()),
             Some(value) if value == CommandCode::GetDevicePublicKey as u8 => {
-                let group = p256_group()?;
-                let key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
+                let key = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
                 let mut public = p256_public_key(&key)?;
                 public[0] = EC_P256_AUTHENTICATION_ALGORITHM;
                 Frame::new(
@@ -285,9 +287,8 @@ impl ProtocolPeer {
         let host_ephemeral_public = parse_p256_public_key(&data[2..])?;
         let host_static_key = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
         let host_static_public = parse_p256_public_key(&p256_public_key(&host_static_key)?)?;
-        let group = p256_group()?;
-        let device_static_key = p256_private_key(&group, &DEVICE_STATIC_PRIVATE_KEY)?;
-        let device_ephemeral_key = p256_private_key(&group, &DEVICE_EPHEMERAL_PRIVATE_KEY)?;
+        let device_static_key = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
+        let device_ephemeral_key = test_private_key(&DEVICE_EPHEMERAL_PRIVATE_KEY)?;
         let device_ephemeral_public = p256_public_key(&device_ephemeral_key)?;
 
         let ephemeral_secret = p256_ecdh(&device_ephemeral_key, &host_ephemeral_public)?;
@@ -819,21 +820,17 @@ impl Connector for SymmetricHsmAuthPeer {
 
 #[derive(Debug)]
 struct AsymmetricHsmAuthPeer {
-    ephemeral_key: EcKey<Private>,
+    ephemeral_key: P256SecretKey,
     public_key: Vec<u8>,
     fail_calculate: bool,
 }
 
 impl AsymmetricHsmAuthPeer {
     fn new() -> Self {
-        let group = p256_group().unwrap();
-        let ephemeral_key = p256_private_key(
-            &group,
-            &[
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 3,
-            ],
-        )
+        let ephemeral_key = test_private_key(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 3,
+        ])
         .unwrap();
         let public_key = p256_public_key(&ephemeral_key).unwrap().to_vec();
         Self {

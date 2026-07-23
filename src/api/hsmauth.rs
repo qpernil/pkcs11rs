@@ -138,12 +138,12 @@ pub extern "C" fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
             hsmauth_utf8(derivation_password, derivation_password_len)?;
         let key =
             crate::yubico_kdf::yubico_password_p256_key(derivation_password.as_bytes())?;
-        let private_key = Zeroizing::new(key.private_key().to_vec_padded(32)?);
+        let private_key = Zeroizing::new(key.to_bytes());
         hsmauth_put_asymmetric(
             session_handle,
             label,
             label_len,
-            Some(private_key.as_slice()),
+            Some(&private_key[..]),
             credential_password,
             credential_password_len,
             touch_required,

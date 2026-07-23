@@ -194,7 +194,6 @@ pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::yubihsm::parse_p256_public_key;
     use openssl::{
         asn1::Asn1Time,
         bn::BigNum,
@@ -216,7 +215,7 @@ mod tests {
             .public_key()
             .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut context)
             .unwrap();
-        let public = parse_p256_public_key(&point).unwrap();
+        let public = EcKey::from_public_key(&group, private.public_key()).unwrap();
         (PKey::from_ec_key(public).unwrap(), point)
     }
 
