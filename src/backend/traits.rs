@@ -80,6 +80,28 @@ trait Slot {
     fn is_yubihsm(&self) -> bool {
         false
     }
+    fn yubihsm_read_opaque(&self, _id: u16) -> Result<Vec<u8>, Error> {
+        Err(CKR_USER_NOT_LOGGED_IN.into())
+    }
+    fn yubihsm_forget_object(&self, _id: u16, _object_type: u8) -> Result<(), Error> {
+        Ok(())
+    }
+    fn yubihsm_related_metadata_object(
+        &self,
+        _id: u16,
+        _object_type: u8,
+    ) -> Result<Vec<(u16, u8)>, Error> {
+        Ok(Vec::new())
+    }
+    fn yubihsm_set_attributes(
+        &self,
+        _slot_id: CK_SLOT_ID,
+        _unique_id: &str,
+        _id: Option<&[u8]>,
+        _label: Option<&str>,
+    ) -> Result<(), Error> {
+        Err(CKR_ATTRIBUTE_READ_ONLY.into())
+    }
     fn is_issuer_security_domain(&self) -> bool {
         false
     }

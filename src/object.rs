@@ -27,6 +27,9 @@ struct TokenObject {
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
 enum KeyMaterial {
     None,
+    Profile {
+        profile_id: CK_PROFILE_ID,
+    },
     RsaPrivate(Box<RsaPrivateKey>),
     RsaPublic(RsaPublicKey),
     PivPrivate {
@@ -129,6 +132,10 @@ impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::None => fmt.write_str("None"),
+            Self::Profile { profile_id } => fmt
+                .debug_struct("Profile")
+                .field("profile_id", profile_id)
+                .finish(),
             Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
             Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
             Self::PivPrivate {
@@ -500,6 +507,7 @@ impl TokenObject {
         [
             CKA_CLASS as CK_ATTRIBUTE_TYPE,
             CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+            CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE,
             CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
             CKA_LABEL as CK_ATTRIBUTE_TYPE,
             CKA_ID as CK_ATTRIBUTE_TYPE,
@@ -565,10 +573,19 @@ impl TokenObject {
             x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => {
                 Some(self.unique_id.as_bytes().to_vec())
             }
+            x if x == CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE => match self.material {
+                KeyMaterial::Profile { profile_id } => Some(ulong_attribute(profile_id)),
+                _ => None,
+            },
             x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(ulong_attribute(self.key_type))
             }
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes().to_vec()),
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE
+                && matches!(self.material, KeyMaterial::Profile { .. }) =>
+            {
+                None
+            }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
                     .map(|mapping| vec![mapping.cka_id]),
@@ -1031,7 +1048,8 @@ impl TokenObject {
     fn is_immutable_object(&self) -> bool {
         matches!(
             &self.material,
-            KeyMaterial::PivPrivate { .. }
+            KeyMaterial::Profile { .. }
+                | KeyMaterial::PivPrivate { .. }
                 | KeyMaterial::PivPublic { .. }
                 | KeyMaterial::PivCertificate { .. }
                 | KeyMaterial::PivAttestation { .. }
