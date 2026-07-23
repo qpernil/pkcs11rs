@@ -231,23 +231,87 @@ impl HsmAuthProvider {
 struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+    public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
+    public_discovery: RefCell<YubiHsmPublicDiscoveryState>,
+    opaque_cache: RefCell<YubiHsmOpaqueCache>,
     version: (u8, u8, u8),
     algorithms: Vec<u8>,
     trust_prefix: Option<std::ffi::OsString>,
     hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
     object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
+    related_metadata: RefCell<YubiHsmRelatedMetadata>,
     object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     attestation_cache: RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
     next_object_generation: Cell<u64>,
     device_public_key: OnceLock<Vec<u8>>,
 }
 
+#[cfg_attr(feature = "abi-tests", allow(dead_code))]
+const YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID_ENV: &str =
+    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID";
+#[cfg_attr(feature = "abi-tests", allow(dead_code))]
+const YUBIHSM_PUBLIC_DISCOVERY_PASSWORD_ENV: &str =
+    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD";
+
+#[derive(Clone)]
+struct YubiHsmPublicDiscoveryCredential {
+    authkey_id: u16,
+    password: Zeroizing<Vec<u8>>,
+}
+
+impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("YubiHsmPublicDiscoveryCredential")
+            .field("authkey_id", &format_args!("{:04x}", self.authkey_id))
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Default)]
+struct YubiHsmPublicDiscoveryState {
+    connection_epoch: u64,
+    attempted: bool,
+    available: bool,
+    objects: Vec<TokenObject>,
+}
+
+#[cfg_attr(feature = "abi-tests", allow(dead_code))]
+fn configured_yubihsm_public_discovery_credential(
+    authkey_id: Option<std::ffi::OsString>,
+    password: Option<std::ffi::OsString>,
+) -> Result<Option<Rc<YubiHsmPublicDiscoveryCredential>>, Error> {
+    let (authkey_id, password) = match (authkey_id, password) {
+        (None, None) => return Ok(None),
+        (Some(authkey_id), Some(password)) => (authkey_id, password),
+        _ => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+    let authkey_id = authkey_id.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let authkey_id = parse_yubihsm_authkey_id(authkey_id.as_bytes())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let password = password.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    if !(8..=64).contains(&password.len()) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(Some(Rc::new(YubiHsmPublicDiscoveryCredential {
+        authkey_id,
+        password: Zeroizing::new(password.into_bytes()),
+    })))
+}
+
 type YubiHsmObjectKey = (u8, u16);
+type YubiHsmOpaqueCache = HashMap<u16, (u8, Rc<RefCell<Option<Vec<u8>>>>)>;
+type YubiHsmMetadataTarget = (u8, u16, u8);
+type YubiHsmRelatedMetadata = HashMap<YubiHsmMetadataTarget, Vec<(u16, u8)>>;
 type YubiHsmObjectMetadata = (
     YubiHsmObjectInfo,
     Option<YubiHsmPublicKey>,
     u64,
     Option<YubiHsmPkcs11Metadata>,
+);
+type YubiHsmDiscoveredObjects = (
+    Vec<(YubiHsmObjectInfo, Option<YubiHsmPublicKey>)>,
+    HashMap<(u8, u16, u8, u16), YubiHsmPkcs11Metadata>,
 );
 
 #[derive(Clone, Debug)]
@@ -276,16 +340,55 @@ struct YubiHsmPkcs11Metadata {
     public_label: Option<String>,
 }
 
+impl YubiHsmPkcs11Metadata {
+    fn is_empty(&self) -> bool {
+        self.id.is_none()
+            && self.label.is_none()
+            && self.public_id.is_none()
+            && self.public_label.is_none()
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, Error> {
+        const MAX_ATTRIBUTE_LENGTH: usize = 256;
+
+        let mut value = b"MDB1".to_vec();
+        value.push(self.target_type);
+        value.extend_from_slice(&self.target_id.to_be_bytes());
+        value.push(self.target_sequence);
+        for (tag, item) in [
+            (1, self.id.as_deref()),
+            (2, self.label.as_deref().map(str::as_bytes)),
+            (3, self.public_id.as_deref()),
+            (4, self.public_label.as_deref().map(str::as_bytes)),
+        ] {
+            let Some(item) = item else {
+                continue;
+            };
+            if item.is_empty() || item.len() > MAX_ATTRIBUTE_LENGTH {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            value.push(tag);
+            value.extend_from_slice(&(item.len() as u16).to_be_bytes());
+            value.extend_from_slice(item);
+        }
+        Ok(value)
+    }
+}
+
 impl YubiHsmSlot {
     fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
         Self {
             connector,
             session: Rc::new(RefCell::new(None)),
+            public_discovery_credential: None,
+            public_discovery: RefCell::new(YubiHsmPublicDiscoveryState::default()),
+            opaque_cache: RefCell::new(HashMap::new()),
             version,
             algorithms,
             trust_prefix: None,
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
             object_metadata: RefCell::new(HashMap::new()),
+            related_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             attestation_cache: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
@@ -301,6 +404,19 @@ impl YubiHsmSlot {
     ) -> Self {
         let mut slot = Self::new(connector, version, algorithms);
         slot.hsmauth_providers = hsmauth_providers;
+        slot
+    }
+
+    fn with_hsmauth_providers_and_public_discovery(
+        connector: Rc<dyn Connector>,
+        version: (u8, u8, u8),
+        algorithms: Vec<u8>,
+        hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+        public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
+    ) -> Self {
+        let mut slot =
+            Self::with_hsmauth_providers(connector, version, algorithms, hsmauth_providers);
+        slot.public_discovery_credential = public_discovery_credential;
         slot
     }
 
@@ -353,6 +469,636 @@ impl YubiHsmSlot {
         }
         Ok(provider)
     }
+
+    fn opaque_cache_entry(
+        &self,
+        info: &YubiHsmObjectInfo,
+    ) -> Result<Rc<RefCell<Option<Vec<u8>>>>, Error> {
+        let mut cache = self.opaque_cache.try_borrow_mut()?;
+        let entry = cache
+            .entry(info.id)
+            .or_insert_with(|| (info.sequence, Rc::new(RefCell::new(None))));
+        if entry.0 != info.sequence {
+            *entry = (info.sequence, Rc::new(RefCell::new(None)));
+        }
+        Ok(entry.1.clone())
+    }
+
+    fn read_opaque_with_session(
+        &self,
+        info: &YubiHsmObjectInfo,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+    ) -> Result<Vec<u8>, Error> {
+        let cached = self.opaque_cache_entry(info)?;
+        if let Some(value) = cached
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .clone()
+        {
+            return Ok(value);
+        }
+        let value = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            session,
+            &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, info.id)?,
+        )?;
+        *cached.try_borrow_mut()? = Some(value.clone());
+        Ok(value)
+    }
+
+    fn bind_opaque_cache(
+        &self,
+        info: &YubiHsmObjectInfo,
+        objects: &mut [TokenObject],
+    ) -> Result<(), Error> {
+        if info.object_type != YUBIHSM_OPAQUE {
+            return Ok(());
+        }
+        let cached = self.opaque_cache_entry(info)?;
+        for object in objects {
+            if let KeyMaterial::YubiHsm {
+                object_type,
+                value,
+                ..
+            } = &mut object.material
+            {
+                if *object_type == YUBIHSM_OPAQUE {
+                    *value = cached.clone();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn discover_objects(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+    ) -> Result<YubiHsmDiscoveredObjects, Error> {
+        let listed = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            session,
+            &YubiHsmCommand::list_objects(&[])?,
+        )?;
+        let mut discovered = Vec::new();
+        let mut pkcs11_metadata = HashMap::new();
+        let mut ambiguous_metadata = HashSet::new();
+        let mut related_metadata = HashMap::<_, Vec<_>>::new();
+        for entry in parse_yubihsm_object_list(&listed)? {
+            let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
+                self.connector.as_ref(),
+                session,
+                &YubiHsmCommand::get_object_info(entry.id, entry.object_type),
+            )?)?;
+            if info.id != entry.id
+                || info.object_type != entry.object_type
+                || info.sequence != entry.sequence
+            {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            if info.object_type == YUBIHSM_OPAQUE
+                && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
+            {
+                let Some((target_sequence, target_type, target_id)) =
+                    yubihsm_metadata_label_target(&info.label)
+                else {
+                    discovered.push((info, None));
+                    continue;
+                };
+                related_metadata
+                    .entry((target_type, target_id, target_sequence))
+                    .or_default()
+                    .push((info.id, info.sequence));
+                let value = self.read_opaque_with_session(&info, session);
+                match value.and_then(|value| parse_yubihsm_pkcs11_metadata(&info, &value)) {
+                    Ok(metadata) => {
+                        let target = (
+                            metadata.target_type,
+                            metadata.target_id,
+                            metadata.target_sequence,
+                            info.domains,
+                        );
+                        if ambiguous_metadata.contains(&target) {
+                            continue;
+                        }
+                        if pkcs11_metadata.remove(&target).is_some() {
+                            ambiguous_metadata.insert(target);
+                            log!(
+                                2,
+                                "YubiHSM has duplicate PKCS11 metadata for object type {:02x} ID {:04x}",
+                                target.0,
+                                target.1
+                            );
+                        } else {
+                            pkcs11_metadata.insert(target, metadata);
+                        }
+                        continue;
+                    }
+                    Err(error) => log!(
+                        2,
+                        "YubiHSM opaque object {} has a metadata label but invalid contents: {:?}",
+                        info.id,
+                        error
+                    ),
+                }
+                continue;
+            }
+            let public_key = if yubihsm_object_has_public_key(&info) {
+                Some(YubiHsmPublicKey::parse(&send_yubihsm_secure_command(
+                    self.connector.as_ref(),
+                    session,
+                    &YubiHsmCommand::get_public_key(info.id, Some(info.object_type)),
+                )?)?)
+            } else {
+                None
+            };
+            discovered.push((info, public_key));
+        }
+        *self.related_metadata.try_borrow_mut()? = related_metadata;
+        Ok((discovered, pkcs11_metadata))
+    }
+
+    fn object_generation(&self, info: &YubiHsmObjectInfo) -> Result<u64, Error> {
+        let key = (info.object_type, info.id);
+        let mut generations = self
+            .object_generations
+            .try_borrow_mut()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        if let Some((sequence, generation)) = generations.get(&key) {
+            if *sequence == info.sequence {
+                return Ok(*generation);
+            }
+        }
+        let generation = self.next_object_generation.get();
+        self.next_object_generation
+            .set(generation.checked_add(1).ok_or(CKR_DEVICE_MEMORY)?);
+        generations.insert(key, (info.sequence, generation));
+        Ok(generation)
+    }
+
+    fn build_public_discovery_objects(
+        &self,
+        slot_id: CK_SLOT_ID,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+    ) -> Result<Vec<TokenObject>, Error> {
+        let (discovered, mut metadata) = self.discover_objects(session)?;
+        let mut candidates = Vec::new();
+        for (info, public_key) in discovered {
+            let certificate = if info.object_type == YUBIHSM_OPAQUE
+                && info.algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
+            {
+                Some(self.read_opaque_with_session(&info, session)?)
+            } else {
+                None
+            };
+            let generation = self.object_generation(&info)?;
+            let attribute_metadata =
+                metadata.remove(&(info.object_type, info.id, info.sequence, info.domains));
+            let mut objects = yubihsm_token_objects_with_generation(
+                slot_id,
+                info.clone(),
+                public_key,
+                generation,
+                attribute_metadata.as_ref(),
+            )?;
+            self.bind_opaque_cache(&info, &mut objects)?;
+            for object in &mut objects {
+                if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
+                    let certificate = certificate.as_deref().ok_or(CKR_DEVICE_ERROR)?;
+                    if piv_certificate_attribute(
+                        certificate,
+                        CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
+                    )
+                    .is_none()
+                    {
+                        return Err(CKR_DATA_INVALID.into());
+                    }
+                    object.private = false;
+                }
+            }
+            candidates.append(&mut objects);
+        }
+
+        let certificate_ids = candidates
+            .iter()
+            .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+            .map(|object| object.id.clone())
+            .collect::<HashSet<_>>();
+        let public_ids = candidates
+            .iter()
+            .filter(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .map(|object| object.id.clone())
+            .collect::<HashSet<_>>();
+        if !certificate_ids.is_subset(&public_ids) {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let objects = candidates
+            .into_iter()
+            .filter(|object| {
+                object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
+                    || (object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                        && certificate_ids.contains(&object.id))
+            })
+            .collect();
+        Ok(objects)
+    }
+
+    fn public_discovery_available(&self, slot_id: CK_SLOT_ID) -> bool {
+        if self.synchronize_object_cache().is_err() {
+            return false;
+        }
+        let Some(credential) = self.public_discovery_credential.as_ref() else {
+            return false;
+        };
+        {
+            let Ok(mut state) = self.public_discovery.try_borrow_mut() else {
+                return false;
+            };
+            if state.available {
+                return true;
+            }
+            if state.attempted {
+                return false;
+            }
+            state.attempted = true;
+        }
+
+        let session = YubiHsmSecureSession::authenticate(
+            self.connector.as_ref(),
+            credential.authkey_id,
+            credential.password.as_slice(),
+        );
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                log!(
+                    2,
+                    "YubiHSM public discovery authentication failed on {}: {:?}",
+                    self.connector.name(),
+                    error
+                );
+                return false;
+            }
+        };
+        let session = RefCell::new(Some(session));
+        let objects = self.build_public_discovery_objects(slot_id, &session);
+        let mut session = session.into_inner();
+        let mut state = match self.public_discovery.try_borrow_mut() {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        match objects {
+            Ok(objects) => {
+                let mut retained = state
+                    .objects
+                    .drain(..)
+                    .map(|object| (object.unique_id.clone(), object))
+                    .collect::<HashMap<_, _>>();
+                for object in objects {
+                    retained.insert(object.unique_id.clone(), object);
+                }
+                state.objects = retained.into_values().collect();
+                if let Some(session) = session.as_mut() {
+                    if let Err(error) = session.send_command(
+                        self.connector.as_ref(),
+                        &YubiHsmCommand::close_session(),
+                    ) {
+                        log!(
+                            2,
+                            "YubiHSM public discovery session close failed on {}: {:?}",
+                            self.connector.name(),
+                            error
+                        );
+                    }
+                }
+                state.available = true;
+                true
+            }
+            Err(error) => {
+                if let Some(session) = session.as_mut() {
+                    let _ = session.send_command(
+                        self.connector.as_ref(),
+                        &YubiHsmCommand::close_session(),
+                    );
+                }
+                log!(
+                    2,
+                    "YubiHSM public object discovery failed on {}: {:?}",
+                    self.connector.name(),
+                    error
+                );
+                false
+            }
+        }
+    }
+
+    fn synchronize_object_cache(&self) -> Result<(), Error> {
+        let connection_epoch = self.connector.connection_epoch();
+        let changed = {
+            let mut state = self.public_discovery.try_borrow_mut()?;
+            if state.connection_epoch == connection_epoch {
+                false
+            } else {
+                *state = YubiHsmPublicDiscoveryState {
+                    connection_epoch,
+                    ..YubiHsmPublicDiscoveryState::default()
+                };
+                true
+            }
+        };
+        if changed {
+            self.object_metadata.try_borrow_mut()?.clear();
+            self.related_metadata.try_borrow_mut()?.clear();
+            self.object_generations.try_borrow_mut()?.clear();
+            self.attestation_cache.try_borrow_mut()?.clear();
+            self.opaque_cache.try_borrow_mut()?.clear();
+        }
+        Ok(())
+    }
+
+    fn cached_objects(&self) -> Vec<TokenObject> {
+        let Ok(state) = self.public_discovery.try_borrow() else {
+            return Vec::new();
+        };
+        let mut objects = state.objects.clone();
+        objects.sort_by(|left, right| left.unique_id.cmp(&right.unique_id));
+        objects
+    }
+
+    fn update_cached_objects(&self, objects: &[TokenObject]) -> Result<(), Error> {
+        let mut state = self.public_discovery.try_borrow_mut()?;
+        let updated_hardware_objects = objects
+            .iter()
+            .filter_map(|object| match object.material {
+                KeyMaterial::YubiHsm {
+                    id, object_type, ..
+                } => Some((id, object_type & !0x80)),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut retained = state
+            .objects
+            .drain(..)
+            .filter(|object| match object.material {
+                KeyMaterial::YubiHsm {
+                    id, object_type, ..
+                } => !updated_hardware_objects.contains(&(id, object_type & !0x80)),
+                _ => true,
+            })
+            .map(|object| (object.unique_id.clone(), object))
+            .collect::<HashMap<_, _>>();
+        for object in objects {
+            if object.token && object.class != CKO_PROFILE as CK_OBJECT_CLASS {
+                retained.insert(object.unique_id.clone(), object.clone());
+            }
+        }
+        state.objects = retained.into_values().collect();
+        Ok(())
+    }
+
+    fn clear_cached_private_objects(&self) -> Result<(), Error> {
+        let private_targets = {
+            let mut state = self.public_discovery.try_borrow_mut()?;
+            let mut private_targets = HashSet::new();
+            state.objects.retain(|object| {
+                if !object.private {
+                    return true;
+                }
+                if let KeyMaterial::YubiHsm {
+                    id, object_type, ..
+                } = object.material
+                {
+                    private_targets.insert((object_type & !0x80, id));
+                }
+                false
+            });
+            private_targets
+        };
+        if private_targets.is_empty() {
+            return Ok(());
+        }
+
+        self.object_metadata
+            .try_borrow_mut()?
+            .retain(|key, _| !private_targets.contains(key));
+
+        let metadata_ids = {
+            let mut metadata_ids = HashSet::new();
+            self.related_metadata
+                .try_borrow_mut()?
+                .retain(|(object_type, id, _), sources| {
+                    if !private_targets.contains(&(*object_type, *id)) {
+                        return true;
+                    }
+                    metadata_ids.extend(sources.iter().map(|(source_id, _)| *source_id));
+                    false
+                });
+            metadata_ids
+        };
+        self.opaque_cache
+            .try_borrow_mut()?
+            .retain(|id, _| !metadata_ids.contains(id));
+
+        let mut attestation_cache = self.attestation_cache.try_borrow_mut()?;
+        for ((target, _), cache) in attestation_cache.iter() {
+            if private_targets.contains(target) {
+                *cache.value.try_borrow_mut()? = None;
+                cache.attempted.set(false);
+            }
+        }
+        attestation_cache.retain(|(target, _), _| !private_targets.contains(target));
+        Ok(())
+    }
+
+    fn forget_cached_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
+        let key = (object_type & !0x80, id);
+        self.public_discovery
+            .try_borrow_mut()?
+            .objects
+            .retain(|object| {
+                !matches!(
+                    object.material,
+                    KeyMaterial::YubiHsm {
+                        id: candidate_id,
+                        object_type: candidate_type,
+                        ..
+                    } if candidate_id == id
+                        && candidate_type & !0x80 == object_type & !0x80
+                )
+            });
+        self.opaque_cache.try_borrow_mut()?.remove(&id);
+        self.object_metadata.try_borrow_mut()?.remove(&key);
+        self.related_metadata.try_borrow_mut()?.retain(
+            |(target_type, target_id, _), sources| {
+                sources.retain(|(source_id, _)| *source_id != id);
+                (*target_type, *target_id) != key && !sources.is_empty()
+            },
+        );
+        self.object_generations.try_borrow_mut()?.remove(&key);
+        self.attestation_cache
+            .try_borrow_mut()?
+            .retain(|(candidate, _), _| *candidate != key);
+        Ok(())
+    }
+
+    fn related_metadata_object(
+        &self,
+        id: u16,
+        object_type: u8,
+    ) -> Result<Vec<(u16, u8)>, Error> {
+        let metadata = self
+            .object_metadata
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        let Some((info, _, _, _)) = metadata.get(&(object_type & !0x80, id)) else {
+            return Ok(Vec::new());
+        };
+        Ok(self
+            .related_metadata
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .get(&(info.object_type, info.id, info.sequence))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn metadata_target_by_unique_id(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<(YubiHsmObjectInfo, Option<YubiHsmPkcs11Metadata>, bool), Error> {
+        let metadata = self
+            .object_metadata
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        for (info, public_key, generation, attributes) in metadata.values() {
+            let objects = yubihsm_token_objects_with_generation(
+                slot_id,
+                info.clone(),
+                public_key.clone(),
+                *generation,
+                attributes.as_ref(),
+            )?;
+            if let Some((index, _)) = objects
+                .iter()
+                .enumerate()
+                .find(|(_, object)| object.unique_id == unique_id)
+            {
+                return Ok((info.clone(), attributes.clone(), index != 0));
+            }
+        }
+        Err(CKR_ATTRIBUTE_READ_ONLY.into())
+    }
+
+    fn delete_metadata_objects(&self, objects: &[(u16, u8)]) -> Result<(), Error> {
+        let mut first_error = None;
+        for (id, _) in objects {
+            match send_yubihsm_secure_command(
+                self.connector.as_ref(),
+                self.session.as_ref(),
+                &YubiHsmCommand::delete_object(*id, YUBIHSM_OPAQUE),
+            ) {
+                Ok(_) => {
+                    if let Err(error) = self.forget_cached_object(*id, YUBIHSM_OPAQUE) {
+                        first_error.get_or_insert(error);
+                    }
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn replace_pkcs11_metadata(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+        id: Option<&[u8]>,
+        label: Option<&str>,
+    ) -> Result<(), Error> {
+        let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
+        let target = (info.object_type, info.id, info.sequence);
+        let old_objects = self
+            .related_metadata
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .get(&target)
+            .cloned()
+            .unwrap_or_default();
+        let mut metadata = current.unwrap_or(YubiHsmPkcs11Metadata {
+            target_type: info.object_type,
+            target_id: info.id,
+            target_sequence: info.sequence,
+            id: None,
+            label: None,
+            public_id: None,
+            public_label: None,
+        });
+
+        if let Some(id) = id {
+            if id.is_empty() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            let value = (id != info.id.to_be_bytes()).then(|| id.to_vec());
+            if public {
+                metadata.public_id = value;
+            } else {
+                metadata.id = value;
+            }
+        }
+        if let Some(label) = label {
+            if label.is_empty() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            let value = (label != yubihsm_object_label(&info)).then(|| label.to_owned());
+            if public {
+                metadata.public_label = value;
+            } else {
+                metadata.label = value;
+            }
+        }
+
+        if metadata.is_empty() {
+            return self.delete_metadata_objects(&old_objects);
+        }
+
+        let value = metadata.encode()?;
+        let metadata_label = format!(
+            "Meta object for 0x{:02x}{:02x}{:04x}",
+            info.sequence, info.object_type, info.id
+        );
+        let capabilities = if yubihsm_capability(&info.capabilities, 0x10) {
+            yubihsm_capabilities(&[0x10])
+        } else {
+            [0; 8]
+        };
+        let response = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &YubiHsmCommand::put_object(
+                YubiHsmCommandCode::PutOpaque,
+                &YubiHsmObjectParameters {
+                    id: 0,
+                    label: &metadata_label,
+                    domains: info.domains,
+                    capabilities,
+                    algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                },
+                &value,
+            )?,
+        )?;
+        let new_id = parse_yubihsm_object_id(&response)?;
+        let old_objects = old_objects
+            .into_iter()
+            .filter(|(id, _)| *id != new_id)
+            .collect::<Vec<_>>();
+        self.delete_metadata_objects(&old_objects)
+    }
+
 }
 
 fn send_yubihsm_secure_command(
@@ -361,13 +1107,21 @@ fn send_yubihsm_secure_command(
     command: &YubiHsmCommand,
 ) -> Result<Vec<u8>, Error> {
     let mut session_guard = shared_session.try_borrow_mut()?;
-    let session = session_guard
+    send_yubihsm_secure_command_with_session(connector, &mut session_guard, command)
+}
+
+fn send_yubihsm_secure_command_with_session(
+    connector: &dyn Connector,
+    shared_session: &mut Option<YubiHsmSecureSession>,
+    command: &YubiHsmCommand,
+) -> Result<Vec<u8>, Error> {
+    let session = shared_session
         .as_mut()
         .ok_or_else(|| Error::from(CKR_USER_NOT_LOGGED_IN))?;
     YubiHsmSecureSession::validate_command(connector, command)?;
     let result = session.send_command(connector, command);
     if !session.is_valid() {
-        *session_guard = None;
+        *shared_session = None;
     }
     result
 }
@@ -464,6 +1218,55 @@ fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
         _ => "object",
     };
     format!("YubiHSM {kind} {}", info.id)
+}
+
+fn yubihsm_profile_objects(slot_id: CK_SLOT_ID, public_certificates: bool) -> Vec<TokenObject> {
+    let mut profiles = vec![
+        (
+            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
+            "PKCS #11 Baseline Provider",
+        ),
+        (
+            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
+            "PKCS #11 Extended Provider",
+        ),
+        (
+            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
+            "PKCS #11 Authentication Token",
+        ),
+    ];
+    if public_certificates {
+        profiles.push((
+            CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID,
+            "PKCS #11 Public Certificates Token",
+        ));
+    }
+    profiles
+        .into_iter()
+        .map(|(profile_id, label)| TokenObject {
+            slot_id: Some(slot_id),
+            unique_id: format!("pkcs11-profile-{profile_id:08x}"),
+            class: CKO_PROFILE as CK_OBJECT_CLASS,
+            key_type: 0,
+            label: label.to_owned(),
+            id: Vec::new(),
+            token: true,
+            private: false,
+            encrypt: false,
+            decrypt: false,
+            sign: false,
+            verify: false,
+            derive: false,
+            sensitive: false,
+            extractable: false,
+            always_sensitive: false,
+            never_extractable: false,
+            local: true,
+            key_gen_mechanism: None,
+            owner_session: None,
+            material: KeyMaterial::Profile { profile_id },
+        })
+        .collect()
 }
 
 fn yubihsm_device_public_key_object(
@@ -686,8 +1489,8 @@ fn yubihsm_token_objects_with_generation(
         | YUBIHSM_OTP_AEAD_KEY => CKO_SECRET_KEY as CK_OBJECT_CLASS,
         _ => CKO_DATA as CK_OBJECT_CLASS,
     };
-    let private =
-        class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS && class != CKO_DATA as CK_OBJECT_CLASS;
+    let private = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut objects = vec![TokenObject {
         slot_id: Some(slot_id),
         unique_id: unique.clone(),
@@ -853,6 +1656,7 @@ impl Slot for YubiHsmSlot {
     }
     fn login_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
+        self.clear_cached_private_objects()?;
         let session = match parse_yubihsm_login_username(username)? {
             YubiHsmLoginUsername::HsmAuth(login) => {
                 if password.len() > 16 {
@@ -938,15 +1742,28 @@ impl Slot for YubiHsmSlot {
     }
     fn logout(&mut self) -> Result<(), Error> {
         let mut session = self.session.try_borrow_mut()?.take();
-        match session.as_mut() {
+        let close_result = match session.as_mut() {
             Some(session) => session
                 .send_command(self.connector.as_ref(), &YubiHsmCommand::close_session())
                 .map(|_| ()),
             None => Err(CKR_USER_NOT_LOGGED_IN.into()),
-        }
+        };
+        let clear_result = self.clear_cached_private_objects();
+        close_result.and(clear_result)
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let _ = self.device_public_key.take();
+        if let Ok(mut state) = self.public_discovery.try_borrow_mut() {
+            *state = YubiHsmPublicDiscoveryState {
+                connection_epoch: self.connector.connection_epoch(),
+                ..YubiHsmPublicDiscoveryState::default()
+            };
+        }
+        self.object_metadata.try_borrow_mut()?.clear();
+        self.related_metadata.try_borrow_mut()?.clear();
+        self.object_generations.try_borrow_mut()?.clear();
+        self.attestation_cache.try_borrow_mut()?.clear();
+        self.opaque_cache.try_borrow_mut()?.clear();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
         self.algorithms = device_info.algorithms;
@@ -985,76 +1802,33 @@ impl Slot for YubiHsmSlot {
     }
     fn clear_session(&mut self) {
         *self.session.borrow_mut() = None;
+        if let Err(error) = self.clear_cached_private_objects() {
+            log!(
+                2,
+                "YubiHSM private object cache cleanup failed on {}: {:?}",
+                self.connector.name(),
+                error
+            );
+        }
     }
     fn login_is_active(&self) -> bool {
         self.session.borrow().is_some()
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let listed = send_yubihsm_secure_command(
-            self.connector.as_ref(),
-            self.session.as_ref(),
-            &YubiHsmCommand::list_objects(&[])?,
-        )?;
-        let mut discovered = Vec::new();
-        let mut pkcs11_metadata = HashMap::new();
-        for entry in parse_yubihsm_object_list(&listed)? {
-            let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
-                self.connector.as_ref(),
-                self.session.as_ref(),
-                &YubiHsmCommand::get_object_info(entry.id, entry.object_type),
-            )?)?;
-            if info.id != entry.id
-                || info.object_type != entry.object_type
-                || info.sequence != entry.sequence
-            {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            if info.object_type == YUBIHSM_OPAQUE
-                && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
-                && yubihsm_metadata_label_target(&info.label).is_some()
-            {
-                let value = send_yubihsm_secure_command(
-                    self.connector.as_ref(),
-                    self.session.as_ref(),
-                    &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, info.id)?,
-                );
-                match value.and_then(|value| parse_yubihsm_pkcs11_metadata(&info, &value)) {
-                    Ok(metadata) => {
-                        let target = (
-                            metadata.target_type,
-                            metadata.target_id,
-                            metadata.target_sequence,
-                            info.domains,
-                        );
-                        if pkcs11_metadata.insert(target, metadata).is_some() {
-                            log!(
-                                2,
-                                "YubiHSM has duplicate PKCS11 metadata for object type {:02x} ID {:04x}",
-                                target.0,
-                                target.1
-                            );
-                        }
-                        continue;
-                    }
-                    Err(error) => log!(
-                        2,
-                        "YubiHSM opaque object {} has a metadata label but invalid contents: {:?}",
-                        info.id,
-                        error
-                    ),
-                }
-            }
-            let public_key = if yubihsm_object_has_public_key(&info) {
-                Some(YubiHsmPublicKey::parse(&send_yubihsm_secure_command(
-                    self.connector.as_ref(),
-                    self.session.as_ref(),
-                    &YubiHsmCommand::get_public_key(info.id, Some(info.object_type)),
-                )?)?)
-            } else {
-                None
-            };
-            discovered.push((info, public_key));
+        let public_discovery_available = self.public_discovery_available(slot_id);
+        let mut profile_objects =
+            yubihsm_profile_objects(slot_id, public_discovery_available);
+        if self
+            .session
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .is_none()
+        {
+            profile_objects.extend(self.cached_objects());
+            return Ok(profile_objects);
         }
+        let (discovered, mut pkcs11_metadata) =
+            self.discover_objects(self.session.as_ref())?;
 
         let discovered_keys = discovered
             .iter()
@@ -1073,6 +1847,8 @@ impl Slot for YubiHsmSlot {
                 Vec::new()
             }
         };
+        profile_objects.append(&mut objects);
+        let mut objects = profile_objects;
         let mut metadata = HashMap::new();
         for (info, public_key) in discovered {
             let key = (info.object_type, info.id);
@@ -1100,13 +1876,15 @@ impl Slot for YubiHsmSlot {
                     attribute_metadata.clone(),
                 ),
             );
-            objects.extend(yubihsm_token_objects_with_generation(
+            let mut discovered_objects = yubihsm_token_objects_with_generation(
                 slot_id,
-                info,
+                info.clone(),
                 public_key,
                 generation,
                 attribute_metadata.as_ref(),
-            )?);
+            )?;
+            self.bind_opaque_cache(&info, &mut discovered_objects)?;
+            objects.extend(discovered_objects);
         }
         drop(generations);
         let current_generations = metadata
@@ -1117,13 +1895,36 @@ impl Slot for YubiHsmSlot {
             .try_borrow_mut()?
             .retain(|key, _| current_generations.contains_key(key));
         *self.object_metadata.try_borrow_mut()? = metadata;
-        Ok(objects)
+        self.update_cached_objects(&objects)?;
+        let mut cached = self.cached_objects();
+        profile_objects = yubihsm_profile_objects(slot_id, public_discovery_available);
+        profile_objects.append(&mut cached);
+        Ok(profile_objects)
     }
     fn token_object(
         &self,
         slot_id: CK_SLOT_ID,
         unique_id: &str,
     ) -> Result<Option<TokenObject>, Error> {
+        self.synchronize_object_cache()?;
+        let public_discovery_available = self
+            .public_discovery
+            .try_borrow()
+            .map(|state| state.available)
+            .unwrap_or(false);
+        if let Some(object) = yubihsm_profile_objects(slot_id, public_discovery_available)
+            .into_iter()
+            .find(|object| object.unique_id == unique_id)
+        {
+            return Ok(Some(object));
+        }
+        if let Some(object) = self
+            .cached_objects()
+            .into_iter()
+            .find(|object| object.unique_id == unique_id)
+        {
+            return Ok(Some(object));
+        }
         if let Some(public_key) = self.device_public_key.get() {
             let object = yubihsm_device_public_key_object(slot_id, public_key)?;
             if object.unique_id == unique_id {
@@ -1138,13 +1939,15 @@ impl Slot for YubiHsmSlot {
             .cloned()
             .collect::<Vec<_>>();
         for (info, public_key, generation, attribute_metadata) in metadata {
-            if let Some(object) = yubihsm_token_objects_with_generation(
+            let mut objects = yubihsm_token_objects_with_generation(
                 slot_id,
-                info,
+                info.clone(),
                 public_key,
                 generation,
                 attribute_metadata.as_ref(),
-            )?
+            )?;
+            self.bind_opaque_cache(&info, &mut objects)?;
+            if let Some(object) = objects
             .into_iter()
             .find(|object| object.unique_id == unique_id)
             {
@@ -1220,6 +2023,33 @@ impl Slot for YubiHsmSlot {
     }
     fn is_yubihsm(&self) -> bool {
         true
+    }
+    fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
+        let command = YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?;
+        send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &command,
+        )
+    }
+    fn yubihsm_forget_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
+        self.forget_cached_object(id, object_type)
+    }
+    fn yubihsm_related_metadata_object(
+        &self,
+        id: u16,
+        object_type: u8,
+    ) -> Result<Vec<(u16, u8)>, Error> {
+        self.related_metadata_object(id, object_type)
+    }
+    fn yubihsm_set_attributes(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+        id: Option<&[u8]>,
+        label: Option<&str>,
+    ) -> Result<(), Error> {
+        self.replace_pkcs11_metadata(slot_id, unique_id, id, label)
     }
 }
 

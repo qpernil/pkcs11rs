@@ -99,6 +99,19 @@ export PKCS11RS_YUBIHSM_USB=0
 The setting defaults to `1`. Any value other than `0` or `1` makes
 `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
+Optionally expose YubiHSM certificates and matching public keys before PKCS #11
+login with one low-privilege discovery Authentication Key:
+
+```sh
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
+```
+
+The credential is tried independently on every YubiHSM. The public-certificate
+profile is advertised only on slots where authentication and opaque-object
+discovery succeed. See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
+for provisioning and caching requirements.
+
 Enable protected password entry for YubiHSM and YubiHSM Auth login by naming a
 compatible pinentry executable:
 

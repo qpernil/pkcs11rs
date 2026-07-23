@@ -991,11 +991,12 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = vec![
+        let mut objects = yubihsm_profile_objects(slot_id, false);
+        objects.extend([
             abi_test_yubihsm_object(slot_id),
             abi_test_yubihsm_aes_object(slot_id),
             abi_test_yubihsm_nist_aes_object(slot_id),
-        ];
+        ]);
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
@@ -1018,5 +1019,13 @@ impl Slot for AbiYubiHsmSlot {
 
     fn is_yubihsm(&self) -> bool {
         true
+    }
+
+    fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
+        match id {
+            ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
+            ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
+            _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
+        }
     }
 }

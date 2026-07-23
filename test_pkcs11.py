@@ -8,6 +8,7 @@ import os
 import pathlib
 import platform
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -19,6 +20,7 @@ CKR_SLOT_ID_INVALID = 3
 CKR_CANT_LOCK = 0xA
 CKR_BUFFER_TOO_SMALL = 0x150
 CKR_ARGUMENTS_BAD = 7
+CKR_ACTION_PROHIBITED = 0x1B
 CKR_ATTRIBUTE_READ_ONLY = 0x10
 CKR_ATTRIBUTE_SENSITIVE = 0x11
 CKR_DATA_LEN_RANGE = 0x21
@@ -68,6 +70,7 @@ CKO_PRIVATE_KEY = 0x00000003
 CKO_PUBLIC_KEY = 0x00000002
 CKO_DATA = 0x00000000
 CKO_CERTIFICATE = 0x00000001
+CKO_PROFILE = 0x00000009
 CKC_X_509 = 0x00000000
 CKK_GENERIC_SECRET = 0x00000010
 CKK_RSA = 0x00000000
@@ -111,6 +114,7 @@ CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
 CKA_EC_PARAMS = 0x00000180
 CKA_EC_POINT = 0x00000181
+CKA_PROFILE_ID = 0x00000601
 CKA_PKCS11RS_PIV_OBJECT_TAG = 0x80005056
 CKU_SO = 0
 CKU_USER = 1
@@ -124,6 +128,9 @@ ABI_TEST_PIV_SLOT_ID = 78
 ABI_TEST_SCP03_SLOT_ID = 79
 ABI_TEST_YUBIHSM_SLOT_ID = 80
 ABI_TEST_SCP11_SLOT_ID = 81
+CKP_BASELINE_PROVIDER = 1
+CKP_EXTENDED_PROVIDER = 2
+CKP_AUTHENTICATION_TOKEN = 3
 CK_UNAVAILABLE_INFORMATION = (1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1
 
 
@@ -983,6 +990,106 @@ class Pkcs11AbiTests(unittest.TestCase):
             ABI_TEST_YUBIHSM_SLOT_ID,
             ABI_TEST_SCP11_SLOT_ID,
         ])
+
+    def test_yubihsm_profile_objects_are_public_and_immutable(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session_value = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                None,
+                None,
+                ctypes.byref(session_value),
+            ),
+            CKR_OK,
+        )
+        session = session_value.value
+        function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
+        self.assertEqual(
+            self.lib.C_GetFunctionList(ctypes.byref(function_list)),
+            CKR_OK,
+        )
+        find_init = ctypes.CFUNCTYPE(
+            CK_RV, CK_ULONG, ctypes.POINTER(CK_ATTRIBUTE), CK_ULONG
+        )(function_list.contents.C_FindObjectsInit)
+        find = ctypes.CFUNCTYPE(
+            CK_RV,
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        )(function_list.contents.C_FindObjects)
+        find_final = ctypes.CFUNCTYPE(CK_RV, CK_ULONG)(
+            function_list.contents.C_FindObjectsFinal
+        )
+        object_class = CK_ULONG(CKO_PROFILE)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            )
+        )
+        self.assertEqual(
+            find_init(session, template, len(template)), CKR_OK
+        )
+        handles = (CK_ULONG * 8)()
+        found = CK_ULONG()
+        self.assertEqual(
+            find(session, handles, len(handles), ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(find_final(session), CKR_OK)
+        self.assertEqual(found.value, 3)
+
+        def bytes_attribute(object_handle: int, attribute_type: int) -> bytes:
+            attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, object_handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            value = (CK_BYTE * attribute.ulValueLen)()
+            attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, object_handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return bytes(value)
+
+        profile_ids = set()
+        unique_ids = set()
+        for handle in handles[: found.value]:
+            profile_ids.add(
+                int.from_bytes(
+                    bytes_attribute(handle, CKA_PROFILE_ID),
+                    byteorder=sys.byteorder,
+                )
+            )
+            unique_ids.add(bytes_attribute(handle, CKA_UNIQUE_ID))
+            self.assertEqual(bytes_attribute(handle, CKA_TOKEN), b"\x01")
+            self.assertEqual(bytes_attribute(handle, CKA_PRIVATE), b"\x00")
+            self.assertEqual(bytes_attribute(handle, CKA_MODIFIABLE), b"\x00")
+            self.assertEqual(bytes_attribute(handle, CKA_COPYABLE), b"\x00")
+            self.assertEqual(bytes_attribute(handle, CKA_DESTROYABLE), b"\x00")
+            self.assertEqual(
+                self.lib.C_DestroyObject(session, handle),
+                CKR_ACTION_PROHIBITED,
+            )
+
+        self.assertEqual(
+            profile_ids,
+            {
+                CKP_BASELINE_PROVIDER,
+                CKP_EXTENDED_PROVIDER,
+                CKP_AUTHENTICATION_TOKEN,
+            },
+        )
+        self.assertEqual(len(unique_ids), 3)
 
     def test_abi_piv_fixture_exercises_sign_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

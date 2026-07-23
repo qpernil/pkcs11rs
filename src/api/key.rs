@@ -39,7 +39,7 @@ fn generate_key(
                 .yubihsm_command(&command)?;
             let id = parse_yubihsm_object_id(&response)?;
             ctx.refresh_slot_token_objects(slot_id)?;
-            *key_handle = ctx
+            let (handle, imported) = ctx
                 .resolved_objects()?
                 .into_iter()
                 .find(|(_, object)| {
@@ -47,8 +47,20 @@ fn generate_key(
                         && object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
                         && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
                 })
-                .map(|(handle, _)| handle)
                 .ok_or(CKR_DEVICE_ERROR)?;
+            let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+                slot_id,
+                &imported.unique_id,
+                (!object.id.is_empty()).then_some(object.id.as_slice()),
+                (!object.label.is_empty()).then_some(object.label.as_str()),
+            );
+            let refresh = ctx.refresh_slot_token_objects(slot_id);
+            if let Err(error) = metadata_result {
+                let _ = refresh;
+                return Err(error);
+            }
+            refresh?;
+            *key_handle = handle;
             return Ok(());
         }
         let mut key = generate_key_object(mechanism, templ)?;
@@ -131,8 +143,9 @@ fn yubihsm_generate_key_command(
     if supplied_value_len.is_some_and(|value_len| value_len != expected_len) {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
+    let hardware = yubihsm_hardware_import_object(&object)?;
     let command =
-        YubiHsmCommand::generate_object(code, &yubihsm_object_parameters(&object, algorithm)?)?;
+        YubiHsmCommand::generate_object(code, &yubihsm_object_parameters(&hardware, algorithm)?)?;
     object.local = true;
     Ok((object, command))
 }
@@ -302,16 +315,17 @@ fn generate_key_pair(
         if !ctx.get_slot(slot_id)?.is_yubihsm() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        let (private_object, command) =
+        let (private_object, public_object, command) =
             yubihsm_generate_key_pair_command(mechanism, public_template, private_template)?;
         validate_new_object_access(&private_object, flags, logged_in)?;
+        validate_new_object_access(&public_object, flags, logged_in)?;
         let response = ctx
             ._get_session(session_handle)?
             .1
             .yubihsm_command(&command)?;
         let id = parse_yubihsm_object_id(&response)?;
         ctx.refresh_slot_token_objects(slot_id)?;
-        *private_handle = ctx
+        let (private, imported_private) = ctx
             .resolved_objects()?
             .into_iter()
             .find(|(_, object)| {
@@ -319,9 +333,8 @@ fn generate_key_pair(
                     && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                     && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
             })
-            .map(|(handle, _)| handle)
             .ok_or(CKR_DEVICE_ERROR)?;
-        *public_handle = ctx
+        let (public, imported_public) = ctx
             .resolved_objects()?
             .into_iter()
             .find(|(_, object)| {
@@ -329,8 +342,33 @@ fn generate_key_pair(
                     && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
                     && object.id == id.to_be_bytes()
             })
-            .map(|(handle, _)| handle)
             .ok_or(CKR_DEVICE_ERROR)?;
+        let private_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+            slot_id,
+            &imported_private.unique_id,
+            (!private_object.id.is_empty()).then_some(private_object.id.as_slice()),
+            (!private_object.label.is_empty()).then_some(private_object.label.as_str()),
+        );
+        let refresh = ctx.refresh_slot_token_objects(slot_id);
+        if let Err(error) = private_result {
+            let _ = refresh;
+            return Err(error);
+        }
+        refresh?;
+        let public_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+            slot_id,
+            &imported_public.unique_id,
+            (!public_object.id.is_empty()).then_some(public_object.id.as_slice()),
+            (!public_object.label.is_empty()).then_some(public_object.label.as_str()),
+        );
+        let refresh = ctx.refresh_slot_token_objects(slot_id);
+        if let Err(error) = public_result {
+            let _ = refresh;
+            return Err(error);
+        }
+        refresh?;
+        *private_handle = private;
+        *public_handle = public;
         Ok(())
     })
 }
@@ -724,7 +762,7 @@ fn yubihsm_generate_key_pair_command(
     mechanism: &CK_MECHANISM,
     public_template: &[CK_ATTRIBUTE],
     private_template: &[CK_ATTRIBUTE],
-) -> Result<(TokenObject, YubiHsmCommand), Error> {
+) -> Result<(TokenObject, TokenObject, YubiHsmCommand), Error> {
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
@@ -811,13 +849,14 @@ fn yubihsm_generate_key_pair_command(
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     if private_object.label.is_empty() {
-        private_object.label = public_object.label;
+        private_object.label = public_object.label.clone();
     }
+    let hardware = yubihsm_hardware_import_object(&private_object)?;
     let command = YubiHsmCommand::generate_object(
         YubiHsmCommandCode::GenerateAsymmetricKey,
-        &yubihsm_object_parameters(&private_object, algorithm)?,
+        &yubihsm_object_parameters(&hardware, algorithm)?,
     )?;
-    Ok((private_object, command))
+    Ok((private_object, public_object, command))
 }
 
 #[no_mangle]

@@ -1,4 +1,6 @@
+use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use rsa::RsaPrivateKey;
 
 include!("tests/common.rs");
 include!("tests/general.rs");

@@ -832,7 +832,7 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     }
 
     private_id.copy_from_slice(&public_id);
-    let (object, _) = crate::yubihsm_generate_key_pair_command(
+    let (object, _, _) = crate::yubihsm_generate_key_pair_command(
         &mechanism,
         &public_template,
         &[private_id_attribute],
@@ -840,7 +840,7 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     .unwrap();
     assert_eq!(object.id, public_id);
 
-    let (object, _) =
+    let (object, _, _) =
         crate::yubihsm_generate_key_pair_command(&mechanism, &[modulus_attribute], &[]).unwrap();
     assert!(object.id.is_empty());
 }
