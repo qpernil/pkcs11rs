@@ -144,6 +144,7 @@ def load_library() -> ctypes.CDLL:
         [
             "cargo",
             "build",
+            "--locked",
             "--features",
             "abi-tests",
             "--target-dir",

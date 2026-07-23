@@ -58,7 +58,7 @@ libcurl.
 ## Build
 
 ```sh
-cargo build
+cargo build --locked
 ```
 
 The shared library is written to the Cargo target directory. Typical paths are:
@@ -164,8 +164,8 @@ Other values cause `C_Initialize` to return `CKR_ARGUMENTS_BAD`.
 Run the Rust test suite:
 
 ```sh
-cargo test
-cargo test --all-features
+cargo test --locked
+cargo test --locked --all-features
 ```
 
 Run the hardware-independent Python ABI tests:
@@ -178,7 +178,7 @@ Live hardware tests are opt-in:
 
 ```sh
 PKCS11RS_RUN_HARDWARE_TESTS=1 python3 test_hardware.py
-cargo test -- --ignored
+cargo test --locked -- --ignored
 ```
 
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
