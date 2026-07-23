@@ -125,6 +125,93 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_YubiHsmEnrollDevicePublicKey)(
   CK_ULONG_PTR pulFingerprintLen
 );
 
+#define PKCS11RS_HSMAUTH_P256_PUBLIC_KEY_SIZE 65
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutSymmetricCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_BYTE *pEncKey,
+  CK_ULONG ulEncKeyLen,
+  const CK_BYTE *pMacKey,
+  CK_ULONG ulMacKeyLen,
+  const CK_UTF8CHAR *pCredentialPassword,
+  CK_ULONG ulCredentialPasswordLen,
+  CK_BBOOL touchRequired
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedSymmetricCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_UTF8CHAR *pDerivationPassword,
+  CK_ULONG ulDerivationPasswordLen,
+  const CK_UTF8CHAR *pCredentialPassword,
+  CK_ULONG ulCredentialPasswordLen,
+  CK_BBOOL touchRequired
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutAsymmetricCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_BYTE *pPrivateKey,
+  CK_ULONG ulPrivateKeyLen,
+  const CK_UTF8CHAR *pCredentialPassword,
+  CK_ULONG ulCredentialPasswordLen,
+  CK_BBOOL touchRequired,
+  CK_BYTE_PTR pPublicKey,
+  CK_ULONG_PTR pulPublicKeyLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthPutDerivedAsymmetricCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_UTF8CHAR *pDerivationPassword,
+  CK_ULONG ulDerivationPasswordLen,
+  const CK_UTF8CHAR *pCredentialPassword,
+  CK_ULONG ulCredentialPasswordLen,
+  CK_BBOOL touchRequired,
+  CK_BYTE_PTR pPublicKey,
+  CK_ULONG_PTR pulPublicKeyLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthGenerateAsymmetricCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_UTF8CHAR *pCredentialPassword,
+  CK_ULONG ulCredentialPasswordLen,
+  CK_BBOOL touchRequired,
+  CK_BYTE_PTR pPublicKey,
+  CK_ULONG_PTR pulPublicKeyLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthDeleteCredential)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeCredentialPassword)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pLabel,
+  CK_ULONG ulLabelLen,
+  const CK_UTF8CHAR *pNewCredentialPassword,
+  CK_ULONG ulNewCredentialPasswordLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthChangeManagementPassword)(
+  CK_SESSION_HANDLE hSession,
+  const CK_UTF8CHAR *pNewManagementPassword,
+  CK_ULONG ulNewManagementPasswordLen
+);
+
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthReset)(
+  CK_SESSION_HANDLE hSession
+);
+
 #ifdef __cplusplus
 }
 #endif

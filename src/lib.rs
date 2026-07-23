@@ -94,8 +94,8 @@ use security_domain::{
 
 mod hsmauth;
 use hsmauth::{
-    Algorithm as HsmAuthAlgorithm, Client as HsmAuthClient, Credential as HsmAuthCredential,
-    Info as HsmAuthInfo,
+    Administration as HsmAuthAdministration, Algorithm as HsmAuthAlgorithm,
+    Client as HsmAuthClient, Credential as HsmAuthCredential, Info as HsmAuthInfo,
 };
 
 mod piv;
@@ -489,5 +489,7 @@ include!("api/key.rs");
 include!("api/security_domain.rs");
 
 include!("api/yubihsm.rs");
+
+include!("api/hsmauth.rs");
 
 include!("api/interfaces.rs");

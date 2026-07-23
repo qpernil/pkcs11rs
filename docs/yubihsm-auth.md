@@ -139,9 +139,59 @@ do not expose this object because the YubiHSM cannot attest imported key
 material. The authentication key used for login must grant the
 `sign-attestation-certificate` capability for the lazy read to succeed.
 
-Credential creation, deletion, password changes, management-key changes, and
-application reset are implemented by the internal protocol client but are not
-mapped to PKCS #11 operations. The applet slot is deliberately read-only.
+## YubiHSM Auth administration
+
+The YubiHSM Auth slot uses `C_Login` roles as follows:
+
+- `CKU_USER` establishes the configured CCID SCP03 or SCP11 transport, if any.
+  The supplied PIN is otherwise unused because individual credential passwords
+  are provided only while opening a YubiHSM session.
+- `CKU_SO` establishes the same transport and interprets the supplied PIN as
+  the YubiHSM Auth management password. The resulting 16-byte management key
+  is retained in zeroizing per-slot memory until logout, device removal,
+  application reset, or module finalization.
+
+Yubico's password input convention is used for both management and credential
+passwords. A printable UTF-8 value of at most 16 bytes is padded on the right
+with zero bytes. Exactly 32 hexadecimal characters provide the raw 16-byte
+value. Other lengths and malformed hexadecimal values are rejected.
+
+`pkcs11rs.h` declares proprietary administration functions. Every function
+requires a read/write session on the YubiHSM Auth slot with an active `CKU_SO`
+login:
+
+- `PKCS11RS_HsmAuthPutSymmetricCredential` imports explicit 16-byte ENC and
+  MAC keys.
+- `PKCS11RS_HsmAuthPutDerivedSymmetricCredential` applies Yubico's YubiHSM
+  password KDF: PBKDF2-HMAC-SHA256 with salt `Yubico`, 10,000 iterations, and
+  32 output bytes split into ENC and MAC.
+- `PKCS11RS_HsmAuthPutAsymmetricCredential` imports a raw 32-byte P-256 private
+  scalar.
+- `PKCS11RS_HsmAuthPutDerivedAsymmetricCredential` derives the static YubiHSM
+  client P-256 key by applying the same KDF to the derivation password plus a
+  counter byte, advancing the counter until the output is a valid scalar.
+- `PKCS11RS_HsmAuthGenerateAsymmetricCredential` asks the YubiKey to generate
+  the private key internally.
+- `PKCS11RS_HsmAuthDeleteCredential` deletes one credential by label.
+- `PKCS11RS_HsmAuthChangeCredentialPassword` changes one credential password
+  using the retained management key.
+- `PKCS11RS_HsmAuthChangeManagementPassword` changes the applet management
+  key and updates the retained SO state.
+- `PKCS11RS_HsmAuthReset` resets the complete YubiHSM Auth application and
+  ends the login.
+
+Asymmetric creation functions return the 65-byte uncompressed SEC1 public
+point. Passing a null public-key pointer queries this fixed size without
+creating a credential. Successful mutations refresh the applet's PKCS #11
+metadata objects.
+
+The password KDF and its deterministic P-256 construction are used only for
+authentication to a YubiHSM. They are not used for YubiKey CCID SCP03 or
+SCP11, the applet management password, or credential access passwords.
+Management-key authentication is performed by the first mutating APDU rather
+than by `C_Login`; if the device rejects the retained key, the SO login is
+cleared so the caller can retry. Reset is destructive and removes every
+YubiHSM Auth credential.
 
 ## Asymmetric hardware provisioning test
 

@@ -148,11 +148,20 @@ fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
 }
 
 
+struct HsmAuthManagementKey(Zeroizing<[u8; 16]>);
+
+impl std::fmt::Debug for HsmAuthManagementKey {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_str("HsmAuthManagementKey([REDACTED])")
+    }
+}
+
 #[derive(Debug)]
 struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
+    management_key: RefCell<Option<HsmAuthManagementKey>>,
     info: RefCell<Option<HsmAuthInfo>>,
 }
 
@@ -162,6 +171,7 @@ impl HsmAuthSlot {
             connector,
             application_aid,
             authenticated: Cell::new(false),
+            management_key: RefCell::new(None),
             info: RefCell::new(None),
         }
     }
@@ -238,13 +248,28 @@ impl Slot for HsmAuthSlot {
         Some(self.connector.clone())
     }
     fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+        self.management_key.get_mut().take();
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         self.authenticated.set(true);
         Ok(())
     }
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.management_key.get_mut().take();
+        self.connector.clear_secure_channel();
+        let key = hsmauth::password_to_key(pin)?;
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        self.management_key
+            .get_mut()
+            .replace(HsmAuthManagementKey(key));
+        self.authenticated.set(true);
+        Ok(())
+    }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
+        self.management_key.get_mut().take();
         self.connector.clear_secure_channel();
         Ok(())
     }
@@ -261,12 +286,13 @@ impl Slot for HsmAuthSlot {
         let version = self.discovered_info()?.version;
         info.firmwareVersion.major = version.0;
         info.firmwareVersion.minor = version.1.saturating_mul(10) + version.2;
-        info.ulMaxPinLen = 16;
+        info.ulMaxPinLen = 32;
         info.ulMinPinLen = 0;
         Ok(())
     }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
+        self.management_key.get_mut().take();
         self.connector.clear_secure_channel();
     }
     fn login_is_active(&self) -> bool {
@@ -286,6 +312,126 @@ impl Slot for HsmAuthSlot {
             info.credentials.len()
         );
         Ok(objects)
+    }
+    fn invalidate_token_objects(&self) {
+        if let Ok(mut info) = self.info.try_borrow_mut() {
+            *info = None;
+        }
+    }
+    fn is_hsmauth(&self) -> bool {
+        true
+    }
+    fn hsmauth_administration(
+        &mut self,
+        operation: HsmAuthAdministration<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        let management_key = Zeroizing::new(
+            *self
+                .management_key
+                .get_mut()
+                .as_ref()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?
+                .0,
+        );
+        let result = {
+            match operation {
+                HsmAuthAdministration::PutSymmetric {
+                    label,
+                    keys,
+                    credential_password,
+                    touch_required,
+                } => HsmAuthClient
+                    .put_symmetric_credential(
+                        self.connector.as_ref(),
+                        management_key.as_slice(),
+                        label,
+                        keys,
+                        credential_password,
+                        touch_required,
+                    )
+                    .map(|_| Vec::new()),
+                HsmAuthAdministration::PutAsymmetric {
+                    label,
+                    private_key,
+                    credential_password,
+                    touch_required,
+                } => HsmAuthClient
+                    .put_asymmetric_credential(
+                        self.connector.as_ref(),
+                        management_key.as_slice(),
+                        label,
+                        private_key,
+                        credential_password,
+                        touch_required,
+                    )
+                    .and_then(|_| HsmAuthClient.get_public_key(self.connector.as_ref(), label)),
+                HsmAuthAdministration::Delete { label } => HsmAuthClient
+                    .delete_credential(
+                        self.connector.as_ref(),
+                        management_key.as_slice(),
+                        label,
+                    )
+                    .map(|_| Vec::new()),
+                HsmAuthAdministration::ChangeCredentialPassword {
+                    label,
+                    new_credential_password,
+                } => HsmAuthClient
+                    .change_credential_password_admin(
+                        self.connector.as_ref(),
+                        label,
+                        management_key.as_slice(),
+                        new_credential_password,
+                    )
+                    .map(|_| Vec::new()),
+                HsmAuthAdministration::ChangeManagementKey { new_management_key } => {
+                    HsmAuthClient
+                        .change_management_key(
+                            self.connector.as_ref(),
+                            management_key.as_slice(),
+                            new_management_key,
+                        )
+                        .map(|_| Vec::new())
+                }
+                HsmAuthAdministration::Reset => HsmAuthClient
+                    .reset(self.connector.as_ref())
+                    .map(|_| Vec::new()),
+            }
+        };
+
+        match result {
+            Ok(value) => {
+                match operation {
+                    HsmAuthAdministration::ChangeManagementKey { new_management_key } => {
+                        let key: [u8; 16] = new_management_key
+                            .try_into()
+                            .map_err(|_| CKR_ARGUMENTS_BAD)?;
+                        self.management_key
+                            .get_mut()
+                            .replace(HsmAuthManagementKey(Zeroizing::new(key)));
+                    }
+                    HsmAuthAdministration::Reset => {
+                        self.authenticated.set(false);
+                        self.management_key.get_mut().take();
+                        self.connector.clear_secure_channel();
+                    }
+                    _ => {}
+                }
+                self.invalidate_token_objects();
+                Ok(value)
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    Error::Generic(rv)
+                        if rv == CKR_PIN_INCORRECT as CK_RV || rv == CKR_PIN_LOCKED as CK_RV
+                ) {
+                    self.authenticated.set(false);
+                    self.management_key.get_mut().take();
+                    self.connector.clear_secure_channel();
+                }
+                Err(error)
+            }
+        }
     }
 }
 

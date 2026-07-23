@@ -140,6 +140,303 @@ fn finalize_for_test() {
     crate::reset_object_handles();
 }
 
+const HSMAUTH_ADMIN_SLOT_ID: CK_SLOT_ID = 95;
+const HSMAUTH_TEST_PUBLIC_KEY: [u8; 65] = [
+    0x04, 0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4,
+    0x40, 0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8,
+    0x98, 0xc2, 0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a,
+    0x7c, 0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40,
+    0x68, 0x37, 0xbf, 0x51, 0xf5,
+];
+
+#[derive(Debug, Default)]
+struct HsmAuthAdminConnector {
+    commands: std::cell::RefCell<Vec<crate::CommandApdu>>,
+    secure_channel_starts: std::cell::Cell<usize>,
+    secure_channel_clears: std::cell::Cell<usize>,
+    reject_next_management_command: std::cell::Cell<bool>,
+}
+
+impl crate::Connector for HsmAuthAdminConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+    fn product(&self) -> &str {
+        "YubiHSM Auth test"
+    }
+    fn serial(&self) -> &str {
+        "HSMAUTH1"
+    }
+    fn major(&self) -> u8 {
+        5
+    }
+    fn minor(&self) -> u8 {
+        7
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn establish_secure_channel(&self, _application_aid: &[u8]) -> Result<(), crate::Error> {
+        self.secure_channel_starts
+            .set(self.secure_channel_starts.get() + 1);
+        Ok(())
+    }
+    fn clear_secure_channel(&self) {
+        self.secure_channel_clears
+            .set(self.secure_channel_clears.get() + 1);
+    }
+    fn send_short_apdu(
+        &self,
+        command: &crate::CommandApdu,
+    ) -> Result<crate::ResponseApdu, crate::Error> {
+        self.commands.borrow_mut().push(command.clone());
+        let mutation = matches!(command.ins, 0x01 | 0x02 | 0x06 | 0x08 | 0x0b);
+        if mutation && self.reject_next_management_command.replace(false) {
+            return Ok(crate::ResponseApdu {
+                data: Vec::new(),
+                status: 0x63c7,
+            });
+        }
+        let data = match command.ins {
+            0x05 => Vec::new(),
+            0x07 => vec![5, 7, 1],
+            0x09 => vec![8],
+            0x0a => HSMAUTH_TEST_PUBLIC_KEY.to_vec(),
+            _ => Vec::new(),
+        };
+        Ok(crate::ResponseApdu {
+            data,
+            status: 0x9000,
+        })
+    }
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        _receive_buffer: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::Error> {
+        Err(CKR_DEVICE_ERROR.into())
+    }
+}
+
+fn install_hsmauth_admin_slot(
+) -> (
+    std::rc::Rc<HsmAuthAdminConnector>,
+    CK_SESSION_HANDLE,
+) {
+    let connector = std::rc::Rc::new(HsmAuthAdminConnector::default());
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(
+            HSMAUTH_ADMIN_SLOT_ID,
+            Box::new(crate::HsmAuthSlot::new(
+                connector.clone(),
+                crate::hsmauth::AID.to_vec(),
+            )),
+        );
+    }
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            HSMAUTH_ADMIN_SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    (connector, session)
+}
+
+fn assert_short_tlv(command: &crate::CommandApdu, tag: u8, value: &[u8]) {
+    let expected = [&[tag, value.len() as u8][..], value].concat();
+    assert!(
+        command
+            .data
+            .windows(expected.len())
+            .any(|candidate| candidate == expected),
+        "command {:02x} lacks TLV {:02x}={:02x?}",
+        command.ins,
+        tag,
+        value
+    );
+}
+
+#[test]
+fn hsmauth_so_login_authorizes_password_derived_administration() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    let (connector, session) = install_hsmauth_admin_slot();
+
+    let mut management_password = *b"admin";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            management_password.as_mut_ptr(),
+            management_password.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(connector.secure_channel_starts.get(), 1);
+
+    let label = b"derived-symmetric";
+    let derivation_password = "lösenord".as_bytes();
+    let credential_password = b"access";
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+            derivation_password.as_ptr(),
+            derivation_password.len() as CK_ULONG,
+            credential_password.as_ptr(),
+            credential_password.len() as CK_ULONG,
+            CK_TRUE as CK_BBOOL,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let commands = connector.commands.borrow();
+    let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
+    let mut management_key = [0; 16];
+    management_key[..management_password.len()].copy_from_slice(&management_password);
+    assert_short_tlv(put, 0x7b, &management_key);
+    let keys = crate::yubico_password_kdf(derivation_password).unwrap();
+    assert_short_tlv(put, 0x75, &keys[..16]);
+    assert_short_tlv(put, 0x76, &keys[16..]);
+    let mut access_key = [0; 16];
+    access_key[..credential_password.len()].copy_from_slice(credential_password);
+    assert_short_tlv(put, 0x73, &access_key);
+    assert_short_tlv(put, 0x7a, &[1]);
+    drop(commands);
+
+    let new_management_password = b"new-admin";
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthChangeManagementPassword(
+            session,
+            new_management_password.as_ptr(),
+            new_management_password.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthDeleteCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let commands = connector.commands.borrow();
+    let delete = commands.iter().rev().find(|command| command.ins == 0x02).unwrap();
+    let mut new_management_key = [0; 16];
+    new_management_key[..new_management_password.len()]
+        .copy_from_slice(new_management_password);
+    assert_short_tlv(delete, 0x7b, &new_management_key);
+    drop(commands);
+
+    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert!(connector.secure_channel_clears.get() >= 1);
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthDeleteCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    finalize_for_test();
+}
+
+#[test]
+fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    let (connector, session) = install_hsmauth_admin_slot();
+    let mut management_password = *b"000102030405060708090a0b0c0d0e0f";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_SO as CK_USER_TYPE,
+            management_password.as_mut_ptr(),
+            management_password.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let label = b"derived-asymmetric";
+    let derivation_password = b"password";
+    let credential_password = b"entry";
+    let mut public_key_len = 0;
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+            derivation_password.as_ptr(),
+            derivation_password.len() as CK_ULONG,
+            credential_password.as_ptr(),
+            credential_password.len() as CK_ULONG,
+            CK_FALSE as CK_BBOOL,
+            ::std::ptr::null_mut(),
+            &mut public_key_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(public_key_len, 65);
+    assert!(connector.commands.borrow().is_empty());
+
+    let mut public_key = [0; 65];
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+            derivation_password.as_ptr(),
+            derivation_password.len() as CK_ULONG,
+            credential_password.as_ptr(),
+            credential_password.len() as CK_ULONG,
+            CK_FALSE as CK_BBOOL,
+            public_key.as_mut_ptr(),
+            &mut public_key_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(public_key, HSMAUTH_TEST_PUBLIC_KEY);
+
+    let commands = connector.commands.borrow();
+    let put = commands.iter().find(|command| command.ins == 0x01).unwrap();
+    let key = crate::yubico_kdf::yubico_password_p256_key(derivation_password).unwrap();
+    let private_key = key.private_key().to_vec_padded(32).unwrap();
+    assert_short_tlv(put, 0x7d, &private_key);
+    assert_short_tlv(put, 0x74, &[39]);
+    drop(commands);
+
+    connector.reject_next_management_command.set(true);
+    assert_eq!(
+        crate::PKCS11RS_HsmAuthDeleteCredential(
+            session,
+            label.as_ptr(),
+            label.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    finalize_for_test();
+}
+
 #[test]
 fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
     use std::sync::atomic::Ordering;
