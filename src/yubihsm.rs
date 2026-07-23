@@ -1,5 +1,7 @@
 #[cfg(test)]
 use crate::secure_channel_crypto::aes_ecb;
+#[cfg(test)]
+use crate::yubico_kdf::p256_private_key;
 use crate::{
     error::Error,
     secure_channel_crypto::{
@@ -14,7 +16,7 @@ use crate::{
 #[cfg(test)]
 use openssl::pkey::Id;
 use openssl::{
-    bn::{BigNum, BigNumContext},
+    bn::BigNumContext,
     derive::Deriver,
     ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm},
     memcmp,
@@ -426,7 +428,7 @@ impl SecureSession {
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<Self, Error> {
-        let host_static_key = derive_p256_key(password)?;
+        let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
         let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
         let group = p256_group()?;
         let host_ephemeral_key = EcKey::generate(&group)?;
@@ -612,31 +614,6 @@ impl SecureSession {
 
 fn p256_group() -> Result<EcGroup, Error> {
     EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).map_err(Error::from)
-}
-
-fn derive_p256_key(password: &[u8]) -> Result<EcKey<Private>, Error> {
-    let group = p256_group()?;
-    let mut input = Zeroizing::new(Vec::with_capacity(password.len() + 1));
-    input.extend_from_slice(password);
-    input.push(0);
-    for perturbation in 0..=u8::MAX {
-        *input.last_mut().unwrap() = perturbation;
-        let private = crate::yubico_password_kdf(&input)?;
-        if let Ok(key) = p256_private_key(&group, &private[..]) {
-            return Ok(key);
-        }
-    }
-    Err(CKR_FUNCTION_FAILED.into())
-}
-
-fn p256_private_key(group: &EcGroup, private: &[u8]) -> Result<EcKey<Private>, Error> {
-    let private = BigNum::from_slice(private)?;
-    let mut context = BigNumContext::new()?;
-    let mut public = EcPoint::new(group)?;
-    public.mul_generator2(group, &private, &mut context)?;
-    let key = EcKey::from_private_components(group, &private, &public)?;
-    key.check_key()?;
-    Ok(key)
 }
 
 fn p256_public_key(key: &EcKeyRef<Private>) -> Result<[u8; P256_PUBLIC_KEY_LENGTH], Error> {
