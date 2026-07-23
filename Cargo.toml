@@ -27,7 +27,7 @@ hmac = "0.12.1"
 pbkdf2 = "0.12.2"
 rusb = "0.9.4"
 pcsc = "2.9.0"
-curl = "0.4.50"
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 flate2 = "1.1.9"
 zeroize = "1.9.0"
 const-oid = "0.9.6"

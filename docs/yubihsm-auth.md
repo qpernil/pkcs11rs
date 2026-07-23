@@ -7,7 +7,8 @@ every physical YubiHSM USB device, and one slot for each URL configured in
 `PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated YubiHSM Connector base URLs,
 for example `http://hsm-a:12345,http://hsm-b:12345`. Remote slots are additive;
 they do not disable direct USB discovery. An unreachable configured connector
-is retained as an empty slot until the module is reinitialized.
+is retained as an empty slot until the module is reinitialized. The URL scheme
+selects plain HTTP or rustls-backed HTTPS.
 
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP
