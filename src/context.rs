@@ -114,7 +114,7 @@ impl Context {
             ),
             (
                 ABI_TEST_YUBIHSM_SLOT_ID,
-                Box::new(AbiYubiHsmSlot) as Box<dyn Slot>,
+                Box::new(AbiYubiHsmSlot::default()) as Box<dyn Slot>,
             ),
             (
                 ABI_TEST_SCP11_SLOT_ID,

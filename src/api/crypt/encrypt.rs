@@ -209,7 +209,7 @@ fn crypt_init(
             {
                 object.key_type == CKK_RSA as CK_KEY_TYPE
                     && if encrypting {
-                        matches!(object.material, KeyMaterial::RsaPublic(_))
+                        rsa_public_key_material(&object.material)?.is_some()
                     } else {
                         matches!(
                             object.material,
@@ -538,35 +538,17 @@ fn crypt(
             result.to_vec()
         } else {
             let result = (|| -> Result<Vec<u8>, Error> {
-            match &operation.key {
-                KeyMaterial::RsaPublic(key)
-                    if encrypting && operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE =>
-                {
-                    rsa_pkcs1_encrypt(key, input)
-                }
-                KeyMaterial::RsaPublic(key)
-                    if encrypting && operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE =>
-                {
-                    if input.len() != key.size() {
-                        return Err(CKR_DATA_LEN_RANGE.into());
-                    }
-                    rsa_public_operation(key, input)
-                }
-                KeyMaterial::RsaPublic(key)
-                    if encrypting
-                        && operation.mechanism == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE =>
-                {
-                    let (mgf, hash_mechanism, label_digest) =
-                        operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                    let encoded = rsa_oaep_pad(
+            if encrypting {
+                if let Some(public_key) = rsa_public_key_material(&operation.key)? {
+                    return rsa_public_encrypt(
+                        &public_key,
+                        operation.mechanism,
+                        operation.oaep.as_ref(),
                         input,
-                        key.size(),
-                        *mgf,
-                        *hash_mechanism,
-                        label_digest,
-                    )?;
-                    rsa_public_operation(key, &encoded)
+                    );
                 }
+            }
+            match &operation.key {
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } if !encrypting => {
@@ -685,6 +667,28 @@ fn crypt(
         ctx.decrypt_operations.remove(&session_handle);
         Ok(())
     })
+}
+
+fn rsa_public_encrypt(
+    key: &RsaPublicKey,
+    mechanism: CK_MECHANISM_TYPE,
+    oaep: Option<&(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+        rsa_pkcs1_encrypt(key, input)
+    } else if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+        if input.len() != key.size() {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        rsa_public_operation(key, input)
+    } else if mechanism == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE {
+        let (mgf, hash_mechanism, label_digest) = oaep.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        let encoded = rsa_oaep_pad(input, key.size(), *mgf, *hash_mechanism, label_digest)?;
+        rsa_public_operation(key, &encoded)
+    } else {
+        Err(CKR_MECHANISM_INVALID.into())
+    }
 }
 
 #[no_mangle]

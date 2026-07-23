@@ -593,8 +593,13 @@ impl Session for AbiYubiHsmSession {
 }
 
 #[cfg(feature = "abi-tests")]
-#[derive(Debug)]
-pub(super) struct AbiYubiHsmSlot;
+type AbiYubiHsmAttributes = HashMap<String, (Option<Vec<u8>>, Option<String>)>;
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug, Default)]
+pub(super) struct AbiYubiHsmSlot {
+    attributes: RefCell<AbiYubiHsmAttributes>,
+}
 
 #[cfg(feature = "abi-tests")]
 const ABI_YUBIHSM_OPAQUE_DATA_ID: u16 = 5;
@@ -703,6 +708,44 @@ pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
             capabilities: yubihsm_capabilities(&[5]),
             delegated_capabilities: [0; 8],
             public_key: Vec::new(),
+            value: Rc::new(RefCell::new(None)),
+        },
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    let key = RsaPublicKey::from(&certificate_builder::rsa_key());
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: "abi-yubihsm-rsa-public".to_owned(),
+        class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: "ABI YubiHSM RSA key".to_owned(),
+        id: 1u16.to_be_bytes().to_vec(),
+        token: true,
+        private: false,
+        encrypt: true,
+        decrypt: false,
+        sign: false,
+        verify: true,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::YubiHsm {
+            id: 1,
+            object_type: YUBIHSM_PUBLIC_KEY,
+            algorithm: YUBIHSM_ALGO_RSA_2048,
+            length: key.size(),
+            domains: 0xffff,
+            capabilities: yubihsm_capabilities(&[5]),
+            delegated_capabilities: [0; 8],
+            public_key: key.n().to_bytes_be(),
             value: Rc::new(RefCell::new(None)),
         },
     }
@@ -994,6 +1037,7 @@ impl Slot for AbiYubiHsmSlot {
         let mut objects = yubihsm_profile_objects(slot_id, false);
         objects.extend([
             abi_test_yubihsm_object(slot_id),
+            abi_test_yubihsm_public_object(slot_id),
             abi_test_yubihsm_aes_object(slot_id),
             abi_test_yubihsm_nist_aes_object(slot_id),
         ]);
@@ -1004,6 +1048,20 @@ impl Slot for AbiYubiHsmSlot {
             slot_id,
             &abi_yubihsm_device_public_key()?,
         )?);
+        let attributes = self
+            .attributes
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        for object in &mut objects {
+            if let Some((id, label)) = attributes.get(&object.unique_id) {
+                if let Some(id) = id {
+                    object.id = id.clone();
+                }
+                if let Some(label) = label {
+                    object.label = label.clone();
+                }
+            }
+        }
         Ok(objects)
     }
 
@@ -1027,5 +1085,36 @@ impl Slot for AbiYubiHsmSlot {
             ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
             _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
         }
+    }
+
+    fn yubihsm_set_attributes(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+        id: Option<&[u8]>,
+        label: Option<&str>,
+    ) -> Result<(), Error> {
+        let object = self
+            .token_objects(slot_id)?
+            .into_iter()
+            .find(|object| object.unique_id == unique_id)
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if !matches!(object.material, KeyMaterial::YubiHsm { .. }) {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        let mut attributes = self
+            .attributes
+            .try_borrow_mut()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        let entry = attributes
+            .entry(unique_id.to_owned())
+            .or_insert((None, None));
+        if let Some(id) = id {
+            entry.0 = Some(id.to_vec());
+        }
+        if let Some(label) = label {
+            entry.1 = Some(label.to_owned());
+        }
+        Ok(())
     }
 }

@@ -282,7 +282,7 @@ pub fn destroy_object_removes_object_from_store_and_search() {
 }
 
 #[test]
-pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
+pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -330,9 +330,28 @@ pub fn destroy_yubihsm_pseudo_public_objects_is_a_noop() {
         .collect();
 
     for handle in handles {
+        let object = crate::lock_context()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .resolve_object(handle)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            object.attribute_value(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(true))
+        );
+        assert_eq!(
+            object.attribute_value(CKA_COPYABLE as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(false))
+        );
+        assert_eq!(
+            object.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(false))
+        );
         assert_eq!(
             crate::C_DestroyObject(TEST_SESSION_HANDLE, handle),
-            CKR_OK as CK_RV
+            CKR_ACTION_PROHIBITED as CK_RV
         );
         let mut class = 0 as CK_OBJECT_CLASS;
         let mut attribute = CK_ATTRIBUTE {

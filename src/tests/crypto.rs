@@ -922,6 +922,76 @@ pub fn verify_accepts_matching_rsa_signature() {
 }
 
 #[test]
+pub fn verify_accepts_yubihsm_rsa_public_material() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    {
+        let mut context = crate::lock_context().unwrap();
+        let object = context
+            .as_mut()
+            .unwrap()
+            .memory_objects
+            .get_mut(&1)
+            .unwrap();
+        let crate::KeyMaterial::RsaPublic(public_key) = &object.material else {
+            panic!("test public key is not RSA");
+        };
+        object.material = crate::KeyMaterial::YubiHsm {
+            id: 1,
+            object_type: crate::YUBIHSM_PUBLIC_KEY,
+            algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+            length: public_key.size(),
+            domains: 1,
+            capabilities: crate::yubihsm_capabilities(&[0x05]),
+            delegated_capabilities: [0; 8],
+            public_key: public_key.n().to_bytes_be(),
+            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        };
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut data = b"YubiHSM RSA verify".to_vec();
+    let mut signature = [0u8; 256];
+    let mut signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Sign(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_Verify(
+            TEST_SESSION_HANDLE,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
 pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
