@@ -83,6 +83,15 @@ trait Slot {
     fn is_issuer_security_domain(&self) -> bool {
         false
     }
+    fn is_hsmauth(&self) -> bool {
+        false
+    }
+    fn hsmauth_administration(
+        &mut self,
+        _operation: HsmAuthAdministration<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn is_piv(&self) -> bool {
         false
     }

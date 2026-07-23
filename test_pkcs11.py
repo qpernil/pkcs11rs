@@ -828,6 +828,89 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.PKCS11RS_YubiHsmEnrollDevicePublicKey.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthPutSymmetricCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_BYTE,
+        ]
+        cls.lib.PKCS11RS_HsmAuthPutSymmetricCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_BYTE,
+        ]
+        cls.lib.PKCS11RS_HsmAuthPutDerivedSymmetricCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthPutAsymmetricCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_BYTE,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_HsmAuthPutAsymmetricCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_BYTE,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_HsmAuthPutDerivedAsymmetricCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthGenerateAsymmetricCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            CK_BYTE,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_HsmAuthGenerateAsymmetricCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthDeleteCredential.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_HsmAuthDeleteCredential.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthChangeCredentialPassword.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_HsmAuthChangeCredentialPassword.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthChangeManagementPassword.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+        ]
+        cls.lib.PKCS11RS_HsmAuthChangeManagementPassword.restype = CK_RV
+        cls.lib.PKCS11RS_HsmAuthReset.argtypes = [CK_ULONG]
+        cls.lib.PKCS11RS_HsmAuthReset.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)

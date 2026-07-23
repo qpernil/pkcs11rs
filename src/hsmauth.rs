@@ -2,7 +2,8 @@ use crate::{
     CommandApdu, Connector, Error, ResponseApdu, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
     CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_FUNCTION_FAILED,
     CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_OBJECT_HANDLE_INVALID,
-    CKR_PIN_INCORRECT, CKR_PIN_LOCKED, CKR_TOKEN_NOT_RECOGNIZED, CKR_USER_NOT_LOGGED_IN, CK_RV,
+    CKR_PIN_INCORRECT, CKR_PIN_INVALID, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED,
+    CKR_TOKEN_NOT_RECOGNIZED, CKR_USER_NOT_LOGGED_IN, CK_RV,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -87,6 +88,33 @@ pub(crate) struct SessionKeys {
 pub(crate) struct SymmetricCredentialKeys<'a> {
     pub(crate) enc: &'a [u8],
     pub(crate) mac: &'a [u8],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Administration<'a> {
+    PutSymmetric {
+        label: &'a str,
+        keys: SymmetricCredentialKeys<'a>,
+        credential_password: &'a [u8],
+        touch_required: bool,
+    },
+    PutAsymmetric {
+        label: &'a str,
+        private_key: Option<&'a [u8]>,
+        credential_password: &'a [u8],
+        touch_required: bool,
+    },
+    Delete {
+        label: &'a str,
+    },
+    ChangeCredentialPassword {
+        label: &'a str,
+        new_credential_password: &'a [u8],
+    },
+    ChangeManagementKey {
+        new_management_key: &'a [u8],
+    },
+    Reset,
 }
 
 impl std::fmt::Debug for SessionKeys {
@@ -633,6 +661,34 @@ fn validate_management_key(key: &[u8]) -> Result<&[u8], Error> {
     Ok(key)
 }
 
+pub(crate) fn password_to_key(password: &[u8]) -> Result<Zeroizing<[u8; 16]>, Error> {
+    if password.len() <= MANAGEMENT_KEY_LENGTH {
+        let mut key = Zeroizing::new([0; MANAGEMENT_KEY_LENGTH]);
+        key[..password.len()].copy_from_slice(password);
+        return Ok(key);
+    }
+    if password.len() != MANAGEMENT_KEY_LENGTH * 2 {
+        return Err(CKR_PIN_LEN_RANGE.into());
+    }
+
+    let mut key = Zeroizing::new([0; MANAGEMENT_KEY_LENGTH]);
+    for (index, encoded) in password.chunks_exact(2).enumerate() {
+        let high = hex_nibble(encoded[0]).ok_or(CKR_PIN_INVALID)?;
+        let low = hex_nibble(encoded[1]).ok_or(CKR_PIN_INVALID)?;
+        key[index] = high << 4 | low;
+    }
+    Ok(key)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn padded_credential_password(password: &[u8]) -> Result<Zeroizing<[u8; 16]>, Error> {
     if password.len() > CREDENTIAL_PASSWORD_LENGTH {
         return Err(CKR_PIN_INCORRECT.into());
@@ -1089,6 +1145,27 @@ mod tests {
         assert_eq!(
             hsmauth_status_diagnostic(0xffff),
             "unknown status (ffff), PKCS11 CKR_DEVICE_ERROR (0x30)"
+        );
+    }
+
+    #[test]
+    fn password_text_matches_ykman_padding_and_hex_rules() {
+        assert_eq!(password_to_key(b"").unwrap().as_slice(), &[0; 16]);
+        assert_eq!(
+            password_to_key("lösenord".as_bytes()).unwrap().as_slice(),
+            &[0x6c, 0xc3, 0xb6, 0x73, 0x65, 0x6e, 0x6f, 0x72, 0x64, 0, 0, 0, 0, 0, 0, 0,]
+        );
+        assert_eq!(
+            password_to_key(b"000102030405060708090a0B0c0D0e0F")
+                .unwrap()
+                .as_slice(),
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert!(
+            matches!(password_to_key(b"12345678901234567"), Err(Error::Generic(rv)) if rv == CKR_PIN_LEN_RANGE as CK_RV)
+        );
+        assert!(
+            matches!(password_to_key(b"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), Err(Error::Generic(rv)) if rv == CKR_PIN_INVALID as CK_RV)
         );
     }
 }
