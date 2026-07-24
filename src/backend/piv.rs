@@ -1074,6 +1074,10 @@ impl Slot for PivSlot {
                 }
                 _ => (Vec::new(), Vec::new()),
             };
+            let public_key = match &key.public_key {
+                PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => public_key.clone(),
+                PivPublicKey::Rsa(_) => Vec::new(),
+            };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-{:02x}-{fingerprint}-public", key.slot as u8),
@@ -1126,6 +1130,7 @@ impl Slot for PivSlot {
                     algorithm: key.algorithm,
                     modulus,
                     public_exponent,
+                    public_key,
                     pin_policy: key.pin_policy,
                     touch_policy: key.touch_policy,
                 },
