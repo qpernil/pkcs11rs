@@ -876,7 +876,15 @@ fn issuer_sd_token_model_identifies_the_applet() {
     assert_eq!(&token_info.label[..21], b"Issuer SD #SELECT0001");
     assert_eq!(token_info.ulMinPinLen, 0);
     assert_eq!(token_info.ulMaxPinLen, 0);
-    assert!(crate::Slot::mechanisms(&slot).is_empty());
+    assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    assert_eq!(mechanisms.len(), crate::SOFTWARE_DIGEST_MECHANISMS.len());
+    assert!(mechanisms.iter().all(|mechanism| {
+        mechanism.flags == CKF_DIGEST as CK_FLAGS
+            && crate::SOFTWARE_DIGEST_MECHANISMS
+                .iter()
+                .any(|expected| expected.type_ == mechanism.type_)
+    }));
     assert!(crate::Slot::login(&mut slot, &[]).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
 }

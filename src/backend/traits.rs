@@ -74,8 +74,20 @@ trait Slot {
     fn session_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         MECHANISMS.to_vec()
+    }
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        let mut mechanisms = self.backend_mechanisms();
+        for software in SOFTWARE_DIGEST_MECHANISMS {
+            if !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == software.type_)
+            {
+                mechanisms.push(software);
+            }
+        }
+        mechanisms
     }
     fn is_yubihsm(&self) -> bool {
         false

@@ -40,6 +40,63 @@ const MECHANISMS: [MechanismDetails; 5] = [
     },
 ];
 
+const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
+    MechanismDetails {
+        type_: CKM_SHA_1 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA224 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA256 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA384 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA512 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA3_224 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA3_256 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA3_384 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_SHA3_512 as CK_MECHANISM_TYPE,
+        min_key_size: 0,
+        max_key_size: 0,
+        flags: CKF_DIGEST as CK_FLAGS,
+    },
+];
+
 const YUBIHSM_MECHANISMS: [MechanismDetails; 21] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,

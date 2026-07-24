@@ -176,6 +176,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         };
         let session = ctx.sessions.remove(&session_handle).unwrap();
         ctx.find_operations.remove(&session_handle);
+        ctx.digest_operations.remove(&session_handle);
         ctx.encrypt_operations.remove(&session_handle);
         ctx.decrypt_operations.remove(&session_handle);
         ctx.sign_operations.remove(&session_handle);
@@ -225,6 +226,8 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
         };
         ctx.sessions.retain(|_k, v| v.slotID() != slotID);
         ctx.find_operations
+            .retain(|session, _operation| !closed_sessions.contains(session));
+        ctx.digest_operations
             .retain(|session, _operation| !closed_sessions.contains(session));
         ctx.encrypt_operations
             .retain(|session, _operation| !closed_sessions.contains(session));

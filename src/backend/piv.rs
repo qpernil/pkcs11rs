@@ -665,7 +665,7 @@ impl Slot for PivSlot {
         info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
         Ok(())
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = Vec::new();
         let firmware_5_7 = (self.reported_version().major, self.reported_version().minor) >= (5, 7);
         let rsa_max = if firmware_5_7 { 4096 } else { 2048 };

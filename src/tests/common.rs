@@ -172,6 +172,154 @@ fn yubihsm_profile_objects_are_public_immutable_token_objects() {
 }
 
 #[test]
+fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let vectors: [(CK_MECHANISM_TYPE, &str); 9] = [
+        (
+            CKM_SHA_1 as CK_MECHANISM_TYPE,
+            "a9993e364706816aba3e25717850c26c9cd0d89d",
+        ),
+        (
+            CKM_SHA224 as CK_MECHANISM_TYPE,
+            "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7",
+        ),
+        (
+            CKM_SHA256 as CK_MECHANISM_TYPE,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ),
+        (
+            CKM_SHA384 as CK_MECHANISM_TYPE,
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        ),
+        (
+            CKM_SHA512 as CK_MECHANISM_TYPE,
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+        ),
+        (
+            CKM_SHA3_224 as CK_MECHANISM_TYPE,
+            "e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf",
+        ),
+        (
+            CKM_SHA3_256 as CK_MECHANISM_TYPE,
+            "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+        ),
+        (
+            CKM_SHA3_384 as CK_MECHANISM_TYPE,
+            "ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25",
+        ),
+        (
+            CKM_SHA3_512 as CK_MECHANISM_TYPE,
+            "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
+        ),
+    ];
+
+    for (mechanism_type, expected) in vectors {
+        let expected = test_hex(expected);
+        let mut info = unsafe { std::mem::zeroed::<CK_MECHANISM_INFO>() };
+        assert_eq!(
+            crate::C_GetMechanismInfo(TEST_SLOT_ID, mechanism_type, &mut info),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(info.flags, CKF_DIGEST as CK_FLAGS);
+        assert_eq!((info.ulMinKeySize, info.ulMaxKeySize), (0, 0));
+
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            crate::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+            CKR_OK as CK_RV
+        );
+        let mut input = *b"abc";
+        let mut output_len = 0;
+        assert_eq!(
+            crate::C_Digest(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut output_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(output_len as usize, expected.len());
+        let mut output = vec![0; output_len as usize];
+        assert_eq!(
+            crate::C_Digest(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as CK_ULONG,
+                output.as_mut_ptr(),
+                &mut output_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(output, expected);
+        assert_eq!(
+            crate::C_Digest(
+                TEST_SESSION_HANDLE,
+                input.as_mut_ptr(),
+                input.len() as CK_ULONG,
+                output.as_mut_ptr(),
+                &mut output_len,
+            ),
+            CKR_OPERATION_NOT_INITIALIZED as CK_RV
+        );
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA512 as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+        CKR_OK as CK_RV
+    );
+    let mut first = *b"a";
+    let mut second = *b"bc";
+    assert_eq!(
+        crate::C_DigestUpdate(
+            TEST_SESSION_HANDLE,
+            first.as_mut_ptr(),
+            first.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_DigestUpdate(
+            TEST_SESSION_HANDLE,
+            second.as_mut_ptr(),
+            second.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut short = [0; 16];
+    let mut output_len = short.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DigestFinal(TEST_SESSION_HANDLE, short.as_mut_ptr(), &mut output_len),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(output_len, 64);
+    let mut output = [0; 64];
+    assert_eq!(
+        crate::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut output_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        output.to_vec(),
+        test_hex("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+    );
+    finalize_for_test();
+}
+
+#[test]
 fn unavailable_yubihsm_connector_is_an_empty_slot() {
     let connector = crate::HttpConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
     let slot = crate::YubiHsmSlot::new(std::rc::Rc::new(connector), (0, 0, 0), Vec::new());
@@ -4855,29 +5003,6 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     assert_stub!(
         "C_DecryptFinal",
         crate::C_DecryptFinal(session, data.as_mut_ptr(), &mut data_len)
-    );
-    assert_stub!(
-        "C_DigestInit",
-        crate::C_DigestInit(session, ::std::ptr::null_mut())
-    );
-    assert_stub!(
-        "C_Digest",
-        crate::C_Digest(
-            session,
-            data.as_mut_ptr(),
-            data.len() as CK_ULONG,
-            data.as_mut_ptr(),
-            &mut data_len
-        )
-    );
-    assert_stub!(
-        "C_DigestUpdate",
-        crate::C_DigestUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
-    );
-    assert_stub!("C_DigestKey", crate::C_DigestKey(session, 0));
-    assert_stub!(
-        "C_DigestFinal",
-        crate::C_DigestFinal(session, data.as_mut_ptr(), &mut data_len)
     );
     assert_stub!(
         "C_SignInit",

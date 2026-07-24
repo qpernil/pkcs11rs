@@ -2174,7 +2174,7 @@ impl Slot for YubiHsmSlot {
         }
         Ok(objects)
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
     }
     fn is_yubihsm(&self) -> bool {

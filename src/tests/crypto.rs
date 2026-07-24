@@ -5,13 +5,18 @@ pub fn mechanism_list_reports_supported_mechanisms() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_slot(TEST_SLOT_ID);
 
-    let expected = [
+    let mut expected = vec![
         CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         CKM_RSA_PKCS as CK_MECHANISM_TYPE,
         CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         CKM_ECDSA as CK_MECHANISM_TYPE,
         CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
     ];
+    expected.extend(
+        crate::SOFTWARE_DIGEST_MECHANISMS
+            .iter()
+            .map(|mechanism| mechanism.type_),
+    );
     let mut count = 0;
     assert_eq!(
         crate::C_GetMechanismList(TEST_SLOT_ID, ::std::ptr::null_mut(), &mut count),
@@ -27,7 +32,7 @@ pub fn mechanism_list_reports_supported_mechanisms() {
     );
     assert_eq!(count, expected.len() as CK_ULONG);
 
-    let mut mechanisms = [0; 5];
+    let mut mechanisms = vec![0; expected.len()];
     count = mechanisms.len() as CK_ULONG;
     assert_eq!(
         crate::C_GetMechanismList(TEST_SLOT_ID, mechanisms.as_mut_ptr(), &mut count),

@@ -298,7 +298,7 @@ impl Slot for HsmAuthSlot {
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
@@ -625,7 +625,7 @@ impl Slot for IssuerSecurityDomainSlot {
     fn is_issuer_security_domain(&self) -> bool {
         true
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
 }

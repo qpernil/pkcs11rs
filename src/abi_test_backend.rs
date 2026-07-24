@@ -1069,7 +1069,7 @@ impl Slot for AbiYubiHsmSlot {
         Ok(objects)
     }
 
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = yubihsm_mechanisms(&[
             YUBIHSM_ALGO_RSA_PKCS1_SHA1,
             YUBIHSM_ALGO_RSA_2048,
@@ -1083,12 +1083,6 @@ impl Slot for AbiYubiHsmSlot {
         {
             rsa_pkcs.flags |= (CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS;
         }
-        mechanisms.push(MechanismDetails {
-            type_: CKM_SHA512 as CK_MECHANISM_TYPE,
-            min_key_size: 0,
-            max_key_size: 0,
-            flags: CKF_DIGEST as CK_FLAGS,
-        });
         mechanisms
     }
 
