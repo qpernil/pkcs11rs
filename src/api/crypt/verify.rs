@@ -73,7 +73,13 @@ fn verify_init(
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
         let cmac_mechanism = mac_length.is_some();
-        if !rsa_mechanism && !ecdsa_mechanism && !eddsa_mechanism && !cmac_mechanism {
+        let hmac_mechanism = yubihsm_hmac_mechanism(mechanism.mechanism);
+        if !rsa_mechanism
+            && !ecdsa_mechanism
+            && !eddsa_mechanism
+            && !cmac_mechanism
+            && hmac_mechanism.is_none()
+        {
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
@@ -102,7 +108,17 @@ fn verify_init(
                     }
                 )
                 || !yubihsm_material_has_capability(&object.material, 0x33)))
-            || (!cmac_mechanism && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            || (hmac_mechanism.is_some()
+                && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+                    || object.key_type != hmac_mechanism.unwrap().0
+                    || !matches!(
+                        object.material,
+                        KeyMaterial::YubiHsm { algorithm, .. }
+                            if algorithm == hmac_mechanism.unwrap().1
+                    )))
+            || (!cmac_mechanism
+                && hmac_mechanism.is_none()
+                && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
             || (rsa_mechanism
                 && (object.key_type != CKK_RSA as CK_KEY_TYPE
                     || rsa_public_key_material(&object.material)?.is_none()))
@@ -207,6 +223,29 @@ fn verify(
                 return Err(CKR_SIGNATURE_INVALID.into());
             }
             return Ok(());
+        }
+        if let Some((_, expected_algorithm, expected_length)) =
+            yubihsm_hmac_mechanism(operation.mechanism)
+        {
+            if signature.len() != expected_length {
+                return Err(CKR_SIGNATURE_LEN_RANGE.into());
+            }
+            let KeyMaterial::YubiHsm { id, algorithm, .. } = &operation.key else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            if *algorithm != expected_algorithm {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+            let command = YubiHsmCommand::verify_hmac(*id, signature, data)?;
+            let response = ctx
+                ._get_session(session_handle)?
+                .1
+                .yubihsm_command(&command)?;
+            return match response.as_slice() {
+                [1] => Ok(()),
+                [0] => Err(CKR_SIGNATURE_INVALID.into()),
+                _ => Err(CKR_DEVICE_ERROR.into()),
+            };
         }
         if let Some(public_key) = rsa_public_key_material(&operation.key)? {
             return verify_rsa_signature(
@@ -321,6 +360,32 @@ fn verify(
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }
     })
+}
+
+fn yubihsm_hmac_mechanism(
+    mechanism: CK_MECHANISM_TYPE,
+) -> Option<(CK_KEY_TYPE, u8, usize)> {
+    match mechanism {
+        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, YUBIHSM_ALGO_HMAC_SHA1, 20))
+        }
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => Some((
+            CKK_SHA256_HMAC as CK_KEY_TYPE,
+            YUBIHSM_ALGO_HMAC_SHA256,
+            32,
+        )),
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => Some((
+            CKK_SHA384_HMAC as CK_KEY_TYPE,
+            YUBIHSM_ALGO_HMAC_SHA384,
+            48,
+        )),
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => Some((
+            CKK_SHA512_HMAC as CK_KEY_TYPE,
+            YUBIHSM_ALGO_HMAC_SHA512,
+            64,
+        )),
+        _ => None,
+    }
 }
 
 fn verify_rsa_signature(

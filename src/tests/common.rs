@@ -4623,9 +4623,17 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         );
     }
     let hmac = mechanism(CKM_SHA_1_HMAC as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 64));
+    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 512));
+    assert_eq!(
+        hmac.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
     let hmac = mechanism(CKM_SHA512_HMAC as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 128));
+    assert_eq!((hmac.min_key_size, hmac.max_key_size), (1, 1024));
+    assert_eq!(
+        hmac.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
     let generated = mechanism(CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((generated.min_key_size, generated.max_key_size), (20, 64));
     let montgomery = mechanism(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE).unwrap();

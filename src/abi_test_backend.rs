@@ -573,6 +573,20 @@ impl Session for AbiYubiHsmSession {
                 let object_type = *data.get(2).ok_or(CKR_DATA_LEN_RANGE)?;
                 return Ok(vec![object_type, 0, 2]);
             }
+            YubiHsmCommandCode::SignHmac => {
+                if id != ABI_YUBIHSM_HMAC_KEY_ID {
+                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
+                }
+                return abi_yubihsm_hmac_sha256(data.get(2..).ok_or(CKR_DATA_LEN_RANGE)?);
+            }
+            YubiHsmCommandCode::VerifyHmac => {
+                if id != ABI_YUBIHSM_HMAC_KEY_ID {
+                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
+                }
+                let signature = data.get(2..34).ok_or(CKR_DATA_LEN_RANGE)?;
+                let expected = abi_yubihsm_hmac_sha256(data.get(34..).ok_or(CKR_DATA_LEN_RANGE)?)?;
+                return Ok(vec![u8::from(signature == expected)]);
+            }
             YubiHsmCommandCode::EncryptEcb => (
                 secure_channel_crypto::Direction::Encrypt,
                 None,
@@ -622,6 +636,18 @@ const ABI_YUBIHSM_OPAQUE_DATA_ID: u16 = 5;
 const ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID: u16 = 6;
 #[cfg(feature = "abi-tests")]
 const ABI_YUBIHSM_OPAQUE_DATA: &[u8] = b"ABI opaque data";
+#[cfg(feature = "abi-tests")]
+const ABI_YUBIHSM_HMAC_KEY_ID: u16 = 11;
+
+#[cfg(feature = "abi-tests")]
+fn abi_yubihsm_hmac_sha256(data: &[u8]) -> Result<Vec<u8>, Error> {
+    use hmac::{Hmac, KeyInit, Mac};
+
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&[0x0b; 20])
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_private_key(scalar: u32) -> Result<p256::ecdsa::SigningKey, Error> {
@@ -818,6 +844,25 @@ pub(super) fn abi_test_yubihsm_nist_aes_object(slot_id: CK_SLOT_ID) -> TokenObje
         *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
     }
     object
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_hmac_object(slot_id: CK_SLOT_ID) -> Result<TokenObject, Error> {
+    let info = YubiHsmObjectInfo {
+        capabilities: yubihsm_capabilities(&[0x16, 0x17]),
+        id: ABI_YUBIHSM_HMAC_KEY_ID,
+        length: 20,
+        domains: 1,
+        object_type: YUBIHSM_HMAC_KEY,
+        algorithm: YUBIHSM_ALGO_HMAC_SHA256,
+        sequence: 1,
+        origin: 1,
+        label: "RFC 4231 HMAC key".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    yubihsm_token_objects(slot_id, info, None)?
+        .pop()
+        .ok_or(CKR_DEVICE_ERROR.into())
 }
 
 #[cfg(feature = "abi-tests")]
@@ -1059,6 +1104,7 @@ impl Slot for AbiYubiHsmSlot {
             abi_test_yubihsm_aes_object(slot_id),
             abi_test_yubihsm_nist_aes_object(slot_id),
         ];
+        objects.push(abi_test_yubihsm_hmac_object(slot_id)?);
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
@@ -1094,6 +1140,7 @@ impl Slot for AbiYubiHsmSlot {
             YUBIHSM_ALGO_AES_ECB,
             YUBIHSM_ALGO_AES_CBC,
             YUBIHSM_ALGO_AES_KWP,
+            YUBIHSM_ALGO_HMAC_SHA256,
         ]);
         if let Some(rsa_pkcs) = mechanisms
             .iter_mut()
