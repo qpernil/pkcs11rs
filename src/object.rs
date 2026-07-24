@@ -37,6 +37,7 @@ enum KeyMaterial {
         algorithm: piv::Algorithm,
         modulus: Vec<u8>,
         public_exponent: Vec<u8>,
+        public_key: Vec<u8>,
         pin_policy: u8,
         touch_policy: u8,
     },
@@ -402,20 +403,81 @@ fn der_integer(magnitude: &[u8]) -> Option<Vec<u8>> {
     let magnitude = &magnitude[first_nonzero..];
     let needs_sign_padding = magnitude.first().is_some_and(|byte| byte & 0x80 != 0);
     let content_length = magnitude.len().max(1) + usize::from(needs_sign_padding);
-    let mut encoded = Vec::with_capacity(content_length + 3);
-    encoded.push(0x02);
-    if content_length < 128 {
-        encoded.push(content_length as u8);
-    } else if content_length <= u8::MAX as usize {
-        encoded.extend_from_slice(&[0x81, content_length as u8]);
+    let mut content = Vec::with_capacity(content_length);
+    if magnitude.is_empty() || needs_sign_padding {
+        content.push(0);
+    }
+    content.extend_from_slice(magnitude);
+    Some(der_tlv(0x02, &content))
+}
+
+fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(value.len() + 1 + std::mem::size_of::<usize>());
+    encoded.push(tag);
+    if value.len() < 128 {
+        encoded.push(value.len() as u8);
     } else {
+        let length = value.len().to_be_bytes();
+        let first = length
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(length.len() - 1);
+        encoded.push(0x80 | (length.len() - first) as u8);
+        encoded.extend_from_slice(&length[first..]);
+    }
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+fn rsa_public_key_info(modulus: &[u8], public_exponent: &[u8]) -> Option<Vec<u8>> {
+    if modulus.is_empty() || public_exponent.is_empty() {
         return None;
     }
-    if magnitude.is_empty() || needs_sign_padding {
-        encoded.push(0);
+    let mut public_key = der_integer(modulus)?;
+    public_key.extend(der_integer(public_exponent)?);
+    let public_key = der_tlv(0x30, &public_key);
+    let mut subject_public_key = vec![0];
+    subject_public_key.extend(public_key);
+
+    let algorithm = [
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
+        0x00,
+    ];
+    let mut info = algorithm.to_vec();
+    info.extend(der_tlv(0x03, &subject_public_key));
+    Some(der_tlv(0x30, &info))
+}
+
+fn ec_public_key_info(
+    key_type: CK_KEY_TYPE,
+    parameters: Option<&[u8]>,
+    public_key: &[u8],
+    prefix_uncompressed: bool,
+) -> Option<Vec<u8>> {
+    if public_key.is_empty() {
+        return None;
     }
-    encoded.extend_from_slice(magnitude);
-    Some(encoded)
+    let mut algorithm = match key_type {
+        x if x == CKK_EC as CK_KEY_TYPE => {
+            let mut algorithm = vec![0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+            algorithm.extend_from_slice(parameters?);
+            der_tlv(0x30, &algorithm)
+        }
+        x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => {
+            der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70])
+        }
+        x if x == CKK_EC_MONTGOMERY as CK_KEY_TYPE => {
+            der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x6e])
+        }
+        _ => return None,
+    };
+    let mut subject_public_key = vec![0];
+    if prefix_uncompressed {
+        subject_public_key.push(0x04);
+    }
+    subject_public_key.extend_from_slice(public_key);
+    algorithm.extend(der_tlv(0x03, &subject_public_key));
+    Some(der_tlv(0x30, &algorithm))
 }
 
 fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -474,6 +536,109 @@ fn lazy_yubihsm_attestation_certificate(
 }
 
 impl TokenObject {
+    fn public_key_info(&self) -> Option<Vec<u8>> {
+        if !matches!(
+            self.class,
+            x if x == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                || x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        ) {
+            return None;
+        }
+        match &self.material {
+            KeyMaterial::RsaPrivate(key) => {
+                rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
+            }
+            KeyMaterial::RsaPublic(key) => {
+                rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
+            }
+            KeyMaterial::PivPrivate {
+                algorithm,
+                modulus,
+                public_exponent,
+                public_key,
+                ..
+            } => {
+                if !modulus.is_empty() {
+                    rsa_public_key_info(modulus, public_exponent)
+                } else {
+                    ec_public_key_info(
+                        self.key_type,
+                        piv_ec_parameters(*algorithm),
+                        public_key,
+                        matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
+                    )
+                }
+            }
+            KeyMaterial::PivPublic {
+                algorithm,
+                public_key,
+            } => ec_public_key_info(
+                self.key_type,
+                piv_ec_parameters(*algorithm),
+                public_key,
+                matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
+            ),
+            KeyMaterial::OpenPgpPrivate {
+                algorithm,
+                modulus,
+                public_exponent,
+                public_key,
+                ..
+            } => {
+                if !modulus.is_empty() {
+                    rsa_public_key_info(modulus, public_exponent)
+                } else {
+                    ec_public_key_info(
+                        self.key_type,
+                        openpgp_ec_params(*algorithm).as_deref(),
+                        public_key,
+                        matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
+                    )
+                }
+            }
+            KeyMaterial::OpenPgpPublic {
+                algorithm,
+                public_key,
+            } => ec_public_key_info(
+                self.key_type,
+                openpgp_ec_params(*algorithm).as_deref(),
+                public_key,
+                matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
+            ),
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if is_yubihsm_rsa(*algorithm) => {
+                rsa_public_key_info(public_key, &[0x01, 0x00, 0x01])
+            }
+            KeyMaterial::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } => ec_public_key_info(
+                self.key_type,
+                yubihsm_ec_parameters(*algorithm),
+                public_key,
+                is_yubihsm_ec(*algorithm),
+            ),
+            KeyMaterial::HsmAuthPublic { public_key }
+                if public_key.len() == 65 && public_key[0] == 0x04 =>
+            {
+                ec_public_key_info(
+                    CKK_EC as CK_KEY_TYPE,
+                    piv_ec_parameters(piv::Algorithm::EccP256),
+                    &public_key[1..],
+                    true,
+                )
+            }
+            KeyMaterial::YubiHsmDevicePublic {
+                public_key_info, ..
+            } => Some(public_key_info.clone()),
+            _ => None,
+        }
+    }
+
     fn has_sensitive_attributes(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
@@ -929,6 +1094,9 @@ impl TokenObject {
                 }
                 _ => None,
             },
+            x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                self.public_key_info()
+            }
             x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
                 || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE

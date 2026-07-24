@@ -1663,6 +1663,38 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_MECHANISM_INVALID,
         )
 
+    def test_normal_rsa_key_pair_exposes_matching_public_key_info(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_SLOT_ID)
+        self.login_session(session)
+
+        def public_key_info(handle: int) -> bytes:
+            attribute = CK_ATTRIBUTE(CKA_PUBLIC_KEY_INFO, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            value = (CK_BYTE * attribute.ulValueLen)()
+            attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, handle, ctypes.byref(attribute), 1
+                ),
+                CKR_OK,
+            )
+            return bytes(value)
+
+        public = public_key_info(1)
+        private = public_key_info(2)
+        self.assertEqual(public, private)
+        self.assertTrue(public.startswith(b"\x30"))
+        self.assertIn(
+            bytes.fromhex("06092a864886f70d010101"),
+            public,
+        )
+
     def test_yubihsm_device_public_key_is_a_descriptive_read_only_object(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)

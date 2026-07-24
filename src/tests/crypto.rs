@@ -583,6 +583,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                     algorithm: crate::piv::Algorithm::Rsa1024,
                     modulus: vec![0x80; 128],
                     public_exponent: vec![1, 0, 1],
+                    public_key: Vec::new(),
                     pin_policy: 0,
                     touch_policy: 0,
                 },

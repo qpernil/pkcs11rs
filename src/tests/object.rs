@@ -1235,12 +1235,12 @@ pub fn create_object_requires_and_imports_real_key_material() {
         modulus_attribute,
         public_exponent_attribute,
     ];
-    assert!(matches!(
-        crate::parse_create_object_template(&public_template)
-            .unwrap()
-            .material,
-        crate::KeyMaterial::RsaPublic(_)
-    ));
+    let public = crate::parse_create_object_template(&public_template).unwrap();
+    assert!(matches!(public.material, crate::KeyMaterial::RsaPublic(_)));
+    let public_key_info = public
+        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert!(spki::SubjectPublicKeyInfoRef::try_from(public_key_info.as_slice()).is_ok());
 
     let incomplete = [class_attribute(&mut public_class), key_type_attribute];
     assert!(matches!(
@@ -1264,6 +1264,10 @@ pub fn create_object_requires_and_imports_real_key_material() {
         imported.material,
         crate::KeyMaterial::RsaPrivate(_)
     ));
+    assert_eq!(
+        imported.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE),
+        Some(public_key_info)
+    );
     assert!(!imported.local);
     assert_eq!(imported.key_gen_mechanism, None);
     assert_eq!(
@@ -1284,6 +1288,107 @@ pub fn create_object_requires_and_imports_real_key_material() {
         extractable_private_template.into_object(),
         Err(rv) if rv == CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
     ));
+}
+
+#[test]
+pub fn ec_key_pairs_expose_matching_public_key_info() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    let base = crate::lock_context()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .memory_objects
+        .get(&1)
+        .unwrap()
+        .clone();
+
+    let cases = [
+        (
+            CKK_EC as CK_KEY_TYPE,
+            crate::KeyMaterial::PivPublic {
+                algorithm: crate::piv::Algorithm::EccP256,
+                public_key: vec![0x11; 64],
+            },
+            crate::KeyMaterial::PivPrivate {
+                slot: crate::piv::Slot::Authentication,
+                algorithm: crate::piv::Algorithm::EccP256,
+                modulus: Vec::new(),
+                public_exponent: Vec::new(),
+                public_key: vec![0x11; 64],
+                pin_policy: 0,
+                touch_policy: 0,
+            },
+            "1.2.840.10045.2.1",
+        ),
+        (
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+            crate::KeyMaterial::OpenPgpPublic {
+                algorithm: crate::OpenPgpAlgorithm::Ed25519,
+                public_key: vec![0x22; 32],
+            },
+            crate::KeyMaterial::OpenPgpPrivate {
+                key_ref: crate::OpenPgpKeyRef::Authentication,
+                algorithm: crate::OpenPgpAlgorithm::Ed25519,
+                modulus: Vec::new(),
+                public_exponent: Vec::new(),
+                public_key: vec![0x22; 32],
+                pin_policy: 0,
+                touch_policy: 0,
+            },
+            "1.3.101.112",
+        ),
+        (
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            crate::KeyMaterial::YubiHsm {
+                id: 1,
+                object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+                algorithm: crate::YUBIHSM_ALGO_X25519,
+                length: 32,
+                domains: 1,
+                capabilities: [0; 8],
+                delegated_capabilities: [0; 8],
+                public_key: vec![0x33; 32],
+                value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            },
+            crate::KeyMaterial::YubiHsm {
+                id: 1,
+                object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+                algorithm: crate::YUBIHSM_ALGO_X25519,
+                length: 32,
+                domains: 1,
+                capabilities: [0; 8],
+                delegated_capabilities: [0; 8],
+                public_key: vec![0x33; 32],
+                value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+            },
+            "1.3.101.110",
+        ),
+    ];
+
+    for (key_type, public_material, private_material, algorithm_oid) in cases {
+        let mut public = base.clone();
+        public.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+        public.key_type = key_type;
+        public.material = public_material;
+        let mut private = base.clone();
+        private.class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        private.key_type = key_type;
+        private.material = private_material;
+
+        let public_key_info = public
+            .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+            .unwrap();
+        assert_eq!(
+            private.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE),
+            Some(public_key_info.clone())
+        );
+        let parsed = spki::SubjectPublicKeyInfoRef::try_from(public_key_info.as_slice()).unwrap();
+        assert_eq!(parsed.algorithm.oid.to_string(), algorithm_oid);
+    }
+
+    finalize_for_test();
 }
 
 #[test]
@@ -1553,6 +1658,16 @@ pub fn get_object_size_reports_attribute_storage_size() {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let public_key_info_len = crate::lock_context()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .memory_objects
+        .get(&1)
+        .unwrap()
+        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+        .unwrap()
+        .len();
 
     let mut size = 0;
     assert_eq!(
@@ -1568,7 +1683,8 @@ pub fn get_object_size_reports_attribute_storage_size() {
             + 256
             + 3
             + 1
-            + 8) as CK_ULONG
+            + 8
+            + public_key_info_len) as CK_ULONG
     );
 
     let mut label = *b"Short";
@@ -1600,8 +1716,16 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 7 + 256 + 3 + 1 + 8)
-            as CK_ULONG
+        (4 * ::std::mem::size_of::<CK_ULONG>()
+            + label.len()
+            + id.len()
+            + 1
+            + 7
+            + 256
+            + 3
+            + 1
+            + 8
+            + public_key_info_len) as CK_ULONG
     );
 
     assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);

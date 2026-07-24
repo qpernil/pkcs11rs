@@ -1054,6 +1054,10 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
     assert!(!public.verify);
     assert!(public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE).is_some());
+    let public_key_info = public
+        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+        .unwrap();
+    assert!(spki::SubjectPublicKeyInfoRef::try_from(public_key_info.as_slice()).is_ok());
 }
 
 #[test]
@@ -1390,6 +1394,7 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
             algorithm: crate::piv::Algorithm::Rsa1024,
             modulus: vec![0; 128],
             public_exponent: vec![1, 0, 1],
+            public_key: Vec::new(),
             pin_policy: 3,
             touch_policy: 1,
         };
@@ -1453,6 +1458,7 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
             algorithm: crate::piv::Algorithm::Rsa1024,
             modulus: vec![0; 128],
             public_exponent: vec![1, 0, 1],
+            public_key: Vec::new(),
             pin_policy: 2,
             touch_policy: 1,
         };
