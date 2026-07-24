@@ -1357,55 +1357,6 @@ fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
     format!("YubiHSM {kind} {}", info.id)
 }
 
-fn yubihsm_profile_objects(slot_id: CK_SLOT_ID, public_certificates: bool) -> Vec<TokenObject> {
-    let mut profiles = vec![
-        (
-            CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            "PKCS #11 Baseline Provider",
-        ),
-        (
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            "PKCS #11 Extended Provider",
-        ),
-        (
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
-            "PKCS #11 Authentication Token",
-        ),
-    ];
-    if public_certificates {
-        profiles.push((
-            CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID,
-            "PKCS #11 Public Certificates Token",
-        ));
-    }
-    profiles
-        .into_iter()
-        .map(|(profile_id, label)| TokenObject {
-            slot_id: Some(slot_id),
-            unique_id: format!("pkcs11-profile-{profile_id:08x}"),
-            class: CKO_PROFILE as CK_OBJECT_CLASS,
-            key_type: 0,
-            label: label.to_owned(),
-            id: Vec::new(),
-            token: true,
-            private: false,
-            encrypt: false,
-            decrypt: false,
-            sign: false,
-            verify: false,
-            derive: false,
-            sensitive: false,
-            extractable: false,
-            always_sensitive: false,
-            never_extractable: false,
-            local: true,
-            key_gen_mechanism: None,
-            owner_session: None,
-            material: KeyMaterial::Profile { profile_id },
-        })
-        .collect()
-}
-
 fn yubihsm_device_public_key_object(
     slot_id: CK_SLOT_ID,
     public_key: &[u8],
@@ -1970,18 +1921,14 @@ impl Slot for YubiHsmSlot {
     fn login_is_active(&self) -> bool {
         self.session.borrow().is_some()
     }
-    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let public_discovery_available = self.public_discovery_available(slot_id);
-        let mut profile_objects =
-            yubihsm_profile_objects(slot_id, public_discovery_available);
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         if self
             .session
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
             .is_none()
         {
-            profile_objects.extend(self.cached_objects());
-            return Ok(profile_objects);
+            return Ok(self.cached_objects());
         }
         let (discovered, mut pkcs11_metadata) =
             self.discover_objects(self.session.as_ref())?;
@@ -2003,8 +1950,6 @@ impl Slot for YubiHsmSlot {
                 Vec::new()
             }
         };
-        profile_objects.append(&mut objects);
-        let mut objects = profile_objects;
         let mut metadata = HashMap::new();
         for (info, public_key) in discovered {
             let key = (info.object_type, info.id);
@@ -2052,28 +1997,14 @@ impl Slot for YubiHsmSlot {
             .retain(|key, _| current_generations.contains_key(key));
         *self.object_metadata.try_borrow_mut()? = metadata;
         self.update_cached_objects(&objects)?;
-        let mut cached = self.cached_objects();
-        profile_objects = yubihsm_profile_objects(slot_id, public_discovery_available);
-        profile_objects.append(&mut cached);
-        Ok(profile_objects)
+        Ok(self.cached_objects())
     }
-    fn token_object(
+    fn backend_token_object(
         &self,
         slot_id: CK_SLOT_ID,
         unique_id: &str,
     ) -> Result<Option<TokenObject>, Error> {
         self.synchronize_caches()?;
-        let public_discovery_available = self
-            .object_view_cache
-            .try_borrow()
-            .map(|state| state.available)
-            .unwrap_or(false);
-        if let Some(object) = yubihsm_profile_objects(slot_id, public_discovery_available)
-            .into_iter()
-            .find(|object| object.unique_id == unique_id)
-        {
-            return Ok(Some(object));
-        }
         if let Some(object) = self
             .cached_objects()
             .into_iter()
@@ -2176,6 +2107,12 @@ impl Slot for YubiHsmSlot {
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
+    }
+    fn supports_extended_provider_profile(&self) -> bool {
+        mechanisms_support_extended_provider(&self.mechanisms())
+    }
+    fn supports_public_certificates_token_profile(&self, slot_id: CK_SLOT_ID) -> bool {
+        self.public_discovery_available(slot_id)
     }
     fn is_yubihsm(&self) -> bool {
         true
