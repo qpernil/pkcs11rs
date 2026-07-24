@@ -308,6 +308,7 @@ struct SignatureOperation {
     requires_login: bool,
     context_specific_extended: bool,
     mechanism: CK_MECHANISM_TYPE,
+    mac_length: Option<usize>,
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
     piv_pin_policy: Option<u8>,
     buffer: Vec<u8>,

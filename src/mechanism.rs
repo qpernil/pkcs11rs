@@ -40,7 +40,7 @@ const MECHANISMS: [MechanismDetails; 5] = [
     },
 ];
 
-const YUBIHSM_MECHANISMS: [MechanismDetails; 19] = [
+const YUBIHSM_MECHANISMS: [MechanismDetails; 21] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -124,6 +124,18 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 19] = [
         min_key_size: 16,
         max_key_size: 32,
         flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_AES_CMAC as CK_MECHANISM_TYPE,
+        min_key_size: 16,
+        max_key_size: 32,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE,
+        min_key_size: 16,
+        max_key_size: 32,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
@@ -238,7 +250,9 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 y if y == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE
                     || y == CKM_AES_ECB as CK_MECHANISM_TYPE
                     || y == CKM_AES_CBC as CK_MECHANISM_TYPE
-                    || y == CKM_AES_GCM as CK_MECHANISM_TYPE =>
+                    || y == CKM_AES_GCM as CK_MECHANISM_TYPE
+                    || y == CKM_AES_CMAC as CK_MECHANISM_TYPE
+                    || y == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
                 {
                     &aes_sizes
                 }
@@ -309,6 +323,11 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                     algorithms.contains(&YUBIHSM_ALGO_AES_CBC)
                 }
                 x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
+                    algorithms.contains(&YUBIHSM_ALGO_AES_ECB)
+                }
+                x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
+                    || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
+                {
                     algorithms.contains(&YUBIHSM_ALGO_AES_ECB)
                 }
                 x if x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE => any(&[

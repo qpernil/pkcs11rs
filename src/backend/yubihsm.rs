@@ -1565,16 +1565,21 @@ fn yubihsm_token_objects_with_generation(
     let rsa_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm);
     let ccm_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_ccm_wrap(info.algorithm);
     let montgomery = is_montgomery_key_type(key_type);
-    let sign = !authentication_key
-        && (info.object_type == YUBIHSM_ASYMMETRIC_KEY
-            || (info.object_type == YUBIHSM_HMAC_KEY && is_hmac_key_type(key_type)))
+    let aes_cmac = info.object_type == YUBIHSM_SYMMETRIC_KEY
+        && key_type == CKK_AES as CK_KEY_TYPE
         && algorithm_supported
-        && !is_yubihsm_x25519(info.algorithm)
-        && (yubihsm_capability(&info.capabilities, 0x05)
-            || yubihsm_capability(&info.capabilities, 0x06)
-            || yubihsm_capability(&info.capabilities, 0x07)
-            || yubihsm_capability(&info.capabilities, 0x08)
-            || yubihsm_capability(&info.capabilities, 0x16));
+        && yubihsm_capability(&info.capabilities, 0x33);
+    let sign = aes_cmac
+        || (!authentication_key
+            && (info.object_type == YUBIHSM_ASYMMETRIC_KEY
+                || (info.object_type == YUBIHSM_HMAC_KEY && is_hmac_key_type(key_type)))
+            && algorithm_supported
+            && !is_yubihsm_x25519(info.algorithm)
+            && (yubihsm_capability(&info.capabilities, 0x05)
+                || yubihsm_capability(&info.capabilities, 0x06)
+                || yubihsm_capability(&info.capabilities, 0x07)
+                || yubihsm_capability(&info.capabilities, 0x08)
+                || yubihsm_capability(&info.capabilities, 0x16)));
     let decrypt = if ccm_wrap_key {
         yubihsm_capability(&info.capabilities, 0x26)
     } else {
@@ -1640,7 +1645,7 @@ fn yubihsm_token_objects_with_generation(
         encrypt,
         decrypt,
         sign,
-        verify: false,
+        verify: aes_cmac,
         derive,
         sensitive: private,
         extractable: yubihsm_capability(&info.capabilities, 0x10)

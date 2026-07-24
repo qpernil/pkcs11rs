@@ -25,7 +25,10 @@ fn verify_init(
         }
 
         let mechanism = _as_ref(mechanism)?;
-        let pss = if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+        let mac_length = aes_cmac_length(mechanism)?;
+        let pss = if mac_length.is_some() {
+            None
+        } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
@@ -69,18 +72,37 @@ fn verify_init(
         let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
-        if !rsa_mechanism && !ecdsa_mechanism && !eddsa_mechanism {
+        let cmac_mechanism = mac_length.is_some();
+        if !rsa_mechanism && !ecdsa_mechanism && !eddsa_mechanism && !cmac_mechanism {
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
         let object = ctx
             .resolve_object(key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if object.private && !logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if !object.is_visible_to(session_handle, slot_id, logged_in) {
+            return Err(CKR_KEY_HANDLE_INVALID.into());
+        }
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+        if (cmac_mechanism
+            && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+                || object.key_type != CKK_AES as CK_KEY_TYPE
+                || !matches!(
+                    object.material,
+                    KeyMaterial::YubiHsm {
+                        algorithm: YUBIHSM_ALGO_AES128
+                            | YUBIHSM_ALGO_AES192
+                            | YUBIHSM_ALGO_AES256,
+                        ..
+                    }
+                )
+                || !yubihsm_material_has_capability(&object.material, 0x33)))
+            || (!cmac_mechanism && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
             || (rsa_mechanism
                 && (object.key_type != CKK_RSA as CK_KEY_TYPE
                     || rsa_public_key_material(&object.material)?.is_none()))
@@ -112,9 +134,10 @@ fn verify_init(
             SignatureOperation {
                 key: object.material.clone(),
                 slot_id,
-                requires_login: false,
+                requires_login: object.private,
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
+                mac_length,
                 pss,
                 piv_pin_policy: None,
                 buffer: Vec::new(),
@@ -159,11 +182,32 @@ fn verify(
             .verify_operations
             .remove(&session_handle)
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
+            ctx.reconcile_login_state(operation.slot_id);
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
         let data = from_raw_parts(data, data_len as usize)?;
         let mut buffered_data = operation.buffer;
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let signature = from_raw_parts(signature, signature_len as usize)?;
+        if let Some(mac_length) = operation.mac_length {
+            if signature.len() != mac_length {
+                return Err(CKR_SIGNATURE_LEN_RANGE.into());
+            }
+            let KeyMaterial::YubiHsm { id, .. } = &operation.key else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            let mut expected = yubihsm_aes_cmac(ctx, session_handle, *id, data)?;
+            expected.truncate(mac_length);
+            if !bool::from(subtle::ConstantTimeEq::ct_eq(
+                expected.as_slice(),
+                signature,
+            )) {
+                return Err(CKR_SIGNATURE_INVALID.into());
+            }
+            return Ok(());
+        }
         if let Some(public_key) = rsa_public_key_material(&operation.key)? {
             return verify_rsa_signature(
                 &public_key,
