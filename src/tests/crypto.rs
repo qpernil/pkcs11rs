@@ -454,9 +454,19 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     {
         let mut context = crate::lock_context().unwrap();
         let context = context.as_mut().unwrap();
-        context
-            .slots
-            .insert(TEST_SLOT_ID, Box::new(test_slot(true)));
+        context.slots.insert(
+            TEST_SLOT_ID,
+            Box::new(test_slot_with_mechanisms(
+                true,
+                &[
+                    (
+                        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+                        CKF_SIGN as CK_FLAGS,
+                    ),
+                    (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_SIGN as CK_FLAGS),
+                ],
+            )),
+        );
         context.sessions.insert(
             TEST_SESSION_HANDLE,
             Box::new(PivSigningTestSession {
@@ -583,6 +593,25 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(
+            TEST_SLOT_ID,
+            Box::new(test_slot_with_mechanisms(
+                true,
+                &[
+                    (
+                        CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+                        CKF_VERIFY as CK_FLAGS,
+                    ),
+                    (
+                        CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+                        CKF_VERIFY as CK_FLAGS,
+                    ),
+                ],
+            )),
+        );
+    }
 
     let private_key = {
         let context = crate::lock_context().unwrap();
@@ -765,6 +794,16 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
     };
     assert_eq!(
         crate::C_SignInit(TEST_SESSION_HANDLE, &mut unsupported, 2),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
+    let mut unadvertised = CK_MECHANISM {
+        mechanism: CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::C_SignInit(TEST_SESSION_HANDLE, &mut unadvertised, 2),
         CKR_MECHANISM_INVALID as CK_RV
     );
 
@@ -1002,6 +1041,22 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(
+            TEST_SLOT_ID,
+            Box::new(test_slot_with_mechanisms(
+                true,
+                &[
+                    (
+                        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+                        CKF_VERIFY as CK_FLAGS,
+                    ),
+                    (CKM_EDDSA as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
+                ],
+            )),
+        );
+    }
 
     let signing_key = crate::certificate_builder::p256_key();
     let point =

@@ -25,6 +25,12 @@ fn verify_init(
         }
 
         let mechanism = _as_ref(mechanism)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_VERIFY as CK_FLAGS,
+        )?;
         let mac_length = aes_cmac_length(mechanism)?;
         let pss = if mac_length.is_some() {
             None

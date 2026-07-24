@@ -238,13 +238,12 @@ fn wrap_key(
         if !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !slot
-            .mechanisms()
-            .iter()
-            .any(|candidate| candidate.type_ == mechanism.mechanism)
-        {
-            return Err(CKR_MECHANISM_INVALID.into());
-        }
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_WRAP as CK_FLAGS,
+        )?;
         let target = ctx
             .resolve_object(key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
@@ -377,13 +376,12 @@ fn unwrap_key(
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
-        if !slot
-            .mechanisms()
-            .iter()
-            .any(|candidate| candidate.type_ == mechanism.mechanism)
-        {
-            return Err(CKR_MECHANISM_INVALID.into());
-        }
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_UNWRAP as CK_FLAGS,
+        )?;
         let wrapper = ctx
             .resolve_object(unwrapping_key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))

@@ -19,11 +19,17 @@ fn digest_init(
     mechanism: CK_MECHANISM_PTR,
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
-        ctx._get_session(session_handle)?;
+        let (slot_id, _flags, _logged_in) = ctx.session_details(session_handle)?;
         if ctx.digest_operations.contains_key(&session_handle) {
             return Err(Error::from(CKR_OPERATION_ACTIVE as CK_RV));
         }
         let mechanism = _as_ref(mechanism)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_DIGEST as CK_FLAGS,
+        )?;
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(Error::from(CKR_MECHANISM_PARAM_INVALID as CK_RV));
         }

@@ -1123,7 +1123,7 @@ pub(crate) fn make_yubihsm_keypair_collision_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
+            1, 2, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -1561,7 +1561,7 @@ fn public_discovery_test_slot(
     YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
         peer,
         (2, 4, 1),
-        vec![YUBIHSM_ALGO_RSA_2048],
+        vec![YUBIHSM_ALGO_RSA_2048, crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256],
         Rc::new(RefCell::new(Vec::new())),
         Some(credential),
     )
@@ -1571,7 +1571,11 @@ fn cache_test_slot(peer: Rc<ProtocolPeer>, public_discovery: bool) -> YubiHsmSlo
     if public_discovery {
         public_discovery_test_slot(peer, public_discovery_credential("password"))
     } else {
-        YubiHsmSlot::new(peer, (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048])
+        YubiHsmSlot::new(
+            peer,
+            (2, 4, 1),
+            vec![YUBIHSM_ALGO_RSA_2048, crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256],
+        )
     }
 }
 

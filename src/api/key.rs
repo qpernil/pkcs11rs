@@ -30,6 +30,12 @@ fn generate_key(
 
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_GENERATE as CK_FLAGS,
+        )?;
         if ctx.get_slot(slot_id)?.is_yubihsm() {
             let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
             validate_new_object_access(&object, flags, logged_in)?;
@@ -253,6 +259,12 @@ fn generate_key_pair(
     let private_handle = as_mut(private_key)?;
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        )?;
         if ctx.get_slot(slot_id)?.is_piv() {
             let generation = piv_generate_key_pair_parameters(
                 mechanism,
@@ -1042,6 +1054,12 @@ fn derive_key(
 
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            CKF_DERIVE as CK_FLAGS,
+        )?;
         let object = ctx
             .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
