@@ -61,12 +61,14 @@ UTF-8 bytes. Supplying only one variable makes `C_Initialize` return
 against each local and remote YubiHSM. A failure affects only that slot and
 does not interfere with ordinary user login.
 
-The symmetric discovery Authentication Key must have `get-opaque`, and its
-domains must include every certificate exposed before login plus the associated
-metadata records. Certificates and their matching asymmetric keys must have
-equal PKCS #11 `CKA_ID` values, either from their common YubiHSM object ID or
-from valid metadata records. Provision the credential in a domain containing
-only data suitable for this service-owned public view.
+The symmetric discovery Authentication Key must have `get-opaque`. Its domains
+must exactly match the domains of every YubiHSM Authentication Key accepted by
+`C_Login` while the public-certificates profile is active; a login using an
+Authentication Key with different domains returns `CKR_FUNCTION_REJECTED`.
+Certificates and their matching asymmetric keys must have equal PKCS #11
+`CKA_ID` values, either from their common YubiHSM object ID or from valid
+metadata records. Provision these credentials in domains containing only data
+suitable for this service-owned public view.
 
 After successful authentication, the module enumerates the credential-visible
 objects and reads object information. PKCS #11 metadata opaque objects are read
@@ -81,16 +83,17 @@ values remain lazy.
 The slot retains one object set and one lazy opaque-value cache shared by
 pre-login and post-login enumeration. Discovery and ordinary user sessions
 upsert observations into that set by stable `CKA_UNIQUE_ID`; there are no
-separate discovery and login views. A user login may therefore add public and
-private objects that were outside the discovery credential's domains.
+separate discovery and login views. Equal Authentication Key domains ensure
+that user enumeration cannot add objects outside the discovery credential's
+view.
 
-Attribute access reads an uncached opaque value through the active user session
-and later reconstructions of the same YubiHSM object ID and sequence reuse that
+Attribute access reads an uncached opaque value through the active user
+session. Without a user login, it opens a temporary session using the discovery
+credential, reads and caches the value, and closes that session immediately.
+Later reconstructions of the same YubiHSM object ID and sequence reuse that
 cache cell. Logout retains public objects and successful public value reads,
 but removes every private object and the metadata and attestation state that
 could reconstruct it. The next user login enumerates its private view again.
-A public opaque object first seen through user login remains discoverable after
-logout, but an uncached `CKA_VALUE` requires another user login.
 
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
@@ -98,12 +101,12 @@ opaque-value caches and retries public discovery. Reinitialize the module after
 replacing a USB device, changing a remote connector's attached device, or
 changing the domains visible to an authentication credential.
 
-The ephemeral discovery session is separate from the PKCS #11 user-login
-session, is closed after discovery, and is never used for private or mutating
-operations. Public-object mutation still requires an ordinary user login and a
-read/write PKCS #11 session. The password is not logged. A plaintext service
-configuration is acceptable when protected by normal file permissions; do not
-commit the credential.
+Every ephemeral discovery session is separate from the PKCS #11 user-login
+session, is closed after discovery or one lazy read, and is never used for
+private or mutating operations. Public-object mutation still requires an
+ordinary user login and a read/write PKCS #11 session. The password is not
+logged. A plaintext service configuration is acceptable when protected by
+normal file permissions; do not commit the credential.
 
 ### PKCS #11 metadata
 
