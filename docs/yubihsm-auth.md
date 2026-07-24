@@ -53,16 +53,16 @@ They therefore do not normally advertise `CKP_EXTENDED_PROVIDER`. The
 synthetic ABI fixture supplies the standard Extended Provider surface only for
 OASIS profile qualification tests.
 
-Profile objects cannot be modified, copied, or destroyed. Configure both of
-the following values to enable pre-login certificate discovery:
+Profile objects cannot be modified, copied, or destroyed. Configure a direct
+YubiHSM credential to enable pre-login certificate discovery:
 
 ```sh
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
 ```
 
-The ID is exactly four hexadecimal digits and the password is 8 through 64
-UTF-8 bytes. Supplying only one variable makes `C_Initialize` return
+The value uses the same `AAAApassword` representation as a direct YubiHSM
+`C_Login`: `AAAA` is exactly four hexadecimal digits and the password is 8
+through 64 UTF-8 bytes. A malformed value makes `C_Initialize` return
 `CKR_ARGUMENTS_BAD`. The same configured credential is tried independently
 against each local and remote YubiHSM. A failure affects only that slot and
 does not interfere with ordinary user login.

@@ -131,8 +131,7 @@ impl Context {
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_credential =
             configured_yubihsm_public_discovery_credential(
-                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID_ENV),
-                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_PASSWORD_ENV),
+                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL_ENV),
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_credential = None;

@@ -132,8 +132,7 @@ Optionally expose YubiHSM certificates and matching public keys before PKCS #11
 login with one low-privilege discovery Authentication Key:
 
 ```sh
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD='service-owned-password'
+export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
 ```
 
 The credential is tried independently on every YubiHSM. The public-certificate
@@ -142,7 +141,8 @@ module can build a valid public certificate and matching public-key view. The
 short-lived discovery session is separate from an ordinary PKCS #11 login and
 is closed after discovery or one logged-out lazy value read. While the profile
 is active, user-login Authentication Keys must have exactly the same domains as
-the discovery Authentication Key. Both variables must be supplied together.
+the discovery Authentication Key. The value uses the same `AAAApassword`
+representation as direct YubiHSM login.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.

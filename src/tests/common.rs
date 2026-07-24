@@ -80,49 +80,29 @@ fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
 #[test]
 fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential() {
     assert!(
-        crate::configured_yubihsm_public_discovery_credential(None, None)
+        crate::configured_yubihsm_public_discovery_credential(None)
             .unwrap()
             .is_none()
     );
-    let credential = crate::configured_yubihsm_public_discovery_credential(
-        Some("00a5".into()),
-        Some("discovery-password".into()),
-    )
-    .unwrap()
-    .unwrap();
+    let credential =
+        crate::configured_yubihsm_public_discovery_credential(Some(
+            "00a5discovery-password".into(),
+        ))
+        .unwrap()
+        .unwrap();
     assert_eq!(credential.authkey_id, 0x00a5);
     assert_eq!(credential.password.as_slice(), b"discovery-password");
 
-    assert!(
-        crate::configured_yubihsm_public_discovery_credential(
-            Some("0001".into()),
-            None,
-        )
-        .is_err()
-    );
-    assert!(
-        crate::configured_yubihsm_public_discovery_credential(
-            None,
-            Some("password".into()),
-        )
-        .is_err()
-    );
-    for id in ["1", "zzzz"] {
+    for credential in [
+        "",
+        "1password",
+        "zzzzpassword",
+        ":0001default:password",
+        "0001short",
+        "0001password-that-is-far-too-long-to-be-a-valid-yubihsm-authentication-key-password",
+    ] {
         assert!(
-            crate::configured_yubihsm_public_discovery_credential(
-                Some(id.into()),
-                Some("password".into()),
-            )
-            .is_err()
-        );
-    }
-    for password in ["short", "password-that-is-far-too-long-to-be-a-valid-yubihsm-authentication-key-password"] {
-        assert!(
-            crate::configured_yubihsm_public_discovery_credential(
-                Some("0001".into()),
-                Some(password.into()),
-            )
-            .is_err()
+            crate::configured_yubihsm_public_discovery_credential(Some(credential.into())).is_err()
         );
     }
 }
