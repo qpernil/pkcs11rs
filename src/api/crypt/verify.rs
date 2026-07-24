@@ -106,8 +106,7 @@ fn verify_init(
                             | YUBIHSM_ALGO_AES256,
                         ..
                     }
-                )
-                || !yubihsm_material_has_capability(&object.material, 0x33)))
+                )))
             || (hmac_mechanism.is_some()
                 && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
                     || object.key_type != hmac_mechanism.unwrap().0

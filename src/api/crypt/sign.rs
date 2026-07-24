@@ -199,26 +199,6 @@ fn sign_init(
         if !object.sign {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let required_capability = match mechanism.mechanism {
-            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-                || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                || piv_is_hashed_rsa_pkcs(x) =>
-            {
-                0x05
-            }
-            x if piv_is_pss_mechanism(x) => 0x06,
-            x if x == CKM_ECDSA as CK_MECHANISM_TYPE => 0x07,
-            x if x == CKM_EDDSA as CK_MECHANISM_TYPE => 0x08,
-            x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
-                || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
-            {
-                0x33
-            }
-            _ => 0x16,
-        };
-        if !yubihsm_material_has_capability(&object.material, required_capability) {
-            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
-        }
         let expected_key_type = match mechanism.mechanism {
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(x) => {
                 CKK_EC as CK_KEY_TYPE

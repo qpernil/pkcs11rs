@@ -502,13 +502,6 @@ fn yubihsm_attributes_to_capabilities(
     yubihsm_capabilities(&bits)
 }
 
-fn yubihsm_material_has_capability(material: &KeyMaterial, bit: usize) -> bool {
-    match material {
-        KeyMaterial::YubiHsm { capabilities, .. } => yubihsm_capability(capabilities, bit),
-        _ => true,
-    }
-}
-
 fn is_yubihsm_rsa(algorithm: u8) -> bool {
     matches!(
         algorithm,
