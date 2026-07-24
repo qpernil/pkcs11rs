@@ -128,21 +128,23 @@ export PKCS11RS_YUBIHSM_USB=0
 The setting defaults to `1`. Any value other than `0` or `1` makes
 `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
-Optionally expose YubiHSM certificates and matching public keys before PKCS #11
-login with one low-privilege discovery Authentication Key:
+Optionally expose YubiHSM public objects before PKCS #11 login with one
+low-privilege discovery Authentication Key:
 
 ```sh
 export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
 ```
 
-The credential is tried independently on every YubiHSM. The public-certificate
-profile is advertised only on slots where authentication succeeds and the
-module can build a valid public certificate and matching public-key view. The
-short-lived discovery session is separate from an ordinary PKCS #11 login and
-is closed after discovery or one logged-out lazy value read. While the profile
-is active, user-login Authentication Keys must have exactly the same domains as
-the discovery Authentication Key. The value uses the same `AAAApassword`
-representation as direct YubiHSM login.
+The credential is tried independently on every YubiHSM. The module retains all
+objects whose effective `CKA_PRIVATE` is false; internal PKCS #11 metadata
+companions remain hidden. The public-certificate profile is advertised only on
+slots where authentication and public discovery succeed, independently of the
+currently provisioned object inventory. Malformed provisioned objects are
+logged and skipped individually. The short-lived discovery session is separate
+from an ordinary PKCS #11 login and is closed after discovery or one logged-out
+lazy value read. While the profile is active, user-login Authentication Keys
+must have exactly the same domains as the discovery Authentication Key. The
+value uses the same `AAAApassword` representation as direct YubiHSM login.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
