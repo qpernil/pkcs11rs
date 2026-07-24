@@ -3,6 +3,7 @@ use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::RsaPrivateKey;
 
 include!("tests/common.rs");
+include!("tests/wrap.rs");
 include!("tests/general.rs");
 include!("tests/crypto.rs");
 include!("tests/object.rs");

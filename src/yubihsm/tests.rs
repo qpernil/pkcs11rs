@@ -4,10 +4,12 @@ use crate::{
     Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA,
     CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
     CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS,
-    CK_PROFILE_ID, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+    CK_PROFILE_ID, YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256,
     YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
-    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ASYMMETRIC_KEY,
-    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
+    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -124,6 +126,7 @@ pub(crate) struct ProtocolPeer {
     connection_epoch: Cell<u64>,
     fail_next_put_opaque: Cell<bool>,
     fail_delete_opaque: RefCell<HashSet<u16>>,
+    last_wrapped_object: RefCell<Option<ObjectInfo>>,
     product: &'static str,
     serial: &'static str,
 }
@@ -174,6 +177,7 @@ impl ProtocolPeer {
             connection_epoch: Cell::new(0),
             fail_next_put_opaque: Cell::new(false),
             fail_delete_opaque: RefCell::new(HashSet::new()),
+            last_wrapped_object: RefCell::new(None),
             product: "YubiHSM",
             serial: "16909060",
         }
@@ -646,7 +650,17 @@ impl ProtocolPeer {
             }
             value if value == CommandCode::GetPublicKey as u8 => {
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
+                let algorithm = self
+                    .metadata_objects
+                    .borrow()
+                    .get(&id)
+                    .map(|(info, _)| info.algorithm);
+                if algorithm == Some(YUBIHSM_ALGO_EC_P256) {
+                    let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
+                    let mut response = vec![YUBIHSM_ALGO_EC_P256];
+                    response.extend_from_slice(&p256_public_key(&private)?);
+                    (inner.command | RESPONSE_BIT, response)
+                } else if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
                     let private_key = x25519_dalek::StaticSecret::from(*private_key);
                     let mut key = vec![56];
                     key.extend_from_slice(x25519_dalek::PublicKey::from(&private_key).as_bytes());
@@ -670,10 +684,20 @@ impl ProtocolPeer {
             }
             value
                 if value == CommandCode::GenerateAsymmetricKey as u8
-                    || value == CommandCode::PutAsymmetricKey as u8 =>
+                    || value == CommandCode::PutAsymmetricKey as u8
+                    || value == CommandCode::GenerateWrapKey as u8 =>
             {
                 let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let id = if requested == 0 { 2 } else { requested };
+                let id = if requested == 0 {
+                    (2..=u16::MAX)
+                        .find(|candidate| {
+                            !self.objects.borrow().contains(candidate)
+                                && !self.metadata_objects.borrow().contains_key(candidate)
+                        })
+                        .ok_or(CKR_DEVICE_MEMORY)?
+                } else {
+                    requested
+                };
                 if inner.command == CommandCode::GenerateAsymmetricKey as u8
                     && inner.data.get(52) == Some(&56)
                 {
@@ -691,9 +715,52 @@ impl ProtocolPeer {
                         .borrow_mut()
                         .insert(id, private_key);
                 }
-                if !self.objects.borrow().contains(&id) {
-                    self.objects.borrow_mut().push(id);
-                }
+                let object_type = if inner.command == CommandCode::GenerateWrapKey as u8 {
+                    YUBIHSM_WRAP_KEY
+                } else {
+                    YUBIHSM_ASYMMETRIC_KEY
+                };
+                let algorithm = *inner.data.get(52).ok_or(CKR_DATA_LEN_RANGE)?;
+                let length = match algorithm {
+                    YUBIHSM_ALGO_RSA_2048 => 256,
+                    YUBIHSM_ALGO_RSA_3072 => 384,
+                    YUBIHSM_ALGO_RSA_4096 => 512,
+                    _ => 32,
+                };
+                let label = inner.data[2..42]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .and_then(|label| std::str::from_utf8(label).ok())
+                    .ok_or(CKR_DEVICE_ERROR)?
+                    .to_owned();
+                let delegated_capabilities = if object_type == YUBIHSM_WRAP_KEY {
+                    inner
+                        .data
+                        .get(53..61)
+                        .ok_or(CKR_DATA_LEN_RANGE)?
+                        .try_into()
+                        .unwrap()
+                } else {
+                    [0; 8]
+                };
+                self.metadata_objects.borrow_mut().insert(
+                    id,
+                    (
+                        ObjectInfo {
+                            capabilities: inner.data[44..52].try_into().unwrap(),
+                            id,
+                            length,
+                            domains: u16::from_be_bytes(inner.data[42..44].try_into().unwrap()),
+                            object_type,
+                            algorithm,
+                            sequence: 1,
+                            origin: 1,
+                            label,
+                            delegated_capabilities,
+                        },
+                        Vec::new(),
+                    ),
+                );
                 (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
             }
             value if value == CommandCode::PutOpaque as u8 => {
@@ -750,11 +817,152 @@ impl ProtocolPeer {
                     self.objects
                         .borrow_mut()
                         .retain(|candidate| *candidate != id);
-                    if object_type == YUBIHSM_OPAQUE {
+                    let remove_metadata = self
+                        .metadata_objects
+                        .borrow()
+                        .get(&id)
+                        .is_some_and(|(info, _)| info.object_type == object_type);
+                    if remove_metadata {
                         self.metadata_objects.borrow_mut().remove(&id);
                     }
                     (inner.command | RESPONSE_BIT, vec![])
                 }
+            }
+            value
+                if value == CommandCode::ExportWrapped as u8 && inner.data.len() >= 5
+                    || (value == CommandCode::GetRsaWrappedKey as u8
+                        || value == CommandCode::ExportRsaWrapped as u8)
+                        && inner.data.len() >= 28 =>
+            {
+                let target_type = inner.data[2];
+                let target_id = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
+                if let Some((info, _)) = self
+                    .metadata_objects
+                    .borrow()
+                    .get(&target_id)
+                    .filter(|(info, _)| info.object_type == target_type)
+                {
+                    *self.last_wrapped_object.borrow_mut() = Some(info.clone());
+                }
+                let mut wrapped = b"wrapped-object:".to_vec();
+                wrapped.push(inner.command);
+                wrapped.extend_from_slice(&inner.data);
+                (inner.command | RESPONSE_BIT, wrapped)
+            }
+            value if value == CommandCode::ImportWrapped as u8 && inner.data.len() > 2 => {
+                if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
+                    info.sequence = info.sequence.wrapping_add(1);
+                    info.origin = 2;
+                    self.metadata_objects
+                        .borrow_mut()
+                        .insert(info.id, (info.clone(), Vec::new()));
+                    let [high, low] = info.id.to_be_bytes();
+                    (
+                        inner.command | RESPONSE_BIT,
+                        [info.object_type, high, low].to_vec(),
+                    )
+                } else {
+                    let id = 20;
+                    self.metadata_objects.borrow_mut().insert(
+                        id,
+                        (
+                            ObjectInfo {
+                                capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
+                                id,
+                                length: 16,
+                                domains: 0xffff,
+                                object_type: YUBIHSM_SYMMETRIC_KEY,
+                                algorithm: YUBIHSM_ALGO_AES128,
+                                sequence: 1,
+                                origin: 2,
+                                label: "AES-CCM unwrapped".to_owned(),
+                                delegated_capabilities: [0; 8],
+                            },
+                            Vec::new(),
+                        ),
+                    );
+                    (
+                        inner.command | RESPONSE_BIT,
+                        [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
+                    )
+                }
+            }
+            value if value == CommandCode::ImportRsaWrapped as u8 && inner.data.len() > 25 => {
+                if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
+                    info.sequence = info.sequence.wrapping_add(1);
+                    info.origin = 2;
+                    self.metadata_objects
+                        .borrow_mut()
+                        .insert(info.id, (info.clone(), Vec::new()));
+                    let [high, low] = info.id.to_be_bytes();
+                    (
+                        inner.command | RESPONSE_BIT,
+                        [info.object_type, high, low].to_vec(),
+                    )
+                } else {
+                    let id = 21;
+                    self.metadata_objects.borrow_mut().insert(
+                        id,
+                        (
+                            ObjectInfo {
+                                capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
+                                id,
+                                length: 16,
+                                domains: 0xffff,
+                                object_type: YUBIHSM_SYMMETRIC_KEY,
+                                algorithm: YUBIHSM_ALGO_AES128,
+                                sequence: 1,
+                                origin: 2,
+                                label: "RSA unwrapped object".to_owned(),
+                                delegated_capabilities: [0; 8],
+                            },
+                            Vec::new(),
+                        ),
+                    );
+                    (
+                        inner.command | RESPONSE_BIT,
+                        [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
+                    )
+                }
+            }
+            value if value == CommandCode::PutRsaWrappedKey as u8 && inner.data.len() >= 58 => {
+                let object_type = inner.data[2];
+                let requested = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
+                let id = if requested == 0 { 22 } else { requested };
+                let label = inner.data[5..45]
+                    .split(|byte| *byte == 0)
+                    .next()
+                    .and_then(|label| std::str::from_utf8(label).ok())
+                    .ok_or(CKR_DEVICE_ERROR)?
+                    .to_owned();
+                let info = ObjectInfo {
+                    capabilities: inner.data[47..55].try_into().unwrap(),
+                    id,
+                    length: match inner.data[55] {
+                        YUBIHSM_ALGO_AES128 => 16,
+                        YUBIHSM_ALGO_AES192 => 24,
+                        YUBIHSM_ALGO_AES256 => 32,
+                        YUBIHSM_ALGO_RSA_2048 => 256,
+                        YUBIHSM_ALGO_RSA_3072 => 384,
+                        YUBIHSM_ALGO_RSA_4096 => 512,
+                        _ => 32,
+                    },
+                    domains: u16::from_be_bytes(inner.data[45..47].try_into().unwrap()),
+                    object_type,
+                    algorithm: inner.data[55],
+                    sequence: 1,
+                    origin: 2,
+                    label,
+                    delegated_capabilities: [0; 8],
+                };
+                self.metadata_objects
+                    .borrow_mut()
+                    .insert(id, (info, Vec::new()));
+                let [high, low] = id.to_be_bytes();
+                (
+                    inner.command | RESPONSE_BIT,
+                    [object_type, high, low].to_vec(),
+                )
             }
             value if value == CommandCode::SignPkcs1 as u8 => {
                 (inner.command | RESPONSE_BIT, vec![0x5a; 256])
@@ -863,7 +1071,7 @@ pub(crate) fn make_yubihsm_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -885,7 +1093,7 @@ pub(crate) fn make_yubihsm_asymmetric_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -915,7 +1123,7 @@ pub(crate) fn make_yubihsm_keypair_collision_test_slot() -> (
         peer,
         (2, 4, 1),
         vec![
-            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 29, 46, 48, 50, 51, 52, 53, 54, 55, 56,
         ],
     );
     slot.trust_prefix = Some(trust.prefix.clone());
@@ -3154,8 +3362,15 @@ fn every_authenticated_command_crosses_the_secure_transport() {
                     | CommandCode::GetObjectInfo
                     | CommandCode::GetPublicKey
                     | CommandCode::GenerateAsymmetricKey
+                    | CommandCode::GenerateWrapKey
                     | CommandCode::PutAsymmetricKey
                     | CommandCode::DeleteObject
+                    | CommandCode::ExportWrapped
+                    | CommandCode::ImportWrapped
+                    | CommandCode::GetRsaWrappedKey
+                    | CommandCode::PutRsaWrappedKey
+                    | CommandCode::ExportRsaWrapped
+                    | CommandCode::ImportRsaWrapped
                     | CommandCode::SignPkcs1
                     | CommandCode::DecryptPkcs1
                     | CommandCode::DecryptEcb
