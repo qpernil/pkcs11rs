@@ -30,6 +30,7 @@ CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68
 CKR_MECHANISM_INVALID = 0x70
+CKR_MECHANISM_PARAM_INVALID = 0x71
 CKR_OBJECT_HANDLE_INVALID = 0x82
 CKR_OPERATION_NOT_INITIALIZED = 0x91
 CKR_PIN_INCORRECT = 0xA0
@@ -59,12 +60,23 @@ CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
+CKM_SHA_1 = 0x00000220
+CKM_SHA256 = 0x00000250
+CKM_SHA224 = 0x00000255
+CKM_SHA384 = 0x00000260
+CKM_SHA512 = 0x00000270
+CKM_SHA3_256 = 0x000002B0
+CKM_SHA3_224 = 0x000002B5
+CKM_SHA3_384 = 0x000002C0
+CKM_SHA3_512 = 0x000002D0
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
 CKM_AES_ECB = 0x00001081
 CKM_AES_CBC = 0x00001082
 CKM_AES_GCM = 0x00001087
+CKM_AES_CMAC = 0x0000108A
+CKM_AES_CMAC_GENERAL = 0x0000108B
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
 CKO_PUBLIC_KEY = 0x00000002
@@ -992,20 +1004,8 @@ class Pkcs11AbiTests(unittest.TestCase):
             ABI_TEST_SCP11_SLOT_ID,
         ])
 
-    def test_yubihsm_profile_objects_are_public_and_immutable(self) -> None:
+    def test_profile_objects_match_each_slot_capability(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        session_value = CK_ULONG()
-        self.assertEqual(
-            self.lib.C_OpenSession(
-                ABI_TEST_YUBIHSM_SLOT_ID,
-                CKF_SERIAL_SESSION | CKF_RW_SESSION,
-                None,
-                None,
-                ctypes.byref(session_value),
-            ),
-            CKR_OK,
-        )
-        session = session_value.value
         function_list = ctypes.POINTER(CK_FUNCTION_LIST)()
         self.assertEqual(
             self.lib.C_GetFunctionList(ctypes.byref(function_list)),
@@ -1024,27 +1024,9 @@ class Pkcs11AbiTests(unittest.TestCase):
         find_final = ctypes.CFUNCTYPE(CK_RV, CK_ULONG)(
             function_list.contents.C_FindObjectsFinal
         )
-        object_class = CK_ULONG(CKO_PROFILE)
-        template = (CK_ATTRIBUTE * 1)(
-            CK_ATTRIBUTE(
-                CKA_CLASS,
-                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
-                ctypes.sizeof(object_class),
-            )
-        )
-        self.assertEqual(
-            find_init(session, template, len(template)), CKR_OK
-        )
-        handles = (CK_ULONG * 8)()
-        found = CK_ULONG()
-        self.assertEqual(
-            find(session, handles, len(handles), ctypes.byref(found)),
-            CKR_OK,
-        )
-        self.assertEqual(find_final(session), CKR_OK)
-        self.assertEqual(found.value, 4)
-
-        def bytes_attribute(object_handle: int, attribute_type: int) -> bytes:
+        def bytes_attribute(
+            session: int, object_handle: int, attribute_type: int
+        ) -> bytes:
             attribute = CK_ATTRIBUTE(attribute_type, None, 0)
             self.assertEqual(
                 self.lib.C_GetAttributeValue(
@@ -1062,36 +1044,90 @@ class Pkcs11AbiTests(unittest.TestCase):
             )
             return bytes(value)
 
-        profile_ids = set()
-        unique_ids = set()
-        for handle in handles[: found.value]:
-            profile_ids.add(
-                int.from_bytes(
-                    bytes_attribute(handle, CKA_PROFILE_ID),
-                    byteorder=sys.byteorder,
-                )
-            )
-            unique_ids.add(bytes_attribute(handle, CKA_UNIQUE_ID))
-            self.assertEqual(bytes_attribute(handle, CKA_TOKEN), b"\x01")
-            self.assertEqual(bytes_attribute(handle, CKA_PRIVATE), b"\x00")
-            self.assertEqual(bytes_attribute(handle, CKA_MODIFIABLE), b"\x00")
-            self.assertEqual(bytes_attribute(handle, CKA_COPYABLE), b"\x00")
-            self.assertEqual(bytes_attribute(handle, CKA_DESTROYABLE), b"\x00")
-            self.assertEqual(
-                self.lib.C_DestroyObject(session, handle),
-                CKR_ACTION_PROHIBITED,
-            )
-
-        self.assertEqual(
-            profile_ids,
-            {
+        expected_profiles = {
+            ABI_TEST_SLOT_ID: {
+                CKP_BASELINE_PROVIDER,
+            },
+            ABI_TEST_PIV_SLOT_ID: {
+                CKP_BASELINE_PROVIDER,
+                CKP_AUTHENTICATION_TOKEN,
+                CKP_PUBLIC_CERTIFICATES_TOKEN,
+            },
+            ABI_TEST_SCP03_SLOT_ID: {CKP_BASELINE_PROVIDER},
+            ABI_TEST_YUBIHSM_SLOT_ID: {
                 CKP_BASELINE_PROVIDER,
                 CKP_EXTENDED_PROVIDER,
                 CKP_AUTHENTICATION_TOKEN,
                 CKP_PUBLIC_CERTIFICATES_TOKEN,
             },
-        )
-        self.assertEqual(len(unique_ids), 4)
+            ABI_TEST_SCP11_SLOT_ID: {CKP_BASELINE_PROVIDER},
+        }
+        all_unique_ids: dict[int, bytes] = {}
+        for slot_id, expected in expected_profiles.items():
+            session_value = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_OpenSession(
+                    slot_id,
+                    CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                    None,
+                    None,
+                    ctypes.byref(session_value),
+                ),
+                CKR_OK,
+            )
+            session = session_value.value
+            object_class = CK_ULONG(CKO_PROFILE)
+            template = (CK_ATTRIBUTE * 1)(
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                    ctypes.sizeof(object_class),
+                )
+            )
+            self.assertEqual(find_init(session, template, len(template)), CKR_OK)
+            handles = (CK_ULONG * 8)()
+            found = CK_ULONG()
+            self.assertEqual(
+                find(session, handles, len(handles), ctypes.byref(found)),
+                CKR_OK,
+            )
+            self.assertEqual(find_final(session), CKR_OK)
+
+            profile_ids = set()
+            unique_ids = set()
+            for handle in handles[: found.value]:
+                profile_id = int.from_bytes(
+                    bytes_attribute(session, handle, CKA_PROFILE_ID),
+                    byteorder=sys.byteorder,
+                )
+                profile_ids.add(profile_id)
+                unique_id = bytes_attribute(session, handle, CKA_UNIQUE_ID)
+                unique_ids.add(unique_id)
+                self.assertEqual(
+                    all_unique_ids.setdefault(profile_id, unique_id),
+                    unique_id,
+                )
+                self.assertEqual(
+                    bytes_attribute(session, handle, CKA_TOKEN), b"\x01"
+                )
+                self.assertEqual(
+                    bytes_attribute(session, handle, CKA_PRIVATE), b"\x00"
+                )
+                self.assertEqual(
+                    bytes_attribute(session, handle, CKA_MODIFIABLE), b"\x00"
+                )
+                self.assertEqual(
+                    bytes_attribute(session, handle, CKA_COPYABLE), b"\x00"
+                )
+                self.assertEqual(
+                    bytes_attribute(session, handle, CKA_DESTROYABLE), b"\x00"
+                )
+                self.assertEqual(
+                    self.lib.C_DestroyObject(session, handle),
+                    CKR_ACTION_PROHIBITED,
+                )
+            self.assertEqual(profile_ids, expected)
+            self.assertEqual(len(unique_ids), len(expected))
 
     def test_abi_piv_fixture_exercises_sign_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -2112,6 +2148,163 @@ done
             ),
         )
 
+    def test_abi_yubihsm_aes_cmac_variants_match_nist_vector(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertIn(CKM_AES_CMAC, mechanisms)
+        self.assertIn(CKM_AES_CMAC_GENERAL, mechanisms)
+
+        key_id = (CK_BYTE * 2)(0, 3)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id))
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        message_bytes = bytes.fromhex(
+            "6bc1bee22e409f96e93d7e117393172a"
+            "ae2d8a571e03ac9c9eb76fac45af8e51"
+            "30c81c46a35ce411"
+        )
+        message = (CK_BYTE * len(message_bytes)).from_buffer_copy(message_bytes)
+        expected = bytes.fromhex("dfa66747de9ae63030ca32611497c827")
+        mechanism = CK_MECHANISM(CKM_AES_CMAC, None, 0)
+        mac = (CK_BYTE * 16)()
+        mac_length = CK_ULONG(len(mac))
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                message,
+                len(message),
+                mac,
+                ctypes.byref(mac_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(mac), expected)
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, message, len(message), mac, len(mac)),
+            CKR_OK,
+        )
+
+        general_length = CK_ULONG(8)
+        mechanism = CK_MECHANISM(
+            CKM_AES_CMAC_GENERAL,
+            ctypes.cast(ctypes.byref(general_length), CK_VOID_PTR),
+            ctypes.sizeof(general_length),
+        )
+        truncated_mac = (CK_BYTE * general_length.value)()
+        truncated_length = CK_ULONG(len(truncated_mac))
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SignUpdate(session, message, 17),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SignUpdate(
+                session,
+                ctypes.cast(
+                    ctypes.byref(message, 17),
+                    ctypes.POINTER(CK_BYTE),
+                ),
+                len(message) - 17,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_SignFinal(
+                session,
+                truncated_mac,
+                ctypes.byref(truncated_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(truncated_mac), expected[:8])
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(
+                session,
+                message,
+                len(message),
+                truncated_mac,
+                len(truncated_mac),
+            ),
+            CKR_OK,
+        )
+
+        general_length.value = 0
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        empty_mac = (CK_BYTE * 1)()
+        empty_mac_length = CK_ULONG(0)
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                message,
+                len(message),
+                empty_mac,
+                ctypes.byref(empty_mac_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, message, len(message), None, 0),
+            CKR_OK,
+        )
+
+        general_length.value = 17
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_MECHANISM_PARAM_INVALID,
+        )
+
     def test_abi_yubihsm_authentication_keys_are_generic_secrets(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
@@ -3125,6 +3318,15 @@ done
             CKM_EC_KEY_PAIR_GEN,
             CKM_ECDSA,
             CKM_GENERIC_SECRET_KEY_GEN,
+            CKM_SHA_1,
+            CKM_SHA224,
+            CKM_SHA256,
+            CKM_SHA384,
+            CKM_SHA512,
+            CKM_SHA3_224,
+            CKM_SHA3_256,
+            CKM_SHA3_384,
+            CKM_SHA3_512,
         ]
         count = CK_ULONG()
         self.assertEqual(

@@ -868,7 +868,8 @@ class OasisProfileTests(unittest.TestCase):
             "module": str(self.lib._name),
             "module_sha256": self.module_sha256,
         }
-        (path / f"{name}.json").write_text(
+        suffix = getattr(self, "result_suffix", "")
+        (path / f"{name}{suffix}.json").write_text(
             json.dumps({**common, **result}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
