@@ -1367,32 +1367,27 @@ fn get_attribute_value(
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
-            if let KeyMaterial::YubiHsm {
-                id,
-                object_type,
-                algorithm,
-                value,
-                ..
-            } = &object.material
+            if matches!(
+                &object.material,
+                KeyMaterial::YubiHsm {
+                    object_type: YUBIHSM_OPAQUE,
+                    algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+                    ..
+                }
+            ) && is_certificate_attribute(attribute.type_)
             {
-                if *object_type == YUBIHSM_OPAQUE
-                    && *algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
-                    && is_certificate_attribute(attribute.type_)
-                {
-                    let payload = yubihsm_opaque_value(ctx, session_handle, *id, value)?;
-                    match piv_certificate_attribute(&payload, attribute.type_) {
-                        Some(value) => {
-                            if let Err(error) = write_attribute_value(attribute, &value) {
-                                rv = combine_attribute_rv(rv, error);
-                            }
-                        }
-                        None => {
-                            attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                            rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                match object_attribute_value(ctx, session_handle, &object, attribute.type_)? {
+                    Some(value) => {
+                        if let Err(error) = write_attribute_value(attribute, &value) {
+                            rv = combine_attribute_rv(rv, error);
                         }
                     }
-                    continue;
+                    None => {
+                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
+                    }
                 }
+                continue;
             }
             if attribute.type_ == CKA_VALUE as CK_ATTRIBUTE_TYPE {
                 match &object.material {
@@ -1504,6 +1499,28 @@ fn yubihsm_opaque_value(
         .map_err(|_| Error::from(CKR_CANT_LOCK))?
         .clone()
         .ok_or(CKR_DEVICE_ERROR.into())
+}
+
+fn object_attribute_value(
+    ctx: &Context,
+    session_handle: CK_SESSION_HANDLE,
+    object: &TokenObject,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<Vec<u8>>, Error> {
+    if let KeyMaterial::YubiHsm {
+        id,
+        object_type: YUBIHSM_OPAQUE,
+        algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+        value,
+        ..
+    } = &object.material
+    {
+        if is_certificate_attribute(attribute_type) {
+            let payload = yubihsm_opaque_value(ctx, session_handle, *id, value)?;
+            return Ok(piv_certificate_attribute(&payload, attribute_type));
+        }
+    }
+    Ok(object.attribute_value(attribute_type))
 }
 
 fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
@@ -1790,15 +1807,25 @@ fn find_objects_init(
         }
         ctx.insert_session_objects(slot_id, session_handle)?;
         log!(2, "C_FindObjectsInit template {:?}", templ);
-        let mut objects: Vec<CK_OBJECT_HANDLE> = ctx
-            .resolved_objects()?
-            .into_iter()
-            .filter(|(_handle, object)| {
-                object.is_visible_to(session_handle, slot_id, logged_in)
-                    && object.matches_template(&templ)
-            })
-            .map(|(handle, _object)| handle)
-            .collect();
+        let mut objects = Vec::new();
+        for (handle, object) in ctx.resolved_objects()? {
+            if !object.is_visible_to(session_handle, slot_id, logged_in) {
+                continue;
+            }
+            let mut matches = true;
+            for (attribute_type, expected) in &templ {
+                if object_attribute_value(ctx, session_handle, &object, *attribute_type)?
+                    .as_ref()
+                    != Some(expected)
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                objects.push(handle);
+            }
+        }
         objects.sort();
         ctx.find_operations
             .insert(session_handle, FindOperation { objects, next: 0 });
