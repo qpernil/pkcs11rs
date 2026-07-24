@@ -1,3 +1,5 @@
+use ghash::{GHash, universal_hash::UniversalHash};
+
 #[no_mangle]
 pub extern "C" fn C_EncryptInit(
     session_handle: CK_SESSION_HANDLE,
@@ -261,44 +263,19 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
 const AES_BLOCK_LENGTH: usize = 16;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 
-fn ghash_multiply(left: u128, right: u128) -> u128 {
-    const REDUCTION: u128 = 0xe1000000000000000000000000000000;
-    let mut product = 0;
-    let mut factor = right;
-    for bit in 0..128 {
-        if left & (1u128 << (127 - bit)) != 0 {
-            product ^= factor;
-        }
-        factor = if factor & 1 == 0 {
-            factor >> 1
-        } else {
-            (factor >> 1) ^ REDUCTION
-        };
-    }
-    product
-}
-
-fn ghash_update(mut hash: u128, key: u128, data: &[u8]) -> u128 {
-    for chunk in data.chunks(AES_BLOCK_LENGTH) {
-        let mut block = [0; AES_BLOCK_LENGTH];
-        block[..chunk.len()].copy_from_slice(chunk);
-        hash = ghash_multiply(hash ^ u128::from_be_bytes(block), key);
-    }
-    hash
-}
-
 fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
     let aad_bits = u64::try_from(aad.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
         .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
     let ciphertext_bits = u64::try_from(ciphertext.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
         .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-    let key = u128::from_be_bytes(key);
-    let mut hash = ghash_update(0, key, aad);
-    hash = ghash_update(hash, key, ciphertext);
+    let mut hash = GHash::new(&key.into());
+    hash.update_padded(aad);
+    hash.update_padded(ciphertext);
     let mut lengths = [0; AES_BLOCK_LENGTH];
     lengths[..8].copy_from_slice(&aad_bits.to_be_bytes());
     lengths[8..].copy_from_slice(&ciphertext_bits.to_be_bytes());
-    Ok(ghash_multiply(hash ^ u128::from_be_bytes(lengths), key).to_be_bytes())
+    hash.update(&[lengths.into()]);
+    Ok(hash.finalize().into())
 }
 
 fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) {
