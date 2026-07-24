@@ -84,20 +84,45 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
             .unwrap()
             .is_none()
     );
-    let credential =
-        crate::configured_yubihsm_public_discovery_credential(Some(
-            "00a5discovery-password".into(),
-        ))
-        .unwrap()
-        .unwrap();
+    let credential = crate::configured_yubihsm_public_discovery_credential(Some(
+        "00a5discovery-password".into(),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(credential.username, b"00a5");
     assert_eq!(credential.authkey_id, 0x00a5);
-    assert_eq!(credential.password.as_slice(), b"discovery-password");
+    assert_eq!(
+        credential
+            .password
+            .borrow()
+            .as_deref()
+            .map(Vec::as_slice),
+        Some(b"discovery-password".as_slice())
+    );
+
+    let credential = crate::configured_yubihsm_public_discovery_credential(Some(
+        ":0001default key@12345678:password".into(),
+    ))
+    .unwrap()
+    .unwrap();
+    assert_eq!(credential.username, b":0001default key@12345678");
+    assert_eq!(credential.authkey_id, 1);
+    assert_eq!(
+        credential
+            .password
+            .borrow()
+            .as_deref()
+            .map(Vec::as_slice),
+        Some(b"password".as_slice())
+    );
+    assert!(credential.uses_hsmauth());
 
     for credential in [
         "",
         "1password",
         "zzzzpassword",
-        ":0001default:password",
+        ":0001default",
+        ":0001default:password-is-over-16-bytes",
         "0001short",
         "0001password-that-is-far-too-long-to-be-a-valid-yubihsm-authentication-key-password",
     ] {

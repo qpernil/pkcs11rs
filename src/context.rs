@@ -131,7 +131,7 @@ impl Context {
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_credential =
             configured_yubihsm_public_discovery_credential(
-                std::env::var_os(YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL_ENV),
+                std::env::var_os(YUBIHSM_DISCOVERY_ENV),
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_credential = None;
@@ -622,19 +622,7 @@ impl Context {
                                         log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
                                     }
-                                    let token_objects = match slot.token_objects(slot_id) {
-                                        Ok(objects) => objects,
-                                        Err(error) => {
-                                            log!(2, "YubiHSM public object discovery: {:?}", error);
-                                            slot.profile_objects(slot_id)
-                                        }
-                                    };
                                     self.slots.insert(slot_id, slot);
-                                    if let Err(error) =
-                                        self.reconcile_slot_token_objects(slot_id, token_objects)
-                                    {
-                                        log!(2, "YubiHSM object registration: {:?}", error);
-                                    }
                                     self.dynamic_slots.insert(slot_id);
                                     seen_dynamic_slots.insert(slot_id);
                                 }
@@ -681,25 +669,7 @@ impl Context {
                     connector.set_unavailable();
                 }
             }
-            let token_objects = if slot.is_present() {
-                match slot.token_objects(slot_id) {
-                    Ok(objects) => objects,
-                    Err(error) => {
-                        log!(
-                            2,
-                            "YubiHSM public object discovery through {url}: {:?}",
-                            error
-                        );
-                        slot.profile_objects(slot_id)
-                    }
-                }
-            } else {
-                Vec::new()
-            };
             self.slots.insert(slot_id, slot);
-            if let Err(error) = self.reconcile_slot_token_objects(slot_id, token_objects) {
-                log!(2, "YubiHSM object registration through {url}: {:?}", error);
-            }
             self.dynamic_slots.insert(slot_id);
             seen_dynamic_slots.insert(slot_id);
         }
@@ -949,6 +919,31 @@ impl Context {
                         seen_dynamic_slots.insert(slot_id);
                     }
                 }
+            }
+        }
+        let yubihsm_slot_ids = self
+            .slots
+            .iter()
+            .filter_map(|(slot_id, slot)| {
+                (slot.is_yubihsm()
+                    && (!self.dynamic_slots.contains(slot_id)
+                        || seen_dynamic_slots.contains(slot_id)))
+                .then_some(*slot_id)
+            })
+            .collect::<Vec<_>>();
+        for slot_id in yubihsm_slot_ids {
+            let token_objects = match self.slots.get(&slot_id) {
+                Some(slot) if slot.is_present() => match slot.token_objects(slot_id) {
+                    Ok(objects) => objects,
+                    Err(error) => {
+                        log!(2, "YubiHSM public object discovery: {:?}", error);
+                        slot.profile_objects(slot_id)
+                    }
+                },
+                _ => Vec::new(),
+            };
+            if let Err(error) = self.reconcile_slot_token_objects(slot_id, token_objects) {
+                log!(2, "YubiHSM object registration: {:?}", error);
             }
         }
         let removed_slots: Vec<CK_SLOT_ID> = self

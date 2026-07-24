@@ -132,7 +132,11 @@ Optionally expose YubiHSM public objects before PKCS #11 login with one
 low-privilege discovery Authentication Key:
 
 ```sh
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
+# Direct YubiHSM Authentication Key
+export PKCS11RS_YUBIHSM_DISCOVERY='00a5service-owned-password'
+
+# Or a YubiHSM Auth credential used with target Authentication Key 00a5
+export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-password'
 ```
 
 The credential is tried independently on every YubiHSM. The module retains all
@@ -145,8 +149,11 @@ until login, cleanup, reconnection, or secure-session invalidation. `C_Login`
 closes it and installs the user session; after `C_Logout`, the discovery session
 is reopened lazily by the next public hardware read. While the profile is
 active, user-login Authentication Keys must have exactly the same domains as
-the discovery Authentication Key. The value uses the same `AAAApassword`
-representation as direct YubiHSM login.
+the discovery Authentication Key. The value accepts the same direct or
+YubiHSM Auth selector as `C_Login`. The password may be omitted when
+`PKCS11RS_PINENTRY` is configured; it is requested lazily once and reused for
+all YubiHSMs. CCID applets, including YubiHSM Auth providers, are discovered
+before this YubiHSM discovery pass.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.

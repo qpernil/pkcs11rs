@@ -54,18 +54,39 @@ synthetic ABI fixture supplies the standard Extended Provider surface only for
 OASIS profile qualification tests.
 
 Profile objects cannot be modified, copied, or destroyed. Configure a direct
-YubiHSM credential to enable pre-login public-object discovery:
+YubiHSM credential or a YubiHSM Auth credential to enable pre-login
+public-object discovery:
 
 ```sh
-export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
+# Direct YubiHSM Authentication Key
+export PKCS11RS_YUBIHSM_DISCOVERY='00a5service-owned-password'
+
+# YubiHSM Auth credential used with target Authentication Key 00a5
+export PKCS11RS_YUBIHSM_DISCOVERY=':00a5public discovery@12345678:credential-password'
 ```
 
-The value uses the same `AAAApassword` representation as a direct YubiHSM
-`C_Login`: `AAAA` is exactly four hexadecimal digits and the password is 8
-through 64 UTF-8 bytes. A malformed value makes `C_Initialize` return
-`CKR_ARGUMENTS_BAD`. The same configured credential is tried independently
-against each local and remote YubiHSM. A failure affects only that slot and
-does not interfere with ordinary user login.
+The value uses one of the same selectors as YubiHSM `C_Login`. Direct
+authentication is `AAAApassword`, where `AAAA` is exactly four hexadecimal
+digits and the password is 8 through 64 UTF-8 bytes. YubiHSM Auth
+authentication is `:AAAAlabel[@source]:password`, where the credential password
+is at most 16 UTF-8 bytes. The optional source selects the YubiHSM Auth device
+when labels are not unique. An explicit trailing colon represents an empty
+credential password.
+
+The password may be omitted when `PKCS11RS_PINENTRY` is configured. Public
+discovery requests it lazily after finding the required YubiHSM Auth provider,
+caches it in zeroizing module memory, and reuses it across every YubiHSM because
+the discovery credential is global. Direct configuration consisting of only
+the four-digit Authentication Key ID uses the same behavior. Without pinentry,
+the password must be explicit. A malformed or incomplete value makes
+`C_Initialize` return `CKR_ARGUMENTS_BAD`.
+
+CCID applets and their YubiHSM Auth credentials are enumerated before the module
+performs YubiHSM public discovery. The same configured credential is then tried
+independently against each local and remote YubiHSM. A missing provider or
+authentication failure affects only that slot and does not interfere with
+ordinary user login. Provider discovery may be retried before the slot records
+a definitive discovery result.
 
 The discovery Authentication Key must have `get-opaque`. Its domains must
 exactly match the domains of every YubiHSM Authentication Key accepted by
