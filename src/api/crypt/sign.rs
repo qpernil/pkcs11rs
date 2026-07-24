@@ -1,3 +1,94 @@
+const AES_CMAC_LENGTH: usize = 16;
+
+fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
+    match mechanism.mechanism {
+        x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE => {
+            if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            Ok(Some(AES_CMAC_LENGTH))
+        }
+        x if x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE => {
+            if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ULONG>() {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let length = *_as_ref(mechanism.pParameter.cast::<CK_ULONG>())
+                .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
+                as usize;
+            if length > AES_CMAC_LENGTH {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            Ok(Some(length))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn aes_cmac_double(mut block: [u8; AES_CMAC_LENGTH]) -> [u8; AES_CMAC_LENGTH] {
+    let carry = block[0] >> 7;
+    for index in 0..AES_CMAC_LENGTH - 1 {
+        block[index] = (block[index] << 1) | (block[index + 1] >> 7);
+    }
+    block[AES_CMAC_LENGTH - 1] <<= 1;
+    block[AES_CMAC_LENGTH - 1] ^= 0x87 & 0u8.wrapping_sub(carry);
+    block
+}
+
+fn aes_cmac_with_encryptor(
+    data: &[u8],
+    mut encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
+    let encrypted_zero = encrypt(&[0; AES_CMAC_LENGTH])?;
+    let subkey = encrypted_zero
+        .as_slice()
+        .try_into()
+        .map(aes_cmac_double)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let complete = !data.is_empty() && crate::is_multiple_of(data.len(), AES_CMAC_LENGTH);
+    let last_subkey = if complete {
+        subkey
+    } else {
+        aes_cmac_double(subkey)
+    };
+    let block_count = std::cmp::max(1, data.len().div_ceil(AES_CMAC_LENGTH));
+    let mut state = [0; AES_CMAC_LENGTH];
+
+    for block_index in 0..block_count {
+        let start = block_index * AES_CMAC_LENGTH;
+        let available = data.len().saturating_sub(start).min(AES_CMAC_LENGTH);
+        let mut block = [0; AES_CMAC_LENGTH];
+        block[..available].copy_from_slice(&data[start..start + available]);
+        if block_index + 1 == block_count {
+            if !complete {
+                block[available] = 0x80;
+            }
+            for (value, subkey) in block.iter_mut().zip(last_subkey) {
+                *value ^= subkey;
+            }
+        }
+        for (value, previous) in block.iter_mut().zip(state) {
+            *value ^= previous;
+        }
+        let encrypted = encrypt(&block)?;
+        state = encrypted
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    }
+    Ok(state.to_vec())
+}
+
+fn yubihsm_aes_cmac(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    aes_cmac_with_encryptor(data, |block| {
+        yubihsm_encrypt_ecb_blocks(ctx, session_handle, key_id, block)
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn C_SignInit(
     session_handle: CK_SESSION_HANDLE,
@@ -25,7 +116,10 @@ fn sign_init(
         }
 
         let mechanism = _as_ref(mechanism)?;
-        let pss = if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
+        let mac_length = aes_cmac_length(mechanism)?;
+        let pss = if mac_length.is_some() {
+            None
+        } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
@@ -82,6 +176,8 @@ fn sign_init(
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
+                    || x == CKM_AES_CMAC as CK_MECHANISM_TYPE
+                    || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
             ) {
                 return Err(CKR_MECHANISM_INVALID.into());
             }
@@ -113,6 +209,11 @@ fn sign_init(
             x if piv_is_pss_mechanism(x) => 0x06,
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE => 0x07,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => 0x08,
+            x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
+                || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
+            {
+                0x33
+            }
             _ => 0x16,
         };
         if !yubihsm_material_has_capability(&object.material, required_capability) {
@@ -127,12 +228,18 @@ fn sign_init(
             x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => CKK_SHA384_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => CKK_SHA512_HMAC as CK_KEY_TYPE,
+            x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
+                || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
+            {
+                CKK_AES as CK_KEY_TYPE
+            }
             _ => CKK_RSA as CK_KEY_TYPE,
         };
-        let hmac_yubihsm = is_hmac_key_type(expected_key_type)
+        let secret_yubihsm = (is_hmac_key_type(expected_key_type)
+            || expected_key_type == CKK_AES as CK_KEY_TYPE)
             && matches!(object.material, KeyMaterial::YubiHsm { .. });
-        if ((!hmac_yubihsm && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
-            || (hmac_yubihsm && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
+        if ((!secret_yubihsm && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            || (secret_yubihsm && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
             || object.key_type != expected_key_type
             || !matches!(
                 object.material,
@@ -185,6 +292,7 @@ fn sign_init(
                 requires_login: object.private,
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
+                mac_length,
                 pss,
                 piv_pin_policy: match &object.material {
                     KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
@@ -295,6 +403,9 @@ fn sign(
                 algorithm: YUBIHSM_ALGO_ED25519,
                 ..
             } => 64,
+            KeyMaterial::YubiHsm { .. } if operation.mac_length.is_some() => {
+                operation.mac_length.unwrap()
+            }
             KeyMaterial::YubiHsm { algorithm, .. } => match *algorithm {
                 YUBIHSM_ALGO_HMAC_SHA1 => 20,
                 YUBIHSM_ALGO_HMAC_SHA256 => 32,
@@ -418,6 +529,11 @@ fn sign(
                     }
                 }
                 KeyMaterial::YubiHsm { id, algorithm, .. } => {
+                    if operation.mac_length.is_some() {
+                        let mut mac = yubihsm_aes_cmac(ctx, session_handle, *id, data)?;
+                        mac.truncate(required);
+                        return Ok(mac);
+                    }
                     let digest_info = if piv_is_hashed_rsa_pkcs(operation.mechanism) {
                         let digest = piv_hash_mechanism(operation.mechanism)
                             .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
