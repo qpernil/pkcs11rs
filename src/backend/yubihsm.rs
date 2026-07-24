@@ -599,6 +599,12 @@ impl YubiHsmSlot {
             .public_discovery_credential
             .as_ref()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        log!(
+            2,
+            "YubiHSM public discovery reading opaque object {} on {} through a temporary session",
+            id,
+            self.connector.name()
+        );
         let expected_domains = {
             let state = self
                 .object_view_cache
@@ -629,6 +635,13 @@ impl YubiHsmSlot {
                 state.available = false;
                 state.authkey_domains = None;
             }
+        } else {
+            log!(
+                2,
+                "YubiHSM public discovery cached opaque object {} from {}",
+                id,
+                self.connector.name()
+            );
         }
         result
     }
@@ -666,11 +679,18 @@ impl YubiHsmSlot {
             session,
             &YubiHsmCommand::list_objects(&[])?,
         )?;
+        let listed = parse_yubihsm_object_list(&listed)?;
+        log!(
+            2,
+            "YubiHSM discovery listed {} hardware objects on {}",
+            listed.len(),
+            self.connector.name()
+        );
         let mut discovered = Vec::new();
         let mut pkcs11_metadata = HashMap::new();
         let mut ambiguous_metadata = HashSet::new();
         let mut related_metadata = HashMap::<_, Vec<_>>::new();
-        for entry in parse_yubihsm_object_list(&listed)? {
+        for entry in listed {
             let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
                 self.connector.as_ref(),
                 session,
@@ -696,8 +716,8 @@ impl YubiHsmSlot {
                     .entry((target_type, target_id, target_sequence))
                     .or_default()
                     .push((info.id, info.sequence));
-                let value = self.read_opaque_with_session(&info, session);
-                match value.and_then(|value| parse_yubihsm_pkcs11_metadata(&info, &value)) {
+                let value = self.read_opaque_with_session(&info, session)?;
+                match parse_yubihsm_pkcs11_metadata(&info, &value) {
                     Ok(metadata) => {
                         let target = (
                             metadata.target_type,
@@ -731,16 +751,37 @@ impl YubiHsmSlot {
                 continue;
             }
             let public_key = if yubihsm_object_has_public_key(&info) {
-                Some(YubiHsmPublicKey::parse(&send_yubihsm_secure_command(
+                let encoded = send_yubihsm_secure_command(
                     self.connector.as_ref(),
                     session,
                     &YubiHsmCommand::get_public_key(info.id, Some(info.object_type)),
-                )?)?)
+                )?;
+                match YubiHsmPublicKey::parse(&encoded) {
+                    Ok(public_key) => Some(public_key),
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiHSM discovery skipped object type {:02x} ID {:04x} on {} because its public key is invalid: {:?}",
+                            info.object_type,
+                            info.id,
+                            self.connector.name(),
+                            error
+                        );
+                        continue;
+                    }
+                }
             } else {
                 None
             };
             discovered.push((info, public_key));
         }
+        log!(
+            2,
+            "YubiHSM discovery resolved {} objects and {} PKCS11 metadata records on {}",
+            discovered.len(),
+            pkcs11_metadata.len(),
+            self.connector.name()
+        );
         *self.related_metadata.try_borrow_mut()? = related_metadata;
         Ok((discovered, pkcs11_metadata))
     }
@@ -770,7 +811,7 @@ impl YubiHsmSlot {
     ) -> Result<Vec<TokenObject>, Error> {
         let (discovered, mut metadata) = self.discover_objects(session)?;
         let mut candidates = Vec::new();
-        for (info, public_key) in discovered {
+        'discovered: for (info, public_key) in discovered {
             let certificate = if info.object_type == YUBIHSM_OPAQUE
                 && info.algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
             {
@@ -781,13 +822,26 @@ impl YubiHsmSlot {
             let generation = self.object_generation(&info)?;
             let attribute_metadata =
                 metadata.remove(&(info.object_type, info.id, info.sequence, info.domains));
-            let mut objects = yubihsm_token_objects_with_generation(
+            let mut objects = match yubihsm_token_objects_with_generation(
                 slot_id,
                 info.clone(),
                 public_key,
                 generation,
                 attribute_metadata.as_ref(),
-            )?;
+            ) {
+                Ok(objects) => objects,
+                Err(error) => {
+                    log!(
+                        2,
+                        "YubiHSM public discovery skipped object type {:02x} ID {:04x} on {} because it could not be represented in PKCS11: {:?}",
+                        info.object_type,
+                        info.id,
+                        self.connector.name(),
+                        error
+                    );
+                    continue;
+                }
+            };
             self.bind_opaque_value_cache(&info, &mut objects)?;
             for object in &mut objects {
                 if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
@@ -798,7 +852,14 @@ impl YubiHsmSlot {
                     )
                     .is_none()
                     {
-                        return Err(CKR_DATA_INVALID.into());
+                        log!(
+                            2,
+                            "YubiHSM public discovery rejected certificate {:?} with CKA_ID {:02x?} on {} because its X.509 value is invalid",
+                            object.label,
+                            object.id,
+                            self.connector.name()
+                        );
+                        continue 'discovered;
                     }
                     object.private = false;
                 }
@@ -806,36 +867,53 @@ impl YubiHsmSlot {
             candidates.append(&mut objects);
         }
 
-        let certificate_ids = candidates
+        let certificate_count = candidates
             .iter()
             .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
-            .map(|object| object.id.clone())
-            .collect::<HashSet<_>>();
-        let public_ids = candidates
+            .count();
+        let public_key_count = candidates
             .iter()
             .filter(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-            .map(|object| object.id.clone())
-            .collect::<HashSet<_>>();
-        let private_ids = candidates
+            .count();
+        let private_key_count = candidates
             .iter()
             .filter(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
-            .map(|object| object.id.clone())
-            .collect::<HashSet<_>>();
-        let certificate_key_ids = certificate_ids
-            .intersection(&private_ids)
-            .cloned()
-            .collect::<HashSet<_>>();
-        if !certificate_key_ids.is_subset(&public_ids) {
-            return Err(CKR_DATA_INVALID.into());
-        }
+            .count();
+        log!(
+            2,
+            "YubiHSM public discovery found {} certificates, {} public keys, and {} private key references on {}",
+            certificate_count,
+            public_key_count,
+            private_key_count,
+            self.connector.name()
+        );
         let objects = candidates
             .into_iter()
             .filter(|object| {
-                object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
-                    || (object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                        && certificate_ids.contains(&object.id))
+                let retained = !object.private;
+                log!(
+                    2,
+                    "YubiHSM public discovery {} class {:#x} object {:?} with CKA_ID {:02x?} on {} because {}",
+                    if retained { "retained" } else { "filtered" },
+                    object.class,
+                    object.label,
+                    object.id,
+                    self.connector.name(),
+                    if retained {
+                        "CKA_PRIVATE is false"
+                    } else {
+                        "CKA_PRIVATE is true"
+                    }
+                );
+                retained
             })
-            .collect();
+            .collect::<Vec<_>>();
+        log!(
+            2,
+            "YubiHSM public discovery selected {} public PKCS11 objects on {}",
+            objects.len(),
+            self.connector.name()
+        );
         Ok(objects)
     }
 
@@ -859,6 +937,12 @@ impl YubiHsmSlot {
             state.attempted = true;
         }
 
+        log!(
+            2,
+            "YubiHSM public discovery starting on {} with authentication key {:04x}",
+            self.connector.name(),
+            credential.authkey_id
+        );
         let session =
             self.authenticate_direct(credential.authkey_id, credential.password.as_slice());
         let session = match session {
@@ -873,6 +957,11 @@ impl YubiHsmSlot {
                 return false;
             }
         };
+        log!(
+            2,
+            "YubiHSM public discovery authenticated on {}",
+            self.connector.name()
+        );
         let session = RefCell::new(Some(session));
         let discovery: Result<(Vec<TokenObject>, u16), Error> = (|| {
             let info = self.authentication_key_info(&session, credential.authkey_id)?;
@@ -913,6 +1002,12 @@ impl YubiHsmSlot {
                 }
                 state.available = true;
                 state.authkey_domains = Some(authkey_domains);
+                log!(
+                    2,
+                    "YubiHSM public discovery completed on {}; cache now contains {} token objects",
+                    self.connector.name(),
+                    state.objects.len()
+                );
                 true
             }
             Err(error) => {
@@ -948,6 +1043,11 @@ impl YubiHsmSlot {
             }
         };
         if changed {
+            log!(
+                2,
+                "YubiHSM discovery cache reset on {} after connector state changed",
+                self.connector.name()
+            );
             self.object_metadata.try_borrow_mut()?.clear();
             self.related_metadata.try_borrow_mut()?.clear();
             self.object_generations.try_borrow_mut()?.clear();
@@ -1602,10 +1702,15 @@ fn yubihsm_token_objects_with_generation(
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             key_type,
             label: metadata
-                .and_then(|metadata| metadata.public_label.clone())
+                .and_then(|metadata| {
+                    metadata
+                        .public_label
+                        .clone()
+                        .or_else(|| metadata.label.clone())
+                })
                 .unwrap_or(hardware_label),
             id: metadata
-                .and_then(|metadata| metadata.public_id.clone())
+                .and_then(|metadata| metadata.public_id.clone().or_else(|| metadata.id.clone()))
                 .unwrap_or_else(|| info.id.to_be_bytes().to_vec()),
             token: true,
             private: false,

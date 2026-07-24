@@ -1811,8 +1811,8 @@ fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
         .unwrap();
     assert_eq!(private.id, b"repaired-id");
     assert_eq!(private.label, "repaired label");
-    assert_eq!(public.id, [0, 1]);
-    assert_eq!(public.label, "test-rsa");
+    assert_eq!(public.id, b"repaired-id");
+    assert_eq!(public.label, "repaired label");
     assert_eq!(
         peer.metadata_objects
             .borrow()
@@ -2278,14 +2278,17 @@ fn assert_reconnect_discards_cached_objects_and_values(public_discovery: bool) {
         inner_command_count(&peer, CommandCode::GetOpaque),
         reads_before_reconnect + if public_discovery { 3 } else { 0 }
     );
-    assert!(!reconnected_prelogin.iter().any(|object| matches!(
-        object.material,
-        KeyMaterial::YubiHsm {
-            id: 4,
-            object_type: YUBIHSM_OPAQUE,
-            ..
-        }
-    )));
+    assert_eq!(
+        reconnected_prelogin.iter().any(|object| matches!(
+            object.material,
+            KeyMaterial::YubiHsm {
+                id: 4,
+                object_type: YUBIHSM_OPAQUE,
+                ..
+            }
+        )),
+        public_discovery
+    );
 
     Slot::login(&mut slot, b"0001password").unwrap();
     let reconnected = Slot::token_objects(&slot, 7).unwrap();
@@ -2453,9 +2456,10 @@ fn yubihsm_metadata_overrides_cache_without_public_discovery_credential() {
 }
 
 #[test]
-fn yubihsm_public_discovery_exposes_certificates_and_matching_keys_without_pkcs_login() {
+fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
+    peer.objects.borrow_mut().push(5);
     let mut slot =
         public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
     Slot::init_slot(&mut slot).unwrap();
@@ -2486,16 +2490,166 @@ fn yubihsm_public_discovery_exposes_certificates_and_matching_keys_without_pkcs_
             object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == certificate.id
         })
         .unwrap();
+    let standalone_public_key = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 5])
+        .unwrap();
+    let public_data = yubihsm_opaque_object(&objects, 4);
     assert!(!certificate.private);
     assert!(!public_key.private);
+    assert!(!standalone_public_key.private);
+    assert!(!public_data.private);
+    assert!(objects.iter().all(|object| !object.private));
+    assert!(!objects
+        .iter()
+        .any(|object| matches!(object.material, KeyMaterial::YubiHsm { id: 100 | 101, .. })));
     let KeyMaterial::YubiHsm { value, .. } = &certificate.material else {
         panic!("expected a YubiHSM certificate");
     };
     assert!(value.borrow().is_some());
+    let KeyMaterial::YubiHsm { value, .. } = &public_data.material else {
+        panic!("expected public opaque data");
+    };
+    assert!(value.borrow().is_none());
     assert!(slot.session.borrow().is_none());
     assert!(slot.object_view_cache.borrow().available);
     assert!(peer.session.borrow().is_none());
     assert_eq!(peer.closed_sessions.get(), 1);
+}
+
+#[test]
+fn synthetic_public_key_inherits_sparse_physical_key_metadata() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    replace_metadata(
+        &peer,
+        100,
+        YUBIHSM_OPAQUE,
+        2,
+        1,
+        &[(1, b"inherited-id"), (2, b"inherited certificate")],
+    );
+    replace_metadata(
+        &peer,
+        101,
+        YUBIHSM_ASYMMETRIC_KEY,
+        1,
+        1,
+        &[(1, b"inherited-id"), (2, b"inherited key")],
+    );
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    let public_key = objects
+        .iter()
+        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(public_key.id, b"inherited-id");
+    assert_eq!(public_key.label, "inherited key");
+    assert!(objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::Profile { profile_id }
+            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+    )));
+}
+
+#[test]
+fn explicit_public_metadata_mismatch_does_not_withdraw_profile() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    replace_metadata(
+        &peer,
+        101,
+        YUBIHSM_ASYMMETRIC_KEY,
+        1,
+        1,
+        &[
+            (1, b"shared-id"),
+            (2, b"private key"),
+            (3, b"different-public-id"),
+            (4, b"public key"),
+        ],
+    );
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::Profile { profile_id }
+            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+    )));
+    assert!(objects.iter().any(|object| {
+        object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS && object.id == b"shared-id"
+    }));
+    assert!(objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"different-public-id"
+    }));
+}
+
+#[test]
+fn malformed_certificate_is_skipped_without_withdrawing_profile() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    peer.metadata_objects.borrow_mut().insert(
+        6,
+        (
+            ObjectInfo {
+                capabilities: [0; 8],
+                id: 6,
+                length: 17,
+                domains: 0xffff,
+                object_type: YUBIHSM_OPAQUE,
+                algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+                sequence: 1,
+                origin: 1,
+                label: "malformed certificate".to_owned(),
+                delegated_capabilities: [0; 8],
+            },
+            b"not a certificate".to_vec(),
+        ),
+    );
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::Profile { profile_id }
+            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+    )));
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+            .count(),
+        1
+    );
+    assert!(!objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::YubiHsm {
+            id: 6,
+            object_type: YUBIHSM_OPAQUE,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn public_certificate_profile_does_not_require_provisioned_certificates() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::Profile { profile_id }
+            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+    )));
+    assert!(objects
+        .iter()
+        .all(|object| object.class != CKO_CERTIFICATE as CK_OBJECT_CLASS));
+    assert!(objects
+        .iter()
+        .any(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
 }
 
 #[test]
@@ -2578,7 +2732,7 @@ fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
 }
 
 #[test]
-fn yubihsm_user_login_expands_the_public_certificate_view_without_duplicates() {
+fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut slot =
@@ -2592,7 +2746,8 @@ fn yubihsm_user_login_expands_the_public_certificate_view_without_duplicates() {
     assert_eq!(public_certificate_ids.len(), 1);
     assert!(public_objects
         .iter()
-        .all(|object| object.class != CKO_DATA as CK_OBJECT_CLASS));
+        .any(|object| object.class == CKO_DATA as CK_OBJECT_CLASS));
+    assert!(public_objects.iter().all(|object| !object.private));
     let get_opaque_before_login = peer
         .inner_commands
         .borrow()

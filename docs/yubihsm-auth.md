@@ -54,7 +54,7 @@ synthetic ABI fixture supplies the standard Extended Provider surface only for
 OASIS profile qualification tests.
 
 Profile objects cannot be modified, copied, or destroyed. Configure a direct
-YubiHSM credential to enable pre-login certificate discovery:
+YubiHSM credential to enable pre-login public-object discovery:
 
 ```sh
 export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL='00a5service-owned-password'
@@ -76,15 +76,30 @@ Certificates and their matching asymmetric keys must have equal PKCS #11
 metadata records. Provision these credentials in domains containing only data
 suitable for this service-owned public view.
 
+The profile represents operational support rather than the current object
+inventory. It is advertised after the discovery credential authenticates and
+the public view can be enumerated, even when no certificates are provisioned.
+Malformed metadata, certificate values, public keys, and other object-local
+representations are logged and skipped without withdrawing the profile or
+discarding other valid public objects. Authentication, authorization, list,
+read, and transport failures still make discovery unavailable for that slot.
+
 After successful authentication, the module enumerates the credential-visible
 objects and reads object information. PKCS #11 metadata opaque objects are read
 because their sparse `CKA_ID` and `CKA_LABEL` overrides affect object
-construction, matching, searches, and later operations. X.509 opaque values
-are read to validate and construct the pre-login certificate view. Before
-PKCS #11 login the module exposes only those X.509 certificates, their matching
-synthesized public keys, and the `CKP_PUBLIC_CERTIFICATES_TOKEN` profile.
-Certificate values are therefore readable without `C_Login`. Other opaque
-values remain lazy.
+construction, matching, searches, and later operations. Metadata companions
+remain internal. Before PKCS #11 login the module exposes every constructed
+object whose effective `CKA_PRIVATE` is false, including X.509 certificates,
+standalone or matching public keys, and public data and template objects.
+X.509 opaque values are read immediately for certificate validation; other
+opaque values remain lazy.
+
+A synthetic public key inherits `CKA_ID` and `CKA_LABEL` overrides from its
+physical private key when no explicit public-key override is present. Explicit
+public-key metadata takes precedence. This keeps sparse metadata aligned by
+default while still allowing the two synthetic objects to be named separately.
+An explicit mismatch is treated as a provisioning choice and does not withdraw
+the profile.
 
 The slot retains one object set and one lazy opaque-value cache shared by
 pre-login and post-login enumeration. Discovery and ordinary user sessions
