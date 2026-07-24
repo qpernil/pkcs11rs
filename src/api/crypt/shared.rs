@@ -1,3 +1,5 @@
+use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
+
 fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
     match algorithm {
         YUBIHSM_ALGO_EC_P224 => Ok(28),
@@ -26,18 +28,25 @@ fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result
 }
 
 fn rsa_pkcs1_v1_5_unpad(encoded: &[u8]) -> Result<Vec<u8>, Error> {
-    if encoded.len() < 11 || encoded.get(0..2) != Some(&[0, 2]) {
+    if encoded.len() < 11 {
         return Err(CKR_ENCRYPTED_DATA_INVALID.into());
     }
-    let separator = encoded[2..]
-        .iter()
-        .position(|value| *value == 0)
-        .map(|position| position + 2)
-        .ok_or(CKR_ENCRYPTED_DATA_INVALID)?;
-    if separator < 10 || encoded[2..separator].contains(&0) {
+
+    let mut valid = encoded[0].ct_eq(&0) & encoded[1].ct_eq(&2);
+    let mut found = subtle::Choice::from(0);
+    let mut separator = 0u32;
+    for (index, value) in encoded[2..].iter().enumerate() {
+        let is_separator = value.ct_eq(&0);
+        let use_index = !found & is_separator;
+        separator = u32::conditional_select(&separator, &((index + 2) as u32), use_index);
+        found |= is_separator;
+    }
+    valid &= found & separator.ct_gt(&9);
+
+    if !bool::from(valid) {
         return Err(CKR_ENCRYPTED_DATA_INVALID.into());
     }
-    Ok(encoded[separator + 1..].to_vec())
+    Ok(encoded[separator as usize + 1..].to_vec())
 }
 
 fn rsa_oaep_unpad(
@@ -49,9 +58,10 @@ fn rsa_oaep_unpad(
     let digest = digest_for_hash_mechanism(hash_mechanism)?;
     let mgf_digest = mgf_digest(mgf_code, hash_mechanism)?;
     let hash_len = digest.size();
-    if encoded.len() < 2 * hash_len + 2 || encoded[0] != 0 {
+    if encoded.len() < 2 * hash_len + 2 || label_digest.len() != hash_len {
         return Err(CKR_ENCRYPTED_DATA_INVALID.into());
     }
+    let mut valid = encoded[0].ct_eq(&0);
     let masked_seed = &encoded[1..hash_len + 1];
     let masked_db = &encoded[hash_len + 1..];
     let seed_mask = mgf1(masked_db, hash_len, mgf_digest)?;
@@ -64,18 +74,25 @@ fn rsa_oaep_unpad(
     for (value, mask) in db.iter_mut().zip(db_mask) {
         *value ^= mask;
     }
-    if db.get(..hash_len) != Some(label_digest) {
+
+    valid &= db[..hash_len].ct_eq(label_digest);
+    let mut looking_for_separator = subtle::Choice::from(1);
+    let mut separator_is_one = subtle::Choice::from(0);
+    let mut separator = 0u32;
+    for (index, value) in db[hash_len..].iter().enumerate() {
+        let is_zero = value.ct_eq(&0);
+        let first_nonzero = looking_for_separator & !is_zero;
+        separator =
+            u32::conditional_select(&separator, &((index + hash_len) as u32), first_nonzero);
+        separator_is_one |= first_nonzero & value.ct_eq(&1);
+        looking_for_separator &= is_zero;
+    }
+    valid &= !looking_for_separator & separator_is_one;
+
+    if !bool::from(valid) {
         return Err(CKR_ENCRYPTED_DATA_INVALID.into());
     }
-    let separator = db[hash_len..]
-        .iter()
-        .position(|value| *value == 1)
-        .map(|position| position + hash_len)
-        .ok_or(CKR_ENCRYPTED_DATA_INVALID)?;
-    if db[hash_len..separator].iter().any(|value| *value != 0) {
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    Ok(db[separator + 1..].to_vec())
+    Ok(db[separator as usize + 1..].to_vec())
 }
 
 fn rsa_oaep_pad(

@@ -445,6 +445,84 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
 }
 
 #[test]
+pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
+    assert_eq!(
+        crate::rsa_pkcs1_v1_5_unpad(&[0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0]).unwrap(),
+        b""
+    );
+    for malformed in [
+        vec![1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+        vec![0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+        vec![0, 2, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+        vec![0, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    ] {
+        assert!(matches!(
+            crate::rsa_pkcs1_v1_5_unpad(&malformed),
+            Err(crate::error::Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as CK_RV
+        ));
+    }
+
+    fn encode_oaep_db(db: &[u8], seed: &[u8]) -> Vec<u8> {
+        let digest =
+            crate::mgf_digest(33, CKM_SHA256 as CK_MECHANISM_TYPE).unwrap();
+        let db_mask = crate::mgf1(seed, db.len(), digest).unwrap();
+        let masked_db = db
+            .iter()
+            .zip(db_mask)
+            .map(|(value, mask)| value ^ mask)
+            .collect::<Vec<_>>();
+        let seed_mask = crate::mgf1(&masked_db, seed.len(), digest).unwrap();
+        let mut encoded = vec![0];
+        encoded.extend(seed.iter().zip(seed_mask).map(|(value, mask)| value ^ mask));
+        encoded.extend(masked_db);
+        encoded
+    }
+
+    let label_digest = <sha2::Sha256 as sha2::Digest>::digest(b"");
+    let seed = [0x42; 32];
+    let mut valid_db = label_digest.to_vec();
+    valid_db.extend([0, 0, 1]);
+    valid_db.extend(b"message");
+    let valid = encode_oaep_db(&valid_db, &seed);
+    assert_eq!(
+        crate::rsa_oaep_unpad(
+            &valid,
+            33,
+            CKM_SHA256 as CK_MECHANISM_TYPE,
+            &label_digest,
+        )
+        .unwrap(),
+        b"message"
+    );
+
+    let mut wrong_leader = valid.clone();
+    wrong_leader[0] = 1;
+    let mut wrong_label_db = valid_db.clone();
+    wrong_label_db[0] ^= 1;
+    let mut nonzero_padding_db = label_digest.to_vec();
+    nonzero_padding_db.extend([0, 2, 1]);
+    nonzero_padding_db.extend(b"message");
+    let mut missing_separator_db = label_digest.to_vec();
+    missing_separator_db.extend([0; 10]);
+    for malformed in [
+        wrong_leader,
+        encode_oaep_db(&wrong_label_db, &seed),
+        encode_oaep_db(&nonzero_padding_db, &seed),
+        encode_oaep_db(&missing_separator_db, &seed),
+    ] {
+        assert!(matches!(
+            crate::rsa_oaep_unpad(
+                &malformed,
+                33,
+                CKM_SHA256 as CK_MECHANISM_TYPE,
+                &label_digest,
+            ),
+            Err(crate::error::Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as CK_RV
+        ));
+    }
+}
+
+#[test]
 pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
