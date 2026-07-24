@@ -627,7 +627,7 @@ impl Context {
                                         Ok(objects) => objects,
                                         Err(error) => {
                                             log!(2, "YubiHSM public object discovery: {:?}", error);
-                                            yubihsm_profile_objects(slot_id, false)
+                                            slot.profile_objects(slot_id)
                                         }
                                     };
                                     self.slots.insert(slot_id, slot);
@@ -691,7 +691,7 @@ impl Context {
                             "YubiHSM public object discovery through {url}: {:?}",
                             error
                         );
-                        yubihsm_profile_objects(slot_id, false)
+                        slot.profile_objects(slot_id)
                     }
                 }
             } else {
@@ -1036,8 +1036,20 @@ fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
 #[cfg(feature = "abi-tests")]
 #[allow(dead_code)]
 fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), Error> {
-    context.refresh_slot_token_objects(ABI_TEST_PIV_SLOT_ID)?;
-    context.refresh_slot_token_objects(ABI_TEST_YUBIHSM_SLOT_ID)?;
+    let profiles = context
+        .slots
+        .get(&ABI_TEST_SLOT_ID)
+        .ok_or(CKR_SLOT_ID_INVALID)?
+        .profile_objects(ABI_TEST_SLOT_ID);
+    context.reconcile_slot_token_objects(ABI_TEST_SLOT_ID, profiles)?;
+    for slot_id in [
+        ABI_TEST_PIV_SLOT_ID,
+        ABI_TEST_SCP03_SLOT_ID,
+        ABI_TEST_YUBIHSM_SLOT_ID,
+        ABI_TEST_SCP11_SLOT_ID,
+    ] {
+        context.refresh_slot_token_objects(slot_id)?;
+    }
     Ok(())
 }
 

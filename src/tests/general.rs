@@ -535,7 +535,13 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
     };
 
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
-    assert_eq!(objects.len(), 3);
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|object| object.class != CKO_PROFILE as CK_OBJECT_CLASS)
+            .count(),
+        3
+    );
 
     let public = objects
         .iter()

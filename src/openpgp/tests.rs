@@ -231,8 +231,15 @@ fn empty_key_information_skips_public_key_discovery() {
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
     assert!(objects
         .iter()
+        .filter(|object| object.class != crate::CKO_PROFILE as crate::CK_OBJECT_CLASS)
         .all(|object| object.class == crate::CKO_DATA as crate::CK_OBJECT_CLASS));
-    assert_eq!(objects.len(), EXPORTED_DATA_OBJECTS.len());
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|object| object.class == crate::CKO_DATA as crate::CK_OBJECT_CLASS)
+            .count(),
+        EXPORTED_DATA_OBJECTS.len()
+    );
     assert!(connector
         .commands
         .borrow()

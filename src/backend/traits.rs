@@ -1,3 +1,80 @@
+fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_ID) -> TokenObject {
+    let label = match profile_id as u32 {
+        CKP_BASELINE_PROVIDER => "PKCS #11 Baseline Provider",
+        CKP_EXTENDED_PROVIDER => "PKCS #11 Extended Provider",
+        CKP_AUTHENTICATION_TOKEN => "PKCS #11 Authentication Token",
+        CKP_PUBLIC_CERTIFICATES_TOKEN => "PKCS #11 Public Certificates Token",
+        _ => "PKCS #11 Profile",
+    };
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: format!("pkcs11-profile-{profile_id:08x}"),
+        class: CKO_PROFILE as CK_OBJECT_CLASS,
+        key_type: 0,
+        label: label.to_owned(),
+        id: Vec::new(),
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: false,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: None,
+        owner_session: None,
+        material: KeyMaterial::Profile { profile_id },
+    }
+}
+
+fn profile_token_objects(
+    slot_id: CK_SLOT_ID,
+    extended_provider: bool,
+    authentication_token: bool,
+    public_certificates_token: bool,
+) -> Vec<TokenObject> {
+    let mut profile_ids = vec![CKP_BASELINE_PROVIDER as CK_PROFILE_ID];
+    if extended_provider {
+        profile_ids.push(CKP_EXTENDED_PROVIDER as CK_PROFILE_ID);
+    }
+    if authentication_token {
+        profile_ids.push(CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID);
+    }
+    if public_certificates_token {
+        profile_ids.push(CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID);
+    }
+    profile_ids
+        .into_iter()
+        .map(|profile_id| profile_token_object(slot_id, profile_id))
+        .collect()
+}
+
+fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool {
+    let supports = |type_: CK_MECHANISM_TYPE, flags: CK_FLAGS| {
+        mechanisms.iter().any(|mechanism| {
+            mechanism.type_ == type_ && mechanism.flags & flags == flags
+        })
+    };
+    supports(CKM_SHA512 as CK_MECHANISM_TYPE, CKF_DIGEST as CK_FLAGS)
+        && supports(
+            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        )
+        && supports(
+            CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            (CKF_ENCRYPT
+                | CKF_DECRYPT
+                | CKF_SIGN
+                | CKF_VERIFY
+                | CKF_WRAP
+                | CKF_UNWRAP) as CK_FLAGS,
+        )
+}
+
 trait Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn name(&self) -> String;
@@ -57,19 +134,58 @@ trait Slot {
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
     fn clear_session(&mut self) {}
-    fn token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+    fn supports_extended_provider_profile(&self) -> bool {
+        false
+    }
+    fn supports_authentication_token_profile(&self) -> bool {
+        self.mechanisms().iter().any(|mechanism| {
+            mechanism.type_ == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+                && mechanism.flags & CKF_SIGN as CK_FLAGS != 0
+        })
+    }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        false
+    }
+    fn profile_objects(&self, slot_id: CK_SLOT_ID) -> Vec<TokenObject> {
+        profile_token_objects(
+            slot_id,
+            self.supports_extended_provider_profile(),
+            self.supports_authentication_token_profile(),
+            self.supports_public_certificates_token_profile(slot_id),
+        )
+    }
+    fn backend_token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
+    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let mut objects = self.profile_objects(slot_id);
+        objects.extend(self.backend_token_objects(slot_id)?);
+        Ok(objects)
+    }
     fn invalidate_token_objects(&self) {}
-    fn token_object(
+    fn backend_token_object(
         &self,
         slot_id: CK_SLOT_ID,
         unique_id: &str,
     ) -> Result<Option<TokenObject>, Error> {
         Ok(self
-            .token_objects(slot_id)?
+            .backend_token_objects(slot_id)?
             .into_iter()
             .find(|object| object.token && object.unique_id == unique_id))
+    }
+    fn token_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<TokenObject>, Error> {
+        if let Some(object) = self
+            .profile_objects(slot_id)
+            .into_iter()
+            .find(|object| object.unique_id == unique_id)
+        {
+            return Ok(Some(object));
+        }
+        self.backend_token_object(slot_id, unique_id)
     }
     fn session_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())

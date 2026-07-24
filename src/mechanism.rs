@@ -280,7 +280,7 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             _ => None,
         })
         .collect();
-    YUBIHSM_MECHANISMS
+    let mut mechanisms: Vec<MechanismDetails> = YUBIHSM_MECHANISMS
         .iter()
         .filter_map(|details| {
             let mut details = *details;
@@ -409,7 +409,23 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             };
             supported.then_some(details)
         })
-        .collect()
+        .collect();
+    for (algorithm, type_) in [
+        (YUBIHSM_ALGO_RSA_PKCS1_SHA1, CKM_SHA1_RSA_PKCS),
+        (YUBIHSM_ALGO_RSA_PKCS1_SHA256, CKM_SHA256_RSA_PKCS),
+        (YUBIHSM_ALGO_RSA_PKCS1_SHA384, CKM_SHA384_RSA_PKCS),
+        (YUBIHSM_ALGO_RSA_PKCS1_SHA512, CKM_SHA512_RSA_PKCS),
+    ] {
+        if has_rsa && algorithms.contains(&algorithm) {
+            mechanisms.push(MechanismDetails {
+                type_: type_ as CK_MECHANISM_TYPE,
+                min_key_size: *rsa_sizes.iter().min().unwrap(),
+                max_key_size: *rsa_sizes.iter().max().unwrap(),
+                flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            });
+        }
+    }
+    mechanisms
 }
 
 fn mechanism_details(

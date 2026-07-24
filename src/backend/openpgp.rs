@@ -546,6 +546,9 @@ impl Slot for OpenPgpSlot {
         }
         mechanisms
     }
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        true
+    }
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.connector.clear_secure_channel();
@@ -609,7 +612,7 @@ impl Slot for OpenPgpSlot {
         )?;
         self.init_slot()
     }
-    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = Vec::with_capacity(
             self.keys.len() * 2 + self.certificates.len() + self.data_objects.len(),
         );

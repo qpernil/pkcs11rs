@@ -301,7 +301,7 @@ impl Slot for HsmAuthSlot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
-    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let info = self.discovered_info()?;
         let objects = hsmauth_token_objects(slot_id, &info);
         log!(
@@ -611,7 +611,7 @@ impl Slot for IssuerSecurityDomainSlot {
         }
         Ok(())
     }
-    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(issuer_security_domain_token_objects(
             slot_id,
             &self.discovered_info()?,

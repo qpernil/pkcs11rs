@@ -128,8 +128,8 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
 }
 
 #[test]
-fn yubihsm_profile_objects_are_public_immutable_token_objects() {
-    let profiles = crate::yubihsm_profile_objects(7, true);
+fn profile_objects_are_public_immutable_token_objects() {
+    let profiles = crate::profile_token_objects(7, true, true, true);
     assert_eq!(profiles.len(), 4);
     let unique_ids = profiles
         .iter()

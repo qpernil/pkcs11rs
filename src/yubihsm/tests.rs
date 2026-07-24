@@ -2,12 +2,12 @@ use super::*;
 use crate::{
     configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
     Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA,
-    CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_AUTHENTICATION_TOKEN, CKP_BASELINE_PROVIDER,
-    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
-    CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID,
-    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
-    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
+    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS,
+    CK_PROFILE_ID, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
+    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ASYMMETRIC_KEY,
+    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1801,12 +1801,16 @@ fn yubihsm_without_public_discovery_configuration_exposes_provider_profiles_only
         vec![YUBIHSM_ALGO_RSA_2048],
     );
     let objects = Slot::token_objects(&slot, 7).unwrap();
+    let profile_ids = objects
+        .iter()
+        .filter_map(|object| match object.material {
+            KeyMaterial::Profile { profile_id } => Some(profile_id),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     assert_eq!(
-        objects
-            .iter()
-            .filter(|object| object.class == CKO_PROFILE as CK_OBJECT_CLASS)
-            .count(),
-        3
+        profile_ids,
+        HashSet::from([CKP_BASELINE_PROVIDER as CK_PROFILE_ID])
     );
     assert!(objects
         .iter()
@@ -2256,8 +2260,6 @@ fn yubihsm_public_discovery_exposes_certificates_and_matching_keys_without_pkcs_
         profile_ids,
         HashSet::from([
             CKP_BASELINE_PROVIDER as CK_PROFILE_ID,
-            CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
-            CKP_AUTHENTICATION_TOKEN as CK_PROFILE_ID,
             CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID,
         ])
     );

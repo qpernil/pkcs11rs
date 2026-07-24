@@ -234,12 +234,15 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
             pin_policy: 2,
             touch_policy: 1,
             origin: piv::ORIGIN_GENERATED,
+            public_label: Some(String::from("testrsa-pub")),
+            private_label: Some(String::from("testrsa-pri")),
         }],
         certificates: vec![PivCertificate {
             slot: piv::Slot::Signature,
             algorithm: piv::Algorithm::Rsa2048,
             value: certificate,
             attestation: false,
+            label: Some(String::from("Mozilla Builtin Roots")),
         }],
         data_objects: vec![PivDataObject {
             object_id: piv::Slot::Signature.certificate_object(),
@@ -1037,14 +1040,13 @@ impl Slot for AbiYubiHsmSlot {
         Ok(())
     }
 
-    fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = yubihsm_profile_objects(slot_id, true);
-        objects.extend([
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        let mut objects = vec![
             abi_test_yubihsm_object(slot_id),
             abi_test_yubihsm_public_object(slot_id),
             abi_test_yubihsm_aes_object(slot_id),
             abi_test_yubihsm_nist_aes_object(slot_id),
-        ]);
+        ];
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
         objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
@@ -1072,6 +1074,7 @@ impl Slot for AbiYubiHsmSlot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = yubihsm_mechanisms(&[
             YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+            YUBIHSM_ALGO_RSA_PKCS1_SHA256,
             YUBIHSM_ALGO_RSA_2048,
             YUBIHSM_ALGO_AES128,
             YUBIHSM_ALGO_AES_ECB,
@@ -1084,6 +1087,14 @@ impl Slot for AbiYubiHsmSlot {
             rsa_pkcs.flags |= (CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS;
         }
         mechanisms
+    }
+
+    fn supports_extended_provider_profile(&self) -> bool {
+        mechanisms_support_extended_provider(&self.mechanisms())
+    }
+
+    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        true
     }
 
     fn is_yubihsm(&self) -> bool {
