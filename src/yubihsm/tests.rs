@@ -1549,7 +1549,7 @@ fn password_derivation_matches_yubihsm_defaults() {
 }
 
 fn public_discovery_credential(password: &str) -> Rc<YubiHsmPublicDiscoveryCredential> {
-    configured_yubihsm_public_discovery_credential(Some("0001".into()), Some(password.into()))
+    configured_yubihsm_public_discovery_credential(Some(format!("0001{password}").into()))
         .unwrap()
         .unwrap()
 }

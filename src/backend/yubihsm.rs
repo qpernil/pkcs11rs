@@ -247,11 +247,8 @@ struct YubiHsmSlot {
 }
 
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
-const YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID_ENV: &str =
-    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID";
-#[cfg_attr(feature = "abi-tests", allow(dead_code))]
-const YUBIHSM_PUBLIC_DISCOVERY_PASSWORD_ENV: &str =
-    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_PASSWORD";
+const YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL_ENV: &str =
+    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL";
 
 #[derive(Clone)]
 struct YubiHsmPublicDiscoveryCredential {
@@ -280,24 +277,26 @@ struct YubiHsmObjectViewCache {
 
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
 fn configured_yubihsm_public_discovery_credential(
-    authkey_id: Option<std::ffi::OsString>,
-    password: Option<std::ffi::OsString>,
+    credential: Option<std::ffi::OsString>,
 ) -> Result<Option<Rc<YubiHsmPublicDiscoveryCredential>>, Error> {
-    let (authkey_id, password) = match (authkey_id, password) {
-        (None, None) => return Ok(None),
-        (Some(authkey_id), Some(password)) => (authkey_id, password),
-        _ => return Err(CKR_ARGUMENTS_BAD.into()),
+    let Some(credential) = credential else {
+        return Ok(None);
     };
-    let authkey_id = authkey_id.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let authkey_id = parse_yubihsm_authkey_id(authkey_id.as_bytes())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let password = password.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let credential = credential.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let (username, password) =
+        split_yubihsm_login(credential.as_bytes()).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let password = password.ok_or(CKR_ARGUMENTS_BAD)?;
+    let YubiHsmLoginUsername::Direct(authkey_id) =
+        parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?
+    else {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    };
     if !(8..=64).contains(&password.len()) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(Some(Rc::new(YubiHsmPublicDiscoveryCredential {
         authkey_id,
-        password: Zeroizing::new(password.into_bytes()),
+        password: Zeroizing::new(password.to_vec()),
     })))
 }
 
