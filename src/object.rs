@@ -333,6 +333,8 @@ struct CryptOperation {
     gcm: Option<GcmParameters>,
     oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
     piv_pin_policy: Option<u8>,
+    buffer: Zeroizing<Vec<u8>>,
+    multipart: bool,
     result: Option<Zeroizing<Vec<u8>>>,
 }
 
@@ -348,6 +350,8 @@ impl std::fmt::Debug for CryptOperation {
             .field("gcm", &self.gcm)
             .field("oaep", &self.oaep)
             .field("piv_pin_policy", &self.piv_pin_policy)
+            .field("buffer_length", &self.buffer.len())
+            .field("multipart", &self.multipart)
             .field("result_length", &self.result.as_ref().map(|result| result.len()))
             .finish()
     }

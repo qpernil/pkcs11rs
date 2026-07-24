@@ -1101,6 +1101,89 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_OK as CK_RV
     );
     assert_eq!(ciphertext_len, 256);
+
+    let mut multipart_ciphertext = [0u8; 256];
+    let mut multipart_ciphertext_len = multipart_ciphertext.len() as CK_ULONG;
+    let mut no_output = [0u8; 1];
+    let mut update_len = no_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut rsa_mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            plaintext.as_mut_ptr(),
+            2,
+            no_output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    update_len = no_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            plaintext[2..].as_mut_ptr(),
+            (plaintext.len() - 2) as CK_ULONG,
+            no_output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    assert_eq!(
+        crate::C_EncryptFinal(
+            session,
+            multipart_ciphertext.as_mut_ptr(),
+            &mut multipart_ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(multipart_ciphertext_len, 256);
+
+    let mut multipart_plaintext = [0u8; 256];
+    let mut multipart_plaintext_len = multipart_plaintext.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut rsa_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    for range in [0..100, 100..multipart_ciphertext.len()] {
+        update_len = no_output.len() as CK_ULONG;
+        assert_eq!(
+            crate::C_DecryptUpdate(
+                session,
+                multipart_ciphertext[range.clone()].as_mut_ptr(),
+                range.len() as CK_ULONG,
+                no_output.as_mut_ptr(),
+                &mut update_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(update_len, 0);
+    }
+    assert_eq!(
+        crate::C_DecryptFinal(
+            session,
+            multipart_plaintext.as_mut_ptr(),
+            &mut multipart_plaintext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        &multipart_plaintext[..multipart_plaintext_len as usize],
+        b"plaintext"
+    );
+
+    let decrypt_commands = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(code, _)| *code == crate::YubiHsmCommandCode::DecryptPkcs1 as u8)
+            .count()
+    };
+    let decrypt_commands_before_retry_test = decrypt_commands();
     let mut too_small = [0u8; 1];
     let mut decrypted_len = too_small.len() as CK_ULONG;
     assert_eq!(
@@ -1118,14 +1201,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(decrypted_len, b"plaintext".len() as CK_ULONG);
-    let decrypt_commands = || {
-        commands
-            .borrow()
-            .iter()
-            .filter(|(code, _)| *code == crate::YubiHsmCommandCode::DecryptPkcs1 as u8)
-            .count()
-    };
-    assert_eq!(decrypt_commands(), 1);
+    assert_eq!(decrypt_commands(), decrypt_commands_before_retry_test + 1);
     {
         let context = crate::lock_context().unwrap();
         let debug = format!(
@@ -1154,7 +1230,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         CKR_OK as CK_RV
     );
     assert_eq!(&decrypted[..decrypted_len as usize], b"plaintext");
-    assert_eq!(decrypt_commands(), 1);
+    assert_eq!(decrypt_commands(), decrypt_commands_before_retry_test + 1);
 
     let mut sign_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -3055,6 +3131,42 @@ fn assert_pkcs11_aes_vector(
     );
     assert_eq!(&output[..output_len as usize], ciphertext);
 
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let split = plaintext.len().min(17);
+    let mut update_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            input.as_mut_ptr(),
+            split as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    update_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            input[split..].as_mut_ptr(),
+            (input.len() - split) as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    output_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptFinal(session, output.as_mut_ptr(), &mut output_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&output[..output_len as usize], ciphertext);
+
     let mut input = ciphertext.to_vec();
     let mut output = vec![0; plaintext.len()];
     let mut output_len = output.len() as CK_ULONG;
@@ -3070,6 +3182,42 @@ fn assert_pkcs11_aes_vector(
             output.as_mut_ptr(),
             &mut output_len,
         ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&output[..output_len as usize], plaintext);
+
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let split = input.len().min(19);
+    update_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptUpdate(
+            session,
+            input.as_mut_ptr(),
+            split as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    update_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptUpdate(
+            session,
+            input[split..].as_mut_ptr(),
+            (input.len() - split) as CK_ULONG,
+            output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    output_len = output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptFinal(session, output.as_mut_ptr(), &mut output_len),
         CKR_OK as CK_RV
     );
     assert_eq!(&output[..output_len as usize], plaintext);
@@ -3723,6 +3871,266 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
         .all(|data| data.len() <= 2018 && crate::is_multiple_of(data.len() - 2, 16)));
     drop(ecb_commands);
     drop(commands);
+
+    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+}
+
+#[test]
+fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    const KEY_ID: u16 = 0x1235;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let key = insert_yubihsm_aes_test_object(SLOT_ID, KEY_ID);
+
+    let mut iv = [0x11; 12];
+    let mut aad = *b"multipart aad";
+    let mut parameters = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: (iv.len() * 8) as CK_ULONG,
+        pAAD: aad.as_mut_ptr(),
+        ulAADLen: aad.len() as CK_ULONG,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GCM as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_GCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    let mut plaintext: Vec<u8> = (0..79).map(|index| index as u8).collect();
+    let ecb_command_count = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == crate::YubiHsmCommandCode::EncryptEcb as u8)
+            .count()
+    };
+
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let commands_before_updates = ecb_command_count();
+    let mut update_len = 123;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            plaintext.as_mut_ptr(),
+            13,
+            std::ptr::null_mut(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(update_len, 0);
+    let mut no_output = [0u8; 1];
+    for range in [0..13, 13..47, 47..plaintext.len()] {
+        update_len = no_output.len() as CK_ULONG;
+        assert_eq!(
+            crate::C_EncryptUpdate(
+                session,
+                plaintext[range.clone()].as_mut_ptr(),
+                range.len() as CK_ULONG,
+                no_output.as_mut_ptr(),
+                &mut update_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(update_len, 0);
+    }
+    let mut encrypted_len = 0;
+    assert_eq!(
+        crate::C_EncryptFinal(session, std::ptr::null_mut(), &mut encrypted_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(encrypted_len as usize, plaintext.len() + 16);
+    assert_eq!(ecb_command_count(), commands_before_updates);
+
+    let mut too_small = [0u8; 1];
+    let mut too_small_len = too_small.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptFinal(session, too_small.as_mut_ptr(), &mut too_small_len),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(too_small_len, encrypted_len);
+    let commands_after_encryption = ecb_command_count();
+    assert!(commands_after_encryption > commands_before_updates);
+
+    let mut encrypted = vec![0; encrypted_len as usize];
+    assert_eq!(
+        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(ecb_command_count(), commands_after_encryption);
+    assert_eq!(
+        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let mut plaintext_len = 99;
+    assert_eq!(
+        crate::C_DecryptUpdate(
+            session,
+            encrypted.as_mut_ptr(),
+            17,
+            std::ptr::null_mut(),
+            &mut plaintext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(plaintext_len, 0);
+    for range in [0..17, 17..encrypted.len()] {
+        update_len = no_output.len() as CK_ULONG;
+        assert_eq!(
+            crate::C_DecryptUpdate(
+                session,
+                encrypted[range.clone()].as_mut_ptr(),
+                range.len() as CK_ULONG,
+                no_output.as_mut_ptr(),
+                &mut update_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(update_len, 0);
+    }
+    assert_eq!(
+        crate::C_DecryptFinal(session, std::ptr::null_mut(), &mut plaintext_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(plaintext_len as usize, plaintext.len());
+    let mut decrypted = vec![0; plaintext_len as usize];
+    assert_eq!(
+        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(&decrypted[..plaintext_len as usize], plaintext);
+
+    *encrypted.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        crate::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    update_len = no_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptUpdate(
+            session,
+            encrypted.as_mut_ptr(),
+            encrypted.len() as CK_ULONG,
+            no_output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    plaintext_len = decrypted.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    update_len = no_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            no_output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    encrypted_len = encrypted.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_Encrypt(
+            session,
+            std::ptr::null_mut(),
+            0,
+            encrypted.as_mut_ptr(),
+            &mut encrypted_len,
+        ),
+        CKR_OPERATION_ACTIVE as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptInit(session, std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptInit(session, std::ptr::null_mut(), 0),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(
+        crate::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    update_len = no_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_EncryptUpdate(
+            session,
+            std::ptr::null_mut(),
+            1,
+            no_output.as_mut_ptr(),
+            &mut update_len,
+        ),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
 
     assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
 }
