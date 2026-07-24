@@ -232,14 +232,12 @@ struct YubiHsmSlot {
     connector: Rc<dyn Connector>,
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
     public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
-    object_view_cache: RefCell<YubiHsmObjectViewCache>,
-    opaque_value_cache: RefCell<YubiHsmOpaqueValueCache>,
+    object_cache: RefCell<YubiHsmObjectCache>,
     version: (u8, u8, u8),
     algorithms: Vec<u8>,
     trust_prefix: Option<std::ffi::OsString>,
     hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
     object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
-    related_metadata: RefCell<YubiHsmRelatedMetadata>,
     object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     attestation_cache: RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
     next_object_generation: Cell<u64>,
@@ -266,12 +264,12 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
 }
 
 #[derive(Debug, Default)]
-struct YubiHsmObjectViewCache {
+struct YubiHsmObjectCache {
     connection_epoch: u64,
     attempted: bool,
     available: bool,
     authkey_domains: Option<u16>,
-    authentication_algorithms: HashMap<u16, YubiHsmAuthAlgorithm>,
+    native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
     objects: Vec<TokenObject>,
 }
 
@@ -301,9 +299,7 @@ fn configured_yubihsm_public_discovery_credential(
 }
 
 type YubiHsmObjectKey = (u8, u16);
-type YubiHsmOpaqueValueCache = HashMap<u16, (u8, Rc<RefCell<Option<Vec<u8>>>>)>;
 type YubiHsmMetadataTarget = (u8, u16, u8);
-type YubiHsmRelatedMetadata = HashMap<YubiHsmMetadataTarget, Vec<(u16, u8)>>;
 type YubiHsmObjectMetadata = (
     YubiHsmObjectInfo,
     Option<YubiHsmPublicKey>,
@@ -314,6 +310,29 @@ type YubiHsmDiscoveredObjects = (
     Vec<(YubiHsmObjectInfo, Option<YubiHsmPublicKey>)>,
     HashMap<(u8, u16, u8, u16), YubiHsmPkcs11Metadata>,
 );
+
+#[derive(Clone, Debug)]
+struct YubiHsmCachedObjectProperties {
+    sequence: Option<u8>,
+    info: Option<YubiHsmObjectInfo>,
+    public_key: Option<YubiHsmPublicKey>,
+    opaque_value: Rc<RefCell<Option<Vec<u8>>>>,
+    metadata_sources: Vec<(u16, u8)>,
+    inferred_authentication_algorithm: Option<YubiHsmAuthAlgorithm>,
+}
+
+impl YubiHsmCachedObjectProperties {
+    fn new(sequence: Option<u8>) -> Self {
+        Self {
+            sequence,
+            info: None,
+            public_key: None,
+            opaque_value: Rc::new(RefCell::new(None)),
+            metadata_sources: Vec::new(),
+            inferred_authentication_algorithm: None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct YubiHsmAttestationCache {
@@ -377,19 +396,29 @@ impl YubiHsmPkcs11Metadata {
 }
 
 impl YubiHsmSlot {
+    fn authentication_algorithm(info: &YubiHsmObjectInfo) -> Option<YubiHsmAuthAlgorithm> {
+        match (info.object_type, info.algorithm) {
+            (YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION) => {
+                Some(YubiHsmAuthAlgorithm::Symmetric)
+            }
+            (YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION) => {
+                Some(YubiHsmAuthAlgorithm::Asymmetric)
+            }
+            _ => None,
+        }
+    }
+
     fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
         Self {
             connector,
             session: Rc::new(RefCell::new(None)),
             public_discovery_credential: None,
-            object_view_cache: RefCell::new(YubiHsmObjectViewCache::default()),
-            opaque_value_cache: RefCell::new(HashMap::new()),
+            object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
             algorithms,
             trust_prefix: None,
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
             object_metadata: RefCell::new(HashMap::new()),
-            related_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             attestation_cache: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
@@ -471,18 +500,142 @@ impl YubiHsmSlot {
         Ok(provider)
     }
 
-    fn opaque_value_cache_entry(
+    fn cache_object_info(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
+        let mut state = self.object_cache.try_borrow_mut()?;
+        let key = (info.object_type, info.id);
+        let sequence_changed = {
+            let entry = state
+                .native_objects
+                .entry(key)
+                .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
+            let sequence_changed = entry
+                .sequence
+                .is_some_and(|sequence| sequence != info.sequence);
+            if sequence_changed {
+                *entry = YubiHsmCachedObjectProperties::new(Some(info.sequence));
+            } else {
+                entry.sequence = Some(info.sequence);
+            }
+            entry.info = Some(info.clone());
+            entry.inferred_authentication_algorithm = None;
+            sequence_changed
+        };
+        if sequence_changed && info.object_type == YUBIHSM_OPAQUE {
+            for entry in state.native_objects.values_mut() {
+                entry
+                    .metadata_sources
+                    .retain(|(source_id, _)| *source_id != info.id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cached_object_info(
+        &self,
+        id: u16,
+        object_type: u8,
+        sequence: Option<u8>,
+    ) -> Result<Option<YubiHsmObjectInfo>, Error> {
+        Ok(self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .native_objects
+            .get(&(object_type, id))
+            .filter(|entry| sequence.is_none_or(|sequence| entry.sequence == Some(sequence)))
+            .and_then(|entry| entry.info.clone()))
+    }
+
+    fn read_object_info(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        id: u16,
+        object_type: u8,
+        expected_sequence: Option<u8>,
+    ) -> Result<YubiHsmObjectInfo, Error> {
+        let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            session,
+            &YubiHsmCommand::get_object_info(id, object_type),
+        )?)?;
+        if info.id != id
+            || info.object_type != object_type
+            || expected_sequence.is_some_and(|sequence| info.sequence != sequence)
+        {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        self.cache_object_info(&info)?;
+        Ok(info)
+    }
+
+    fn listed_object_info(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        id: u16,
+        object_type: u8,
+        sequence: u8,
+    ) -> Result<YubiHsmObjectInfo, Error> {
+        let cached = {
+            let mut state = self.object_cache.try_borrow_mut()?;
+            let (cached, sequence_changed) = {
+                let entry = state
+                    .native_objects
+                    .entry((object_type, id))
+                    .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(sequence)));
+                let sequence_changed = entry
+                    .sequence
+                    .is_some_and(|cached| cached != sequence);
+                if sequence_changed {
+                    *entry = YubiHsmCachedObjectProperties::new(Some(sequence));
+                } else {
+                    entry.sequence = Some(sequence);
+                }
+                (entry.info.clone(), sequence_changed)
+            };
+            if sequence_changed && object_type == YUBIHSM_OPAQUE {
+                for entry in state.native_objects.values_mut() {
+                    entry
+                        .metadata_sources
+                        .retain(|(source_id, _)| *source_id != id);
+                }
+            }
+            cached
+        };
+        if let Some(info) = cached {
+            return Ok(info);
+        }
+        self.read_object_info(session, id, object_type, Some(sequence))
+    }
+
+    fn object_info_with_session(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        id: u16,
+        object_type: u8,
+    ) -> Result<YubiHsmObjectInfo, Error> {
+        if let Some(info) = self.cached_object_info(id, object_type, None)? {
+            return Ok(info);
+        }
+        self.read_object_info(session, id, object_type, None)
+    }
+
+    fn object_value_cache_entry(
         &self,
         info: &YubiHsmObjectInfo,
     ) -> Result<Rc<RefCell<Option<Vec<u8>>>>, Error> {
-        let mut cache = self.opaque_value_cache.try_borrow_mut()?;
-        let entry = cache
-            .entry(info.id)
-            .or_insert_with(|| (info.sequence, Rc::new(RefCell::new(None))));
-        if entry.0 != info.sequence {
-            *entry = (info.sequence, Rc::new(RefCell::new(None)));
+        let mut state = self.object_cache.try_borrow_mut()?;
+        let entry = state
+            .native_objects
+            .entry((info.object_type, info.id))
+            .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
+        if entry.sequence.is_some_and(|sequence| sequence != info.sequence) {
+            *entry = YubiHsmCachedObjectProperties::new(Some(info.sequence));
+        } else {
+            entry.sequence = Some(info.sequence);
         }
-        Ok(entry.1.clone())
+        entry.info.get_or_insert_with(|| info.clone());
+        Ok(entry.opaque_value.clone())
     }
 
     fn read_opaque_with_session(
@@ -490,7 +643,7 @@ impl YubiHsmSlot {
         info: &YubiHsmObjectInfo,
         session: &RefCell<Option<YubiHsmSecureSession>>,
     ) -> Result<Vec<u8>, Error> {
-        let cached = self.opaque_value_cache_entry(info)?;
+        let cached = self.object_value_cache_entry(info)?;
         if let Some(value) = cached
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
@@ -507,41 +660,101 @@ impl YubiHsmSlot {
         Ok(value)
     }
 
+    fn read_opaque_by_id(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        id: u16,
+    ) -> Result<Vec<u8>, Error> {
+        let info = self.object_info_with_session(session, id, YUBIHSM_OPAQUE)?;
+        self.read_opaque_with_session(&info, session)
+    }
+
+    fn public_key_with_session(
+        &self,
+        info: &YubiHsmObjectInfo,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+    ) -> Result<YubiHsmPublicKey, Error> {
+        if let Some(public_key) = self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .native_objects
+            .get(&(info.object_type, info.id))
+            .filter(|entry| entry.sequence == Some(info.sequence))
+            .and_then(|entry| entry.public_key.clone())
+        {
+            return Ok(public_key);
+        }
+        let encoded = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            session,
+            &YubiHsmCommand::get_public_key(info.id, Some(info.object_type)),
+        )?;
+        let public_key = YubiHsmPublicKey::parse(&encoded)?;
+        let mut state = self.object_cache.try_borrow_mut()?;
+        let entry = state
+            .native_objects
+            .entry((info.object_type, info.id))
+            .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
+        if entry.sequence.is_some_and(|sequence| sequence != info.sequence) {
+            *entry = YubiHsmCachedObjectProperties::new(Some(info.sequence));
+        } else {
+            entry.sequence = Some(info.sequence);
+        }
+        entry.info.get_or_insert_with(|| info.clone());
+        entry.public_key = Some(public_key.clone());
+        Ok(public_key)
+    }
+
+    fn replace_metadata_links(
+        &self,
+        links: HashMap<YubiHsmMetadataTarget, Vec<(u16, u8)>>,
+    ) -> Result<(), Error> {
+        let mut state = self.object_cache.try_borrow_mut()?;
+        for entry in state.native_objects.values_mut() {
+            entry.metadata_sources.clear();
+        }
+        for ((object_type, id, sequence), sources) in links {
+            let Some(entry) = state.native_objects.get_mut(&(object_type, id)) else {
+                continue;
+            };
+            if entry.sequence == Some(sequence) {
+                entry.metadata_sources = sources;
+            }
+        }
+        Ok(())
+    }
+
     fn authentication_key_info(
         &self,
         session: &RefCell<Option<YubiHsmSecureSession>>,
         authkey_id: u16,
     ) -> Result<YubiHsmObjectInfo, Error> {
-        let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
-            self.connector.as_ref(),
+        self.read_object_info(
             session,
-            &YubiHsmCommand::get_object_info(authkey_id, YUBIHSM_AUTHENTICATION_KEY),
-        )?)?;
-        if info.id != authkey_id || info.object_type != YUBIHSM_AUTHENTICATION_KEY {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        self.cache_authentication_algorithm(&info)?;
-        Ok(info)
+            authkey_id,
+            YUBIHSM_AUTHENTICATION_KEY,
+            None,
+        )
     }
 
-    fn cache_authentication_algorithm(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
-        if info.object_type != YUBIHSM_AUTHENTICATION_KEY {
-            return Ok(());
-        }
-        let mut state = self.object_view_cache.try_borrow_mut()?;
-        let algorithms = &mut state.authentication_algorithms;
-        match info.algorithm {
-            YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION => {
-                algorithms.insert(info.id, YubiHsmAuthAlgorithm::Symmetric);
-            }
-            YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION => {
-                algorithms.insert(info.id, YubiHsmAuthAlgorithm::Asymmetric);
-            }
-            _ => {
-                algorithms.remove(&info.id);
-            }
-        }
-        Ok(())
+    fn cached_authentication_algorithm(
+        &self,
+        authkey_id: u16,
+    ) -> Result<Option<YubiHsmAuthAlgorithm>, Error> {
+        Ok(self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .native_objects
+            .get(&(YUBIHSM_AUTHENTICATION_KEY, authkey_id))
+            .and_then(|entry| {
+                entry
+                    .info
+                    .as_ref()
+                    .and_then(Self::authentication_algorithm)
+                    .or(entry.inferred_authentication_algorithm)
+            }))
     }
 
     fn authenticate_direct(
@@ -550,13 +763,7 @@ impl YubiHsmSlot {
         password: &[u8],
     ) -> Result<YubiHsmSecureSession, Error> {
         self.synchronize_caches()?;
-        let cached_algorithm = self
-            .object_view_cache
-            .try_borrow()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?
-            .authentication_algorithms
-            .get(&authkey_id)
-            .copied();
+        let cached_algorithm = self.cached_authentication_algorithm(authkey_id)?;
         let (session, algorithm) = YubiHsmSecureSession::authenticate_direct(
             self.connector.as_ref(),
             authkey_id,
@@ -564,10 +771,26 @@ impl YubiHsmSlot {
             self.trust_prefix.as_deref(),
             cached_algorithm,
         )?;
-        self.object_view_cache
-            .try_borrow_mut()?
-            .authentication_algorithms
-            .insert(authkey_id, algorithm);
+        let mut state = self.object_cache.try_borrow_mut()?;
+        let entry = state
+            .native_objects
+            .entry((YUBIHSM_AUTHENTICATION_KEY, authkey_id))
+            .or_insert_with(|| YubiHsmCachedObjectProperties::new(None));
+        match entry
+            .info
+            .as_ref()
+            .and_then(Self::authentication_algorithm)
+        {
+            Some(cached) if cached == algorithm => {
+                entry.inferred_authentication_algorithm = None;
+            }
+            Some(_) => {
+                let sequence = entry.sequence;
+                *entry = YubiHsmCachedObjectProperties::new(sequence);
+                entry.inferred_authentication_algorithm = Some(algorithm);
+            }
+            None => entry.inferred_authentication_algorithm = Some(algorithm),
+        }
         Ok(session)
     }
 
@@ -607,7 +830,7 @@ impl YubiHsmSlot {
         );
         let expected_domains = {
             let state = self
-                .object_view_cache
+                .object_cache
                 .try_borrow()
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             if !state.available {
@@ -623,15 +846,11 @@ impl YubiHsmSlot {
             if info.domains != expected_domains || !yubihsm_capability(&info.capabilities, 0) {
                 return Err(CKR_FUNCTION_REJECTED.into());
             }
-            send_yubihsm_secure_command(
-                self.connector.as_ref(),
-                &session,
-                &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?,
-            )
+            self.read_opaque_by_id(&session, id)
         })();
         self.close_temporary_session(&session, "public discovery");
         if result.is_err() {
-            if let Ok(mut state) = self.object_view_cache.try_borrow_mut() {
+            if let Ok(mut state) = self.object_cache.try_borrow_mut() {
                 state.available = false;
                 state.authkey_domains = None;
             }
@@ -646,7 +865,7 @@ impl YubiHsmSlot {
         result
     }
 
-    fn bind_opaque_value_cache(
+    fn bind_cached_opaque_value(
         &self,
         info: &YubiHsmObjectInfo,
         objects: &mut [TokenObject],
@@ -654,7 +873,7 @@ impl YubiHsmSlot {
         if info.object_type != YUBIHSM_OPAQUE {
             return Ok(());
         }
-        let cached = self.opaque_value_cache_entry(info)?;
+        let cached = self.object_value_cache_entry(info)?;
         for object in objects {
             if let KeyMaterial::YubiHsm {
                 object_type,
@@ -691,18 +910,12 @@ impl YubiHsmSlot {
         let mut ambiguous_metadata = HashSet::new();
         let mut related_metadata = HashMap::<_, Vec<_>>::new();
         for entry in listed {
-            let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
-                self.connector.as_ref(),
+            let info = self.listed_object_info(
                 session,
-                &YubiHsmCommand::get_object_info(entry.id, entry.object_type),
-            )?)?;
-            if info.id != entry.id
-                || info.object_type != entry.object_type
-                || info.sequence != entry.sequence
-            {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
-            self.cache_authentication_algorithm(&info)?;
+                entry.id,
+                entry.object_type,
+                entry.sequence,
+            )?;
             if info.object_type == YUBIHSM_OPAQUE
                 && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
             {
@@ -751,12 +964,7 @@ impl YubiHsmSlot {
                 continue;
             }
             let public_key = if yubihsm_object_has_public_key(&info) {
-                let encoded = send_yubihsm_secure_command(
-                    self.connector.as_ref(),
-                    session,
-                    &YubiHsmCommand::get_public_key(info.id, Some(info.object_type)),
-                )?;
-                match YubiHsmPublicKey::parse(&encoded) {
+                match self.public_key_with_session(&info, session) {
                     Ok(public_key) => Some(public_key),
                     Err(error) => {
                         log!(
@@ -782,7 +990,7 @@ impl YubiHsmSlot {
             pkcs11_metadata.len(),
             self.connector.name()
         );
-        *self.related_metadata.try_borrow_mut()? = related_metadata;
+        self.replace_metadata_links(related_metadata)?;
         Ok((discovered, pkcs11_metadata))
     }
 
@@ -842,7 +1050,7 @@ impl YubiHsmSlot {
                     continue;
                 }
             };
-            self.bind_opaque_value_cache(&info, &mut objects)?;
+            self.bind_cached_opaque_value(&info, &mut objects)?;
             for object in &mut objects {
                 if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
                     let certificate = certificate.as_deref().ok_or(CKR_DEVICE_ERROR)?;
@@ -925,7 +1133,7 @@ impl YubiHsmSlot {
             return false;
         };
         {
-            let Ok(mut state) = self.object_view_cache.try_borrow_mut() else {
+            let Ok(mut state) = self.object_cache.try_borrow_mut() else {
                 return false;
             };
             if state.available {
@@ -972,7 +1180,7 @@ impl YubiHsmSlot {
             Ok((objects, info.domains))
         })();
         let mut session = session.into_inner();
-        let mut state = match self.object_view_cache.try_borrow_mut() {
+        let mut state = match self.object_cache.try_borrow_mut() {
             Ok(state) => state,
             Err(_) => return false,
         };
@@ -1031,13 +1239,13 @@ impl YubiHsmSlot {
     fn synchronize_caches(&self) -> Result<(), Error> {
         let connection_epoch = self.connector.connection_epoch();
         let changed = {
-            let mut state = self.object_view_cache.try_borrow_mut()?;
+            let mut state = self.object_cache.try_borrow_mut()?;
             if state.connection_epoch == connection_epoch {
                 false
             } else {
-                *state = YubiHsmObjectViewCache {
+                *state = YubiHsmObjectCache {
                     connection_epoch,
-                    ..YubiHsmObjectViewCache::default()
+                    ..YubiHsmObjectCache::default()
                 };
                 true
             }
@@ -1049,16 +1257,14 @@ impl YubiHsmSlot {
                 self.connector.name()
             );
             self.object_metadata.try_borrow_mut()?.clear();
-            self.related_metadata.try_borrow_mut()?.clear();
             self.object_generations.try_borrow_mut()?.clear();
             self.attestation_cache.try_borrow_mut()?.clear();
-            self.opaque_value_cache.try_borrow_mut()?.clear();
         }
         Ok(())
     }
 
     fn cached_objects(&self) -> Vec<TokenObject> {
-        let Ok(state) = self.object_view_cache.try_borrow() else {
+        let Ok(state) = self.object_cache.try_borrow() else {
             return Vec::new();
         };
         let mut objects = state.objects.clone();
@@ -1067,7 +1273,7 @@ impl YubiHsmSlot {
     }
 
     fn update_cached_objects(&self, objects: &[TokenObject]) -> Result<(), Error> {
-        let mut state = self.object_view_cache.try_borrow_mut()?;
+        let mut state = self.object_cache.try_borrow_mut()?;
         let updated_hardware_objects = objects
             .iter()
             .filter_map(|object| match object.material {
@@ -1099,7 +1305,7 @@ impl YubiHsmSlot {
 
     fn clear_cached_private_objects(&self) -> Result<(), Error> {
         let private_targets = {
-            let mut state = self.object_view_cache.try_borrow_mut()?;
+            let mut state = self.object_cache.try_borrow_mut()?;
             let mut private_targets = HashSet::new();
             state.objects.retain(|object| {
                 if !object.private {
@@ -1113,6 +1319,31 @@ impl YubiHsmSlot {
                 }
                 false
             });
+            let metadata_ids = private_targets
+                .iter()
+                .filter_map(|key| state.native_objects.get(key))
+                .flat_map(|entry| entry.metadata_sources.iter())
+                .map(|(id, _)| *id)
+                .collect::<HashSet<_>>();
+            state
+                .native_objects
+                .retain(|(object_type, id), entry| {
+                    if private_targets.contains(&(*object_type, *id)) {
+                        if *object_type != YUBIHSM_AUTHENTICATION_KEY {
+                            return false;
+                        }
+                        let sequence = entry.sequence;
+                        let authentication_algorithm = entry
+                            .info
+                            .as_ref()
+                            .and_then(Self::authentication_algorithm)
+                            .or(entry.inferred_authentication_algorithm);
+                        *entry = YubiHsmCachedObjectProperties::new(sequence);
+                        entry.inferred_authentication_algorithm = authentication_algorithm;
+                        return true;
+                    }
+                    *object_type != YUBIHSM_OPAQUE || !metadata_ids.contains(id)
+                });
             private_targets
         };
         if private_targets.is_empty() {
@@ -1122,23 +1353,6 @@ impl YubiHsmSlot {
         self.object_metadata
             .try_borrow_mut()?
             .retain(|key, _| !private_targets.contains(key));
-
-        let metadata_ids = {
-            let mut metadata_ids = HashSet::new();
-            self.related_metadata
-                .try_borrow_mut()?
-                .retain(|(object_type, id, _), sources| {
-                    if !private_targets.contains(&(*object_type, *id)) {
-                        return true;
-                    }
-                    metadata_ids.extend(sources.iter().map(|(source_id, _)| *source_id));
-                    false
-                });
-            metadata_ids
-        };
-        self.opaque_value_cache
-            .try_borrow_mut()?
-            .retain(|id, _| !metadata_ids.contains(id));
 
         let mut attestation_cache = self.attestation_cache.try_borrow_mut()?;
         for ((target, _), cache) in attestation_cache.iter() {
@@ -1153,10 +1367,9 @@ impl YubiHsmSlot {
 
     fn forget_cached_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
         let key = (object_type & !0x80, id);
-        self.object_view_cache
-            .try_borrow_mut()?
-            .objects
-            .retain(|object| {
+        {
+            let mut state = self.object_cache.try_borrow_mut()?;
+            state.objects.retain(|object| {
                 !matches!(
                     object.material,
                     KeyMaterial::YubiHsm {
@@ -1167,14 +1380,14 @@ impl YubiHsmSlot {
                         && candidate_type & !0x80 == object_type & !0x80
                 )
             });
-        self.opaque_value_cache.try_borrow_mut()?.remove(&id);
+            state.native_objects.remove(&key);
+            for entry in state.native_objects.values_mut() {
+                entry
+                    .metadata_sources
+                    .retain(|(source_id, _)| *source_id != id);
+            }
+        }
         self.object_metadata.try_borrow_mut()?.remove(&key);
-        self.related_metadata.try_borrow_mut()?.retain(
-            |(target_type, target_id, _), sources| {
-                sources.retain(|(source_id, _)| *source_id != id);
-                (*target_type, *target_id) != key && !sources.is_empty()
-            },
-        );
         self.object_generations.try_borrow_mut()?.remove(&key);
         self.attestation_cache
             .try_borrow_mut()?
@@ -1187,19 +1400,13 @@ impl YubiHsmSlot {
         id: u16,
         object_type: u8,
     ) -> Result<Vec<(u16, u8)>, Error> {
-        let metadata = self
-            .object_metadata
-            .try_borrow()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        let Some((info, _, _, _)) = metadata.get(&(object_type & !0x80, id)) else {
-            return Ok(Vec::new());
-        };
         Ok(self
-            .related_metadata
+            .object_cache
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
-            .get(&(info.object_type, info.id, info.sequence))
-            .cloned()
+            .native_objects
+            .get(&(object_type & !0x80, id))
+            .map(|entry| entry.metadata_sources.clone())
             .unwrap_or_default())
     }
 
@@ -1263,14 +1470,7 @@ impl YubiHsmSlot {
         label: Option<&str>,
     ) -> Result<(), Error> {
         let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
-        let target = (info.object_type, info.id, info.sequence);
-        let old_objects = self
-            .related_metadata
-            .try_borrow()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?
-            .get(&target)
-            .cloned()
-            .unwrap_or_default();
+        let old_objects = self.related_metadata_object(info.id, info.object_type)?;
         let mut metadata = current.unwrap_or(YubiHsmPkcs11Metadata {
             target_type: info.object_type,
             target_id: info.id,
@@ -1873,7 +2073,7 @@ impl Slot for YubiHsmSlot {
         let session = RefCell::new(Some(session));
         let discovery_domains = {
             let state = self
-                .object_view_cache
+                .object_cache
                 .try_borrow()
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.available.then_some(state.authkey_domains).flatten()
@@ -1929,17 +2129,15 @@ impl Slot for YubiHsmSlot {
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         let _ = self.device_public_key.take();
-        if let Ok(mut state) = self.object_view_cache.try_borrow_mut() {
-            *state = YubiHsmObjectViewCache {
+        if let Ok(mut state) = self.object_cache.try_borrow_mut() {
+            *state = YubiHsmObjectCache {
                 connection_epoch: self.connector.connection_epoch(),
-                ..YubiHsmObjectViewCache::default()
+                ..YubiHsmObjectCache::default()
             };
         }
         self.object_metadata.try_borrow_mut()?.clear();
-        self.related_metadata.try_borrow_mut()?.clear();
         self.object_generations.try_borrow_mut()?.clear();
         self.attestation_cache.try_borrow_mut()?.clear();
-        self.opaque_value_cache.try_borrow_mut()?.clear();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
         self.algorithms = device_info.algorithms;
@@ -2053,7 +2251,7 @@ impl Slot for YubiHsmSlot {
                 generation,
                 attribute_metadata.as_ref(),
             )?;
-            self.bind_opaque_value_cache(&info, &mut discovered_objects)?;
+            self.bind_cached_opaque_value(&info, &mut discovered_objects)?;
             objects.extend(discovered_objects);
         }
         drop(generations);
@@ -2102,7 +2300,7 @@ impl Slot for YubiHsmSlot {
                 generation,
                 attribute_metadata.as_ref(),
             )?;
-            self.bind_opaque_value_cache(&info, &mut objects)?;
+            self.bind_cached_opaque_value(&info, &mut objects)?;
             if let Some(object) = objects
             .into_iter()
             .find(|object| object.unique_id == unique_id)
@@ -2195,12 +2393,7 @@ impl Slot for YubiHsmSlot {
         {
             return self.read_opaque_with_public_discovery(id);
         }
-        let command = YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?;
-        send_yubihsm_secure_command(
-            self.connector.as_ref(),
-            self.session.as_ref(),
-            &command,
-        )
+        self.read_opaque_by_id(self.session.as_ref(), id)
     }
     fn yubihsm_forget_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
         self.forget_cached_object(id, object_type)
