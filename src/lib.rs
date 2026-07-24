@@ -177,9 +177,9 @@ use yubihsm::{
     device_public_key_bytes as get_yubihsm_device_public_key,
     get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
     parse_object_list as parse_yubihsm_object_list, Command as YubiHsmCommand,
-    CommandCode as YubiHsmCommandCode, ObjectInfo as YubiHsmObjectInfo,
-    ObjectParameters as YubiHsmObjectParameters, PublicKey as YubiHsmPublicKey,
-    SecureSession as YubiHsmSecureSession,
+    CommandCode as YubiHsmCommandCode, DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm,
+    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
+    PublicKey as YubiHsmPublicKey, SecureSession as YubiHsmSecureSession,
 };
 
 #[allow(dead_code)]

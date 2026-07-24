@@ -199,6 +199,12 @@ pub(crate) struct AsymmetricHandshake {
     pub(crate) receipt: [u8; ASYMMETRIC_RECEIPT_LENGTH],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DirectAuthenticationAlgorithm {
+    Symmetric,
+    Asymmetric,
+}
+
 impl std::fmt::Debug for SecureSession {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("SecureSession")
@@ -209,26 +215,74 @@ impl std::fmt::Debug for SecureSession {
 }
 
 impl SecureSession {
-    pub(crate) fn authenticate(
+    pub(crate) fn authenticate_direct(
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<Self, Error> {
-        let mut challenge = [0u8; CHALLENGE_LENGTH];
-        getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-        Self::authenticate_with_challenge(connector, authkey_id, password, challenge)
+        trust_prefix: Option<&std::ffi::OsStr>,
+        cached_algorithm: Option<DirectAuthenticationAlgorithm>,
+    ) -> Result<(Self, DirectAuthenticationAlgorithm), Error> {
+        let first = cached_algorithm.unwrap_or(DirectAuthenticationAlgorithm::Symmetric);
+        match first {
+            DirectAuthenticationAlgorithm::Symmetric => {
+                if let Some(session) =
+                    Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
+                {
+                    return Ok((session, DirectAuthenticationAlgorithm::Symmetric));
+                }
+                log!(
+                    2,
+                    "YubiHSM Authentication Key {:04x} rejected symmetric CREATE SESSION with wrong length; trying asymmetric authentication",
+                    authkey_id
+                );
+                let session = Self::authenticate_asymmetric_detect_format(
+                    connector,
+                    authkey_id,
+                    password,
+                    trust_prefix,
+                )?
+                .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
+                Ok((session, DirectAuthenticationAlgorithm::Asymmetric))
+            }
+            DirectAuthenticationAlgorithm::Asymmetric => {
+                if let Some(session) = Self::authenticate_asymmetric_detect_format(
+                    connector,
+                    authkey_id,
+                    password,
+                    trust_prefix,
+                )? {
+                    return Ok((session, DirectAuthenticationAlgorithm::Asymmetric));
+                }
+                log!(
+                    2,
+                    "YubiHSM Authentication Key {:04x} rejected asymmetric CREATE SESSION with wrong length; trying symmetric authentication",
+                    authkey_id
+                );
+                let session =
+                    Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
+                        .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
+                Ok((session, DirectAuthenticationAlgorithm::Symmetric))
+            }
+        }
     }
 
+    #[cfg(test)]
     fn authenticate_with_challenge(
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
         host_challenge: [u8; CHALLENGE_LENGTH],
     ) -> Result<Self, Error> {
-        let static_keys = crate::yubico_password_kdf(password)?;
-
         let handshake = Self::begin_symmetric(connector, authkey_id, host_challenge)?;
+        Self::complete_symmetric_with_password(connector, handshake, password)
+    }
 
+    fn complete_symmetric_with_password(
+        connector: &dyn Connector,
+        handshake: SymmetricHandshake,
+        password: &[u8],
+    ) -> Result<Self, Error> {
+        let static_keys = crate::yubico_password_kdf(password)?;
         let s_enc = derive_key(&static_keys[..16], 0x04, &handshake.context)?;
         let s_mac = derive_key(&static_keys[16..], 0x06, &handshake.context)?;
         let s_rmac = derive_key(&static_keys[16..], 0x07, &handshake.context)?;
@@ -241,6 +295,21 @@ impl SecureSession {
             Zeroizing::new(s_rmac),
             Some(expected_card),
         )
+    }
+
+    fn authenticate_symmetric_detect_format(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        password: &[u8],
+    ) -> Result<Option<Self>, Error> {
+        let mut challenge = [0u8; CHALLENGE_LENGTH];
+        getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        let handshake = match Self::begin_symmetric(connector, authkey_id, challenge) {
+            Ok(handshake) => handshake,
+            Err(error) if is_wrong_length_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Self::complete_symmetric_with_password(connector, handshake, password).map(Some)
     }
 
     pub(crate) fn begin_symmetric(
@@ -422,71 +491,65 @@ impl SecureSession {
         let _ = session.send_command(connector, &Command::close_session());
     }
 
-    pub(crate) fn authenticate_asymmetric_with_trust_prefix(
+    fn authenticate_asymmetric_detect_format(
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
-    ) -> Result<Self, Error> {
-        let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
-        let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
+    ) -> Result<Option<Self>, Error> {
         let host_ephemeral_key = P256SecretKey::generate();
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
 
-        let mut create_data = Vec::with_capacity(2 + P256_PUBLIC_KEY_LENGTH);
-        create_data.extend_from_slice(&authkey_id.to_be_bytes());
-        create_data.extend_from_slice(&host_ephemeral_public);
-        let response = send_plain_protocol(connector, COMMAND_CREATE_SESSION, &create_data)
-            .map_err(map_authentication_error)?;
-        if response.len() != 1 + P256_PUBLIC_KEY_LENGTH + ASYMMETRIC_RECEIPT_LENGTH {
-            return Err(CKR_DEVICE_ERROR.into());
+        let handshake = match Self::begin_asymmetric(connector, authkey_id, &host_ephemeral_public)
+        {
+            Ok(handshake) => handshake,
+            Err(error) if is_wrong_length_error(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let session_keys = (|| {
+            let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
+            let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
+            let device_ephemeral_public = &handshake.context[P256_PUBLIC_KEY_LENGTH..];
+            let device_ephemeral_key = parse_p256_public_key(device_ephemeral_public)?;
+
+            let ephemeral_secret = p256_ecdh(&host_ephemeral_key, &device_ephemeral_key)?;
+            let static_secret = p256_ecdh(&host_static_key, &device_static_key)?;
+            let session_keys = x963_session_keys(&ephemeral_secret, &static_secret);
+
+            let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
+            receipt_input.extend_from_slice(device_ephemeral_public);
+            receipt_input.extend_from_slice(&host_ephemeral_public);
+            let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
+            if !bool::from(expected_receipt.ct_eq(&handshake.receipt)) {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+            Ok((
+                Zeroizing::new(
+                    session_keys[16..32]
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                ),
+                Zeroizing::new(
+                    session_keys[32..48]
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                ),
+                Zeroizing::new(
+                    session_keys[48..64]
+                        .try_into()
+                        .map_err(|_| CKR_DEVICE_ERROR)?,
+                ),
+            ))
+        })();
+        match session_keys {
+            Ok((s_enc, s_mac, s_rmac)) => Ok(Some(Self::complete_asymmetric_with_session_keys(
+                handshake, s_enc, s_mac, s_rmac,
+            ))),
+            Err(error) => {
+                Self::close_failed_asymmetric_handshake(connector, handshake);
+                Err(error)
+            }
         }
-
-        let sid = response[0];
-        let device_ephemeral_public: [u8; P256_PUBLIC_KEY_LENGTH] = response
-            [1..1 + P256_PUBLIC_KEY_LENGTH]
-            .try_into()
-            .map_err(|_| CKR_DEVICE_ERROR)?;
-        let receipt: [u8; ASYMMETRIC_RECEIPT_LENGTH] = response[1 + P256_PUBLIC_KEY_LENGTH..]
-            .try_into()
-            .map_err(|_| CKR_DEVICE_ERROR)?;
-        let device_ephemeral_key = parse_p256_public_key(&device_ephemeral_public)?;
-
-        let ephemeral_secret = p256_ecdh(&host_ephemeral_key, &device_ephemeral_key)?;
-        let static_secret = p256_ecdh(&host_static_key, &device_static_key)?;
-        let session_keys = x963_session_keys(&ephemeral_secret, &static_secret);
-
-        let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
-        receipt_input.extend_from_slice(&device_ephemeral_public);
-        receipt_input.extend_from_slice(&host_ephemeral_public);
-        let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
-        if !bool::from(expected_receipt.ct_eq(&receipt)) {
-            return Err(CKR_PIN_INCORRECT.into());
-        }
-
-        let mut counter = [0; AES_BLOCK_SIZE];
-        increment_counter(&mut counter);
-        Ok(Self {
-            sid,
-            s_enc: Zeroizing::new(
-                session_keys[16..32]
-                    .try_into()
-                    .map_err(|_| CKR_DEVICE_ERROR)?,
-            ),
-            s_mac: Zeroizing::new(
-                session_keys[32..48]
-                    .try_into()
-                    .map_err(|_| CKR_DEVICE_ERROR)?,
-            ),
-            s_rmac: Zeroizing::new(
-                session_keys[48..64]
-                    .try_into()
-                    .map_err(|_| CKR_DEVICE_ERROR)?,
-            ),
-            counter,
-            mac_chaining_value: receipt,
-            valid: true,
-        })
     }
 
     pub(crate) fn send_command(
@@ -718,6 +781,13 @@ fn increment_counter(counter: &mut [u8; AES_BLOCK_SIZE]) {
             break;
         }
     }
+}
+
+fn is_wrong_length_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Generic(rv) if *rv == CKR_DATA_LEN_RANGE as _
+    )
 }
 
 fn map_device_error(error: Option<u8>) -> Error {

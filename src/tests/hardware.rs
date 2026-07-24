@@ -363,10 +363,12 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             );
         }
 
-        let mut admin_session = crate::YubiHsmSecureSession::authenticate(
+        let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
             yubihsm.as_ref(),
             admin_id,
             admin_password.as_bytes(),
+            None,
+            None,
         )
         .expect("failed to authenticate to the YubiHSM provisioning key");
         let existing_key = (|| -> Result<Option<crate::YubiHsmObjectInfo>, crate::Error> {
@@ -405,10 +407,12 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         }
 
         if existing_key.is_some() {
-            let mut admin_session = crate::YubiHsmSecureSession::authenticate(
+            let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
                 yubihsm.as_ref(),
                 admin_id,
                 admin_password.as_bytes(),
+                None,
+                None,
             )
             .expect("failed to reopen the YubiHSM provisioning session for cleanup");
             let deletion = admin_session
@@ -476,10 +480,12 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             public_key,
         )
         .expect("failed to encode the asymmetric authentication key");
-        let mut admin_session = crate::YubiHsmSecureSession::authenticate(
+        let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
             yubihsm.as_ref(),
             admin_id,
             admin_password.as_bytes(),
+            None,
+            None,
         )
         .expect("failed to reopen the YubiHSM provisioning session");
         let installed_id = admin_session

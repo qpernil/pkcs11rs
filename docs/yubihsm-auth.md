@@ -61,8 +61,8 @@ UTF-8 bytes. Supplying only one variable makes `C_Initialize` return
 against each local and remote YubiHSM. A failure affects only that slot and
 does not interfere with ordinary user login.
 
-The symmetric discovery Authentication Key must have `get-opaque`. Its domains
-must exactly match the domains of every YubiHSM Authentication Key accepted by
+The discovery Authentication Key must have `get-opaque`. Its domains must
+exactly match the domains of every YubiHSM Authentication Key accepted by
 `C_Login` while the public-certificates profile is active; a login using an
 Authentication Key with different domains returns `CKR_FUNCTION_REJECTED`.
 Certificates and their matching asymmetric keys must have equal PKCS #11
@@ -129,12 +129,11 @@ object also deletes every linked metadata companion.
 
 ## YubiHSM login
 
-An ordinary YubiHSM slot supports three `C_Login` PIN forms:
+An ordinary YubiHSM slot supports two `C_Login` PIN forms:
 
 | Authentication | PIN form |
 | --- | --- |
-| Direct symmetric key | `AAAApassword` |
-| Direct asymmetric key | `@AAAApassword` |
+| Direct authentication key | `AAAApassword` |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]:<credential-password>` |
 
 `AAAA` is the four-hex-digit ID of the authentication key on the target
@@ -161,6 +160,17 @@ selector from the password, so the password itself may contain colons. The
 selected credential and target YubiHSM authentication key must form a
 compatible symmetric or asymmetric authentication pair.
 
+For direct authentication, the module first checks the algorithm cached for
+that YubiHSM slot and Authentication Key ID. Only when the cache entry is empty
+does it probe with the symmetric `CREATE SESSION` request first. If the
+YubiHSM immediately rejects that request with its wrong-length status, the
+module retries with the asymmetric request. A cached algorithm is used
+immediately; if its request receives the same wrong-length status, the entry
+is stale and the module tries the other algorithm. Successful authentication
+updates the cache. Object discovery also populates this shared cache from
+Authentication Key metadata, and reconnection clears it with the rest of the
+slot's discovery state.
+
 When `PKCS11RS_PINENTRY` is configured, the password and its separating colon
 may be omitted to request it through pinentry:
 
@@ -176,8 +186,7 @@ separately with `C_LoginUser`:
 
 | Authentication | Username | PIN |
 | --- | --- | --- |
-| Direct symmetric key | `AAAA` | Password |
-| Direct asymmetric key | `@AAAA` | Password |
+| Direct authentication key | `AAAA` | Password |
 | YubiHSM Auth credential | `:AAAA<label>[@<source>]` | Credential password |
 
 Passing a null PIN pointer and zero PIN length to `C_LoginUser` requests the
