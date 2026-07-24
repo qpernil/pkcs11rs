@@ -33,20 +33,28 @@ available in a particular slot.
 
 ## PKCS #11 3.2 profiles
 
-Every present YubiHSM slot advertises public, immutable, token-resident
-`CKO_PROFILE` objects for:
+Every present slot advertises a public, immutable, token-resident
+`CKP_BASELINE_PROVIDER` object. Additional `CKO_PROFILE` objects are derived
+from the backend's advertised behavior:
 
 | Profile | Availability |
 | --- | --- |
-| `CKP_BASELINE_PROVIDER` | Every present YubiHSM slot |
-| `CKP_EXTENDED_PROVIDER` | Every present YubiHSM slot |
-| `CKP_AUTHENTICATION_TOKEN` | Every present YubiHSM slot |
-| `CKP_PUBLIC_CERTIFICATES_TOKEN` | Only after successful configured public discovery |
+| `CKP_BASELINE_PROVIDER` | Every present slot |
+| `CKP_EXTENDED_PROVIDER` | Slots whose mechanism list satisfies the mandatory Extended Provider mechanism and flag vector |
+| `CKP_AUTHENTICATION_TOKEN` | Slots advertising signing-capable `CKM_SHA256_RSA_PKCS` |
+| `CKP_PUBLIC_CERTIFICATES_TOKEN` | PIV and OpenPGP slots; YubiHSM slots only after successful configured public discovery |
 
 Each `CKO_PROFILE` object identifies one supported profile through its
 `CKA_PROFILE_ID` attribute and has a stable, distinct `CKA_UNIQUE_ID`. The
-public-certificates profile is based on an actual authenticated discovery
-result, not merely on the presence of configuration.
+YubiHSM public-certificates profile is based on an actual authenticated
+discovery result, not merely on the presence of configuration.
+
+Production YubiHSM slots normally use the vendor AES-CCM and RSA wrap
+mechanisms, so they do not claim the standard Extended Provider profile unless
+their advertised mechanism flags satisfy its complete predicate. The
+deterministic ABI qualification fixture deliberately supplies that standard
+surface so the OASIS Extended Provider test remains executable; this is not a
+claim about a particular YubiHSM device.
 
 ## Compatibility and Validation
 
