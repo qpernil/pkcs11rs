@@ -234,6 +234,22 @@ PKCS11RS_RUN_HARDWARE_TESTS=1 python3 test_hardware.py
 cargo test --locked -- --ignored
 ```
 
+The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
+auto-assigned object IDs, generates an exportable P-256 target and RSA-2048
+wrap key, restores the wrapped target, and removes both keys before returning:
+
+```sh
+PKCS11RS_TEST_YUBIHSM_RSA_WRAP=1 \
+cargo test generated_ec_key_round_trips_through_private_rsa_wrap_key_on_hardware \
+  -- --ignored --nocapture
+```
+
+The test uses authentication key `0001` and password `password` by default.
+Override them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
+`PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`. Set
+`PKCS11RS_TEST_YUBIHSM_SOURCE` to a serial number or full slot name when more
+than one YubiHSM is present.
+
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 

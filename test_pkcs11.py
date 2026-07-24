@@ -60,6 +60,7 @@ CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
+CKM_RSA_AES_KEY_WRAP = 0x00001054
 CKM_SHA_1 = 0x00000220
 CKM_SHA256 = 0x00000250
 CKM_SHA224 = 0x00000255
@@ -77,6 +78,10 @@ CKM_AES_CBC = 0x00001082
 CKM_AES_GCM = 0x00001087
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
+CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
+CKM_YUBICO_RSA_WRAP = 0xD9554209
+CKG_MGF1_SHA256 = 2
+CKZ_DATA_SPECIFIED = 1
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
 CKO_PUBLIC_KEY = 0x00000002
@@ -277,6 +282,10 @@ class CK_GCM_PARAMS(ctypes.Structure):
     ]
 
 
+class CKM_YUBICO_AES_CCM_WRAP_PARAMS(ctypes.Structure):
+    _fields_ = [("format", CK_ULONG)]
+
+
 class PKCS11RS_SCP03_KEY_SET(ctypes.Structure):
     _fields_ = [
         ("pEncKey", ctypes.POINTER(CK_BYTE)),
@@ -320,6 +329,13 @@ class CK_RSA_PKCS_OAEP_PARAMS(ctypes.Structure):
         ("source", CK_ULONG),
         ("pSourceData", CK_VOID_PTR),
         ("ulSourceDataLen", CK_ULONG),
+    ]
+
+
+class CK_RSA_AES_KEY_WRAP_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ulAESKeyBits", CK_ULONG),
+        ("pOAEPParams", ctypes.POINTER(CK_RSA_PKCS_OAEP_PARAMS)),
     ]
 
 
@@ -737,6 +753,26 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_GenerateKey.restype = CK_RV
+        cls.lib.C_WrapKey.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_WrapKey.restype = CK_RV
+        cls.lib.C_UnwrapKey.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_UnwrapKey.restype = CK_RV
         cls.lib.C_GenerateRandom.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_BYTE),
@@ -966,12 +1002,14 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
 
-    def open_slot_session(self, slot_id: int) -> int:
+    def open_slot_session(
+        self, slot_id: int, flags: int = CKF_SERIAL_SESSION
+    ) -> int:
         session = CK_ULONG()
         self.assertEqual(
             self.lib.C_OpenSession(
                 slot_id,
-                CKF_SERIAL_SESSION,
+                flags,
                 None,
                 None,
                 ctypes.byref(session),
@@ -2587,7 +2625,7 @@ done
                 CKA_WRAP,
                 CKA_UNWRAP,
             ),
-            (CKK_RSA, 2048, 0, 0, 0, 0),
+            (CKK_RSA, 2048, 0, 0, 1, 0),
         )
 
         public_wrap = find_one(10, CKO_PUBLIC_KEY)
@@ -2603,6 +2641,241 @@ done
             ),
             (CKK_RSA, 2048, 0, 0, 1, 0),
         )
+
+    def test_abi_yubihsm_wraps_and_unwraps_with_ccm_and_rsa(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(
+            ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
+        )
+        self.login_session(session)
+
+        def find_one(object_id: int, object_class: int) -> int:
+            encoded_id = (CK_BYTE * 2)(*object_id.to_bytes(2, "big"))
+            encoded_class = CK_ULONG(object_class)
+            template = (CK_ATTRIBUTE * 2)(
+                CK_ATTRIBUTE(CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), 2),
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(encoded_class), CK_VOID_PTR),
+                    ctypes.sizeof(encoded_class),
+                ),
+            )
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+            )
+            handle = CK_ULONG()
+            found = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session, ctypes.byref(handle), 1, ctypes.byref(found)
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            return handle.value
+
+        def rsa_mechanism(
+            mechanism_type: int,
+        ) -> tuple[
+            CK_MECHANISM, CK_RSA_AES_KEY_WRAP_PARAMS, CK_RSA_PKCS_OAEP_PARAMS
+        ]:
+            oaep = CK_RSA_PKCS_OAEP_PARAMS(
+                CKM_SHA256,
+                CKG_MGF1_SHA256,
+                CKZ_DATA_SPECIFIED,
+                None,
+                0,
+            )
+            parameters = CK_RSA_AES_KEY_WRAP_PARAMS(256, ctypes.pointer(oaep))
+            mechanism = CK_MECHANISM(
+                mechanism_type,
+                ctypes.cast(ctypes.byref(parameters), CK_VOID_PTR),
+                ctypes.sizeof(parameters),
+            )
+            return mechanism, parameters, oaep
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertTrue(
+            {
+                CKM_YUBICO_AES_CCM_WRAP,
+                CKM_YUBICO_RSA_WRAP,
+                CKM_RSA_AES_KEY_WRAP,
+            }.issubset(set(mechanisms))
+        )
+
+        target = find_one(2, CKO_SECRET_KEY)
+        ccm_wrapper = find_one(8, CKO_SECRET_KEY)
+        rsa_private = find_one(9, CKO_PRIVATE_KEY)
+        rsa_public = find_one(9, CKO_PUBLIC_KEY)
+        public_wrapper = find_one(10, CKO_PUBLIC_KEY)
+
+        extractable = CK_BYTE()
+        extractable_attribute = CK_ATTRIBUTE(
+            CKA_EXTRACTABLE,
+            ctypes.cast(ctypes.byref(extractable), CK_VOID_PTR),
+            ctypes.sizeof(extractable),
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session, target, ctypes.byref(extractable_attribute), 1
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(extractable.value, 1)
+
+        ccm_parameters = CKM_YUBICO_AES_CCM_WRAP_PARAMS(1)
+        ccm = CK_MECHANISM(
+            CKM_YUBICO_AES_CCM_WRAP,
+            ctypes.cast(ctypes.byref(ccm_parameters), CK_VOID_PTR),
+            ctypes.sizeof(ccm_parameters),
+        )
+        wrapped_length = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_WrapKey(
+                session,
+                ctypes.byref(ccm),
+                ccm_wrapper,
+                target,
+                None,
+                ctypes.byref(wrapped_length),
+            ),
+            CKR_OK,
+        )
+        self.assertGreater(wrapped_length.value, 0)
+
+        too_short = (CK_BYTE * 1)()
+        wrapped_length.value = len(too_short)
+        self.assertEqual(
+            self.lib.C_WrapKey(
+                session,
+                ctypes.byref(ccm),
+                ccm_wrapper,
+                target,
+                too_short,
+                ctypes.byref(wrapped_length),
+            ),
+            CKR_BUFFER_TOO_SMALL,
+        )
+        wrapped = (CK_BYTE * wrapped_length.value)()
+        self.assertEqual(
+            self.lib.C_WrapKey(
+                session,
+                ctypes.byref(ccm),
+                ccm_wrapper,
+                target,
+                wrapped,
+                ctypes.byref(wrapped_length),
+            ),
+            CKR_OK,
+        )
+        self.assertTrue(bytes(wrapped[: wrapped_length.value]).startswith(b"ABI wrapped key:"))
+
+        imported = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_UnwrapKey(
+                session,
+                ctypes.byref(ccm),
+                ccm_wrapper,
+                wrapped,
+                wrapped_length,
+                None,
+                0,
+                ctypes.byref(imported),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(imported.value, target)
+
+        for mechanism_type, wrapper in (
+            (CKM_YUBICO_RSA_WRAP, public_wrapper),
+            (CKM_RSA_AES_KEY_WRAP, rsa_public),
+        ):
+            rsa, _parameters, _oaep = rsa_mechanism(mechanism_type)
+            rsa_length = CK_ULONG(3136)
+            rsa_wrapped = (CK_BYTE * rsa_length.value)()
+            self.assertEqual(
+                self.lib.C_WrapKey(
+                    session,
+                    ctypes.byref(rsa),
+                    wrapper,
+                    target,
+                    rsa_wrapped,
+                    ctypes.byref(rsa_length),
+                ),
+                CKR_OK,
+            )
+
+        full_rsa, _full_parameters, _full_oaep = rsa_mechanism(
+            CKM_YUBICO_RSA_WRAP
+        )
+        self.assertEqual(
+            self.lib.C_UnwrapKey(
+                session,
+                ctypes.byref(full_rsa),
+                rsa_private,
+                wrapped,
+                wrapped_length,
+                None,
+                0,
+                ctypes.byref(imported),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(imported.value, target)
+
+        key_rsa, _key_parameters, _key_oaep = rsa_mechanism(
+            CKM_RSA_AES_KEY_WRAP
+        )
+        object_class = CK_ULONG(CKO_SECRET_KEY)
+        key_type = CK_ULONG(CKK_AES)
+        value_len = CK_ULONG(16)
+        template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+            CK_ATTRIBUTE(
+                CKA_VALUE_LEN,
+                ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                ctypes.sizeof(value_len),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_UnwrapKey(
+                session,
+                ctypes.byref(key_rsa),
+                rsa_private,
+                wrapped,
+                wrapped_length,
+                template,
+                len(template),
+                ctypes.byref(imported),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(imported.value, target)
 
     def test_abi_yubihsm_opaque_objects_match_reference_attributes(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

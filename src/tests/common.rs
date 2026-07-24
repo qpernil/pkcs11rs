@@ -1661,7 +1661,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
     assert!(!public.encrypt && !public.verify);
     assert_eq!(
         public.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
-        Some(vec![CK_FALSE as CK_BBOOL])
+        Some(vec![CK_TRUE as CK_BBOOL])
     );
     assert!(matches!(
         public.material,
@@ -1698,6 +1698,262 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
     assert_eq!(
         public_wrap[0].attribute_value(CKA_MODULUS as CK_ATTRIBUTE_TYPE),
         Some(vec![0xa5; 256])
+    );
+}
+
+#[test]
+fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
+    let cases = [
+        (
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                decrypt: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x05, 0x06, 0x09, 0x0a, 0x10],
+        ),
+        (
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_EC_P256,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                derive: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x07, 0x0b],
+        ),
+        (
+            crate::YUBIHSM_HMAC_KEY,
+            crate::YUBIHSM_ALGO_HMAC_SHA256,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                verify: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x16, 0x17],
+        ),
+        (
+            crate::YUBIHSM_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                wrap: true,
+                unwrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x0c, 0x0d, 0x10],
+        ),
+        (
+            crate::YUBIHSM_WRAP_KEY,
+            crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+            crate::YubiHsmPkcs11Attributes {
+                encrypt: true,
+                decrypt: true,
+                wrap: true,
+                unwrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x0c, 0x0d, 0x10, 0x25, 0x26],
+        ),
+        (
+            crate::YUBIHSM_PUBLIC_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                wrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+            vec![0x0c],
+        ),
+    ];
+    for (object_type, algorithm, attributes, bits) in cases {
+        let capabilities =
+            crate::yubihsm_attributes_to_capabilities(object_type, algorithm, attributes);
+        assert_eq!(capabilities, crate::yubihsm_capabilities(&bits));
+        assert_eq!(
+            crate::yubihsm_capabilities_to_attributes(
+                object_type,
+                algorithm,
+                &capabilities
+            ),
+            attributes
+        );
+    }
+
+    let aes = crate::YubiHsmPkcs11Attributes {
+        encrypt: true,
+        decrypt: true,
+        ..crate::YubiHsmPkcs11Attributes::default()
+    };
+    let capabilities = crate::yubihsm_attributes_to_capabilities(
+        crate::YUBIHSM_SYMMETRIC_KEY,
+        crate::YUBIHSM_ALGO_AES128,
+        aes,
+    );
+    assert_eq!(
+        capabilities,
+        crate::yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35])
+    );
+    let effective = crate::yubihsm_capabilities_to_attributes(
+        crate::YUBIHSM_SYMMETRIC_KEY,
+        crate::YUBIHSM_ALGO_AES128,
+        &capabilities,
+    );
+    assert!(effective.encrypt && effective.decrypt && effective.sign && effective.verify);
+
+    let private_wrap_capabilities = crate::yubihsm_capabilities(&[0x0c, 0x0d]);
+    let synthetic_public = crate::yubihsm_capabilities_to_attributes(
+        crate::YUBIHSM_WRAP_KEY_PUBLIC,
+        crate::YUBIHSM_ALGO_RSA_2048,
+        &private_wrap_capabilities,
+    );
+    assert!(synthetic_public.wrap);
+    assert!(!synthetic_public.unwrap);
+    assert!(synthetic_public.extractable);
+}
+
+#[test]
+fn yubihsm_capability_mapping_ignores_meaningless_capabilities() {
+    let all = [0xff; 8];
+    let cases = [
+        (
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                decrypt: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_EC_P256,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                derive: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_X25519,
+            crate::YubiHsmPkcs11Attributes {
+                derive: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_PUBLIC_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                encrypt: true,
+                verify: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_PUBLIC_KEY,
+            crate::YUBIHSM_ALGO_EC_P256,
+            crate::YubiHsmPkcs11Attributes {
+                verify: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                wrap: true,
+                unwrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_WRAP_KEY,
+            crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+            crate::YubiHsmPkcs11Attributes {
+                encrypt: true,
+                decrypt: true,
+                wrap: true,
+                unwrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_PUBLIC_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            crate::YubiHsmPkcs11Attributes {
+                wrap: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_HMAC_KEY,
+            crate::YUBIHSM_ALGO_HMAC_SHA256,
+            crate::YubiHsmPkcs11Attributes {
+                sign: true,
+                verify: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_SYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_AES128,
+            crate::YubiHsmPkcs11Attributes {
+                encrypt: true,
+                decrypt: true,
+                sign: true,
+                verify: true,
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+        (
+            crate::YUBIHSM_HMAC_KEY,
+            crate::YUBIHSM_ALGO_AES128,
+            crate::YubiHsmPkcs11Attributes {
+                extractable: true,
+                ..crate::YubiHsmPkcs11Attributes::default()
+            },
+        ),
+    ];
+    for (object_type, algorithm, expected) in cases {
+        assert_eq!(
+            crate::yubihsm_capabilities_to_attributes(object_type, algorithm, &all),
+            expected
+        );
+    }
+
+    let ec_with_rsa_sign = crate::yubihsm_capabilities(&[0x05]);
+    assert!(
+        !crate::yubihsm_capabilities_to_attributes(
+            crate::YUBIHSM_ASYMMETRIC_KEY,
+            crate::YUBIHSM_ALGO_EC_P256,
+            &ec_with_rsa_sign,
+        )
+        .sign
+    );
+    let public_wrap_with_wrap_data = crate::yubihsm_capabilities(&[0x25]);
+    assert!(
+        !crate::yubihsm_capabilities_to_attributes(
+            crate::YUBIHSM_PUBLIC_WRAP_KEY,
+            crate::YUBIHSM_ALGO_RSA_2048,
+            &public_wrap_with_wrap_data,
+        )
+        .encrypt
     );
 }
 
@@ -4387,6 +4643,47 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
+    assert!(mechanism(crate::CKM_YUBICO_AES_CCM_WRAP).is_none());
+    assert!(mechanism(crate::CKM_YUBICO_RSA_WRAP).is_none());
+    assert!(mechanism(CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE).is_none());
+
+    let wrapping = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+        crate::YUBIHSM_ALGO_AES_KWP,
+        crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+        crate::YUBIHSM_ALGO_AES256_CCM_WRAP,
+    ]);
+    for mechanism_type in [
+        crate::CKM_YUBICO_RSA_WRAP,
+        CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+    ] {
+        let details = wrapping
+            .iter()
+            .find(|mechanism| mechanism.type_ == mechanism_type)
+            .unwrap();
+        assert_eq!((details.min_key_size, details.max_key_size), (2048, 2048));
+        assert_eq!(
+            details.flags,
+            (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS
+        );
+    }
+    let ccm = wrapping
+        .iter()
+        .find(|mechanism| mechanism.type_ == crate::CKM_YUBICO_AES_CCM_WRAP)
+        .unwrap();
+    assert_eq!((ccm.min_key_size, ccm.max_key_size), (16, 32));
+    assert_eq!(ccm.flags, (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS);
+
+    let incomplete_rsa_wrap = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+    ]);
+    assert!(!incomplete_rsa_wrap.iter().any(|mechanism| matches!(
+        mechanism.type_,
+        x if x == crate::CKM_YUBICO_RSA_WRAP
+            || x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE
+    )));
 
     let public_operations = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_2048,

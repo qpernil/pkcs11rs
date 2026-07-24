@@ -10,6 +10,7 @@ mod hardware_provisioning {
     const TOUCH_AUTHKEY_ID_ENV: &str = "PKCS11RS_TEST_YUBIHSM_TOUCH_AUTHKEY_ID";
     const SCP11B_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_SCP11B";
     const SCP11B_KVN_ENV: &str = "PKCS11RS_TEST_SCP11B_KVN";
+    const RSA_WRAP_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_RSA_WRAP";
     const DEFAULT_MANAGEMENT_KEY: &str = "00000000000000000000000000000000";
     const DEFAULT_LABEL: &str = "pkcs11rs-asymmetric";
     const DEFAULT_TOUCH_LABEL: &str = "pkcs11rs-asymmetric-touch";
@@ -95,6 +96,58 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             "multiple {kind} devices matched; set {selector_name} to a serial number or full device name"
         );
         connector
+    }
+
+    fn select_yubihsm_slot() -> CK_SLOT_ID {
+        let selector = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE").ok();
+        crate::with_context_mut(|context| {
+            context.init();
+            let mut matches = context.slots.iter().filter_map(|(slot_id, slot)| {
+                (slot.is_yubihsm()
+                    && slot.is_present()
+                    && selector.as_ref().is_none_or(|selector| {
+                        slot.serial() == selector || slot.name() == *selector
+                    }))
+                .then_some(*slot_id)
+            });
+            let slot_id = matches.next().ok_or(CKR_SLOT_ID_INVALID)?;
+            if matches.next().is_some() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            Ok(slot_id)
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "expected exactly one present YubiHSM matching PKCS11RS_TEST_YUBIHSM_SOURCE={selector:?}: {error:?}"
+            )
+        })
+    }
+
+    #[test]
+    #[ignore = "generates, wraps, destroys, restores, and cleans up persistent keys on a live YubiHSM"]
+    fn generated_ec_key_round_trips_through_private_rsa_wrap_key_on_hardware() {
+        if std::env::var(RSA_WRAP_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!("skipped hardware wrap test; set {RSA_WRAP_ENABLE_ENV}=1 to enable it");
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+        let slot_id = select_yubihsm_slot();
+        let admin_id = hex_u16(
+            "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
+            &environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
+        );
+        let admin_password = environment(
+            "PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD",
+            DEFAULT_ADMIN_PASSWORD,
+        );
+        let pin = format!("{admin_id:04x}{admin_password}");
+        let result = generated_ec_private_rsa_wrap_round_trip(slot_id, pin.as_bytes());
+        let finalize = crate::C_Finalize(std::ptr::null_mut());
+        result.unwrap();
+        assert_eq!(finalize, CKR_OK as CK_RV);
     }
 
     #[test]

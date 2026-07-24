@@ -561,6 +561,18 @@ impl Session for AbiYubiHsmSession {
                 }
                 return abi_yubihsm_device_attestation();
             }
+            YubiHsmCommandCode::ExportWrapped
+            | YubiHsmCommandCode::GetRsaWrappedKey
+            | YubiHsmCommandCode::ExportRsaWrapped => {
+                return Ok([b"ABI wrapped key:".as_slice(), data].concat());
+            }
+            YubiHsmCommandCode::ImportWrapped | YubiHsmCommandCode::ImportRsaWrapped => {
+                return Ok(vec![YUBIHSM_SYMMETRIC_KEY, 0, 2]);
+            }
+            YubiHsmCommandCode::PutRsaWrappedKey => {
+                let object_type = *data.get(2).ok_or(CKR_DATA_LEN_RANGE)?;
+                return Ok(vec![object_type, 0, 2]);
+            }
             YubiHsmCommandCode::EncryptEcb => (
                 secure_channel_crypto::Direction::Encrypt,
                 None,
@@ -771,9 +783,9 @@ pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
         verify: true,
         derive: false,
         sensitive: true,
-        extractable: false,
+        extractable: true,
         always_sensitive: true,
-        never_extractable: true,
+        never_extractable: false,
         local: true,
         key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
         owner_session: None,
@@ -783,7 +795,7 @@ pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
             algorithm: YUBIHSM_ALGO_AES128,
             length: 16,
             domains: 0xffff,
-            capabilities: yubihsm_capabilities(&[0x32, 0x33]),
+            capabilities: yubihsm_capabilities(&[0x10, 0x32, 0x33]),
             delegated_capabilities: [0; 8],
             public_key: Vec::new(),
             value: Rc::new(RefCell::new(None)),
@@ -1075,10 +1087,13 @@ impl Slot for AbiYubiHsmSlot {
         let mut mechanisms = yubihsm_mechanisms(&[
             YUBIHSM_ALGO_RSA_PKCS1_SHA1,
             YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+            YUBIHSM_ALGO_RSA_OAEP_SHA1,
             YUBIHSM_ALGO_RSA_2048,
+            YUBIHSM_ALGO_AES128_CCM_WRAP,
             YUBIHSM_ALGO_AES128,
             YUBIHSM_ALGO_AES_ECB,
             YUBIHSM_ALGO_AES_CBC,
+            YUBIHSM_ALGO_AES_KWP,
         ]);
         if let Some(rsa_pkcs) = mechanisms
             .iter_mut()
