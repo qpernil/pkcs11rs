@@ -270,6 +270,28 @@ impl ProtocolPeer {
         );
     }
 
+    fn add_standalone_certificate(&self, id: u16) {
+        let certificate = Self::attestation_certificate(id).unwrap();
+        self.metadata_objects.borrow_mut().insert(
+            id,
+            (
+                ObjectInfo {
+                    capabilities: [0; 8],
+                    id,
+                    length: certificate.len() as u16,
+                    domains: 0xffff,
+                    object_type: YUBIHSM_OPAQUE,
+                    algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+                    sequence: 1,
+                    origin: 1,
+                    label: "standalone CA certificate".to_owned(),
+                    delegated_capabilities: [0; 8],
+                },
+                certificate,
+            ),
+        );
+    }
+
     fn set_authkey_domains(&self, authkey_id: u16, domains: u16) {
         self.authkey_domains
             .borrow_mut()
@@ -2226,6 +2248,36 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
                 KeyMaterial::Profile { profile_id }
                     if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
         )));
+}
+
+#[test]
+fn yubihsm_public_discovery_accepts_standalone_ca_certificates() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    peer.add_standalone_certificate(6);
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects.iter().any(|object| matches!(
+        object.material,
+        KeyMaterial::Profile { profile_id }
+            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+    )));
+    let certificates = objects
+        .iter()
+        .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+        .collect::<Vec<_>>();
+    assert_eq!(certificates.len(), 2);
+    assert!(certificates
+        .iter()
+        .any(|object| object.label == "standalone CA certificate"));
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .count(),
+        1
+    );
 }
 
 #[test]
