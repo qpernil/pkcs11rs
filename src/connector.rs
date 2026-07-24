@@ -505,6 +505,8 @@ pub(crate) struct UsbConnector {
     pub(crate) serial: String,
     pub(crate) packet_size: usize,
     pub(crate) claimed: bool,
+    pub(crate) connection_epoch: u64,
+    pub(crate) connected_once: bool,
 }
 
 impl Connector for UsbConnector {
@@ -528,6 +530,9 @@ impl Connector for UsbConnector {
     }
     fn hardware_version(&self) -> Option<(u8, u8)> {
         Some((self.version.major(), self.version.minor()))
+    }
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch
     }
     fn is_present(&self) -> bool {
         self.claimed
@@ -598,6 +603,10 @@ impl UsbConnector {
         {
             log!(2, "libusb drained {length} stale bytes");
         }
+        if self.connected_once {
+            self.connection_epoch = self.connection_epoch.wrapping_add(1);
+        }
+        self.connected_once = true;
         self.claimed = true;
         Ok(())
     }
@@ -857,6 +866,9 @@ pub(crate) struct HttpConnector {
     url: String,
     version: (u8, u8, u8),
     connected: Cell<bool>,
+    reconnectable: Cell<bool>,
+    connection_epoch: Cell<u64>,
+    status_identity: RefCell<Option<YubiHsmConnectorStatus>>,
     agent: ureq::Agent,
 }
 
@@ -878,6 +890,9 @@ impl Connector for HttpConnector {
     }
     fn minor(&self) -> u8 {
         self.version.1
+    }
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch.get()
     }
     fn is_present(&self) -> bool {
         self.connected.get()
@@ -929,15 +944,30 @@ impl Connector for HttpConnector {
         }
         receive_buffer[..received.len()].copy_from_slice(&received);
         log!(2, "http.post({:?}) -> {:?}", send_buffer, received);
-        self.connected.set(true);
+        if !self.connected.replace(true) {
+            self.connection_epoch
+                .set(self.connection_epoch.get().wrapping_add(1));
+        }
         Ok(&receive_buffer[..received.len()])
     }
     fn refresh(&self) -> Result<(), Error> {
-        if !self.connected.get() {
+        if !self.connected.get() && !self.reconnectable.get() {
             return Err(CKR_DEVICE_REMOVED.into());
         }
         match self.status(Duration::from_secs(5)) {
-            Ok(_) => {
+            Ok(status) => {
+                let was_connected = self.connected.replace(true);
+                let identity_changed = self
+                    .status_identity
+                    .try_borrow()
+                    .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                    .as_ref()
+                    != Some(&status);
+                *self.status_identity.try_borrow_mut()? = Some(status);
+                if !was_connected || identity_changed {
+                    self.connection_epoch
+                        .set(self.connection_epoch.get().wrapping_add(1));
+                }
                 self.connected.set(true);
                 Ok(())
             }
@@ -963,6 +993,9 @@ impl HttpConnector {
             url,
             version: (0, 0, 0),
             connected: Cell::new(false),
+            reconnectable: Cell::new(false),
+            connection_epoch: Cell::new(0),
+            status_identity: RefCell::new(None),
             agent: ureq::Agent::new_with_config(config),
         })
     }
@@ -986,14 +1019,17 @@ impl HttpConnector {
 
     pub(crate) fn connect(&mut self) -> Result<(), Error> {
         let status = self.status(Duration::from_secs(5))?;
-        self.serial = status.serial;
+        self.serial = status.serial.clone();
         self.version = status.version;
+        *self.status_identity.get_mut() = Some(status);
         self.connected.set(true);
+        self.reconnectable.set(true);
         Ok(())
     }
 
     pub(crate) fn set_unavailable(&self) {
         self.connected.set(false);
+        self.reconnectable.set(false);
     }
 }
 
@@ -1071,6 +1107,7 @@ mod tests {
             "Yubico YubiHSM Connector http://127.0.0.1:12345"
         );
         assert!(!connector.is_present());
+        assert!(connector.refresh().is_err());
     }
 
     #[test]
@@ -1126,6 +1163,48 @@ mod tests {
                 .unwrap(),
             b"\x83\x00\x01\x42"
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_connector_epochs_track_replacement_and_reconnection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            for (index, identity) in [
+                b"status=OK\nserial=11111111\nversion=3.0.7\n".as_slice(),
+                b"status=OK\nserial=11111111\nversion=3.0.7\n".as_slice(),
+                b"status=OK\nserial=22222222\nversion=3.1.0\n".as_slice(),
+                b"status=OK\nserial=22222222\nversion=3.1.0\n".as_slice(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let request = read_http_request(&mut connection);
+                assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+                write_http_response(&mut connection, identity, index == 3);
+            }
+        });
+
+        let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
+        connector.connect().unwrap();
+        assert_eq!(connector.connection_epoch(), 0);
+
+        connector.refresh().unwrap();
+        assert_eq!(connector.connection_epoch(), 0);
+
+        connector.refresh().unwrap();
+        assert_eq!(connector.connection_epoch(), 1);
+
+        connector.connected.set(false);
+        assert!(!connector.is_present());
+        connector.refresh().unwrap();
+        assert!(connector.is_present());
+        assert_eq!(connector.connection_epoch(), 2);
         server.join().unwrap();
     }
 
