@@ -1147,6 +1147,7 @@ pub fn authentication_loss_cancels_active_private_signing() {
                 present: std::cell::Cell::new(true),
                 remove_on_refresh: false,
                 login_active: Some(login_active.clone()),
+                mechanisms: crate::MECHANISMS.to_vec(),
             }),
         );
         context.sessions.insert(
@@ -2397,6 +2398,7 @@ pub fn open_session_refreshes_token_presence() {
                 present: std::cell::Cell::new(true),
                 remove_on_refresh: true,
                 login_active: None,
+                mechanisms: crate::MECHANISMS.to_vec(),
             }),
         );
     }

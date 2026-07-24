@@ -118,6 +118,16 @@ fn crypt_init(
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         let mechanism = _as_ref(mechanism)?;
+        require_slot_mechanism(
+            ctx,
+            slot_id,
+            mechanism.mechanism,
+            if encrypting {
+                CKF_ENCRYPT as CK_FLAGS
+            } else {
+                CKF_DECRYPT as CK_FLAGS
+            },
+        )?;
         let (iv, gcm, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE

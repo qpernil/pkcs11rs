@@ -4751,6 +4751,7 @@ struct TestSlot {
     present: std::cell::Cell<bool>,
     remove_on_refresh: bool,
     login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    mechanisms: Vec<crate::MechanismDetails>,
 }
 
 #[derive(Debug)]
@@ -5119,6 +5120,10 @@ impl crate::Slot for TestSlot {
         self.format_token_info(info);
         Ok(())
     }
+
+    fn backend_mechanisms(&self) -> Vec<crate::MechanismDetails> {
+        self.mechanisms.clone()
+    }
 }
 
 fn test_slot(present: bool) -> TestSlot {
@@ -5126,7 +5131,23 @@ fn test_slot(present: bool) -> TestSlot {
         present: std::cell::Cell::new(present),
         remove_on_refresh: false,
         login_active: None,
+        mechanisms: crate::MECHANISMS.to_vec(),
     }
+}
+
+fn test_slot_with_mechanisms(
+    present: bool,
+    additional: &[(CK_MECHANISM_TYPE, CK_FLAGS)],
+) -> TestSlot {
+    let mut slot = test_slot(present);
+    slot.mechanisms
+        .extend(additional.iter().map(|(type_, flags)| crate::MechanismDetails {
+            type_: *type_,
+            min_key_size: 0,
+            max_key_size: CK_UNAVAILABLE_INFORMATION as CK_ULONG,
+            flags: *flags,
+        }));
+    slot
 }
 
 fn install_test_slot(slot_id: CK_SLOT_ID) {

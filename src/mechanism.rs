@@ -483,6 +483,19 @@ fn mechanism_details(
         .ok_or(CKR_MECHANISM_INVALID.into())
 }
 
+fn require_slot_mechanism(
+    ctx: &Context,
+    slot_id: CK_SLOT_ID,
+    type_: CK_MECHANISM_TYPE,
+    operation: CK_FLAGS,
+) -> Result<MechanismDetails, Error> {
+    let details = mechanism_details(&ctx.get_slot(slot_id)?.mechanisms(), type_)?;
+    if details.flags & operation == 0 {
+        return Err(CKR_MECHANISM_INVALID.into());
+    }
+    Ok(details)
+}
+
 #[no_mangle]
 pub extern "C" fn C_GetMechanismList(
     slotID: CK_SLOT_ID,

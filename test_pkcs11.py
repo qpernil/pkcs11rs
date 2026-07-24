@@ -62,6 +62,7 @@ CKF_VERIFY = 0x00002000
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
+CKM_SHA224_RSA_PKCS = 0x00000046
 CKM_RSA_AES_KEY_WRAP = 0x00001054
 CKM_SHA_1 = 0x00000220
 CKM_SHA256 = 0x00000250
@@ -1606,6 +1607,61 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(signature_len.value, 256)
+
+    def test_abi_yubihsm_rejects_unadvertised_sign_mechanism(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertNotIn(CKM_SHA224_RSA_PKCS, mechanisms)
+
+        object_class = CK_ULONG(CKO_PRIVATE_KEY)
+        key_type = CK_ULONG(CKK_RSA)
+        template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_KEY_TYPE,
+                ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                ctypes.sizeof(key_type),
+            ),
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        mechanism = CK_MECHANISM(CKM_SHA224_RSA_PKCS, None, 0)
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_MECHANISM_INVALID,
+        )
 
     def test_yubihsm_device_public_key_is_a_descriptive_read_only_object(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
