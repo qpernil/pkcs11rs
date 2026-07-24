@@ -229,7 +229,7 @@ impl ProtocolPeer {
 
         let mut key_metadata = b"MDB1".to_vec();
         key_metadata.extend_from_slice(&[3, 0, 1, 1]);
-        encode_metadata_item(&mut key_metadata, 1, b"private-id");
+        encode_metadata_item(&mut key_metadata, 1, b"shared-id");
         encode_metadata_item(&mut key_metadata, 2, b"metadata private key");
         encode_metadata_item(&mut key_metadata, 3, b"shared-id");
         encode_metadata_item(&mut key_metadata, 4, b"metadata public key");
@@ -1575,6 +1575,19 @@ fn yubihsm_duplicate_metadata_is_repaired_without_public_discovery_credential() 
 fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
+    replace_metadata(
+        peer.as_ref(),
+        101,
+        YUBIHSM_ASYMMETRIC_KEY,
+        1,
+        1,
+        &[
+            (1, b"private-id"),
+            (2, b"metadata private key"),
+            (3, b"shared-id"),
+            (4, b"metadata public key"),
+        ],
+    );
     let mut slot = cache_test_slot(peer.clone(), public_discovery);
     let _ = Slot::token_objects(&slot, 7).unwrap();
     Slot::login(&mut slot, b"0001password").unwrap();
@@ -2107,7 +2120,7 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .unwrap();
-    assert_eq!(private_key.id, b"private-id");
+    assert_eq!(private_key.id, b"shared-id");
     assert_eq!(private_key.label, "metadata private key");
     assert_eq!(public_key.id, b"shared-id");
     assert_eq!(public_key.label, "metadata public key");
@@ -2131,7 +2144,7 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         1,
         1,
         &[
-            (1, b"updated-private-id"),
+            (1, b"updated-shared-id"),
             (2, b"updated private key"),
             (3, b"updated-shared-id"),
             (4, b"updated public key"),
@@ -2155,7 +2168,7 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .unwrap();
-    assert_eq!(private_key.id, b"updated-private-id");
+    assert_eq!(private_key.id, b"updated-shared-id");
     assert_eq!(private_key.label, "updated private key");
     assert_eq!(public_key.id, b"updated-shared-id");
     assert_eq!(public_key.label, "updated public key");

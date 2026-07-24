@@ -2024,7 +2024,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     }
 
     let initial =
-        find_yubihsm_object(session, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, b"private-id", "metadata private key");
+        find_yubihsm_object(session, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, b"shared-id", "metadata private key");
     assert_eq!(initial.len(), 1);
     assert!(find_yubihsm_object(
         session,
@@ -2050,7 +2050,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         1,
         1,
         &[
-            (1, b"updated-private-id"),
+            (1, b"updated-shared-id"),
             (2, b"updated private key"),
             (3, b"updated-shared-id"),
             (4, b"updated public key"),
@@ -2069,14 +2069,14 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     let updated = find_yubihsm_object(
         session,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-        b"updated-private-id",
+        b"updated-shared-id",
         "updated private key",
     );
     assert_eq!(updated, initial);
     assert!(find_yubihsm_object(
         session,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-        b"private-id",
+        b"shared-id",
         "metadata private key"
     )
     .is_empty());
