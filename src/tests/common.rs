@@ -804,7 +804,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, corrupt_response_mac, _trust) =
-        crate::yubihsm::tests::make_yubihsm_test_slot();
+        crate::yubihsm::tests::make_yubihsm_keypair_collision_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1134,6 +1134,14 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ),
         [generated_public]
     );
+    let collision_public = find_yubihsm_object(
+        session,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        &[0, 2],
+        "collision public",
+    );
+    assert_eq!(collision_public.len(), 1);
+    assert_ne!(collision_public[0], generated_public);
     let metadata_puts = commands
         .borrow()
         .iter()

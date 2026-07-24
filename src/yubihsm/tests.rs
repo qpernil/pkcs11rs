@@ -553,7 +553,12 @@ impl ProtocolPeer {
                         delegated_capabilities: [0; 8],
                     };
                     (inner.command | RESPONSE_BIT, encode_object_info(&info))
-                } else if let Some((info, _)) = self.metadata_objects.borrow().get(&id) {
+                } else if let Some((info, _)) = self
+                    .metadata_objects
+                    .borrow()
+                    .get(&id)
+                    .filter(|(info, _)| info.object_type == inner.data[2])
+                {
                     (inner.command | RESPONSE_BIT, encode_object_info(info))
                 } else if inner.data[2] != 3 {
                     return Err(CKR_DEVICE_ERROR.into());
@@ -804,6 +809,36 @@ pub(crate) fn make_yubihsm_test_slot() -> (
     TestTrustEntry,
 ) {
     let peer = std::rc::Rc::new(ProtocolPeer::new());
+    let commands = peer.inner_commands.clone();
+    let corrupt_response_mac = peer.corrupt_response_mac.clone();
+    let trust = TestTrustEntry::new();
+    let mut slot = crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+        ],
+    );
+    slot.trust_prefix = Some(trust.prefix.clone());
+    (Box::new(slot), commands, corrupt_response_mac, trust)
+}
+
+pub(crate) fn make_yubihsm_keypair_collision_test_slot() -> (
+    Box<dyn crate::Slot>,
+    InnerCommands,
+    std::rc::Rc<Cell<bool>>,
+    TestTrustEntry,
+) {
+    let peer = std::rc::Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    replace_metadata(
+        peer.as_ref(),
+        101,
+        YUBIHSM_ASYMMETRIC_KEY,
+        1,
+        1,
+        &[(3, &[0, 2]), (4, b"collision public")],
+    );
     let commands = peer.inner_commands.clone();
     let corrupt_response_mac = peer.corrupt_response_mac.clone();
     let trust = TestTrustEntry::new();
