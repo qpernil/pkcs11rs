@@ -170,8 +170,7 @@ fn sign_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
         if matches!(object.material, KeyMaterial::YubiHsm { .. })
-            && (piv_is_hashed_rsa_pkcs(mechanism.mechanism)
-                || piv_is_hashed_ecdsa(mechanism.mechanism)
+            && (piv_is_hashed_ecdsa(mechanism.mechanism)
                 || (piv_is_pss_mechanism(mechanism.mechanism)
                     && mechanism.mechanism != CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE))
         {
@@ -419,8 +418,22 @@ fn sign(
                     }
                 }
                 KeyMaterial::YubiHsm { id, algorithm, .. } => {
-                    let command = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
-                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignPkcs1, *id, data)?
+                    let digest_info = if piv_is_hashed_rsa_pkcs(operation.mechanism) {
+                        let digest = piv_hash_mechanism(operation.mechanism)
+                            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                        let digest = hash(digest, data)?;
+                        Some(
+                            piv_digest_info(operation.mechanism, &digest)
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                        )
+                    } else {
+                        None
+                    };
+                    let command = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                        || piv_is_hashed_rsa_pkcs(operation.mechanism)
+                    {
+                        let input = digest_info.as_deref().unwrap_or(data);
+                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignPkcs1, *id, input)?
                     } else if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
                         let (mgf, salt_length, _) =
                             operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;

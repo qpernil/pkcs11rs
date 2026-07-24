@@ -1379,10 +1379,8 @@ fn create_session_payload_lengths(peer: &ProtocolPeer) -> Vec<usize> {
     peer.commands
         .borrow()
         .iter()
-        .filter_map(|command| {
-            (command.first() == Some(&COMMAND_CREATE_SESSION))
-                .then(|| Frame::parse(command).unwrap().data.len())
-        })
+        .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+        .map(|command| Frame::parse(command).unwrap().data.len())
         .collect()
 }
 

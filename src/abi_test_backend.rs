@@ -683,7 +683,7 @@ pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
         unique_id: "abi-yubihsm-rsa".to_owned(),
         class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type: CKK_RSA as CK_KEY_TYPE,
-        label: "ABI YubiHSM RSA key".to_owned(),
+        label: "testrsa-pri".to_owned(),
         id: 1u16.to_be_bytes().to_vec(),
         token: true,
         private: true,
@@ -721,7 +721,7 @@ fn abi_test_yubihsm_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
         unique_id: "abi-yubihsm-rsa-public".to_owned(),
         class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         key_type: CKK_RSA as CK_KEY_TYPE,
-        label: "ABI YubiHSM RSA key".to_owned(),
+        label: "testrsa-pub".to_owned(),
         id: 1u16.to_be_bytes().to_vec(),
         token: true,
         private: false,
@@ -913,7 +913,7 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
         (
             ABI_YUBIHSM_OPAQUE_DATA_ID,
             YUBIHSM_ALGO_OPAQUE_DATA,
-            b"opaque-data".as_slice(),
+            b"Mozilla Builtin Roots".as_slice(),
             ABI_YUBIHSM_OPAQUE_DATA.len(),
         ),
         (
@@ -939,9 +939,13 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
                 label,
                 delegated_capabilities: [0; 8],
             };
-            yubihsm_token_objects(slot_id, info, None)?
+            let mut object = yubihsm_token_objects(slot_id, info, None)?
                 .pop()
-                .ok_or(CKR_DEVICE_ERROR.into())
+                .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))?;
+            if algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE {
+                object.id = 1u16.to_be_bytes().to_vec();
+            }
+            Ok(object)
         })
         .collect()
 }
@@ -1034,7 +1038,7 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = yubihsm_profile_objects(slot_id, false);
+        let mut objects = yubihsm_profile_objects(slot_id, true);
         objects.extend([
             abi_test_yubihsm_object(slot_id),
             abi_test_yubihsm_public_object(slot_id),
@@ -1066,13 +1070,26 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn mechanisms(&self) -> Vec<MechanismDetails> {
-        yubihsm_mechanisms(&[
+        let mut mechanisms = yubihsm_mechanisms(&[
             YUBIHSM_ALGO_RSA_PKCS1_SHA1,
             YUBIHSM_ALGO_RSA_2048,
             YUBIHSM_ALGO_AES128,
             YUBIHSM_ALGO_AES_ECB,
             YUBIHSM_ALGO_AES_CBC,
-        ])
+        ]);
+        if let Some(rsa_pkcs) = mechanisms
+            .iter_mut()
+            .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
+        {
+            rsa_pkcs.flags |= (CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS;
+        }
+        mechanisms.push(MechanismDetails {
+            type_: CKM_SHA512 as CK_MECHANISM_TYPE,
+            min_key_size: 0,
+            max_key_size: 0,
+            flags: CKF_DIGEST as CK_FLAGS,
+        });
+        mechanisms
     }
 
     fn is_yubihsm(&self) -> bool {

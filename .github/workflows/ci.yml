@@ -34,6 +34,17 @@ jobs:
       - name: Run Python ABI tests
         run: python3 test_pkcs11.py
 
+      - name: Run OASIS PKCS #11 3.2 profile cases
+        run: python3 conformance/run_oasis.py --results target/oasis-results
+
+      - name: Upload OASIS profile results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oasis-pkcs11-v3.2-results
+          path: target/oasis-results
+          if-no-files-found: warn
+
   msrv:
     runs-on: ubuntu-latest
 
