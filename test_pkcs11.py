@@ -57,12 +57,15 @@ CKF_ASYNC_SESSION = 0x00000008
 CKF_OS_LOCKING_OK = 0x00000002
 CKF_INTERFACE_FORK_SAFE = 0x00000001
 CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
+CKF_SIGN = 0x00000800
+CKF_VERIFY = 0x00002000
 CKF_GENERATE = 0x00008000
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
 CKM_RSA_AES_KEY_WRAP = 0x00001054
 CKM_SHA_1 = 0x00000220
 CKM_SHA256 = 0x00000250
+CKM_SHA256_HMAC = 0x00000251
 CKM_SHA224 = 0x00000255
 CKM_SHA384 = 0x00000260
 CKM_SHA512 = 0x00000270
@@ -2341,6 +2344,118 @@ done
         self.assertEqual(
             self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
             CKR_MECHANISM_PARAM_INVALID,
+        )
+
+    def test_abi_yubihsm_hmac_sign_and_verify_match_rfc_4231(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        info = CK_MECHANISM_INFO()
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                CKM_SHA256_HMAC,
+                ctypes.byref(info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual((info.ulMinKeySize, info.ulMaxKeySize), (1, 512))
+        self.assertEqual(
+            info.flags & (CKF_SIGN | CKF_VERIFY),
+            CKF_SIGN | CKF_VERIFY,
+        )
+
+        key_id = (CK_BYTE * 2)(0, 11)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id))
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session, ctypes.byref(handle), 1, ctypes.byref(found)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        message = (CK_BYTE * 8).from_buffer_copy(b"Hi There")
+        expected = bytes.fromhex(
+            "b0344c61d8db38535ca8afceaf0bf12b"
+            "881dc200c9833da726e9376c2e32cff7"
+        )
+        mechanism = CK_MECHANISM(CKM_SHA256_HMAC, None, 0)
+        mac = (CK_BYTE * 32)()
+        mac_length = CK_ULONG(len(mac))
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(
+                session,
+                message,
+                len(message),
+                mac,
+                ctypes.byref(mac_length),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(bytes(mac), expected)
+
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, message, len(message), mac, len(mac)),
+            CKR_OK,
+        )
+
+        mac[0] ^= 1
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, message, len(message), mac, len(mac)),
+            CKR_SIGNATURE_INVALID,
+        )
+        mac[0] ^= 1
+
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, message, len(message), mac, len(mac) - 1),
+            CKR_SIGNATURE_LEN_RANGE,
+        )
+
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(self.lib.C_VerifyUpdate(session, message, 3), CKR_OK)
+        self.assertEqual(
+            self.lib.C_VerifyUpdate(
+                session,
+                ctypes.cast(
+                    ctypes.byref(message, 3),
+                    ctypes.POINTER(CK_BYTE),
+                ),
+                len(message) - 3,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_VerifyFinal(session, mac, len(mac)),
+            CKR_OK,
         )
 
     def test_abi_yubihsm_authentication_keys_are_generic_secrets(self) -> None:

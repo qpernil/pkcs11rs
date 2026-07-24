@@ -221,26 +221,26 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 24] = [
     MechanismDetails {
         type_: CKM_SHA_1_HMAC as CK_MECHANISM_TYPE,
         min_key_size: 1,
-        max_key_size: 64,
-        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        max_key_size: 512,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
         min_key_size: 1,
-        max_key_size: 64,
-        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        max_key_size: 512,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_SHA384_HMAC as CK_MECHANISM_TYPE,
         min_key_size: 1,
-        max_key_size: 128,
-        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        max_key_size: 1024,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_SHA512_HMAC as CK_MECHANISM_TYPE,
         min_key_size: 1,
-        max_key_size: 128,
-        flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        max_key_size: 1024,
+        flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
     },
 ];
 
