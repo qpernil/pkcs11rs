@@ -1822,6 +1822,60 @@ fn find_yubihsm_object(
     handles[..count as usize].to_vec()
 }
 
+fn read_bytes_attribute(
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Vec<u8> {
+    let mut attribute = CK_ATTRIBUTE {
+        type_: attribute_type,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut value = vec![0; attribute.ulValueLen as usize];
+    attribute.pValue = value.as_mut_ptr().cast();
+    assert_eq!(
+        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    value
+}
+
+fn find_by_bytes_attribute(
+    session: CK_SESSION_HANDLE,
+    class: CK_OBJECT_CLASS,
+    attribute_type: CK_ATTRIBUTE_TYPE,
+    value: &[u8],
+) -> Vec<CK_OBJECT_HANDLE> {
+    let mut class = class;
+    let mut value = value.to_vec();
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        bytes_attribute(attribute_type, &mut value),
+    ];
+    assert_eq!(
+        crate::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
+        CKR_OK as CK_RV
+    );
+    let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 4];
+    let mut count = 0;
+    assert_eq!(
+        crate::C_FindObjects(
+            session,
+            handles.as_mut_ptr(),
+            handles.len() as CK_ULONG,
+            &mut count,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    handles[..count as usize].to_vec()
+}
+
 fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discovery: bool) {
     finalize_for_test();
     assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
@@ -1941,6 +1995,33 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ),
         CKR_OK as CK_RV
     );
+
+    let certificate = find_yubihsm_object(
+        session,
+        CKO_CERTIFICATE as CK_OBJECT_CLASS,
+        b"shared-id",
+        "metadata certificate",
+    );
+    assert_eq!(certificate.len(), 1);
+    for attribute_type in [
+        CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE,
+        CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
+        CKA_ISSUER as CK_ATTRIBUTE_TYPE,
+        CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
+        CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
+    ] {
+        let value = read_bytes_attribute(session, certificate[0], attribute_type);
+        assert_eq!(
+            find_by_bytes_attribute(
+                session,
+                CKO_CERTIFICATE as CK_OBJECT_CLASS,
+                attribute_type,
+                &value,
+            ),
+            certificate
+        );
+    }
 
     let initial =
         find_yubihsm_object(session, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, b"private-id", "metadata private key");
