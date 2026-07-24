@@ -818,52 +818,27 @@ fn padded_big_num(value: &BigUint, length: usize) -> Result<Vec<u8>, Error> {
 
 fn yubihsm_object_parameters(
     object: &TokenObject,
+    object_type: u8,
     algorithm: u8,
 ) -> Result<YubiHsmObjectParameters<'_>, Error> {
     if !object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let mut bits = Vec::new();
-    if object.sign
-        && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS || is_hmac_key_type(object.key_type))
-    {
-        if object.key_type == CKK_RSA as CK_KEY_TYPE {
-            bits.extend([0x05, 0x06]);
-        } else if object.key_type == CKK_EC as CK_KEY_TYPE {
-            bits.push(0x07);
-        } else if object.key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
-            bits.push(0x08);
-        } else {
-            bits.push(0x16);
-        }
-    }
-    if object.verify {
-        bits.push(0x17);
-    }
-    if object.derive {
-        bits.push(0x0b);
-    }
-    if object.decrypt {
-        if object.key_type == CKK_RSA as CK_KEY_TYPE {
-            bits.extend([0x09, 0x0a]);
-        } else {
-            bits.extend([0x32, 0x34]);
-        }
-    }
-    if object.encrypt {
-        bits.extend([0x33, 0x35]);
-    }
-    if object.extractable
-        && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-        && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-    {
-        bits.push(0x10);
-    }
+    let attributes = YubiHsmPkcs11Attributes {
+        encrypt: object.encrypt,
+        decrypt: object.decrypt,
+        sign: object.sign,
+        verify: object.verify,
+        derive: object.derive,
+        wrap: object.can_wrap(),
+        unwrap: object.can_unwrap(),
+        extractable: object.extractable,
+    };
     Ok(YubiHsmObjectParameters {
         id: yubihsm_id(&object.id)?,
         label: &object.label,
         domains: 0xffff,
-        capabilities: yubihsm_capabilities(&bits),
+        capabilities: yubihsm_attributes_to_capabilities(object_type, algorithm, attributes),
         algorithm,
     })
 }
@@ -890,7 +865,7 @@ fn yubihsm_import_command(
             Ok((
                 YubiHsmCommand::put_object(
                     YubiHsmCommandCode::PutAsymmetricKey,
-                    &yubihsm_object_parameters(object, algorithm)?,
+                    &yubihsm_object_parameters(object, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
                     &value,
                 )?,
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -922,7 +897,15 @@ fn yubihsm_import_command(
             Ok((
                 YubiHsmCommand::put_object(
                     code,
-                    &yubihsm_object_parameters(object, algorithm)?,
+                    &yubihsm_object_parameters(
+                        object,
+                        if code == YubiHsmCommandCode::PutSymmetricKey {
+                            YUBIHSM_SYMMETRIC_KEY
+                        } else {
+                            YUBIHSM_HMAC_KEY
+                        },
+                        algorithm,
+                    )?,
                     value,
                 )?,
                 CKO_SECRET_KEY as CK_OBJECT_CLASS,

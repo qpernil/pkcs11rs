@@ -1018,10 +1018,11 @@ impl TokenObject {
         matches!(
             &self.material,
             KeyMaterial::YubiHsm {
-                object_type: YUBIHSM_WRAP_KEY | YUBIHSM_PUBLIC_WRAP_KEY,
+                object_type,
+                algorithm,
                 capabilities,
                 ..
-            } if yubihsm_capability(capabilities, 0x0c)
+            } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).wrap
         )
     }
 
@@ -1029,10 +1030,11 @@ impl TokenObject {
         matches!(
             &self.material,
             KeyMaterial::YubiHsm {
-                object_type: YUBIHSM_WRAP_KEY,
+                object_type,
+                algorithm,
                 capabilities,
                 ..
-            } if yubihsm_capability(capabilities, 0x0d)
+            } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).unwrap
         )
     }
 
@@ -1040,6 +1042,11 @@ impl TokenObject {
         (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
             && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
+            && !matches!(
+                &self.material,
+                KeyMaterial::YubiHsm { capabilities, .. }
+                    if yubihsm_capability(capabilities, 0x10)
+            )
     }
 
     fn is_certificate_object(&self) -> bool {

@@ -24,12 +24,12 @@ use zeroize::Zeroizing;
 #[allow(dead_code)]
 mod commands;
 pub(crate) mod trust;
-pub(crate) use commands::{
-    parse_object_id, parse_object_list, Command, CommandCode, ObjectInfo, ObjectParameters,
-    PublicKey,
-};
 #[cfg(all(test, not(feature = "abi-tests")))]
-pub(crate) use commands::{DelegatedObjectParameters, ObjectFilter};
+pub(crate) use commands::ObjectFilter;
+pub(crate) use commands::{
+    parse_object_id, parse_object_list, Command, CommandCode, DelegatedObjectParameters,
+    ObjectInfo, ObjectParameters, PublicKey, RsaWrapParameters,
+};
 
 const COMMAND_CREATE_SESSION: u8 = CommandCode::CreateSession as u8;
 const COMMAND_AUTHENTICATE_SESSION: u8 = CommandCode::AuthenticateSession as u8;

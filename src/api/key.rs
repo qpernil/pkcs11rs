@@ -144,8 +144,15 @@ fn yubihsm_generate_key_command(
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
     let hardware = yubihsm_hardware_import_object(&object)?;
-    let command =
-        YubiHsmCommand::generate_object(code, &yubihsm_object_parameters(&hardware, algorithm)?)?;
+    let object_type = if code == YubiHsmCommandCode::GenerateSymmetricKey {
+        YUBIHSM_SYMMETRIC_KEY
+    } else {
+        YUBIHSM_HMAC_KEY
+    };
+    let command = YubiHsmCommand::generate_object(
+        code,
+        &yubihsm_object_parameters(&hardware, object_type, algorithm)?,
+    )?;
     object.local = true;
     Ok((object, command))
 }
@@ -317,6 +324,17 @@ fn generate_key_pair(
         }
         let (private_object, public_object, command) =
             yubihsm_generate_key_pair_command(mechanism, public_template, private_template)?;
+        let wrap_key = command.code() == YubiHsmCommandCode::GenerateWrapKey;
+        let private_object_type = if wrap_key {
+            YUBIHSM_WRAP_KEY
+        } else {
+            YUBIHSM_ASYMMETRIC_KEY
+        };
+        let public_object_type = if wrap_key {
+            YUBIHSM_WRAP_KEY_PUBLIC
+        } else {
+            YUBIHSM_PUBLIC_KEY
+        };
         validate_new_object_access(&private_object, flags, logged_in)?;
         validate_new_object_access(&public_object, flags, logged_in)?;
         let response = ctx
@@ -335,9 +353,9 @@ fn generate_key_pair(
                         &object.material,
                         KeyMaterial::YubiHsm {
                             id: object_id,
-                            object_type: YUBIHSM_ASYMMETRIC_KEY,
+                            object_type,
                             ..
-                        } if *object_id == id
+                        } if *object_id == id && *object_type == private_object_type
                     )
             })
             .ok_or(CKR_DEVICE_ERROR)?;
@@ -351,9 +369,9 @@ fn generate_key_pair(
                         &object.material,
                         KeyMaterial::YubiHsm {
                             id: object_id,
-                            object_type: YUBIHSM_PUBLIC_KEY,
+                            object_type,
                             ..
-                        } if *object_id == id
+                        } if *object_id == id && *object_type == public_object_type
                     )
             })
             .ok_or(CKR_DEVICE_ERROR)?;
@@ -746,6 +764,15 @@ fn template_attribute(
         .find(|attribute| attribute.type_ == attribute_type)
 }
 
+fn optional_bool_template_attribute(
+    templ: &[CK_ATTRIBUTE],
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<bool>, Error> {
+    template_attribute(templ, attribute_type)
+        .map(|attribute| read_bool_template_attribute(attribute).map_err(Error::from))
+        .transpose()
+}
+
 fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
     match parameters {
         [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21] => Ok(YUBIHSM_ALGO_EC_P224),
@@ -836,13 +863,54 @@ fn yubihsm_generate_key_pair_command(
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
-    let public_object =
-        key_pair_object(public_template, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, key_type)?;
-    let mut private_object = key_pair_object(
+    validate_unique_template(public_template)?;
+    validate_unique_template(private_template)?;
+    let public_wrap =
+        optional_bool_template_attribute(public_template, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
+    let public_unwrap =
+        optional_bool_template_attribute(public_template, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
+    let private_wrap =
+        optional_bool_template_attribute(private_template, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
+    let private_unwrap =
+        optional_bool_template_attribute(private_template, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
+    let private_extractable = optional_bool_template_attribute(
         private_template,
+        CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+    )?
+    .unwrap_or(false);
+    let public_filtered = public_template
+        .iter()
+        .copied()
+        .filter(|attribute| {
+            attribute.type_ != CKA_WRAP as CK_ATTRIBUTE_TYPE
+                && attribute.type_ != CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+        })
+        .collect::<Vec<_>>();
+    let private_filtered = private_template
+        .iter()
+        .copied()
+        .filter(|attribute| {
+            attribute.type_ != CKA_WRAP as CK_ATTRIBUTE_TYPE
+                && attribute.type_ != CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+                && attribute.type_ != CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+        })
+        .collect::<Vec<_>>();
+    let public_object = key_pair_object(
+        &public_filtered,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    let mut private_object = key_pair_object(
+        &private_filtered,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
+    private_object.extractable = private_extractable;
+    private_object.never_extractable = !private_extractable;
     if !public_object.token || !private_object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
@@ -866,37 +934,54 @@ fn yubihsm_generate_key_pair_command(
         private_object.label = public_object.label.clone();
     }
     let hardware = yubihsm_hardware_import_object(&private_object)?;
-    let command = YubiHsmCommand::generate_object(
-        YubiHsmCommandCode::GenerateAsymmetricKey,
-        &yubihsm_object_parameters(&hardware, algorithm)?,
-    )?;
+    let wrap_key = private_unwrap;
+    if public_unwrap
+        || private_wrap
+        || public_wrap && !wrap_key
+        || (wrap_key && key_type != CKK_RSA as CK_KEY_TYPE)
+        || (wrap_key
+            && (public_object.encrypt
+                || public_object.decrypt
+                || public_object.sign
+                || public_object.verify
+                || public_object.derive
+                || private_object.encrypt
+                || private_object.decrypt
+                || private_object.sign
+                || private_object.verify
+                || private_object.derive))
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    let command = if wrap_key {
+        let attributes = YubiHsmPkcs11Attributes {
+            wrap: public_wrap || private_wrap,
+            unwrap: true,
+            extractable: private_extractable,
+            ..YubiHsmPkcs11Attributes::default()
+        };
+        let parameters = YubiHsmDelegatedObjectParameters {
+            object: YubiHsmObjectParameters {
+                id: yubihsm_id(&hardware.id)?,
+                label: &hardware.label,
+                domains: 0xffff,
+                capabilities: yubihsm_attributes_to_capabilities(
+                    YUBIHSM_WRAP_KEY,
+                    algorithm,
+                    attributes,
+                ),
+                algorithm,
+            },
+            delegated_capabilities: [0xff; 8],
+        };
+        YubiHsmCommand::generate_wrap_key(&parameters)?
+    } else {
+        YubiHsmCommand::generate_object(
+            YubiHsmCommandCode::GenerateAsymmetricKey,
+            &yubihsm_object_parameters(&hardware, YUBIHSM_ASYMMETRIC_KEY, algorithm)?,
+        )?
+    };
     Ok((private_object, public_object, command))
-}
-
-#[no_mangle]
-pub extern "C" fn C_WrapKey(
-    session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
-    _wrapping_key: CK_OBJECT_HANDLE,
-    _key: CK_OBJECT_HANDLE,
-    _wrapped_key: *mut ::std::os::raw::c_uchar,
-    _wrapped_key_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    session_function_not_supported(session_handle)
-}
-
-#[no_mangle]
-pub extern "C" fn C_UnwrapKey(
-    session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
-    _unwrapping_key: CK_OBJECT_HANDLE,
-    _wrapped_key: *mut ::std::os::raw::c_uchar,
-    _wrapped_key_len: ::std::os::raw::c_ulong,
-    _templ: *mut CK_ATTRIBUTE,
-    _attribute_count: ::std::os::raw::c_ulong,
-    _key: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    session_function_not_supported(session_handle)
 }
 
 #[no_mangle]
