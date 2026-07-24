@@ -769,7 +769,16 @@ impl YubiHsmSlot {
             .filter(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
             .map(|object| object.id.clone())
             .collect::<HashSet<_>>();
-        if !certificate_ids.is_subset(&public_ids) {
+        let private_ids = candidates
+            .iter()
+            .filter(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            .map(|object| object.id.clone())
+            .collect::<HashSet<_>>();
+        let certificate_key_ids = certificate_ids
+            .intersection(&private_ids)
+            .cloned()
+            .collect::<HashSet<_>>();
+        if !certificate_key_ids.is_subset(&public_ids) {
             return Err(CKR_DATA_INVALID.into());
         }
         let objects = candidates
