@@ -187,21 +187,6 @@ fn crypt_init(
         if (encrypting && !object.encrypt) || (!encrypting && !object.decrypt) {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let required_capability = match (mechanism.mechanism, encrypting) {
-            (mechanism, false) if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE => 0x09,
-            (mechanism, false) if mechanism == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => 0x0a,
-            (mechanism, false) if mechanism == CKM_AES_ECB as CK_MECHANISM_TYPE => 0x32,
-            (mechanism, true) if mechanism == CKM_AES_ECB as CK_MECHANISM_TYPE => 0x33,
-            (mechanism, false) if mechanism == CKM_AES_CBC as CK_MECHANISM_TYPE => 0x34,
-            (mechanism, true) if mechanism == CKM_AES_CBC as CK_MECHANISM_TYPE => 0x35,
-            (mechanism, _) if mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE => 0x33,
-            _ => 0,
-        };
-        if required_capability != 0
-            && !yubihsm_material_has_capability(&object.material, required_capability)
-        {
-            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
-        }
         let valid_key = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE

@@ -144,15 +144,14 @@ fn parse_yubihsm_wrap_mechanism(
 
 fn yubihsm_material(
     object: &TokenObject,
-) -> Result<(u16, u8, u8, [u8; 8]), Error> {
+) -> Result<(u16, u8, u8), Error> {
     match &object.material {
         KeyMaterial::YubiHsm {
             id,
             object_type,
             algorithm,
-            capabilities,
             ..
-        } => Ok((*id, *object_type, *algorithm, *capabilities)),
+        } => Ok((*id, *object_type, *algorithm)),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
@@ -162,7 +161,7 @@ fn validate_yubihsm_wrapping_key(
     mechanism: &YubiHsmWrapMechanism,
     unwrapping: bool,
 ) -> Result<(u16, u8), Error> {
-    let (id, object_type, algorithm, capabilities) = yubihsm_material(object)?;
+    let (id, object_type, algorithm) = yubihsm_material(object)?;
     let compatible = match mechanism {
         YubiHsmWrapMechanism::AesCcm { .. } => {
             object_type == YUBIHSM_WRAP_KEY && is_yubihsm_ccm_wrap(algorithm)
@@ -178,10 +177,11 @@ fn validate_yubihsm_wrapping_key(
         }
     };
     if !compatible
-        || !yubihsm_capability(
-            &capabilities,
-            if unwrapping { 0x0d } else { 0x0c },
-        )
+        || if unwrapping {
+            !object.can_unwrap()
+        } else {
+            !object.can_wrap()
+        }
     {
         return Err(if unwrapping {
             CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into()
@@ -252,12 +252,12 @@ fn wrap_key(
         if !target.is_key_object() {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
-        let (target_id, target_type, _algorithm, capabilities) =
+        let (target_id, target_type, _algorithm) =
             yubihsm_material(&target).map_err(|_| Error::from(CKR_KEY_HANDLE_INVALID))?;
         if target_type & 0x80 != 0 {
             return Err(CKR_KEY_NOT_WRAPPABLE.into());
         }
-        if !yubihsm_capability(&capabilities, 0x10) {
+        if !target.extractable {
             return Err(CKR_KEY_UNEXTRACTABLE.into());
         }
         let wrapper = ctx
