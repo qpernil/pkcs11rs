@@ -683,6 +683,20 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_Encrypt.restype = CK_RV
+        cls.lib.C_EncryptUpdate.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_EncryptUpdate.restype = CK_RV
+        cls.lib.C_EncryptFinal.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_EncryptFinal.restype = CK_RV
         cls.lib.C_DecryptInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -697,6 +711,20 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_Decrypt.restype = CK_RV
+        cls.lib.C_DecryptUpdate.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_DecryptUpdate.restype = CK_RV
+        cls.lib.C_DecryptFinal.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_DecryptFinal.restype = CK_RV
         cls.lib.C_SignInit.argtypes = [
             CK_ULONG,
             ctypes.POINTER(CK_MECHANISM),
@@ -2158,6 +2186,73 @@ done
             CKR_OK,
         )
         self.assertEqual((decrypted_len.value, bytes(decrypted)), (16, bytes(16)))
+
+        multipart_encrypted = (CK_BYTE * 32)()
+        self.assertEqual(
+            self.lib.C_EncryptInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        no_output = (CK_BYTE * 1)()
+        for offset, length in ((0, 5), (5, 11)):
+            output_len = CK_ULONG(len(no_output))
+            self.assertEqual(
+                self.lib.C_EncryptUpdate(
+                    session,
+                    ctypes.cast(
+                        ctypes.byref(plaintext, offset), ctypes.POINTER(CK_BYTE)
+                    ),
+                    length,
+                    no_output,
+                    ctypes.byref(output_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(output_len.value, 0)
+        multipart_encrypted_len = CK_ULONG(len(multipart_encrypted))
+        self.assertEqual(
+            self.lib.C_EncryptFinal(
+                session,
+                multipart_encrypted,
+                ctypes.byref(multipart_encrypted_len),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            bytes(multipart_encrypted[: multipart_encrypted_len.value]),
+            bytes(encrypted[: encrypted_len.value]),
+        )
+
+        multipart_decrypted = (CK_BYTE * 16)()
+        self.assertEqual(
+            self.lib.C_DecryptInit(session, ctypes.byref(mechanism), handle.value), CKR_OK
+        )
+        for offset, length in ((0, 7), (7, 25)):
+            output_len = CK_ULONG(len(no_output))
+            self.assertEqual(
+                self.lib.C_DecryptUpdate(
+                    session,
+                    ctypes.cast(
+                        ctypes.byref(multipart_encrypted, offset),
+                        ctypes.POINTER(CK_BYTE),
+                    ),
+                    length,
+                    no_output,
+                    ctypes.byref(output_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(output_len.value, 0)
+        multipart_decrypted_len = CK_ULONG(len(multipart_decrypted))
+        self.assertEqual(
+            self.lib.C_DecryptFinal(
+                session,
+                multipart_decrypted,
+                ctypes.byref(multipart_decrypted_len),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(
+            bytes(multipart_decrypted[: multipart_decrypted_len.value]), bytes(16)
+        )
 
         encrypted[31] ^= 1
         self.assertEqual(

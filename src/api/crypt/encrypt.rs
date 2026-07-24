@@ -24,27 +24,43 @@ pub extern "C" fn C_Encrypt(
         encrypted_data,
         encrypted_data_len,
         true,
+        false,
     ))
 }
 
 #[no_mangle]
 pub extern "C" fn C_EncryptUpdate(
     session_handle: CK_SESSION_HANDLE,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: ::std::os::raw::c_ulong,
+    encrypted_part: *mut ::std::os::raw::c_uchar,
+    encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(crypt_update(
+        session_handle,
+        part,
+        part_len,
+        encrypted_part,
+        encrypted_part_len,
+        true,
+    ))
 }
 
 #[no_mangle]
 pub extern "C" fn C_EncryptFinal(
     session_handle: CK_SESSION_HANDLE,
-    _last_encrypted_part: *mut ::std::os::raw::c_uchar,
-    _last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    last_encrypted_part: *mut ::std::os::raw::c_uchar,
+    last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(crypt(
+        session_handle,
+        ptr::null(),
+        0,
+        last_encrypted_part,
+        last_encrypted_part_len,
+        true,
+        true,
+    ))
 }
 
 #[no_mangle]
@@ -70,6 +86,7 @@ pub extern "C" fn C_Decrypt(
         encrypted_data_len,
         data,
         data_len,
+        false,
         false,
     ))
 }
@@ -111,12 +128,24 @@ fn crypt_init(
 ) -> Result<(), Error> {
     with_context_mut(|ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        let operations = if encrypting {
-            &ctx.encrypt_operations
+        let operation_active = if encrypting {
+            ctx.encrypt_operations.contains_key(&session_handle)
         } else {
-            &ctx.decrypt_operations
+            ctx.decrypt_operations.contains_key(&session_handle)
         };
-        if operations.contains_key(&session_handle) {
+        if mechanism.is_null() {
+            let removed = if encrypting {
+                ctx.encrypt_operations.remove(&session_handle)
+            } else {
+                ctx.decrypt_operations.remove(&session_handle)
+            };
+            return if removed.is_some() {
+                Ok(())
+            } else {
+                Err(CKR_OPERATION_NOT_INITIALIZED.into())
+            };
+        }
+        if operation_active {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         let mechanism = _as_ref(mechanism)?;
@@ -240,6 +269,8 @@ fn crypt_init(
                 KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
                 _ => None,
             },
+            buffer: Zeroizing::new(Vec::new()),
+            multipart: false,
             result: None,
         };
         if encrypting {
@@ -428,6 +459,7 @@ fn crypt(
     output: *mut u8,
     output_len: CK_ULONG_PTR,
     encrypting: bool,
+    finalizing: bool,
 ) -> Result<(), Error> {
     if output_len.is_null() {
         let _ = with_context_mut(|ctx| {
@@ -447,6 +479,9 @@ fn crypt(
         }
         .cloned()
         .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.multipart && !finalizing {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
             ctx.encrypt_operations.remove(&session_handle);
@@ -461,6 +496,9 @@ fn crypt(
                 return Err(error);
             }
         };
+        let mut buffered_input = operation.buffer.clone();
+        buffered_input.extend_from_slice(input);
+        let input = buffered_input.as_slice();
         let required = if operation.mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE {
             let Some(parameters) = operation.gcm.as_ref() else {
                 ctx.encrypt_operations.remove(&session_handle);
@@ -666,19 +704,115 @@ fn rsa_public_encrypt(
 #[no_mangle]
 pub extern "C" fn C_DecryptUpdate(
     session_handle: CK_SESSION_HANDLE,
-    _encrypted_part: *mut ::std::os::raw::c_uchar,
-    _encrypted_part_len: ::std::os::raw::c_ulong,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: *mut ::std::os::raw::c_ulong,
+    encrypted_part: *mut ::std::os::raw::c_uchar,
+    encrypted_part_len: ::std::os::raw::c_ulong,
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(crypt_update(
+        session_handle,
+        encrypted_part,
+        encrypted_part_len,
+        part,
+        part_len,
+        false,
+    ))
 }
 
 #[no_mangle]
 pub extern "C" fn C_DecryptFinal(
     session_handle: CK_SESSION_HANDLE,
-    _last_part: *mut ::std::os::raw::c_uchar,
-    _last_part_len: *mut ::std::os::raw::c_ulong,
+    last_part: *mut ::std::os::raw::c_uchar,
+    last_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    map(crypt(
+        session_handle,
+        ptr::null(),
+        0,
+        last_part,
+        last_part_len,
+        false,
+        true,
+    ))
+}
+
+fn crypt_update(
+    session_handle: CK_SESSION_HANDLE,
+    input: *const u8,
+    input_len: CK_ULONG,
+    output: *mut u8,
+    output_len: CK_ULONG_PTR,
+    encrypting: bool,
+) -> Result<(), Error> {
+    if output_len.is_null() {
+        return with_context_mut(|ctx| {
+            ctx._get_session(session_handle)?;
+            if encrypting {
+                ctx.encrypt_operations.remove(&session_handle);
+            } else {
+                ctx.decrypt_operations.remove(&session_handle);
+            }
+            Err(CKR_ARGUMENTS_BAD.into())
+        });
+    }
+    let output_len = as_mut(output_len)?;
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let operation = if encrypting {
+            ctx.encrypt_operations.get(&session_handle)
+        } else {
+            ctx.decrypt_operations.get(&session_handle)
+        }
+        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
+            let slot_id = operation.slot_id;
+            ctx.reconcile_login_state(slot_id);
+            if encrypting {
+                ctx.encrypt_operations.remove(&session_handle);
+            } else {
+                ctx.decrypt_operations.remove(&session_handle);
+            }
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if operation.result.is_some() {
+            if encrypting {
+                ctx.encrypt_operations.remove(&session_handle);
+            } else {
+                ctx.decrypt_operations.remove(&session_handle);
+            }
+            return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+        }
+        let input = match from_raw_parts(input, input_len as usize) {
+            Ok(input) => input,
+            Err(error) => {
+                if encrypting {
+                    ctx.encrypt_operations.remove(&session_handle);
+                } else {
+                    ctx.decrypt_operations.remove(&session_handle);
+                }
+                return Err(error);
+            }
+        };
+        *output_len = 0;
+        if output.is_null() {
+            return Ok(());
+        }
+        let operation = if encrypting {
+            ctx.encrypt_operations.get_mut(&session_handle)
+        } else {
+            ctx.decrypt_operations.get_mut(&session_handle)
+        }
+        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.buffer.try_reserve(input.len()).is_err() {
+            if encrypting {
+                ctx.encrypt_operations.remove(&session_handle);
+            } else {
+                ctx.decrypt_operations.remove(&session_handle);
+            }
+            return Err(CKR_HOST_MEMORY.into());
+        }
+        operation.buffer.extend_from_slice(input);
+        operation.multipart = true;
+        Ok(())
+    })
 }
