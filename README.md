@@ -43,10 +43,10 @@ Every present YubiHSM slot advertises public, immutable, token-resident
 | `CKP_AUTHENTICATION_TOKEN` | Every present YubiHSM slot |
 | `CKP_PUBLIC_CERTIFICATES_TOKEN` | Only after successful configured public discovery |
 
-Each object exposes its profile through `CKA_PROFILE_ID` and has a stable,
-distinct `CKA_UNIQUE_ID`. The public-certificates profile is based on an
-actual authenticated discovery result, not merely on the presence of
-configuration.
+Each `CKO_PROFILE` object identifies one supported profile through its
+`CKA_PROFILE_ID` attribute and has a stable, distinct `CKA_UNIQUE_ID`. The
+public-certificates profile is based on an actual authenticated discovery
+result, not merely on the presence of configuration.
 
 ## Compatibility and Validation
 
@@ -132,7 +132,9 @@ The credential is tried independently on every YubiHSM. The public-certificate
 profile is advertised only on slots where authentication succeeds and the
 module can build a valid public certificate and matching public-key view. The
 short-lived discovery session is separate from an ordinary PKCS #11 login and
-is closed after discovery. Both variables must be supplied together.
+is closed after discovery or one logged-out lazy value read. While the profile
+is active, user-login Authentication Keys must have exactly the same domains as
+the discovery Authentication Key. Both variables must be supplied together.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
@@ -234,8 +236,7 @@ is not intended for a normal module build.
   existing OpenPGP key. Readable OpenPGP data objects are exported read-only.
 - YubiHSM object inventories and opaque values are cached per slot. Reinitialize
   the module after replacing a device or changing the domains available to an
-  authentication credential. A public opaque object first seen during user
-  login may require another login to read an uncached value after logout.
+  authentication credential.
 - Secure-channel credential provisioning and trust-anchor selection are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader
