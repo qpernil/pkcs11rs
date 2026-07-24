@@ -583,6 +583,8 @@ impl Context {
                                         serial,
                                         packet_size,
                                         claimed: false,
+                                        connection_epoch: 0,
+                                        connected_once: false,
                                     };
                                     let name = connector.name();
                                     log!(2, "{}", name);

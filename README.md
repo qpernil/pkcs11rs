@@ -235,8 +235,9 @@ is not intended for a normal module build.
   that the card reports as empty, so PKCS #11 operations cannot overwrite an
   existing OpenPGP key. Readable OpenPGP data objects are exported read-only.
 - YubiHSM object inventories and opaque values are cached per slot. Reinitialize
-  the module after replacing a device or changing the domains available to an
-  authentication credential.
+  the module after replacing a USB device or changing the domains available to
+  an authentication credential. Remote connector serial/version changes and
+  reconnections invalidate their slot cache automatically.
 - Secure-channel credential provisioning and trust-anchor selection are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader

@@ -98,8 +98,10 @@ could reconstruct it. The next user login enumerates its private view again.
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
 opaque-value caches and retries public discovery. Reinitialize the module after
-replacing a USB device, changing a remote connector's attached device, or
-changing the domains visible to an authentication credential.
+replacing a USB device or changing the domains visible to an authentication
+credential. A remote connector's status serial/version and recovery after a
+transport failure advance its connection epoch, which clears that slot's
+caches and retries public discovery automatically.
 
 Every ephemeral discovery session is separate from the PKCS #11 user-login
 session, is closed after discovery or one lazy read, and is never used for
