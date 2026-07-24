@@ -112,14 +112,20 @@ enrich the same native entries and upsert PKCS #11 projections by stable
 Authentication Key domains ensure that user enumeration cannot add objects
 outside the discovery credential's view.
 
-Attribute access reads an uncached opaque value through the active user
-session. Without a user login, it opens a temporary session using the discovery
-credential, reads and caches the value, and closes that session immediately.
+The slot owns one YubiHSM secure session. Initial public discovery retains its
+authenticated session, and later uncached public reads reuse it. `C_Login`
+closes that session and replaces it with the user session. `C_Logout` closes the
+user session; the next public hardware read lazily authenticates with the
+discovery credential and retains the resulting session again. If no discovery
+credential is configured, a logged-out hardware read returns
+`CKR_USER_NOT_LOGGED_IN`. Loss of a user session is reconciled as PKCS #11
+logout and is never silently treated as continued user authentication.
+
 Later reconstructions of the same YubiHSM object type, ID, and sequence reuse
-that cache cell. Logout retains public objects and successful public property
-reads, but removes every private object and the metadata and attestation state
-that could reconstruct it. The next user login enumerates its private view
-again.
+the shared cache cell. Logout retains public objects and successful public
+property reads, but removes every private object and the metadata and
+attestation state that could reconstruct it. The next user login enumerates its
+private view again.
 
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
@@ -129,12 +135,12 @@ credential. A remote connector's status serial/version and recovery after a
 transport failure advance its connection epoch, which clears that slot's
 caches and retries public discovery automatically.
 
-Every ephemeral discovery session is separate from the PKCS #11 user-login
-session, is closed after discovery or one lazy read, and is never used for
-private or mutating operations. Public-object mutation still requires an
-ordinary user login and a read/write PKCS #11 session. The password is not
-logged. A plaintext service configuration is acceptable when protected by
-normal file permissions; do not commit the credential.
+The retained discovery session has a distinct transport role from the PKCS #11
+user-login session and is never used for private or mutating operations.
+Public-object mutation still requires an ordinary user login and a read/write
+PKCS #11 session. The password is not logged. A plaintext service configuration
+is acceptable when protected by normal file permissions; do not commit the
+credential.
 
 ### PKCS #11 metadata
 

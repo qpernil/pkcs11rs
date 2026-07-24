@@ -1272,8 +1272,11 @@ pub extern "C" fn C_GenerateRandom(
     random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     log!(2, "C_GenerateRandom called");
-    let result: Result<(), Error> = with_context(|ctx| {
+    let result: Result<(), Error> = with_context_mut(|ctx| {
         let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
+        let slot_id = ctx._get_session(session)?.1.slotID();
+        ctx.reconcile_login_state(slot_id);
+        ctx.get_slot(slot_id)?.ensure_backend_read_session()?;
         ctx._get_session(session)?.1.generate_random(random_data)
     });
     map(result)

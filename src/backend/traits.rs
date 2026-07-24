@@ -314,6 +314,14 @@ trait Slot {
         true
     }
 
+    fn backend_session_is_active(&self) -> bool {
+        false
+    }
+
+    fn ensure_backend_read_session(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
     fn flags(&self) -> CK_FLAGS {
         if self.is_present() {
             (CKF_HW_SLOT | CKF_REMOVABLE_DEVICE | CKF_TOKEN_PRESENT) as CK_FLAGS
