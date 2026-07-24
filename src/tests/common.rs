@@ -1033,6 +1033,38 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(signature_len, 256);
     assert!(signature.iter().all(|byte| *byte == 0x5a));
 
+    sign_mechanism.mechanism = CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE;
+    assert_eq!(
+        crate::C_SignInit(session, &mut sign_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    let mut hashed_message = *b"oasis authentication";
+    signature_len = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::C_Sign(
+            session,
+            hashed_message.as_mut_ptr(),
+            hashed_message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(hashed_message);
+    let digest_info = crate::piv_digest_info(sign_mechanism.mechanism, &digest).unwrap();
+    {
+        let command_log = commands.borrow();
+        let (_, hashed_sign_data) = command_log
+            .iter()
+            .rev()
+            .find(|(command, _)| {
+                *command == crate::yubihsm::CommandCode::SignPkcs1 as u8
+            })
+            .unwrap();
+        assert_eq!(hashed_sign_data.len(), digest_info.len() + 2);
+        assert!(hashed_sign_data.ends_with(&digest_info));
+    }
+
     let mut modulus_bits = 2048 as CK_ULONG;
     let mut token = CK_TRUE as CK_BBOOL;
     let mut verify = CK_TRUE as CK_BBOOL;
