@@ -39,6 +39,7 @@ struct Context {
     memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     token_object_handles: HashMap<CK_OBJECT_HANDLE, TokenObjectLocator>,
     find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
+    digest_operations: HashMap<CK_SESSION_HANDLE, DigestOperation>,
     encrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
     decrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
     sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
@@ -89,6 +90,7 @@ impl std::fmt::Debug for Context {
             .field("memory_objects", &self.memory_objects)
             .field("token_object_handles", &self.token_object_handles)
             .field("find_operations", &self.find_operations)
+            .field("digest_operations", &self.digest_operations)
             .field("encrypt_operations", &self.encrypt_operations)
             .field("decrypt_operations", &self.decrypt_operations)
             .field("sign_operations", &self.sign_operations)
@@ -171,6 +173,7 @@ impl Context {
             memory_objects: HashMap::new(),
             token_object_handles: HashMap::new(),
             find_operations: HashMap::new(),
+            digest_operations: HashMap::new(),
             encrypt_operations: HashMap::new(),
             decrypt_operations: HashMap::new(),
             sign_operations: HashMap::new(),
@@ -483,6 +486,8 @@ impl Context {
             .collect();
         self.find_operations
             .retain(|session, _operation| !slot_sessions.contains(session));
+        self.digest_operations
+            .retain(|session, _operation| !slot_sessions.contains(session));
         self.encrypt_operations
             .retain(|session, _operation| !slot_sessions.contains(session));
         self.decrypt_operations
@@ -515,6 +520,8 @@ impl Context {
             .collect();
         self.sessions.retain(|handle, _| !sessions.contains(handle));
         self.find_operations
+            .retain(|handle, _| !sessions.contains(handle));
+        self.digest_operations
             .retain(|handle, _| !sessions.contains(handle));
         self.encrypt_operations
             .retain(|handle, _| !sessions.contains(handle));

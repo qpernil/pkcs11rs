@@ -466,7 +466,7 @@ impl Slot for OpenPgpSlot {
         info.ulMaxPinLen = self.pin_max as CK_ULONG;
         Ok(())
     }
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
+    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = Vec::new();
         let mut add = |type_, min_key_size, max_key_size, flags| {
             mechanisms.push(MechanismDetails {

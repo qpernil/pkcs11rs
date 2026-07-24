@@ -21,7 +21,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageDigest {
     Sha1,
     Sha224,

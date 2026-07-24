@@ -1,41 +1,228 @@
+#[derive(Clone, Debug)]
+struct DigestOperation {
+    algorithm: MessageDigest,
+    buffer: Vec<u8>,
+}
+
+fn software_digest(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
+    if !SOFTWARE_DIGEST_MECHANISMS
+        .iter()
+        .any(|details| details.type_ == mechanism)
+    {
+        return Err(Error::from(CKR_MECHANISM_INVALID as CK_RV));
+    }
+    digest_for_hash_mechanism(mechanism)
+}
+
+fn digest_init(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: CK_MECHANISM_PTR,
+) -> Result<(), Error> {
+    with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        if ctx.digest_operations.contains_key(&session_handle) {
+            return Err(Error::from(CKR_OPERATION_ACTIVE as CK_RV));
+        }
+        let mechanism = _as_ref(mechanism)?;
+        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+            return Err(Error::from(CKR_MECHANISM_PARAM_INVALID as CK_RV));
+        }
+        ctx.digest_operations.insert(
+            session_handle,
+            DigestOperation {
+                algorithm: software_digest(mechanism.mechanism)?,
+                buffer: Vec::new(),
+            },
+        );
+        Ok(())
+    })
+}
+
+fn copy_digest(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    operation: &DigestOperation,
+    data: &[u8],
+    digest: *mut u8,
+    digest_len: CK_ULONG_PTR,
+) -> Result<(), Error> {
+    let digest_len = as_mut(digest_len)?;
+    let mut input = operation.buffer.clone();
+    input.extend_from_slice(data);
+    let value = hash(operation.algorithm, &input)?;
+    let required = value.len() as CK_ULONG;
+    if digest.is_null() {
+        *digest_len = required;
+        return Ok(());
+    }
+    if *digest_len < required {
+        *digest_len = required;
+        return Err(Error::from(CKR_BUFFER_TOO_SMALL as CK_RV));
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(value.as_ptr(), digest, value.len());
+    }
+    *digest_len = required;
+    ctx.digest_operations.remove(&session_handle);
+    Ok(())
+}
+
 #[no_mangle]
 pub extern "C" fn C_DigestInit(
     session_handle: CK_SESSION_HANDLE,
-    _mechanism: *mut CK_MECHANISM,
+    mechanism: *mut CK_MECHANISM,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(2, "C_DigestInit called with {:?}", (session_handle, mechanism));
+    map(digest_init(session_handle, mechanism))
 }
 
 #[no_mangle]
 pub extern "C" fn C_Digest(
     session_handle: CK_SESSION_HANDLE,
-    _data: *mut ::std::os::raw::c_uchar,
-    _data_len: ::std::os::raw::c_ulong,
-    _digest: *mut ::std::os::raw::c_uchar,
-    _digest_len: *mut ::std::os::raw::c_ulong,
+    data: *mut ::std::os::raw::c_uchar,
+    data_len: ::std::os::raw::c_ulong,
+    digest: *mut ::std::os::raw::c_uchar,
+    digest_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(
+        2,
+        "C_Digest called with {:?}",
+        (session_handle, data, data_len, digest, digest_len)
+    );
+    map((|| {
+        if digest_len.is_null() {
+            let _ = with_context_mut(|ctx| {
+                if ctx._get_session(session_handle).is_ok() {
+                    ctx.digest_operations.remove(&session_handle);
+                }
+                Ok(())
+            });
+            return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
+        }
+        with_context_mut(|ctx| {
+            ctx._get_session(session_handle)?;
+            let operation = ctx
+                .digest_operations
+                .get(&session_handle)
+                .cloned()
+                .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
+            let data = match from_raw_parts(data, data_len as usize) {
+                Ok(data) => data,
+                Err(error) => {
+                    ctx.digest_operations.remove(&session_handle);
+                    return Err(error);
+                }
+            };
+            copy_digest(
+                ctx,
+                session_handle,
+                &operation,
+                data,
+                digest,
+                digest_len,
+            )
+        })
+    })())
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestUpdate(
     session_handle: CK_SESSION_HANDLE,
-    _part: *mut ::std::os::raw::c_uchar,
-    _part_len: ::std::os::raw::c_ulong,
+    part: *mut ::std::os::raw::c_uchar,
+    part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(
+        2,
+        "C_DigestUpdate called with {:?}",
+        (session_handle, part, part_len)
+    );
+    map(with_context_mut(|ctx| {
+        ctx._get_session(session_handle)?;
+        let part = match from_raw_parts(part, part_len as usize) {
+            Ok(part) => part,
+            Err(error) => {
+                ctx.digest_operations.remove(&session_handle);
+                return Err(error);
+            }
+        };
+        ctx.digest_operations
+            .get_mut(&session_handle)
+            .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
+            .buffer
+            .extend_from_slice(part);
+        Ok(())
+    }))
 }
 
 #[no_mangle]
-pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, _key: CK_OBJECT_HANDLE) -> CK_RV {
-    session_function_not_supported(session_handle)
+pub extern "C" fn C_DigestKey(
+    session_handle: CK_SESSION_HANDLE,
+    key: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    log!(2, "C_DigestKey called with {:?}", (session_handle, key));
+    map(with_context_mut(|ctx| {
+        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        if !ctx.digest_operations.contains_key(&session_handle) {
+            return Err(Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV));
+        }
+        let object = ctx
+            .resolve_object(key)?
+            .ok_or_else(|| Error::from(CKR_KEY_HANDLE_INVALID as CK_RV))?;
+        if !object.is_visible_to(session_handle, slot_id, logged_in) {
+            return Err(Error::from(CKR_KEY_HANDLE_INVALID as CK_RV));
+        }
+        if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
+            return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV));
+        }
+        let value = match &object.material {
+            KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => value.to_vec(),
+            _ => return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV)),
+        };
+        ctx.digest_operations
+            .get_mut(&session_handle)
+            .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
+            .buffer
+            .extend_from_slice(&value);
+        Ok(())
+    }))
 }
 
 #[no_mangle]
 pub extern "C" fn C_DigestFinal(
     session_handle: CK_SESSION_HANDLE,
-    _digest: *mut ::std::os::raw::c_uchar,
-    _digest_len: *mut ::std::os::raw::c_ulong,
+    digest: *mut ::std::os::raw::c_uchar,
+    digest_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    log!(
+        2,
+        "C_DigestFinal called with {:?}",
+        (session_handle, digest, digest_len)
+    );
+    map((|| {
+        if digest_len.is_null() {
+            let _ = with_context_mut(|ctx| {
+                if ctx._get_session(session_handle).is_ok() {
+                    ctx.digest_operations.remove(&session_handle);
+                }
+                Ok(())
+            });
+            return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
+        }
+        with_context_mut(|ctx| {
+            ctx._get_session(session_handle)?;
+            let operation = ctx
+                .digest_operations
+                .get(&session_handle)
+                .cloned()
+                .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
+            copy_digest(
+                ctx,
+                session_handle,
+                &operation,
+                &[],
+                digest,
+                digest_len,
+            )
+        })
+    })())
 }
