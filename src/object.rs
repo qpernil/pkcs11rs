@@ -1144,13 +1144,6 @@ impl TokenObject {
         }
     }
 
-    fn matches_template(&self, templ: &[(CK_ATTRIBUTE_TYPE, Vec<u8>)]) -> bool {
-        templ.iter().all(|(type_, expected)| {
-            self.attribute_value(*type_)
-                .map(|value| expected == &value)
-                .unwrap_or(false)
-        })
-    }
 }
 
 fn rsa_public_key_material(material: &KeyMaterial) -> Result<Option<RsaPublicKey>, Error> {
