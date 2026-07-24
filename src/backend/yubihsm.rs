@@ -365,7 +365,7 @@ impl YubiHsmPkcs11Metadata {
             let Some(item) = item else {
                 continue;
             };
-            if item.is_empty() || item.len() > MAX_ATTRIBUTE_LENGTH {
+            if item.len() > MAX_ATTRIBUTE_LENGTH {
                 return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
             }
             value.push(tag);
@@ -1138,9 +1138,6 @@ impl YubiHsmSlot {
         });
 
         if let Some(id) = id {
-            if id.is_empty() {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
             let value = (id != info.id.to_be_bytes()).then(|| id.to_vec());
             if public {
                 metadata.public_id = value;
@@ -1149,9 +1146,6 @@ impl YubiHsmSlot {
             }
         }
         if let Some(label) = label {
-            if label.is_empty() {
-                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
-            }
             let value = (label != yubihsm_object_label(&info)).then(|| label.to_owned());
             if public {
                 metadata.public_label = value;
