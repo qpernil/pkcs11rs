@@ -1512,53 +1512,16 @@ fn yubihsm_token_objects_with_generation(
     );
     let generated = info.origin & 0x01 != 0;
     let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
-    let authentication_key = info.object_type == YUBIHSM_AUTHENTICATION_KEY;
+    let operational_algorithm_supported =
+        algorithm_supported || is_yubihsm_ccm_wrap(info.algorithm);
     let rsa_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm);
-    let ccm_wrap_key = info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_ccm_wrap(info.algorithm);
-    let montgomery = is_montgomery_key_type(key_type);
-    let aes_cmac = info.object_type == YUBIHSM_SYMMETRIC_KEY
-        && key_type == CKK_AES as CK_KEY_TYPE
-        && algorithm_supported
-        && yubihsm_capability(&info.capabilities, 0x33);
-    let sign = aes_cmac
-        || (!authentication_key
-            && (info.object_type == YUBIHSM_ASYMMETRIC_KEY
-                || (info.object_type == YUBIHSM_HMAC_KEY && is_hmac_key_type(key_type)))
-            && algorithm_supported
-            && !is_yubihsm_x25519(info.algorithm)
-            && (yubihsm_capability(&info.capabilities, 0x05)
-                || yubihsm_capability(&info.capabilities, 0x06)
-                || yubihsm_capability(&info.capabilities, 0x07)
-                || yubihsm_capability(&info.capabilities, 0x08)
-                || yubihsm_capability(&info.capabilities, 0x16)));
-    let decrypt = if ccm_wrap_key {
-        yubihsm_capability(&info.capabilities, 0x26)
-    } else {
-        !authentication_key
-            && !rsa_wrap_key
-            && info.object_type != YUBIHSM_PUBLIC_WRAP_KEY
-            && !montgomery
-            && algorithm_supported
-            && (yubihsm_capability(&info.capabilities, 0x09)
-                || yubihsm_capability(&info.capabilities, 0x0a)
-                || yubihsm_capability(&info.capabilities, 0x32)
-                || yubihsm_capability(&info.capabilities, 0x34))
-    };
-    let encrypt = if ccm_wrap_key {
-        yubihsm_capability(&info.capabilities, 0x25)
-    } else {
-        !authentication_key
-            && !rsa_wrap_key
-            && info.object_type != YUBIHSM_PUBLIC_WRAP_KEY
-            && !montgomery
-            && algorithm_supported
-            && (yubihsm_capability(&info.capabilities, 0x33)
-                || yubihsm_capability(&info.capabilities, 0x35))
-    };
-    let derive = !authentication_key
-        && algorithm_supported
-        && (is_yubihsm_ec(info.algorithm) || is_yubihsm_x25519(info.algorithm))
-        && yubihsm_capability(&info.capabilities, 0x0b);
+    let attributes =
+        yubihsm_capabilities_to_attributes(info.object_type, info.algorithm, &info.capabilities);
+    let sign = operational_algorithm_supported && attributes.sign;
+    let verify = operational_algorithm_supported && attributes.verify;
+    let decrypt = operational_algorithm_supported && attributes.decrypt;
+    let encrypt = operational_algorithm_supported && attributes.encrypt;
+    let derive = operational_algorithm_supported && attributes.derive;
     let material = yubihsm_remote_material(
         &info,
         public_key
@@ -1596,16 +1559,12 @@ fn yubihsm_token_objects_with_generation(
         encrypt,
         decrypt,
         sign,
-        verify: aes_cmac,
+        verify,
         derive,
         sensitive: private,
-        extractable: yubihsm_capability(&info.capabilities, 0x10)
-            && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            && class != CKO_SECRET_KEY as CK_OBJECT_CLASS,
+        extractable: attributes.extractable,
         always_sensitive: private,
-        never_extractable: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || class == CKO_SECRET_KEY as CK_OBJECT_CLASS
-            || !yubihsm_capability(&info.capabilities, 0x10),
+        never_extractable: !attributes.extractable,
         local: generated,
         key_gen_mechanism: generated
             .then(|| yubihsm_key_generation_mechanism(info.algorithm))
@@ -1619,18 +1578,24 @@ fn yubihsm_token_objects_with_generation(
         if public_key.algorithm != info.algorithm {
             return Err(CKR_DEVICE_ERROR.into());
         }
+        let public_object_type = if rsa_wrap_key {
+            YUBIHSM_WRAP_KEY_PUBLIC
+        } else {
+            YUBIHSM_PUBLIC_KEY
+        };
+        let public_attributes = yubihsm_capabilities_to_attributes(
+            public_object_type,
+            info.algorithm,
+            &info.capabilities,
+        );
         let public_material = if rsa_wrap_key {
             yubihsm_remote_material_with_type(
                 &info,
-                YUBIHSM_WRAP_KEY_PUBLIC,
+                public_object_type,
                 public_key.key.clone(),
             )
         } else {
-            yubihsm_remote_material_with_type(
-                &info,
-                YUBIHSM_PUBLIC_KEY,
-                public_key.key,
-            )
+            yubihsm_remote_material_with_type(&info, public_object_type, public_key.key)
         };
         objects.push(TokenObject {
             slot_id: Some(slot_id),
@@ -1645,13 +1610,13 @@ fn yubihsm_token_objects_with_generation(
                 .unwrap_or_else(|| info.id.to_be_bytes().to_vec()),
             token: true,
             private: false,
-            encrypt: !rsa_wrap_key && algorithm_supported && is_yubihsm_rsa(info.algorithm),
+            encrypt: algorithm_supported && public_attributes.encrypt,
             decrypt: false,
             sign: false,
-            verify: !rsa_wrap_key && algorithm_supported && sign,
+            verify: algorithm_supported && public_attributes.verify,
             derive: false,
             sensitive: false,
-            extractable: true,
+            extractable: public_attributes.extractable,
             always_sensitive: false,
             never_extractable: false,
             local: generated,

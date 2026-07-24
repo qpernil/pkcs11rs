@@ -177,9 +177,11 @@ use yubihsm::{
     device_public_key_bytes as get_yubihsm_device_public_key,
     get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
     parse_object_list as parse_yubihsm_object_list, Command as YubiHsmCommand,
-    CommandCode as YubiHsmCommandCode, DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm,
-    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
-    PublicKey as YubiHsmPublicKey, SecureSession as YubiHsmSecureSession,
+    CommandCode as YubiHsmCommandCode,
+    DelegatedObjectParameters as YubiHsmDelegatedObjectParameters,
+    DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm, ObjectInfo as YubiHsmObjectInfo,
+    ObjectParameters as YubiHsmObjectParameters, PublicKey as YubiHsmPublicKey,
+    RsaWrapParameters as YubiHsmRsaWrapParameters, SecureSession as YubiHsmSecureSession,
 };
 
 #[allow(dead_code)]
@@ -268,6 +270,18 @@ const CKK_YUBICO_AES192_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYP
 const CKK_YUBICO_AES256_CCM_WRAP: CK_KEY_TYPE = CKK_VENDOR_DEFINED as CK_KEY_TYPE
     | YUBICO_BASE_VENDOR
     | YUBIHSM_ALGO_AES256_CCM_WRAP as CK_KEY_TYPE;
+const CKM_YUBICO_AES_CCM_WRAP: CK_MECHANISM_TYPE = CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE
+    | YUBICO_BASE_VENDOR as CK_MECHANISM_TYPE
+    | YUBIHSM_WRAP_KEY as CK_MECHANISM_TYPE;
+const CKM_YUBICO_RSA_WRAP: CK_MECHANISM_TYPE = CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE
+    | YUBICO_BASE_VENDOR as CK_MECHANISM_TYPE
+    | YUBIHSM_PUBLIC_WRAP_KEY as CK_MECHANISM_TYPE;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
+    format: CK_ULONG,
+}
 
 const CKA_YUBICO_HSMAUTH_ALGORITHM: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5901;
@@ -303,6 +317,23 @@ fn is_yubihsm_ccm_wrap(algorithm: u8) -> bool {
     )
 }
 
+fn is_yubihsm_aes(algorithm: u8) -> bool {
+    matches!(
+        algorithm,
+        YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256
+    )
+}
+
+fn is_yubihsm_hmac(algorithm: u8) -> bool {
+    matches!(
+        algorithm,
+        YUBIHSM_ALGO_HMAC_SHA1
+            | YUBIHSM_ALGO_HMAC_SHA256
+            | YUBIHSM_ALGO_HMAC_SHA384
+            | YUBIHSM_ALGO_HMAC_SHA512
+    )
+}
+
 fn yubihsm_capability(capabilities: &[u8; 8], bit: usize) -> bool {
     capabilities[7 - bit / 8] & (1 << (bit % 8)) != 0
 }
@@ -313,6 +344,162 @@ fn yubihsm_capabilities(bits: &[usize]) -> [u8; 8] {
         capabilities[7 - bit / 8] |= 1 << (bit % 8);
     }
     capabilities
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct YubiHsmPkcs11Attributes {
+    encrypt: bool,
+    decrypt: bool,
+    sign: bool,
+    verify: bool,
+    derive: bool,
+    wrap: bool,
+    unwrap: bool,
+    extractable: bool,
+}
+
+fn yubihsm_capabilities_to_attributes(
+    object_type: u8,
+    algorithm: u8,
+    capabilities: &[u8; 8],
+) -> YubiHsmPkcs11Attributes {
+    let mut attributes = YubiHsmPkcs11Attributes {
+        extractable: yubihsm_capability(capabilities, 0x10),
+        ..YubiHsmPkcs11Attributes::default()
+    };
+    match object_type {
+        YUBIHSM_ASYMMETRIC_KEY => {
+            if is_yubihsm_rsa(algorithm) {
+                attributes.sign = yubihsm_capability(capabilities, 0x05)
+                    || yubihsm_capability(capabilities, 0x06);
+                attributes.decrypt = yubihsm_capability(capabilities, 0x09)
+                    || yubihsm_capability(capabilities, 0x0a);
+            } else if algorithm == YUBIHSM_ALGO_ED25519 {
+                attributes.sign = yubihsm_capability(capabilities, 0x08);
+            } else if is_yubihsm_ec(algorithm) {
+                attributes.sign = yubihsm_capability(capabilities, 0x07);
+                attributes.derive = yubihsm_capability(capabilities, 0x0b);
+            } else if is_yubihsm_x25519(algorithm) {
+                attributes.derive = yubihsm_capability(capabilities, 0x0b);
+            }
+        }
+        YUBIHSM_PUBLIC_KEY => {
+            attributes.extractable = true;
+            if is_yubihsm_rsa(algorithm) {
+                attributes.verify = yubihsm_capability(capabilities, 0x05)
+                    || yubihsm_capability(capabilities, 0x06);
+                attributes.encrypt = yubihsm_capability(capabilities, 0x09)
+                    || yubihsm_capability(capabilities, 0x0a);
+            } else if algorithm == YUBIHSM_ALGO_ED25519 {
+                attributes.verify = yubihsm_capability(capabilities, 0x08);
+            } else if is_yubihsm_ec(algorithm) {
+                attributes.verify = yubihsm_capability(capabilities, 0x07);
+            }
+        }
+        YUBIHSM_WRAP_KEY if is_yubihsm_rsa(algorithm) || is_yubihsm_ccm_wrap(algorithm) => {
+            attributes.wrap = yubihsm_capability(capabilities, 0x0c);
+            attributes.unwrap = yubihsm_capability(capabilities, 0x0d);
+            if is_yubihsm_ccm_wrap(algorithm) {
+                attributes.encrypt = yubihsm_capability(capabilities, 0x25);
+                attributes.decrypt = yubihsm_capability(capabilities, 0x26);
+            }
+        }
+        YUBIHSM_WRAP_KEY_PUBLIC | YUBIHSM_PUBLIC_WRAP_KEY => {
+            attributes.extractable = true;
+            if is_yubihsm_rsa(algorithm) {
+                attributes.wrap = yubihsm_capability(capabilities, 0x0c);
+            }
+        }
+        YUBIHSM_HMAC_KEY if is_yubihsm_hmac(algorithm) => {
+            attributes.sign = yubihsm_capability(capabilities, 0x16);
+            attributes.verify = yubihsm_capability(capabilities, 0x17);
+        }
+        YUBIHSM_SYMMETRIC_KEY if is_yubihsm_aes(algorithm) => {
+            attributes.encrypt =
+                yubihsm_capability(capabilities, 0x33) || yubihsm_capability(capabilities, 0x35);
+            attributes.decrypt =
+                yubihsm_capability(capabilities, 0x32) || yubihsm_capability(capabilities, 0x34);
+            attributes.sign = yubihsm_capability(capabilities, 0x33);
+            attributes.verify = attributes.sign;
+        }
+        _ => {}
+    }
+    attributes
+}
+
+fn yubihsm_attributes_to_capabilities(
+    object_type: u8,
+    algorithm: u8,
+    attributes: YubiHsmPkcs11Attributes,
+) -> [u8; 8] {
+    let mut bits = Vec::new();
+    match object_type {
+        YUBIHSM_ASYMMETRIC_KEY => {
+            if attributes.sign {
+                if is_yubihsm_rsa(algorithm) {
+                    bits.extend([0x05, 0x06]);
+                } else if algorithm == YUBIHSM_ALGO_ED25519 {
+                    bits.push(0x08);
+                } else if is_yubihsm_ec(algorithm) {
+                    bits.push(0x07);
+                }
+            }
+            if attributes.decrypt && is_yubihsm_rsa(algorithm) {
+                bits.extend([0x09, 0x0a]);
+            }
+            if attributes.derive && (is_yubihsm_ec(algorithm) || is_yubihsm_x25519(algorithm)) {
+                bits.push(0x0b);
+            }
+        }
+        YUBIHSM_WRAP_KEY if is_yubihsm_rsa(algorithm) || is_yubihsm_ccm_wrap(algorithm) => {
+            if attributes.wrap {
+                bits.push(0x0c);
+            }
+            if attributes.unwrap {
+                bits.push(0x0d);
+            }
+            if attributes.encrypt && is_yubihsm_ccm_wrap(algorithm) {
+                bits.push(0x25);
+            }
+            if attributes.decrypt && is_yubihsm_ccm_wrap(algorithm) {
+                bits.push(0x26);
+            }
+        }
+        YUBIHSM_PUBLIC_WRAP_KEY => {
+            if attributes.wrap && is_yubihsm_rsa(algorithm) {
+                bits.push(0x0c);
+            }
+        }
+        YUBIHSM_HMAC_KEY if is_yubihsm_hmac(algorithm) => {
+            if attributes.sign {
+                bits.push(0x16);
+            }
+            if attributes.verify {
+                bits.push(0x17);
+            }
+        }
+        YUBIHSM_SYMMETRIC_KEY if is_yubihsm_aes(algorithm) => {
+            if attributes.encrypt {
+                bits.extend([0x33, 0x35]);
+            }
+            if attributes.decrypt {
+                bits.extend([0x32, 0x34]);
+            }
+            if attributes.sign || attributes.verify {
+                bits.push(0x33);
+            }
+        }
+        _ => {}
+    }
+    if attributes.extractable
+        && !matches!(
+            object_type,
+            YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC | YUBIHSM_PUBLIC_WRAP_KEY
+        )
+    {
+        bits.push(0x10);
+    }
+    yubihsm_capabilities(&bits)
 }
 
 fn yubihsm_material_has_capability(material: &KeyMaterial, bit: usize) -> bool {
@@ -539,6 +726,8 @@ include!("api/session.rs");
 include!("api/object.rs");
 
 include!("api/crypt.rs");
+
+include!("api/wrap.rs");
 
 include!("api/key.rs");
 

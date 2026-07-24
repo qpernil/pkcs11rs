@@ -97,7 +97,7 @@ const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
     },
 ];
 
-const YUBIHSM_MECHANISMS: [MechanismDetails; 21] = [
+const YUBIHSM_MECHANISMS: [MechanismDetails; 24] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -121,6 +121,24 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 21] = [
         min_key_size: 2048,
         max_key_size: 4096,
         flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        min_key_size: 2048,
+        max_key_size: 4096,
+        flags: (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_YUBICO_RSA_WRAP,
+        min_key_size: 2048,
+        max_key_size: 4096,
+        flags: (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_YUBICO_AES_CCM_WRAP,
+        min_key_size: 16,
+        max_key_size: 32,
+        flags: (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -245,6 +263,14 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
     ]);
     let has_x25519 = algorithms.contains(&YUBIHSM_ALGO_X25519);
     let has_ed25519 = algorithms.contains(&YUBIHSM_ALGO_ED25519);
+    let has_rsa_wrap = has_rsa
+        && algorithms.contains(&YUBIHSM_ALGO_AES_KWP)
+        && any(&[
+            YUBIHSM_ALGO_RSA_OAEP_SHA1,
+            YUBIHSM_ALGO_RSA_OAEP_SHA256,
+            YUBIHSM_ALGO_RSA_OAEP_SHA384,
+            YUBIHSM_ALGO_RSA_OAEP_SHA512,
+        ]);
     let rsa_sizes: Vec<CK_ULONG> = algorithms
         .iter()
         .filter_map(|algorithm| match *algorithm {
@@ -280,6 +306,15 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             _ => None,
         })
         .collect();
+    let ccm_wrap_sizes: Vec<CK_ULONG> = algorithms
+        .iter()
+        .filter_map(|algorithm| match *algorithm {
+            YUBIHSM_ALGO_AES128_CCM_WRAP => Some(16),
+            YUBIHSM_ALGO_AES192_CCM_WRAP => Some(24),
+            YUBIHSM_ALGO_AES256_CCM_WRAP => Some(32),
+            _ => None,
+        })
+        .collect();
     let mut mechanisms: Vec<MechanismDetails> = YUBIHSM_MECHANISMS
         .iter()
         .filter_map(|details| {
@@ -288,10 +323,13 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 y if y == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || y == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                     || y == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
-                    || y == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE =>
+                    || y == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE
+                    || y == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE
+                    || y == CKM_YUBICO_RSA_WRAP =>
                 {
                     &rsa_sizes
                 }
+                y if y == CKM_YUBICO_AES_CCM_WRAP => &ccm_wrap_sizes,
                 y if y == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || y == CKM_ECDSA as CK_MECHANISM_TYPE =>
                 {
@@ -354,6 +392,12 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                             YUBIHSM_ALGO_RSA_OAEP_SHA512,
                         ])
                 }
+                x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE
+                    || x == CKM_YUBICO_RSA_WRAP =>
+                {
+                    has_rsa_wrap
+                }
+                x if x == CKM_YUBICO_AES_CCM_WRAP => !ccm_wrap_sizes.is_empty(),
                 x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_ec,
                 x if x == CKM_ECDSA as CK_MECHANISM_TYPE => {
                     has_ec
