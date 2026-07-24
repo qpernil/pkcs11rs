@@ -121,7 +121,7 @@ The setting defaults to `1`. Any value other than `0` or `1` makes
 `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
 Optionally expose YubiHSM certificates and matching public keys before PKCS #11
-login with one low-privilege symmetric discovery Authentication Key:
+login with one low-privilege discovery Authentication Key:
 
 ```sh
 export PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_AUTHKEY_ID=00a5

@@ -5,9 +5,9 @@ use crate::{
     CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_AUTHENTICATION_TOKEN, CKP_BASELINE_PROVIDER,
     CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
     CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID,
-    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
-    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ASYMMETRIC_KEY,
-    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
+    YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -114,6 +114,8 @@ pub(crate) struct ProtocolPeer {
     metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
     authkey_domains: RefCell<HashMap<u16, u16>>,
     authkeys_with_get_opaque: RefCell<HashSet<u16>>,
+    asymmetric_authkeys: RefCell<HashSet<u16>>,
+    listed_authkeys: RefCell<HashSet<u16>>,
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
     corrupt_card_cryptogram: bool,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
@@ -162,6 +164,8 @@ impl ProtocolPeer {
             metadata_objects: RefCell::new(HashMap::new()),
             authkey_domains: RefCell::new(HashMap::from([(1, 0xffff), (2, 0xffff)])),
             authkeys_with_get_opaque: RefCell::new(HashSet::from([1, 2])),
+            asymmetric_authkeys: RefCell::new(HashSet::new()),
+            listed_authkeys: RefCell::new(HashSet::new()),
             x25519_private_keys: RefCell::new(x25519_private_keys),
             corrupt_card_cryptogram: false,
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
@@ -187,6 +191,18 @@ impl ProtocolPeer {
             authenticate_payload: payload,
             ..Self::new()
         }
+    }
+
+    fn use_asymmetric_authentication(&self, authkey_id: u16) {
+        self.asymmetric_authkeys.borrow_mut().insert(authkey_id);
+    }
+
+    fn use_symmetric_authentication(&self, authkey_id: u16) {
+        self.asymmetric_authkeys.borrow_mut().remove(&authkey_id);
+    }
+
+    fn list_authentication_key(&self, authkey_id: u16) {
+        self.listed_authkeys.borrow_mut().insert(authkey_id);
     }
 
     fn add_public_certificate_pair(&self) {
@@ -378,12 +394,13 @@ impl ProtocolPeer {
         if !matches!(authkey_id, 1 | 2) {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        match frame.data.len() {
-            10 => self.create_symmetric_session(&frame.data),
-            length if length == 2 + P256_PUBLIC_KEY_LENGTH => {
+        let asymmetric = self.asymmetric_authkeys.borrow().contains(&authkey_id);
+        match (asymmetric, frame.data.len()) {
+            (false, 10) => self.create_symmetric_session(&frame.data),
+            (true, length) if length == 2 + P256_PUBLIC_KEY_LENGTH => {
                 self.create_asymmetric_session(&frame.data)
             }
-            _ => Err(CKR_DEVICE_ERROR.into()),
+            _ => Frame::new(COMMAND_ERROR, vec![0x08]).map(|frame| frame.encode()),
         }
     }
 
@@ -536,6 +553,10 @@ impl ProtocolPeer {
             }
             value if value == CommandCode::ListObjects as u8 => {
                 let mut objects = Vec::new();
+                for id in self.listed_authkeys.borrow().iter() {
+                    objects.extend_from_slice(&id.to_be_bytes());
+                    objects.extend_from_slice(&[YUBIHSM_AUTHENTICATION_KEY, 1]);
+                }
                 for id in self.objects.borrow().iter() {
                     objects.extend_from_slice(&id.to_be_bytes());
                     objects.extend_from_slice(&[3, 1]);
@@ -568,7 +589,11 @@ impl ProtocolPeer {
                         length: 32,
                         domains,
                         object_type: YUBIHSM_AUTHENTICATION_KEY,
-                        algorithm: YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                        algorithm: if self.asymmetric_authkeys.borrow().contains(&id) {
+                            YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION
+                        } else {
+                            YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION
+                        },
                         sequence: 1,
                         origin: 1,
                         label: format!("authkey-{id}"),
@@ -831,6 +856,28 @@ pub(crate) fn make_yubihsm_test_slot() -> (
     TestTrustEntry,
 ) {
     let peer = std::rc::Rc::new(ProtocolPeer::new());
+    let commands = peer.inner_commands.clone();
+    let corrupt_response_mac = peer.corrupt_response_mac.clone();
+    let trust = TestTrustEntry::new();
+    let mut slot = crate::YubiHsmSlot::new(
+        peer,
+        (2, 4, 1),
+        vec![
+            1, 5, 9, 12, 19, 20, 21, 22, 25, 46, 48, 50, 51, 52, 53, 54, 56,
+        ],
+    );
+    slot.trust_prefix = Some(trust.prefix.clone());
+    (Box::new(slot), commands, corrupt_response_mac, trust)
+}
+
+pub(crate) fn make_yubihsm_asymmetric_test_slot() -> (
+    Box<dyn crate::Slot>,
+    InnerCommands,
+    std::rc::Rc<Cell<bool>>,
+    TestTrustEntry,
+) {
+    let peer = std::rc::Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(1);
     let commands = peer.inner_commands.clone();
     let corrupt_response_mac = peer.corrupt_response_mac.clone();
     let trust = TestTrustEntry::new();
@@ -1235,11 +1282,7 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
 
     assert!(matches!(
         crate::parse_yubihsm_login_username(b"00fF").unwrap(),
-        crate::YubiHsmLoginUsername::Symmetric(0xff)
-    ));
-    assert!(matches!(
-        crate::parse_yubihsm_login_username(b"@00fF").unwrap(),
-        crate::YubiHsmLoginUsername::Asymmetric(0xff)
+        crate::YubiHsmLoginUsername::Direct(0xff)
     ));
 }
 
@@ -1248,10 +1291,6 @@ fn yubihsm_login_splits_username_from_password() {
     assert_eq!(
         crate::split_yubihsm_login(b"00fFpassword").unwrap(),
         (b"00fF".as_slice(), Some(PASSWORD))
-    );
-    assert_eq!(
-        crate::split_yubihsm_login(b"@00fFpassword").unwrap(),
-        (b"@00fF".as_slice(), Some(PASSWORD))
     );
     assert_eq!(
         crate::split_yubihsm_login(b":0001default:pass:word").unwrap(),
@@ -1278,6 +1317,7 @@ fn yubihsm_login_rejects_malformed_usernames() {
         b":0001default:source",
         b":0001default\x01",
         b"@001",
+        b"@00ff",
         b"@xyz1",
     ] {
         assert!(
@@ -1333,6 +1373,17 @@ fn inner_command_count(peer: &ProtocolPeer, command: CommandCode) -> usize {
         .iter()
         .filter(|(candidate, _)| *candidate == command as u8)
         .count()
+}
+
+fn create_session_payload_lengths(peer: &ProtocolPeer) -> Vec<usize> {
+    peer.commands
+        .borrow()
+        .iter()
+        .filter_map(|command| {
+            (command.first() == Some(&COMMAND_CREATE_SESSION))
+                .then(|| Frame::parse(command).unwrap().data.len())
+        })
+        .collect()
 }
 
 fn yubihsm_opaque_object(objects: &[TokenObject], id: u16) -> TokenObject {
@@ -2667,6 +2718,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         yubihsm.inner_commands.borrow().as_slice(),
         [(CommandCode::GetStorageInfo as u8, Vec::new())]
     );
+    assert_eq!(create_session_payload_lengths(&yubihsm), [10]);
 }
 
 #[test]
@@ -2706,6 +2758,7 @@ fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
 fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
     let trust_prefix = OsString::new();
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
+    yubihsm.use_asymmetric_authentication(1);
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
     let provider = crate::HsmAuthProvider {
         connector: hsmauth.clone(),
@@ -2734,12 +2787,14 @@ fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
         yubihsm.inner_commands.borrow().as_slice(),
         [(CommandCode::GetStorageInfo as u8, Vec::new())]
     );
+    assert_eq!(create_session_payload_lengths(&yubihsm), [67]);
 }
 
 #[test]
 fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
     let trust = TestTrustEntry::new();
     let yubihsm = ProtocolPeer::new();
+    yubihsm.use_asymmetric_authentication(1);
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::failing_calculate());
     let provider = crate::HsmAuthProvider {
         connector: hsmauth.clone(),
@@ -2767,16 +2822,62 @@ fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
 }
 
 #[test]
+fn hsmauth_algorithm_mismatches_fail_without_probing() {
+    let asymmetric_target = ProtocolPeer::new();
+    asymmetric_target.use_asymmetric_authentication(1);
+    let symmetric_provider = crate::HsmAuthProvider {
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        credential: crate::HsmAuthCredential {
+            label: "symmetric".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: None,
+        },
+        version: (5, 7, 1),
+        trust_prefix: None,
+    };
+    assert!(matches!(
+        symmetric_provider.authenticate(&asymmetric_target, 1, PASSWORD),
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+    ));
+    assert_eq!(create_session_payload_lengths(&asymmetric_target), [10]);
+
+    let symmetric_target = ProtocolPeer::new();
+    let asymmetric_peer = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
+    let asymmetric_provider = crate::HsmAuthProvider {
+        connector: asymmetric_peer.clone(),
+        credential: crate::HsmAuthCredential {
+            label: "asymmetric".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: Some(asymmetric_peer.public_key.clone()),
+        },
+        version: (5, 7, 1),
+        trust_prefix: None,
+    };
+    assert!(matches!(
+        asymmetric_provider.authenticate(&symmetric_target, 1, PASSWORD),
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+    ));
+    assert_eq!(create_session_payload_lengths(&symmetric_target), [67]);
+}
+
+#[test]
 fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
     let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();
-    let mut session = SecureSession::authenticate_asymmetric_with_trust_prefix(
+    peer.use_asymmetric_authentication(1);
+    let (mut session, algorithm) = SecureSession::authenticate_direct(
         &peer,
         1,
         PASSWORD,
         Some(&trust.prefix),
+        Some(DirectAuthenticationAlgorithm::Asymmetric),
     )
     .unwrap();
+    assert_eq!(algorithm, DirectAuthenticationAlgorithm::Asymmetric);
     assert_eq!(
         session
             .send_command(&peer, &Command::get_storage_info())
@@ -2790,15 +2891,134 @@ fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
 }
 
 #[test]
+fn direct_authentication_probes_symmetric_then_caches_asymmetric() {
+    let trust = TestTrustEntry::new();
+    let peer = ProtocolPeer::new();
+    peer.use_asymmetric_authentication(1);
+
+    let (mut session, algorithm) =
+        SecureSession::authenticate_direct(&peer, 1, PASSWORD, Some(&trust.prefix), None).unwrap();
+    assert_eq!(algorithm, DirectAuthenticationAlgorithm::Asymmetric);
+    assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
+    session
+        .send_command(&peer, &Command::close_session())
+        .unwrap();
+
+    peer.commands.borrow_mut().clear();
+    let (mut session, algorithm) = SecureSession::authenticate_direct(
+        &peer,
+        1,
+        PASSWORD,
+        Some(&trust.prefix),
+        Some(algorithm),
+    )
+    .unwrap();
+    assert_eq!(algorithm, DirectAuthenticationAlgorithm::Asymmetric);
+    assert_eq!(create_session_payload_lengths(&peer), [67]);
+    session
+        .send_command(&peer, &Command::close_session())
+        .unwrap();
+}
+
+#[test]
+fn direct_authentication_does_not_retry_after_password_failure() {
+    let peer = ProtocolPeer::new();
+    assert!(matches!(
+        SecureSession::authenticate_direct(&peer, 1, b"wrong-password", None, None),
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+    ));
+    assert_eq!(create_session_payload_lengths(&peer), [10]);
+}
+
+#[test]
+fn direct_login_reuses_the_detected_authentication_algorithm() {
+    let trust = TestTrustEntry::new();
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(1);
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048]);
+    slot.trust_prefix = Some(trust.prefix.clone());
+
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
+    Slot::logout(&mut slot).unwrap();
+
+    peer.commands.borrow_mut().clear();
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(create_session_payload_lengths(&peer), [67]);
+    Slot::logout(&mut slot).unwrap();
+
+    peer.use_symmetric_authentication(1);
+    fs::write(&trust.path, b"invalidated trust entry").unwrap();
+    peer.commands.borrow_mut().clear();
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(create_session_payload_lengths(&peer), [67, 10]);
+    Slot::logout(&mut slot).unwrap();
+}
+
+#[test]
+fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
+    let trust = TestTrustEntry::new();
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    peer.use_asymmetric_authentication(2);
+    peer.list_authentication_key(2);
+    let mut slot =
+        public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
+    slot.trust_prefix = Some(trust.prefix.clone());
+
+    Slot::token_objects(&slot, 7).unwrap();
+    assert_eq!(
+        slot.public_discovery
+            .borrow()
+            .authentication_algorithms
+            .get(&2),
+        Some(&DirectAuthenticationAlgorithm::Asymmetric)
+    );
+    peer.commands.borrow_mut().clear();
+    Slot::login(&mut slot, b"0002password").unwrap();
+    assert_eq!(create_session_payload_lengths(&peer), [67]);
+    Slot::logout(&mut slot).unwrap();
+
+    let user_peer = Rc::new(ProtocolPeer::new());
+    user_peer.use_asymmetric_authentication(2);
+    user_peer.list_authentication_key(2);
+    let mut user_slot = YubiHsmSlot::new(user_peer.clone(), (2, 4, 1), vec![YUBIHSM_ALGO_RSA_2048]);
+    user_slot.trust_prefix = Some(trust.prefix.clone());
+    Slot::login(&mut user_slot, b"0001password").unwrap();
+    Slot::token_objects(&user_slot, 8).unwrap();
+    Slot::logout(&mut user_slot).unwrap();
+    assert_eq!(
+        user_slot
+            .public_discovery
+            .borrow()
+            .authentication_algorithms
+            .get(&2),
+        Some(&DirectAuthenticationAlgorithm::Asymmetric)
+    );
+    user_peer.commands.borrow_mut().clear();
+    Slot::login(&mut user_slot, b"0002password").unwrap();
+    assert_eq!(create_session_payload_lengths(&user_peer), [67]);
+    Slot::logout(&mut user_slot).unwrap();
+
+    user_peer.connection_epoch.set(1);
+    user_peer.commands.borrow_mut().clear();
+    Slot::login(&mut user_slot, b"0002password").unwrap();
+    assert_eq!(create_session_payload_lengths(&user_peer), [10, 67]);
+    Slot::logout(&mut user_slot).unwrap();
+}
+
+#[test]
 fn asymmetric_authentication_rejects_the_wrong_password() {
     let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();
+    peer.use_asymmetric_authentication(1);
     assert!(matches!(
-        SecureSession::authenticate_asymmetric_with_trust_prefix(
+        SecureSession::authenticate_direct(
             &peer,
             1,
             b"wrong-password",
             Some(&trust.prefix),
+            Some(DirectAuthenticationAlgorithm::Asymmetric),
         ),
         Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
     ));
@@ -2809,12 +3029,14 @@ fn asymmetric_authentication_rejects_an_untrusted_device_public_key() {
     let trust = TestTrustEntry::new();
     fs::write(&trust.path, b"not a public key").unwrap();
     let peer = ProtocolPeer::new();
+    peer.use_asymmetric_authentication(1);
     assert!(matches!(
-        SecureSession::authenticate_asymmetric_with_trust_prefix(
+        SecureSession::authenticate_direct(
             &peer,
             1,
             PASSWORD,
             Some(&trust.prefix),
+            Some(DirectAuthenticationAlgorithm::Asymmetric),
         ),
         Err(Error::Generic(rv)) if rv == crate::CKR_ARGUMENTS_BAD as _
     ));

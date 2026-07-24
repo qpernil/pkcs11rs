@@ -1200,7 +1200,8 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
     assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    let (slot, commands, _, _trust) =
+        crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1217,7 +1218,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
         ),
         CKR_OK as CK_RV
     );
-    let mut pin = *b"@0001password";
+    let mut pin = *b"0001password";
     assert_eq!(
         crate::C_Login(
             session,

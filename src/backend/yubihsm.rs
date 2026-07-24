@@ -274,6 +274,7 @@ struct YubiHsmPublicDiscoveryState {
     attempted: bool,
     available: bool,
     authkey_domains: Option<u16>,
+    authentication_algorithms: HashMap<u16, YubiHsmAuthAlgorithm>,
     objects: Vec<TokenObject>,
 }
 
@@ -520,7 +521,55 @@ impl YubiHsmSlot {
         if info.id != authkey_id || info.object_type != YUBIHSM_AUTHENTICATION_KEY {
             return Err(CKR_DEVICE_ERROR.into());
         }
+        self.cache_authentication_algorithm(&info)?;
         Ok(info)
+    }
+
+    fn cache_authentication_algorithm(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
+        if info.object_type != YUBIHSM_AUTHENTICATION_KEY {
+            return Ok(());
+        }
+        let mut state = self.public_discovery.try_borrow_mut()?;
+        let algorithms = &mut state.authentication_algorithms;
+        match info.algorithm {
+            YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION => {
+                algorithms.insert(info.id, YubiHsmAuthAlgorithm::Symmetric);
+            }
+            YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION => {
+                algorithms.insert(info.id, YubiHsmAuthAlgorithm::Asymmetric);
+            }
+            _ => {
+                algorithms.remove(&info.id);
+            }
+        }
+        Ok(())
+    }
+
+    fn authenticate_direct(
+        &self,
+        authkey_id: u16,
+        password: &[u8],
+    ) -> Result<YubiHsmSecureSession, Error> {
+        self.synchronize_object_cache()?;
+        let cached_algorithm = self
+            .public_discovery
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .authentication_algorithms
+            .get(&authkey_id)
+            .copied();
+        let (session, algorithm) = YubiHsmSecureSession::authenticate_direct(
+            self.connector.as_ref(),
+            authkey_id,
+            password,
+            self.trust_prefix.as_deref(),
+            cached_algorithm,
+        )?;
+        self.public_discovery
+            .try_borrow_mut()?
+            .authentication_algorithms
+            .insert(authkey_id, algorithm);
+        Ok(session)
     }
 
     fn close_temporary_session(
@@ -561,11 +610,9 @@ impl YubiHsmSlot {
             }
             state.authkey_domains.ok_or(CKR_USER_NOT_LOGGED_IN)?
         };
-        let session = RefCell::new(Some(YubiHsmSecureSession::authenticate(
-            self.connector.as_ref(),
-            credential.authkey_id,
-            credential.password.as_slice(),
-        )?));
+        let session = RefCell::new(Some(
+            self.authenticate_direct(credential.authkey_id, credential.password.as_slice())?,
+        ));
         let result = (|| {
             let info = self.authentication_key_info(&session, credential.authkey_id)?;
             if info.domains != expected_domains || !yubihsm_capability(&info.capabilities, 0) {
@@ -636,6 +683,7 @@ impl YubiHsmSlot {
             {
                 return Err(CKR_DEVICE_ERROR.into());
             }
+            self.cache_authentication_algorithm(&info)?;
             if info.object_type == YUBIHSM_OPAQUE
                 && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
             {
@@ -812,11 +860,8 @@ impl YubiHsmSlot {
             state.attempted = true;
         }
 
-        let session = YubiHsmSecureSession::authenticate(
-            self.connector.as_ref(),
-            credential.authkey_id,
-            credential.password.as_slice(),
-        );
+        let session =
+            self.authenticate_direct(credential.authkey_id, credential.password.as_slice());
         let session = match session {
             Ok(session) => session,
             Err(error) => {
@@ -1747,8 +1792,7 @@ impl Slot for YubiHsmSlot {
         self.clear_cached_private_objects()?;
         let login = parse_yubihsm_login_username(username)?;
         let authkey_id = match &login {
-            YubiHsmLoginUsername::Symmetric(authkey_id)
-            | YubiHsmLoginUsername::Asymmetric(authkey_id) => *authkey_id,
+            YubiHsmLoginUsername::Direct(authkey_id) => *authkey_id,
             YubiHsmLoginUsername::HsmAuth(login) => login.authkey_id,
         };
         let session = match login {
@@ -1794,26 +1838,11 @@ impl Slot for YubiHsmSlot {
                 );
                 session
             }
-            YubiHsmLoginUsername::Asymmetric(authkey_id) => {
+            YubiHsmLoginUsername::Direct(authkey_id) => {
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                YubiHsmSecureSession::authenticate_asymmetric_with_trust_prefix(
-                    self.connector.as_ref(),
-                    authkey_id,
-                    password,
-                    self.trust_prefix.as_deref(),
-                )?
-            }
-            YubiHsmLoginUsername::Symmetric(authkey_id) => {
-                if !(8..=64).contains(&password.len()) {
-                    return Err(CKR_PIN_INCORRECT.into());
-                }
-                YubiHsmSecureSession::authenticate(
-                    self.connector.as_ref(),
-                    authkey_id,
-                    password,
-                )?
+                self.authenticate_direct(authkey_id, password)?
             }
         };
         let session = RefCell::new(Some(session));
@@ -2191,8 +2220,7 @@ struct HsmAuthLogin<'a> {
 }
 
 enum YubiHsmLoginUsername<'a> {
-    Symmetric(u16),
-    Asymmetric(u16),
+    Direct(u16),
     HsmAuth(HsmAuthLogin<'a>),
 }
 
@@ -2230,9 +2258,7 @@ fn parse_hsmauth_username(username: &[u8]) -> Result<HsmAuthLogin<'_>, Error> {
 fn parse_yubihsm_login_username(username: &[u8]) -> Result<YubiHsmLoginUsername<'_>, Error> {
     match username.first() {
         Some(b':') => parse_hsmauth_username(username).map(YubiHsmLoginUsername::HsmAuth),
-        Some(b'@') => parse_yubihsm_authkey_id(&username[1..])
-            .map(YubiHsmLoginUsername::Asymmetric),
-        _ => parse_yubihsm_authkey_id(username).map(YubiHsmLoginUsername::Symmetric),
+        _ => parse_yubihsm_authkey_id(username).map(YubiHsmLoginUsername::Direct),
     }
 }
 
@@ -2245,7 +2271,6 @@ fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), Error> {
             Some(position) => position + 5,
             None => return Ok((pin, None)),
         },
-        Some(b'@') => 5,
         _ => 4,
     };
     if pin.len() < username_length {
