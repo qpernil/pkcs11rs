@@ -3,9 +3,11 @@ use crate::{
     configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
     Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA,
     CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_AUTHENTICATION_TOKEN, CKP_BASELINE_PROVIDER,
-    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CK_OBJECT_CLASS, CK_PROFILE_ID,
-    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_OPAQUE,
+    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
+    CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID,
+    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
+    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ASYMMETRIC_KEY,
+    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -110,6 +112,8 @@ pub(crate) struct ProtocolPeer {
     inner_commands: InnerCommands,
     objects: RefCell<Vec<u16>>,
     metadata_objects: RefCell<HashMap<u16, (ObjectInfo, Vec<u8>)>>,
+    authkey_domains: RefCell<HashMap<u16, u16>>,
+    authkeys_with_get_opaque: RefCell<HashSet<u16>>,
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
     corrupt_card_cryptogram: bool,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
@@ -156,6 +160,8 @@ impl ProtocolPeer {
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             objects: RefCell::new(vec![1]),
             metadata_objects: RefCell::new(HashMap::new()),
+            authkey_domains: RefCell::new(HashMap::from([(1, 0xffff), (2, 0xffff)])),
+            authkeys_with_get_opaque: RefCell::new(HashSet::from([1, 2])),
             x25519_private_keys: RefCell::new(x25519_private_keys),
             corrupt_card_cryptogram: false,
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
@@ -262,6 +268,18 @@ impl ProtocolPeer {
                 opaque,
             ),
         );
+    }
+
+    fn set_authkey_domains(&self, authkey_id: u16, domains: u16) {
+        self.authkey_domains
+            .borrow_mut()
+            .insert(authkey_id, domains);
+    }
+
+    fn remove_get_opaque(&self, authkey_id: u16) {
+        self.authkeys_with_get_opaque
+            .borrow_mut()
+            .remove(&authkey_id);
     }
 
     fn x25519_derive(&self, id: u16, public_key: &[u8]) -> Result<Vec<u8>, Error> {
@@ -511,7 +529,31 @@ impl ProtocolPeer {
                     return Err(CKR_DEVICE_ERROR.into());
                 }
                 let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                if let Some((info, _)) = self.metadata_objects.borrow().get(&id) {
+                if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY {
+                    let domains = self
+                        .authkey_domains
+                        .borrow()
+                        .get(&id)
+                        .copied()
+                        .ok_or(CKR_DEVICE_ERROR)?;
+                    let info = ObjectInfo {
+                        capabilities: if self.authkeys_with_get_opaque.borrow().contains(&id) {
+                            crate::yubihsm_capabilities(&[0])
+                        } else {
+                            [0; 8]
+                        },
+                        id,
+                        length: 32,
+                        domains,
+                        object_type: YUBIHSM_AUTHENTICATION_KEY,
+                        algorithm: YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+                        sequence: 1,
+                        origin: 1,
+                        label: format!("authkey-{id}"),
+                        delegated_capabilities: [0; 8],
+                    };
+                    (inner.command | RESPONSE_BIT, encode_object_info(&info))
+                } else if let Some((info, _)) = self.metadata_objects.borrow().get(&id) {
                     (inner.command | RESPONSE_BIT, encode_object_info(info))
                 } else if inner.data[2] != 3 {
                     return Err(CKR_DEVICE_ERROR.into());
@@ -2145,10 +2187,31 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
         .unwrap()
         .iter()
         .any(|object| matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )));
+}
+
+#[test]
+fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    peer.remove_get_opaque(1);
+    let mut slot =
+        public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
+
+    assert!(!Slot::token_objects(&slot, 7)
+        .unwrap()
+        .iter()
+        .any(|object| matches!(
             object.material,
             KeyMaterial::Profile { profile_id }
                 if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
         )));
+    assert!(Slot::login(&mut slot, b"0002password").is_ok());
+    assert!(slot.session.borrow().is_some());
+    Slot::logout(&mut slot).unwrap();
 }
 
 #[test]
@@ -2190,7 +2253,7 @@ fn yubihsm_user_login_expands_the_public_certificate_view_without_duplicates() {
                 label: "login-only certificate".to_owned(),
                 delegated_capabilities: [0; 8],
             },
-            extra_certificate,
+            extra_certificate.clone(),
         ),
     );
 
@@ -2299,6 +2362,92 @@ fn yubihsm_user_login_expands_the_public_certificate_view_without_duplicates() {
         .iter()
         .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .all(|object| !object.private));
+    let login_discovered_certificate = yubihsm_opaque_object(&logged_out_objects, 3);
+    let KeyMaterial::YubiHsm { value, .. } = &login_discovered_certificate.material else {
+        unreachable!();
+    };
+    assert!(value.borrow().is_none());
+    let sessions_before_lazy_read = peer
+        .commands
+        .borrow()
+        .iter()
+        .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+        .count();
+    let closes_before_lazy_read = peer.closed_sessions.get();
+    assert_eq!(
+        exercise_lazy_opaque_cache(&slot, &login_discovered_certificate),
+        extra_certificate
+    );
+    assert!(slot.session.borrow().is_none());
+    assert!(peer.session.borrow().is_none());
+    assert_eq!(
+        peer.commands
+            .borrow()
+            .iter()
+            .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+            .count(),
+        sessions_before_lazy_read + 1
+    );
+    assert_eq!(peer.closed_sessions.get(), closes_before_lazy_read + 1);
+}
+
+#[test]
+fn yubihsm_user_login_requires_public_discovery_domains() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    peer.set_authkey_domains(2, 0x0001);
+    let mut slot =
+        public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
+    assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
+
+    let closes_before_login = peer.closed_sessions.get();
+    assert!(matches!(
+        Slot::login(&mut slot, b"0002password"),
+        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as _
+    ));
+    assert!(slot.session.borrow().is_none());
+    assert!(peer.session.borrow().is_none());
+    assert_eq!(peer.closed_sessions.get(), closes_before_login + 1);
+}
+
+#[test]
+fn yubihsm_logged_out_lazy_read_requires_public_discovery_credential() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let mut slot = cache_test_slot(peer.clone(), false);
+    Slot::login(&mut slot, b"0001password").unwrap();
+    let logged_in = Slot::token_objects(&slot, 7).unwrap();
+    let certificate = yubihsm_opaque_object(&logged_in, 2);
+    let KeyMaterial::YubiHsm { value, .. } = &certificate.material else {
+        unreachable!();
+    };
+    assert!(value.borrow().is_none());
+    Slot::logout(&mut slot).unwrap();
+
+    let sessions_before_read = peer
+        .commands
+        .borrow()
+        .iter()
+        .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+        .count();
+    assert!(matches!(
+        Slot::yubihsm_read_opaque(&slot, 2),
+        Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as _
+    ));
+    assert_eq!(
+        peer.commands
+            .borrow()
+            .iter()
+            .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+            .count(),
+        sessions_before_read
+    );
 }
 
 #[test]

@@ -273,6 +273,7 @@ struct YubiHsmPublicDiscoveryState {
     connection_epoch: u64,
     attempted: bool,
     available: bool,
+    authkey_domains: Option<u16>,
     objects: Vec<TokenObject>,
 }
 
@@ -504,6 +505,86 @@ impl YubiHsmSlot {
         )?;
         *cached.try_borrow_mut()? = Some(value.clone());
         Ok(value)
+    }
+
+    fn authentication_key_info(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        authkey_id: u16,
+    ) -> Result<YubiHsmObjectInfo, Error> {
+        let info = YubiHsmObjectInfo::parse(&send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            session,
+            &YubiHsmCommand::get_object_info(authkey_id, YUBIHSM_AUTHENTICATION_KEY),
+        )?)?;
+        if info.id != authkey_id || info.object_type != YUBIHSM_AUTHENTICATION_KEY {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(info)
+    }
+
+    fn close_temporary_session(
+        &self,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+        purpose: &str,
+    ) {
+        let Ok(mut session) = session.try_borrow_mut() else {
+            return;
+        };
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        if let Err(error) =
+            session.send_command(self.connector.as_ref(), &YubiHsmCommand::close_session())
+        {
+            log!(
+                2,
+                "YubiHSM {purpose} session close failed on {}: {:?}",
+                self.connector.name(),
+                error
+            );
+        }
+    }
+
+    fn read_opaque_with_public_discovery(&self, id: u16) -> Result<Vec<u8>, Error> {
+        let credential = self
+            .public_discovery_credential
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let expected_domains = {
+            let state = self
+                .public_discovery
+                .try_borrow()
+                .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+            if !state.available {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
+            state.authkey_domains.ok_or(CKR_USER_NOT_LOGGED_IN)?
+        };
+        let session = RefCell::new(Some(YubiHsmSecureSession::authenticate(
+            self.connector.as_ref(),
+            credential.authkey_id,
+            credential.password.as_slice(),
+        )?));
+        let result = (|| {
+            let info = self.authentication_key_info(&session, credential.authkey_id)?;
+            if info.domains != expected_domains || !yubihsm_capability(&info.capabilities, 0) {
+                return Err(CKR_FUNCTION_REJECTED.into());
+            }
+            send_yubihsm_secure_command(
+                self.connector.as_ref(),
+                &session,
+                &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?,
+            )
+        })();
+        self.close_temporary_session(&session, "public discovery");
+        if result.is_err() {
+            if let Ok(mut state) = self.public_discovery.try_borrow_mut() {
+                state.available = false;
+                state.authkey_domains = None;
+            }
+        }
+        result
     }
 
     fn bind_opaque_cache(
@@ -740,14 +821,21 @@ impl YubiHsmSlot {
             }
         };
         let session = RefCell::new(Some(session));
-        let objects = self.build_public_discovery_objects(slot_id, &session);
+        let discovery: Result<(Vec<TokenObject>, u16), Error> = (|| {
+            let info = self.authentication_key_info(&session, credential.authkey_id)?;
+            if !yubihsm_capability(&info.capabilities, 0) {
+                return Err(CKR_FUNCTION_REJECTED.into());
+            }
+            let objects = self.build_public_discovery_objects(slot_id, &session)?;
+            Ok((objects, info.domains))
+        })();
         let mut session = session.into_inner();
         let mut state = match self.public_discovery.try_borrow_mut() {
             Ok(state) => state,
             Err(_) => return false,
         };
-        match objects {
-            Ok(objects) => {
+        match discovery {
+            Ok((objects, authkey_domains)) => {
                 let mut retained = state
                     .objects
                     .drain(..)
@@ -771,6 +859,7 @@ impl YubiHsmSlot {
                     }
                 }
                 state.available = true;
+                state.authkey_domains = Some(authkey_domains);
                 true
             }
             Err(error) => {
@@ -1653,7 +1742,13 @@ impl Slot for YubiHsmSlot {
     fn login_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
         self.clear_cached_private_objects()?;
-        let session = match parse_yubihsm_login_username(username)? {
+        let login = parse_yubihsm_login_username(username)?;
+        let authkey_id = match &login {
+            YubiHsmLoginUsername::Symmetric(authkey_id)
+            | YubiHsmLoginUsername::Asymmetric(authkey_id) => *authkey_id,
+            YubiHsmLoginUsername::HsmAuth(login) => login.authkey_id,
+        };
+        let session = match login {
             YubiHsmLoginUsername::HsmAuth(login) => {
                 if password.len() > 16 {
                     return Err(CKR_PIN_INCORRECT.into());
@@ -1718,7 +1813,35 @@ impl Slot for YubiHsmSlot {
                 )?
             }
         };
-        *self.session.try_borrow_mut()? = Some(session);
+        let session = RefCell::new(Some(session));
+        let discovery_domains = {
+            let state = self
+                .public_discovery
+                .try_borrow()
+                .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+            state.available.then_some(state.authkey_domains).flatten()
+        };
+        if let Some(discovery_domains) = discovery_domains {
+            let user_info = self.authentication_key_info(&session, authkey_id);
+            match user_info {
+                Ok(info) if info.domains == discovery_domains => {}
+                Ok(_) => {
+                    log!(
+                        2,
+                        "YubiHSM user Authentication Key domains do not match the public discovery Authentication Key domains on {}",
+                        self.connector.name()
+                    );
+                    self.close_temporary_session(&session, "rejected user");
+                    return Err(CKR_FUNCTION_REJECTED.into());
+                }
+                Err(error) => {
+                    self.close_temporary_session(&session, "rejected user");
+                    return Err(error);
+                }
+            }
+        }
+        *self.session.try_borrow_mut()? =
+            Some(session.into_inner().ok_or(CKR_DEVICE_ERROR)?);
         for cache in self
             .attestation_cache
             .try_borrow()
@@ -2021,6 +2144,14 @@ impl Slot for YubiHsmSlot {
         true
     }
     fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
+        if self
+            .session
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .is_none()
+        {
+            return self.read_opaque_with_public_discovery(id);
+        }
         let command = YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, id)?;
         send_yubihsm_secure_command(
             self.connector.as_ref(),
