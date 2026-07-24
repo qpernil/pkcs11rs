@@ -331,7 +331,14 @@ fn generate_key_pair(
             .find(|(_, object)| {
                 object.slot_id == Some(slot_id)
                     && object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                    && matches!(&object.material, KeyMaterial::YubiHsm { id: object_id, .. } if *object_id == id)
+                    && matches!(
+                        &object.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type: YUBIHSM_ASYMMETRIC_KEY,
+                            ..
+                        } if *object_id == id
+                    )
             })
             .ok_or(CKR_DEVICE_ERROR)?;
         let (public, imported_public) = ctx
@@ -340,7 +347,14 @@ fn generate_key_pair(
             .find(|(_, object)| {
                 object.slot_id == Some(slot_id)
                     && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                    && object.id == id.to_be_bytes()
+                    && matches!(
+                        &object.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type: YUBIHSM_PUBLIC_KEY,
+                            ..
+                        } if *object_id == id
+                    )
             })
             .ok_or(CKR_DEVICE_ERROR)?;
         let private_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
