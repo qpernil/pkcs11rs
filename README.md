@@ -215,6 +215,18 @@ Run the hardware-independent Python ABI tests:
 python3 test_pkcs11.py
 ```
 
+The four final OASIS PKCS #11 3.2 mandatory provider profile artifacts are
+also executable as four separate tests against either the deterministic ABI
+backend or a selected production module and slot:
+
+```sh
+python3 conformance/run_oasis.py --results target/oasis-results
+```
+
+See the [OASIS profile test runner](conformance/README.md) for individual test
+commands, live-module provisioning requirements, result provenance, and the
+qualification boundary.
+
 Live hardware tests are opt-in:
 
 ```sh

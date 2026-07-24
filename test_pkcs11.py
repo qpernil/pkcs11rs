@@ -131,6 +131,7 @@ ABI_TEST_SCP11_SLOT_ID = 81
 CKP_BASELINE_PROVIDER = 1
 CKP_EXTENDED_PROVIDER = 2
 CKP_AUTHENTICATION_TOKEN = 3
+CKP_PUBLIC_CERTIFICATES_TOKEN = 4
 CK_UNAVAILABLE_INFORMATION = (1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1
 
 
@@ -1041,7 +1042,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(find_final(session), CKR_OK)
-        self.assertEqual(found.value, 3)
+        self.assertEqual(found.value, 4)
 
         def bytes_attribute(object_handle: int, attribute_type: int) -> bytes:
             attribute = CK_ATTRIBUTE(attribute_type, None, 0)
@@ -1087,9 +1088,10 @@ class Pkcs11AbiTests(unittest.TestCase):
                 CKP_BASELINE_PROVIDER,
                 CKP_EXTENDED_PROVIDER,
                 CKP_AUTHENTICATION_TOKEN,
+                CKP_PUBLIC_CERTIFICATES_TOKEN,
             },
         )
-        self.assertEqual(len(unique_ids), 3)
+        self.assertEqual(len(unique_ids), 4)
 
     def test_abi_piv_fixture_exercises_sign_dispatch(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -2414,13 +2416,26 @@ done
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
 
-        def find_by_id(object_id: int) -> int:
+        def find_by_id(
+            object_id: int, object_class: int | None = None
+        ) -> int:
             encoded_id = (CK_BYTE * 2)(0, object_id)
-            template = (CK_ATTRIBUTE * 1)(
+            attributes = [
                 CK_ATTRIBUTE(
                     CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), len(encoded_id)
+                ),
+            ]
+            class_value = None
+            if object_class is not None:
+                class_value = CK_ULONG(object_class)
+                attributes.append(
+                    CK_ATTRIBUTE(
+                        CKA_CLASS,
+                        ctypes.cast(ctypes.byref(class_value), CK_VOID_PTR),
+                        ctypes.sizeof(class_value),
+                    )
                 )
-            )
+            template = (CK_ATTRIBUTE * len(attributes))(*attributes)
             self.assertEqual(
                 self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
             )
@@ -2487,7 +2502,7 @@ done
                 scalar_attribute(data, attribute_type, CK_BYTE()), expected
             )
 
-        certificate = find_by_id(6)
+        certificate = find_by_id(1, CKO_CERTIFICATE)
         self.assertEqual(
             scalar_attribute(certificate, CKA_CLASS, CK_ULONG()), CKO_CERTIFICATE
         )
