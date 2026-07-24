@@ -1430,6 +1430,212 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 }
 
 #[test]
+fn yubihsm_session_info_uses_the_retained_backend_session_role() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, peer, commands) =
+        crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
+    slot.token_objects(SLOT_ID).unwrap();
+    assert!(slot.backend_session_is_active());
+    assert!(!slot.login_is_active());
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let storage_queries = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == crate::yubihsm::CommandCode::GetStorageInfo as u8)
+            .count()
+    };
+    let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
+    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(storage_queries(), 1);
+
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(info.state, CKS_RW_USER_FUNCTIONS as CK_STATE);
+    assert_eq!(storage_queries(), 2);
+
+    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(storage_queries(), 2);
+    assert_eq!(peer.create_session_count(), 2);
+    assert_eq!(peer.closed_session_count(), 2);
+
+    let mut random = [0; 16];
+    assert_eq!(
+        crate::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(peer.create_session_count(), 3);
+    assert_eq!(peer.closed_session_count(), 2);
+    assert!(random.iter().any(|byte| *byte != 0));
+    finalize_for_test();
+}
+
+#[test]
+fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
+    #[derive(Debug, Eq, PartialEq)]
+    struct ReadCounts {
+        create_session: usize,
+        close_session: usize,
+        list_objects: usize,
+        get_object_info: usize,
+        get_public_key: usize,
+        get_opaque: usize,
+    }
+
+    fn find_all(session: CK_SESSION_HANDLE) -> Vec<CK_OBJECT_HANDLE> {
+        assert_eq!(
+            crate::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+            CKR_OK as CK_RV
+        );
+        let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 64];
+        let mut count = 0;
+        assert_eq!(
+            crate::C_FindObjects(
+                session,
+                handles.as_mut_ptr(),
+                handles.len() as CK_ULONG,
+                &mut count,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        handles[..count as usize].to_vec()
+    }
+
+    fn read_display_attribute(
+        session: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        attribute_type: CK_ATTRIBUTE_TYPE,
+    ) {
+        let mut attribute = CK_ATTRIBUTE {
+            type_: attribute_type,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        let result = crate::C_GetAttributeValue(session, object, &mut attribute, 1);
+        if result != CKR_OK as CK_RV {
+            assert!(
+                result == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+                    || result == CKR_ATTRIBUTE_SENSITIVE as CK_RV
+            );
+            return;
+        }
+        let mut value = vec![0; attribute.ulValueLen as usize];
+        attribute.pValue = value.as_mut_ptr().cast();
+        assert_eq!(
+            crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+    }
+
+    fn list_like_pkcs11_tool(session: CK_SESSION_HANDLE) {
+        for object in find_all(session) {
+            for attribute_type in [
+                CKA_CLASS as CK_ATTRIBUTE_TYPE,
+                CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+                CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+                CKA_LABEL as CK_ATTRIBUTE_TYPE,
+                CKA_ID as CK_ATTRIBUTE_TYPE,
+                CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+                CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE,
+                CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+                CKA_VALUE as CK_ATTRIBUTE_TYPE,
+            ] {
+                read_display_attribute(session, object, attribute_type);
+            }
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, peer, commands) =
+        crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context.slots.insert(SLOT_ID, slot);
+        context.refresh_slot_token_objects(SLOT_ID).unwrap();
+    }
+    let mut session = 0;
+    assert_eq!(
+        crate::C_OpenSession(
+            SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let counts = || {
+        let commands = commands.borrow();
+        let count = |expected| {
+            commands
+                .iter()
+                .filter(|(command, _)| *command == expected)
+                .count()
+        };
+        ReadCounts {
+            create_session: peer.create_session_count(),
+            close_session: peer.closed_session_count(),
+            list_objects: count(crate::yubihsm::CommandCode::ListObjects as u8),
+            get_object_info: count(crate::yubihsm::CommandCode::GetObjectInfo as u8),
+            get_public_key: count(crate::yubihsm::CommandCode::GetPublicKey as u8),
+            get_opaque: count(crate::yubihsm::CommandCode::GetOpaque as u8),
+        }
+    };
+
+    list_like_pkcs11_tool(session);
+    let first = counts();
+    assert_eq!(first.create_session, 1);
+    assert_eq!(first.close_session, 0);
+    assert!(first.list_objects > 0);
+    assert!(first.get_object_info > 0);
+    assert!(first.get_public_key > 0);
+    assert!(first.get_opaque > 0);
+
+    list_like_pkcs11_tool(session);
+    assert_eq!(counts(), first);
+
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

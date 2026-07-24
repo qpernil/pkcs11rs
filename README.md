@@ -140,11 +140,13 @@ objects whose effective `CKA_PRIVATE` is false; internal PKCS #11 metadata
 companions remain hidden. The public-certificate profile is advertised only on
 slots where authentication and public discovery succeed, independently of the
 currently provisioned object inventory. Malformed provisioned objects are
-logged and skipped individually. The short-lived discovery session is separate
-from an ordinary PKCS #11 login and is closed after discovery or one logged-out
-lazy value read. While the profile is active, user-login Authentication Keys
-must have exactly the same domains as the discovery Authentication Key. The
-value uses the same `AAAApassword` representation as direct YubiHSM login.
+logged and skipped individually. The discovery session is retained and reused
+until login, cleanup, reconnection, or secure-session invalidation. `C_Login`
+closes it and installs the user session; after `C_Logout`, the discovery session
+is reopened lazily by the next public hardware read. While the profile is
+active, user-login Authentication Keys must have exactly the same domains as
+the discovery Authentication Key. The value uses the same `AAAApassword`
+representation as direct YubiHSM login.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.

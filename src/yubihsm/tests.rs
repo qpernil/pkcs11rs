@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
-    Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA,
-    CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
+    Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSessionRole, YubiHsmSlot,
+    CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
     CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS,
     CK_PROFILE_ID, YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
     YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256,
@@ -181,6 +181,18 @@ impl ProtocolPeer {
             product: "YubiHSM",
             serial: "16909060",
         }
+    }
+
+    pub(crate) fn create_session_count(&self) -> usize {
+        self.commands
+            .borrow()
+            .iter()
+            .filter(|command| command.first() == Some(&COMMAND_CREATE_SESSION))
+            .count()
+    }
+
+    pub(crate) fn closed_session_count(&self) -> usize {
+        self.closed_sessions.get()
     }
 
     fn with_bad_card_cryptogram() -> Self {
@@ -2825,10 +2837,51 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
         panic!("expected public opaque data");
     };
     assert!(value.borrow().is_none());
-    assert!(slot.session.borrow().is_none());
+    assert!(slot.session.borrow().is_some());
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
     assert!(slot.object_cache.borrow().available);
-    assert!(peer.session.borrow().is_none());
-    assert_eq!(peer.closed_sessions.get(), 1);
+    assert!(peer.session.borrow().is_some());
+    assert_eq!(peer.closed_sessions.get(), 0);
+}
+
+#[test]
+fn yubihsm_public_read_session_can_open_before_object_discovery() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let slot = public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
+    assert!(!slot.object_cache.borrow().attempted);
+
+    Slot::ensure_backend_read_session(&slot).unwrap();
+    assert_eq!(peer.create_session_count(), 1);
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+    assert!(!slot.object_cache.borrow().attempted);
+    assert!(!slot.object_cache.borrow().available);
+}
+
+#[test]
+fn yubihsm_public_read_reopens_an_invalidated_discovery_session_once() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let slot = public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
+    Slot::token_objects(&slot, 7).unwrap();
+    let sessions_before_read = peer.create_session_count();
+
+    peer.corrupt_response_mac.set(true);
+    assert_eq!(
+        Slot::yubihsm_read_opaque(&slot, 4).unwrap(),
+        b"cached opaque value"
+    );
+    assert_eq!(peer.create_session_count(), sessions_before_read + 1);
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+    assert!(Slot::backend_session_is_active(&slot));
 }
 
 #[test]
@@ -3052,6 +3105,12 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
     let mut slot =
         public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
     let public_objects = Slot::token_objects(&slot, 7).unwrap();
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+    assert!(Slot::backend_session_is_active(&slot));
+    assert!(!Slot::login_is_active(&slot));
     let public_certificate_ids = public_objects
         .iter()
         .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
@@ -3091,6 +3150,9 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
 
     Slot::login(&mut slot, b"0001password").unwrap();
     assert!(slot.session.borrow().is_some());
+    assert_eq!(slot.session_role.get(), Some(YubiHsmSessionRole::User));
+    assert!(Slot::backend_session_is_active(&slot));
+    assert!(Slot::login_is_active(&slot));
     assert!(slot.object_cache.borrow().available);
     let logged_in_objects = Slot::token_objects(&slot, 7).unwrap();
     let get_opaque_after_login = peer
@@ -3171,6 +3233,9 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
 
     Slot::logout(&mut slot).unwrap();
     assert!(slot.session.borrow().is_none());
+    assert_eq!(slot.session_role.get(), None);
+    assert!(!Slot::backend_session_is_active(&slot));
+    assert!(!Slot::login_is_active(&slot));
     assert!(slot.object_cache.borrow().available);
     let logged_out_objects = Slot::token_objects(&slot, 7).unwrap();
     assert!(logged_out_objects.iter().any(|object| {
@@ -3210,8 +3275,12 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
         exercise_lazy_opaque_value_cache(&slot, &login_discovered_certificate),
         extra_certificate
     );
-    assert!(slot.session.borrow().is_none());
-    assert!(peer.session.borrow().is_none());
+    assert!(slot.session.borrow().is_some());
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+    assert!(peer.session.borrow().is_some());
     assert_eq!(
         peer.commands
             .borrow()
@@ -3220,7 +3289,7 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
             .count(),
         sessions_before_lazy_read + 1
     );
-    assert_eq!(peer.closed_sessions.get(), closes_before_lazy_read + 1);
+    assert_eq!(peer.closed_sessions.get(), closes_before_lazy_read);
 }
 
 #[test]
@@ -3244,8 +3313,9 @@ fn yubihsm_user_login_requires_public_discovery_domains() {
         Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as _
     ));
     assert!(slot.session.borrow().is_none());
+    assert_eq!(slot.session_role.get(), None);
     assert!(peer.session.borrow().is_none());
-    assert_eq!(peer.closed_sessions.get(), closes_before_login + 1);
+    assert_eq!(peer.closed_sessions.get(), closes_before_login + 2);
 }
 
 #[test]

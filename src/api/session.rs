@@ -274,7 +274,10 @@ fn get_session_info(
             let session = ctx._get_session(session_handle)?.1;
             (session.slotID(), session.flags())
         };
-        if ctx.is_slot_logged_in(slot_id) {
+        ctx.reconcile_login_state(slot_id);
+        if ctx.is_slot_logged_in(slot_id)
+            || ctx.get_slot(slot_id)?.backend_session_is_active()
+        {
             if let Err(error) = ctx._get_session(session_handle)?.1.get_session_info() {
                 ctx.reconcile_login_state(slot_id);
                 return Err(error);
