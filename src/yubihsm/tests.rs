@@ -1566,6 +1566,44 @@ fn public_discovery_credential(password: &str) -> Rc<YubiHsmPublicDiscoveryCrede
         .unwrap()
 }
 
+fn hsmauth_public_discovery_credential() -> Rc<YubiHsmPublicDiscoveryCredential> {
+    configured_yubihsm_public_discovery_credential(Some(
+        ":0001default key@12345678:password".into(),
+    ))
+    .unwrap()
+    .unwrap()
+}
+
+fn symmetric_hsmauth_provider(serial: &'static str) -> crate::HsmAuthProvider {
+    crate::HsmAuthProvider {
+        connector: Rc::new(SymmetricHsmAuthPeer { serial }),
+        credential: crate::HsmAuthCredential {
+            label: "default key".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: None,
+        },
+        version: (5, 7, 1),
+        trust_prefix: None,
+    }
+}
+
+fn asymmetric_hsmauth_provider(peer: Rc<AsymmetricHsmAuthPeer>) -> crate::HsmAuthProvider {
+    crate::HsmAuthProvider {
+        connector: peer.clone(),
+        credential: crate::HsmAuthCredential {
+            label: "asymmetric".to_owned(),
+            algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
+            retries: 8,
+            touch_required: false,
+            public_key: Some(peer.public_key.clone()),
+        },
+        version: (5, 7, 1),
+        trust_prefix: None,
+    }
+}
+
 fn public_discovery_test_slot(
     peer: Rc<ProtocolPeer>,
     credential: Rc<YubiHsmPublicDiscoveryCredential>,
@@ -2845,6 +2883,170 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
     assert!(slot.object_cache.borrow().available);
     assert!(peer.session.borrow().is_some());
     assert_eq!(peer.closed_sessions.get(), 0);
+}
+
+#[test]
+fn yubihsm_public_discovery_reuses_the_yubihsm_auth_login_path() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer.clone(),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers,
+        Some(hsmauth_public_discovery_credential()),
+    );
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects.iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
+    assert_eq!(create_session_payload_lengths(&peer), [10]);
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+    assert!(!Slot::login_is_active(&slot));
+}
+
+#[test]
+fn yubihsm_public_discovery_supports_asymmetric_yubihsm_auth_credentials() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(1);
+    peer.add_public_certificate_pair();
+    let hsmauth = Rc::new(AsymmetricHsmAuthPeer::new());
+    let providers = Rc::new(RefCell::new(vec![asymmetric_hsmauth_provider(hsmauth)]));
+    let credential = configured_yubihsm_public_discovery_credential(Some(
+        ":0001asymmetric@87654321:password".into(),
+    ))
+    .unwrap()
+    .unwrap();
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer.clone(),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers,
+        Some(credential),
+    );
+
+    assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
+    assert_eq!(create_session_payload_lengths(&peer), [67]);
+    assert_eq!(
+        slot.session_role.get(),
+        Some(YubiHsmSessionRole::PublicDiscovery)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
+    let _guard = crate::test::TEST_LOCK.lock().unwrap();
+    let credential;
+    {
+        let _pinentry = crate::test::TestPinentry::new("password");
+        let direct_credential = configured_yubihsm_public_discovery_credential(Some("0001".into()))
+            .unwrap()
+            .unwrap();
+        assert!(direct_credential.password.borrow().is_none());
+        credential = configured_yubihsm_public_discovery_credential(Some(
+            ":0001default key@12345678".into(),
+        ))
+        .unwrap()
+        .unwrap();
+        let peer = Rc::new(ProtocolPeer::new());
+        peer.add_public_certificate_pair();
+        let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+        let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+            peer.clone(),
+            (2, 4, 1),
+            vec![YUBIHSM_ALGO_RSA_2048],
+            providers,
+            Some(credential.clone()),
+        );
+
+        assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+            matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            )
+        }));
+        assert_eq!(peer.create_session_count(), 1);
+    }
+
+    assert!(!crate::pinentry::is_configured());
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer.clone(),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers,
+        Some(credential),
+    );
+
+    assert!(Slot::token_objects(&slot, 8).unwrap().iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
+    assert_eq!(peer.create_session_count(), 1);
+}
+
+#[test]
+fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let providers = Rc::new(RefCell::new(Vec::new()));
+    let mut slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer.clone(),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        providers.clone(),
+        Some(hsmauth_public_discovery_credential()),
+    );
+
+    assert!(
+        !Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+            matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            )
+        })
+    );
+    assert!(!slot.object_cache.borrow().attempted);
+    assert_eq!(peer.create_session_count(), 0);
+
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(slot.session_role.get(), Some(YubiHsmSessionRole::User));
+    Slot::logout(&mut slot).unwrap();
+
+    providers
+        .borrow_mut()
+        .push(symmetric_hsmauth_provider("12345678"));
+    assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+        matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )
+    }));
+    assert_eq!(peer.create_session_count(), 2);
 }
 
 #[test]

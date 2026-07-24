@@ -252,21 +252,54 @@ enum YubiHsmSessionRole {
 }
 
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
-const YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL_ENV: &str =
-    "PKCS11RS_YUBIHSM_PUBLIC_DISCOVERY_CREDENTIAL";
+const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
 
-#[derive(Clone)]
 struct YubiHsmPublicDiscoveryCredential {
+    username: Vec<u8>,
     authkey_id: u16,
-    password: Zeroizing<Vec<u8>>,
+    password: RefCell<Option<Zeroizing<Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("YubiHsmPublicDiscoveryCredential")
+            .field("username", &"[CONFIGURED SELECTOR]")
             .field("authkey_id", &format_args!("{:04x}", self.authkey_id))
             .field("password", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl YubiHsmPublicDiscoveryCredential {
+    fn uses_hsmauth(&self) -> bool {
+        self.username.first() == Some(&b':')
+    }
+
+    fn with_password<T>(
+        &self,
+        prompt: pinentry::Prompt<'_>,
+        operation: impl FnOnce(&[u8]) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut password = self.password.try_borrow_mut()?;
+        if password.is_none() {
+            let entered = pinentry::request(prompt)?;
+            match parse_yubihsm_login_username(&self.username)? {
+                YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                _ => {}
+            }
+            *password = Some(entered);
+        }
+        operation(
+            password
+                .as_deref()
+                .ok_or(CKR_PIN_INCORRECT)?
+                .as_slice(),
+        )
     }
 }
 
@@ -290,18 +323,34 @@ fn configured_yubihsm_public_discovery_credential(
     let credential = credential.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
     let (username, password) =
         split_yubihsm_login(credential.as_bytes()).map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let password = password.ok_or(CKR_ARGUMENTS_BAD)?;
-    let YubiHsmLoginUsername::Direct(authkey_id) =
-        parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?
-    else {
-        return Err(CKR_ARGUMENTS_BAD.into());
+    let login = parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let authkey_id = match &login {
+        YubiHsmLoginUsername::Direct(authkey_id) => {
+            if password.is_some_and(|password| {
+                !password.is_empty() && !(8..=64).contains(&password.len())
+            }) {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            *authkey_id
+        }
+        YubiHsmLoginUsername::HsmAuth(login) => {
+            if password.is_some_and(|password| password.len() > 16) {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            login.authkey_id
+        }
     };
-    if !(8..=64).contains(&password.len()) {
+    let password = match login {
+        YubiHsmLoginUsername::Direct(_) => password.filter(|password| !password.is_empty()),
+        YubiHsmLoginUsername::HsmAuth(_) => password,
+    };
+    if password.is_none() && !pinentry::is_configured() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(Some(Rc::new(YubiHsmPublicDiscoveryCredential {
+        username: username.to_vec(),
         authkey_id,
-        password: Zeroizing::new(password.to_vec()),
+        password: RefCell::new(password.map(|password| Zeroizing::new(password.to_vec()))),
     })))
 }
 
@@ -802,6 +851,90 @@ impl YubiHsmSlot {
         Ok(session)
     }
 
+    fn authenticate_login(
+        &self,
+        username: &[u8],
+        password: &[u8],
+    ) -> Result<(YubiHsmSecureSession, u16), Error> {
+        match parse_yubihsm_login_username(username)? {
+            YubiHsmLoginUsername::HsmAuth(login) => {
+                if password.len() > 16 {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                log!(
+                    2,
+                    "YubiHSM authentication requested through YubiHSM Auth credential {:?}, source {:?}, authentication key {:04x}",
+                    login.label,
+                    login.source,
+                    login.authkey_id
+                );
+                let provider = self.hsmauth_provider(&login)?;
+                log!(
+                    2,
+                    "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
+                    provider.credential.label,
+                    provider.source_identifier(),
+                    provider.credential.algorithm
+                );
+                let session = match provider.authenticate(
+                    self.connector.as_ref(),
+                    login.authkey_id,
+                    password,
+                ) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        log!(
+                            1,
+                            "YubiHSM Auth secure-session authentication failed: {:?}",
+                            error
+                        );
+                        return Err(error);
+                    }
+                };
+                log!(
+                    2,
+                    "YubiHSM Auth established a secure session with {} using authentication key {:04x}",
+                    self.connector.name(),
+                    login.authkey_id
+                );
+                Ok((session, login.authkey_id))
+            }
+            YubiHsmLoginUsername::Direct(authkey_id) => {
+                if !(8..=64).contains(&password.len()) {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                Ok((
+                    self.authenticate_direct(authkey_id, password)?,
+                    authkey_id,
+                ))
+            }
+        }
+    }
+
+    fn authenticate_public_discovery(
+        &self,
+        credential: &YubiHsmPublicDiscoveryCredential,
+    ) -> Result<(YubiHsmSecureSession, u16), Error> {
+        let title = format!("Public discovery on {}", self.label());
+        let description = match parse_yubihsm_login_username(&credential.username)? {
+            YubiHsmLoginUsername::Direct(authkey_id) => format!(
+                "Enter the password for YubiHSM Authentication Key {authkey_id:04x}."
+            ),
+            YubiHsmLoginUsername::HsmAuth(login) => format!(
+                "Enter the authentication password for {:?}.",
+                login.label
+            ),
+        };
+        credential.with_password(
+            pinentry::Prompt {
+                title: &title,
+                description: &description,
+                label: "Authentication password:",
+            },
+            |password| self.authenticate_login(&credential.username, password),
+        )
+    }
+
     fn has_session_role(&self, role: YubiHsmSessionRole) -> bool {
         let present = self
             .session
@@ -863,11 +996,22 @@ impl YubiHsmSlot {
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.authkey_domains
         };
-        let session = RefCell::new(Some(
-            self.authenticate_direct(credential.authkey_id, credential.password.as_slice())?,
-        ));
+        let (session, authkey_id) = match self.authenticate_public_discovery(credential) {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
+                log!(
+                    2,
+                    "YubiHSM pre-login authentication failed while reopening public discovery on {} with authentication key {:04x}: {:?}",
+                    self.connector.name(),
+                    credential.authkey_id,
+                    error
+                );
+                return Err(error);
+            }
+        };
+        let session = RefCell::new(Some(session));
         let validation = (|| {
-            let info = self.authentication_key_info(&session, credential.authkey_id)?;
+            let info = self.authentication_key_info(&session, authkey_id)?;
             if expected_domains.is_some_and(|expected| info.domains != expected)
                 || !yubihsm_capability(&info.capabilities, 0)
             {
@@ -1191,6 +1335,31 @@ impl YubiHsmSlot {
         let Some(credential) = self.public_discovery_credential.as_ref() else {
             return false;
         };
+        if credential.uses_hsmauth() {
+            let provider_available = match parse_yubihsm_login_username(&credential.username) {
+                Ok(YubiHsmLoginUsername::HsmAuth(login)) => {
+                    match self.hsmauth_provider(&login) {
+                        Ok(_) => true,
+                        Err(error) => {
+                            log!(
+                                1,
+                                "YubiHSM pre-login authentication could not resolve YubiHSM Auth credential {:?}, source {:?}, for authentication key {:04x} on {}: {:?}; public discovery remains retryable",
+                                login.label,
+                                login.source,
+                                login.authkey_id,
+                                self.connector.name(),
+                                error
+                            );
+                            false
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if !provider_available {
+                return false;
+            }
+        }
         {
             let Ok(mut state) = self.object_cache.try_borrow_mut() else {
                 return false;
@@ -1210,15 +1379,15 @@ impl YubiHsmSlot {
             self.connector.name(),
             credential.authkey_id
         );
-        let session =
-            self.authenticate_direct(credential.authkey_id, credential.password.as_slice());
+        let session = self.authenticate_public_discovery(credential);
         let session = match session {
-            Ok(session) => session,
+            Ok((session, _)) => session,
             Err(error) => {
                 log!(
-                    2,
-                    "YubiHSM public discovery authentication failed on {}: {:?}",
+                    1,
+                    "YubiHSM pre-login authentication failed on {} with authentication key {:04x}: {:?}",
                     self.connector.name(),
+                    credential.authkey_id,
                     error
                 );
                 return false;
@@ -2075,61 +2244,7 @@ impl Slot for YubiHsmSlot {
     fn login_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), Error> {
         let _ = self.close_active_session("pre-login");
         self.clear_cached_private_objects()?;
-        let login = parse_yubihsm_login_username(username)?;
-        let authkey_id = match &login {
-            YubiHsmLoginUsername::Direct(authkey_id) => *authkey_id,
-            YubiHsmLoginUsername::HsmAuth(login) => login.authkey_id,
-        };
-        let session = match login {
-            YubiHsmLoginUsername::HsmAuth(login) => {
-                if password.len() > 16 {
-                    return Err(CKR_PIN_INCORRECT.into());
-                }
-                log!(
-                    2,
-                    "YubiHSM login requested through YubiHSM Auth credential {:?}, source {:?}, authentication key {:04x}",
-                    login.label,
-                    login.source,
-                    login.authkey_id
-                );
-                let provider = self.hsmauth_provider(&login)?;
-                log!(
-                    2,
-                    "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
-                    provider.credential.label,
-                    provider.source_identifier(),
-                    provider.credential.algorithm
-                );
-                let session = match provider.authenticate(
-                    self.connector.as_ref(),
-                    login.authkey_id,
-                    password,
-                ) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        log!(
-                            2,
-                            "YubiHSM Auth secure-session authentication failed: {:?}",
-                            error
-                        );
-                        return Err(error);
-                    }
-                };
-                log!(
-                    2,
-                    "YubiHSM Auth established a secure session with {} using authentication key {:04x}",
-                    self.connector.name(),
-                    login.authkey_id
-                );
-                session
-            }
-            YubiHsmLoginUsername::Direct(authkey_id) => {
-                if !(8..=64).contains(&password.len()) {
-                    return Err(CKR_PIN_INCORRECT.into());
-                }
-                self.authenticate_direct(authkey_id, password)?
-            }
-        };
+        let (session, authkey_id) = self.authenticate_login(username, password)?;
         let session = RefCell::new(Some(session));
         let discovery_domains = {
             let state = self
