@@ -2187,6 +2187,33 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ),
         updated
     );
+    let mut empty_id = Vec::new();
+    let mut empty_label = Vec::new();
+    let mut clear_public_attributes = [
+        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut empty_id),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut empty_label),
+    ];
+    assert_eq!(
+        crate::C_SetAttributeValue(
+            session,
+            public[0],
+            clear_public_attributes.as_mut_ptr(),
+            clear_public_attributes.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        find_yubihsm_object(session, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, b"", ""),
+        public
+    );
+    assert_eq!(
+        read_bytes_attribute(session, public[0], CKA_ID as CK_ATTRIBUTE_TYPE),
+        b""
+    );
+    assert_eq!(
+        read_bytes_attribute(session, public[0], CKA_LABEL as CK_ATTRIBUTE_TYPE),
+        b""
+    );
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
