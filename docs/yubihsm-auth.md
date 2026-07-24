@@ -85,14 +85,18 @@ discarding other valid public objects. Authentication, authorization, list,
 read, and transport failures still make discovery unavailable for that slot.
 
 After successful authentication, the module enumerates the credential-visible
-objects and reads object information. PKCS #11 metadata opaque objects are read
-because their sparse `CKA_ID` and `CKA_LABEL` overrides affect object
-construction, matching, searches, and later operations. Metadata companions
-remain internal. Before PKCS #11 login the module exposes every constructed
-object whose effective `CKA_PRIVATE` is false, including X.509 certificates,
-standalone or matching public keys, and public data and template objects.
-X.509 opaque values are read immediately for certificate validation; other
-opaque values remain lazy.
+objects. `LIST OBJECTS` seeds one native cache entry per object type and ID with
+the listed sequence. Object information, public keys, and opaque values then
+populate that entry only when needed. A later list with a different sequence
+replaces the entry and discards every previously cached property.
+
+PKCS #11 metadata opaque objects are read because their sparse `CKA_ID` and
+`CKA_LABEL` overrides affect object construction, matching, searches, and later
+operations. Metadata companions remain internal. Before PKCS #11 login the
+module exposes every constructed object whose effective `CKA_PRIVATE` is false,
+including X.509 certificates, standalone or matching public keys, and public
+data and template objects. X.509 opaque values are read immediately for
+certificate validation; other opaque values remain lazy.
 
 A synthetic public key inherits `CKA_ID` and `CKA_LABEL` overrides from its
 physical private key when no explicit public-key override is present. Explicit
@@ -101,20 +105,21 @@ default while still allowing the two synthetic objects to be named separately.
 An explicit mismatch is treated as a provisioning choice and does not withdraw
 the profile.
 
-The slot retains one object set and one lazy opaque-value cache shared by
+The slot retains one native-object cache and one PKCS #11 object set shared by
 pre-login and post-login enumeration. Discovery and ordinary user sessions
-upsert observations into that set by stable `CKA_UNIQUE_ID`; there are no
-separate discovery and login views. Equal Authentication Key domains ensure
-that user enumeration cannot add objects outside the discovery credential's
-view.
+enrich the same native entries and upsert PKCS #11 projections by stable
+`CKA_UNIQUE_ID`; there are no separate discovery and login views. Equal
+Authentication Key domains ensure that user enumeration cannot add objects
+outside the discovery credential's view.
 
 Attribute access reads an uncached opaque value through the active user
 session. Without a user login, it opens a temporary session using the discovery
 credential, reads and caches the value, and closes that session immediately.
-Later reconstructions of the same YubiHSM object ID and sequence reuse that
-cache cell. Logout retains public objects and successful public value reads,
-but removes every private object and the metadata and attestation state that
-could reconstruct it. The next user login enumerates its private view again.
+Later reconstructions of the same YubiHSM object type, ID, and sequence reuse
+that cache cell. Logout retains public objects and successful public property
+reads, but removes every private object and the metadata and attestation state
+that could reconstruct it. The next user login enumerates its private view
+again.
 
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
@@ -139,14 +144,19 @@ private object's `CKA_ID` and `CKA_LABEL` and the corresponding synthetic
 public object's values. Valid overrides apply regardless of whether the target
 was first seen by public discovery, user login, or a successful mutation.
 
-Metadata is linked to the target's native object type, ID, sequence, and
-domains. Invalid metadata is hidden and ignored. If multiple valid metadata
-objects claim the same target, none is selected until a later attribute update
-repairs the ambiguity. `C_SetAttributeValue` writes a replacement metadata
-object before removing older companions, and creating an object automatically
-creates metadata when requested attributes cannot be encoded by the native
-YubiHSM object. New metadata uses YubiHSM auto-allocation. Destroying the main
-object also deletes every linked metadata companion.
+Metadata is linked from the target's native cache entry. The companion's
+contents identify the target object type, ID, and sequence, while its own
+sequence identifies the current companion incarnation. A link contributes
+attribute overrides only when its target sequence matches the current target
+entry; this prevents reused object IDs from inheriting obsolete attributes.
+Domains must also match. Invalid metadata is hidden and ignored. If multiple
+valid metadata objects claim the same target, none is selected until a later
+attribute update repairs the ambiguity. `C_SetAttributeValue` writes a
+replacement metadata object before removing older companions, and creating an
+object automatically creates metadata when requested attributes cannot be
+encoded by the native YubiHSM object. New metadata uses YubiHSM
+auto-allocation. Destroying the main object also deletes every linked metadata
+companion.
 
 ## YubiHSM login
 
@@ -181,16 +191,17 @@ selector from the password, so the password itself may contain colons. The
 selected credential and target YubiHSM authentication key must form a
 compatible symmetric or asymmetric authentication pair.
 
-For direct authentication, the module first checks the algorithm cached for
-that YubiHSM slot and Authentication Key ID. Only when the cache entry is empty
-does it probe with the symmetric `CREATE SESSION` request first. If the
-YubiHSM immediately rejects that request with its wrong-length status, the
-module retries with the asymmetric request. A cached algorithm is used
-immediately; if its request receives the same wrong-length status, the entry
-is stale and the module tries the other algorithm. Successful authentication
-updates the cache. Object discovery also populates this shared cache from
-Authentication Key metadata, and reconnection clears it with the rest of the
-slot's discovery state.
+For direct authentication, the module first checks the ordinary `algorithm`
+field in cached Authentication Key object information. If object information
+has never been read, a previous successful session probe may instead supply an
+inferred algorithm hint. Only when neither is available does the module probe
+with the symmetric `CREATE SESSION` request first. If the YubiHSM immediately
+rejects that request with its wrong-length status, the module retries with the
+asymmetric request. A cached algorithm is used immediately; if its request
+receives the same wrong-length status, the entry is stale and the module tries
+the other algorithm. Successful authentication retains an inferred hint when
+needed. A later `GET OBJECT INFO` makes the normal object property authoritative.
+Reconnection clears both with the rest of the slot's object cache.
 
 When `PKCS11RS_PINENTRY` is configured, the password and its separating colon
 may be omitted to request it through pinentry:
