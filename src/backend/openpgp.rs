@@ -162,7 +162,7 @@ impl Slot for OpenPgpSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.serial())
+        format!("OpenPGP #{}", self.serial())
     }
     fn serial(&self) -> &str {
         if self.serial == "0" {
