@@ -2331,6 +2331,7 @@ fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
         data.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
         Some(Vec::new())
     );
+    assert_eq!(data.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
     assert_eq!(
         data.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
         Some(crate::bool_attribute(true))
@@ -5190,7 +5191,7 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
 
 #[cfg(feature = "abi-tests")]
 #[test]
-fn piv_key_related_objects_share_ykcs11_id_and_keep_raw_certificate_data() {
+fn piv_key_related_objects_expose_class_appropriate_identifiers() {
     let slot = crate::abi_test_piv_slot().unwrap();
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
     let related = objects
@@ -5205,6 +5206,16 @@ fn piv_key_related_objects_share_ykcs11_id_and_keep_raw_certificate_data() {
                 .filter(|object| object.class == class as CK_OBJECT_CLASS)
                 .count(),
             1
+        );
+    }
+    for class in [CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_CERTIFICATE] {
+        let object = related
+            .iter()
+            .find(|object| object.class == class as CK_OBJECT_CLASS)
+            .unwrap();
+        assert_eq!(
+            object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE),
+            Some(vec![2])
         );
     }
 
@@ -5224,6 +5235,7 @@ fn piv_key_related_objects_share_ykcs11_id_and_keep_raw_certificate_data() {
     let raw_value = data
         .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
         .unwrap();
+    assert_eq!(data.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
     assert_eq!(raw_value.first(), Some(&0x70));
     assert_ne!(raw_value, certificate_value);
     assert_eq!(
