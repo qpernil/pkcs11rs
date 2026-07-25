@@ -5527,13 +5527,24 @@ struct TestSession {
 #[derive(Debug, Default)]
 struct ConcurrentOperationState {
     active: std::sync::atomic::AtomicUsize,
+    active_by_slot: [std::sync::atomic::AtomicUsize; 2],
     max_active: std::sync::atomic::AtomicUsize,
+    operations_by_slot: [std::sync::atomic::AtomicUsize; 2],
+    same_slot_overlap: std::sync::atomic::AtomicBool,
     changed: std::sync::Condvar,
     wait: std::sync::Mutex<()>,
 }
 
 impl ConcurrentOperationState {
-    fn overlap(&self) {
+    fn overlap(&self, slot_index: usize) {
+        let slot_active =
+            self.active_by_slot[slot_index].fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if slot_active > 1 {
+            self.same_slot_overlap
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.operations_by_slot[slot_index].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         let active = self
             .active
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -5551,12 +5562,14 @@ impl ConcurrentOperationState {
             .unwrap();
         self.active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.active_by_slot[slot_index].fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[derive(Debug)]
 struct ConcurrentYubiHsmSlot {
     state: std::sync::Arc<ConcurrentOperationState>,
+    slot_index: usize,
 }
 
 #[derive(Debug)]
@@ -5564,6 +5577,7 @@ struct ConcurrentYubiHsmSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     state: std::sync::Arc<ConcurrentOperationState>,
+    slot_index: usize,
 }
 
 #[derive(Debug)]
@@ -5830,7 +5844,7 @@ impl crate::Session for ConcurrentYubiHsmSession {
     }
 
     fn generate_random(&self, output: &mut [u8]) -> Result<(), crate::error::Error> {
-        self.state.overlap();
+        self.state.overlap(self.slot_index);
         output.fill(self.slot_id as u8);
         Ok(())
     }
@@ -5874,6 +5888,7 @@ impl crate::Slot for ConcurrentYubiHsmSlot {
             slot_id: slotID,
             flags,
             state: self.state.clone(),
+            slot_index: self.slot_index,
         })
     }
 

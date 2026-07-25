@@ -766,6 +766,9 @@ const ABI_TEST_YUBIHSM_SLOT_ID: CK_SLOT_ID = 80;
 const ABI_TEST_SCP11_SLOT_ID: CK_SLOT_ID = 81;
 
 #[cfg(feature = "abi-tests")]
+const ABI_TEST_SECOND_YUBIHSM_SLOT_ID: CK_SLOT_ID = 82;
+
+#[cfg(feature = "abi-tests")]
 mod abi_test_backend;
 #[cfg(feature = "abi-tests")]
 use abi_test_backend::*;

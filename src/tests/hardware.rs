@@ -125,6 +125,167 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         })
     }
 
+    fn select_two_yubihsm_slots() -> Vec<(CK_SLOT_ID, String)> {
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count,),
+            CKR_OK as CK_RV
+        );
+        let mut slot_ids = vec![0; count as usize];
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slot_ids.as_mut_ptr(), &mut count,),
+            CKR_OK as CK_RV
+        );
+
+        let slots = slot_ids
+            .into_iter()
+            .filter_map(|slot_id| {
+                let mut info = CK_SLOT_INFO {
+                    slotDescription: [0; 64],
+                    manufacturerID: [0; 32],
+                    flags: 0,
+                    hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+                    firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+                };
+                assert_eq!(
+                    crate::api::C_GetSlotInfo(slot_id, &mut info),
+                    CKR_OK as CK_RV
+                );
+                let description = String::from_utf8_lossy(&info.slotDescription)
+                    .trim_end()
+                    .to_owned();
+                description
+                    .starts_with("Yubico YubiHSM ")
+                    .then_some((slot_id, description))
+            })
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots.len(),
+            2,
+            "expected at least two present YubiHSM slots for concurrency testing"
+        );
+        slots
+    }
+
+    fn open_hardware_session(slot_id: CK_SLOT_ID) -> CK_SESSION_HANDLE {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        session
+    }
+
+    #[test]
+    #[ignore = "runs many concurrent PKCS #11 operations against two present YubiHSM hardware slots"]
+    fn concurrent_yubihsm_hardware_slots_survive_many_threaded_operations() {
+        const THREAD_COUNT: usize = 16;
+        const CALLS_PER_THREAD: usize = 100;
+        const OUTPUT_LENGTH: usize = 32;
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+
+        let slots = select_two_yubihsm_slots();
+        eprintln!(
+            "concurrency hardware test uses slot {} {} and slot {} {}",
+            slots[0].0, slots[0].1, slots[1].0, slots[1].1
+        );
+
+        let pin = format!("{DEFAULT_ADMIN_ID}{DEFAULT_ADMIN_PASSWORD}");
+
+        let control_sessions = [
+            open_hardware_session(slots[0].0),
+            open_hardware_session(slots[1].0),
+        ];
+        for slot_index in 0..2 {
+            let mut pin = pin.as_bytes().to_vec();
+            assert_eq!(
+                crate::api::C_Login(
+                    control_sessions[slot_index],
+                    CKU_USER as CK_USER_TYPE,
+                    pin.as_mut_ptr(),
+                    pin.len() as CK_ULONG,
+                ),
+                CKR_OK as CK_RV,
+                "failed to log in to {}",
+                slots[slot_index].1
+            );
+        }
+
+        let sessions = (0..THREAD_COUNT)
+            .map(|thread_index| {
+                let slot_index = thread_index % 2;
+                (slot_index, open_hardware_session(slots[slot_index].0))
+            })
+            .collect::<Vec<_>>();
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let start = std::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+        std::thread::scope(|scope| {
+            let workers = sessions
+                .into_iter()
+                .map(|(slot_index, session)| {
+                    let completed = completed.clone();
+                    let start = start.clone();
+                    let slot_name = slots[slot_index].1.clone();
+                    scope.spawn(move || {
+                        start.wait();
+                        let mut previous = None;
+                        for _ in 0..CALLS_PER_THREAD {
+                            let mut output = [0u8; OUTPUT_LENGTH];
+                            assert_eq!(
+                                crate::api::C_GenerateRandom(
+                                    session,
+                                    output.as_mut_ptr(),
+                                    output.len() as CK_ULONG,
+                                ),
+                                CKR_OK as CK_RV,
+                                "random generation failed on {}",
+                                slot_name
+                            );
+                            if let Some(previous) = previous {
+                                assert_ne!(
+                                    output, previous,
+                                    "YubiHSM returned the same random block twice"
+                                );
+                            }
+                            previous = Some(output);
+                            completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        });
+
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            THREAD_COUNT * CALLS_PER_THREAD
+        );
+        for session in control_sessions {
+            assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
     #[test]
     #[ignore = "generates, wraps, destroys, restores, and cleans up persistent keys on a live YubiHSM"]
     fn generated_ec_key_round_trips_through_private_rsa_wrap_key_on_hardware() {

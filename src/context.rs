@@ -1,8 +1,9 @@
 use crate::pkcs11::*;
 #[cfg(feature = "abi-tests")]
 use crate::{
-    abi_test_piv_slot, AbiScp03Slot, AbiTestSlot, AbiYubiHsmSlot, ABI_TEST_PIV_SLOT_ID,
-    ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID, ABI_TEST_YUBIHSM_SLOT_ID,
+    abi_test_piv_slot, abi_test_yubihsm_slots, AbiScp03Slot, AbiTestSlot, ABI_TEST_PIV_SLOT_ID,
+    ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID, ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
+    ABI_TEST_YUBIHSM_SLOT_ID,
 };
 use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
@@ -151,7 +152,7 @@ impl Context {
     pub(crate) fn new() -> Result<Context, Error> {
         pinentry::configure_from_environment()?;
         #[cfg(feature = "abi-tests")]
-        let slots = HashMap::from([
+        let mut slots = HashMap::from([
             (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
             (
                 ABI_TEST_PIV_SLOT_ID,
@@ -162,14 +163,12 @@ impl Context {
                 Box::new(AbiScp03Slot::new("SCP03")?) as Box<dyn Slot>,
             ),
             (
-                ABI_TEST_YUBIHSM_SLOT_ID,
-                Box::new(AbiYubiHsmSlot::default()) as Box<dyn Slot>,
-            ),
-            (
                 ABI_TEST_SCP11_SLOT_ID,
                 Box::new(AbiScp03Slot::new("SCP11A")?) as Box<dyn Slot>,
             ),
         ]);
+        #[cfg(feature = "abi-tests")]
+        slots.extend(abi_test_yubihsm_slots());
         #[cfg(not(feature = "abi-tests"))]
         let slots = HashMap::new();
 
@@ -1202,13 +1201,14 @@ pub(crate) fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), 
         ABI_TEST_SCP03_SLOT_ID,
         ABI_TEST_YUBIHSM_SLOT_ID,
         ABI_TEST_SCP11_SLOT_ID,
+        ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
     ] {
         if let Some(child) = context.yubihsm_contexts.get(&slot_id).cloned() {
             child
                 .lock()
                 .map_err(|_| Error::from(CKR_MUTEX_BAD))?
                 .refresh_slot_token_objects(slot_id)?;
-        } else {
+        } else if context.slots.contains_key(&slot_id) {
             context.refresh_slot_token_objects(slot_id)?;
         }
     }
