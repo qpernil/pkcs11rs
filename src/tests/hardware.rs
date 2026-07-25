@@ -20,7 +20,7 @@ mod hardware_provisioning {
     const DEFAULT_CREDENTIAL_PASSWORD: &str = "password";
     const DEFAULT_ADMIN_ID: &str = "0001";
     const DEFAULT_ADMIN_PASSWORD: &str = "password";
-    const DEFAULT_DOMAINS: &str = "0001";
+    const AUTHENTICATION_KEY_DOMAINS: u16 = 0xffff;
     const SCP11B_TEST_CA_KEY: &[u8] = br#"-----BEGIN EC PRIVATE KEY-----
 MHcCAQEEIL7CkZ7A1x1NWahBWRhsgefvFnA0fLI9OLgEJRyWsvSioAoGCCqGSM49
 AwEHoUQDQgAEwh/eTK7LFECBbeTnetWWBsUjiJt+wV8Bbvwa5Hguiee07eo2J3Eu
@@ -346,12 +346,6 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
             &environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
         );
-        let domains = hex_u16(
-            "PKCS11RS_TEST_YUBIHSM_DOMAINS",
-            &environment("PKCS11RS_TEST_YUBIHSM_DOMAINS", DEFAULT_DOMAINS),
-        );
-        assert_ne!(domains, 0, "PKCS11RS_TEST_YUBIHSM_DOMAINS must not be zero");
-
         let label = environment(case.label_env, case.default_label);
         assert!(
             !label.is_empty() && label.len() <= 40,
@@ -525,7 +519,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             object: crate::YubiHsmObjectParameters {
                 id: authkey_id,
                 label: &label,
-                domains,
+                domains: AUTHENTICATION_KEY_DOMAINS,
                 capabilities: [0; 8],
                 algorithm: crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
             },
@@ -545,15 +539,28 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             None,
         )
         .expect("failed to reopen the YubiHSM provisioning session");
-        let installed_id = admin_session
-            .send_command(yubihsm.as_ref(), &command)
-            .and_then(|response| crate::parse_yubihsm_object_id(&response));
+        let installed = (|| -> Result<(u16, crate::YubiHsmObjectInfo), crate::Error> {
+            let installed_id = admin_session
+                .send_command(yubihsm.as_ref(), &command)
+                .and_then(|response| crate::parse_yubihsm_object_id(&response))?;
+            let info = admin_session
+                .send_command(
+                    yubihsm.as_ref(),
+                    &crate::YubiHsmCommand::get_object_info(
+                        installed_id,
+                        crate::YUBIHSM_AUTHENTICATION_KEY,
+                    ),
+                )
+                .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))?;
+            Ok((installed_id, info))
+        })();
         let provisioning_close =
             admin_session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
-        let installed_id = installed_id
-            .expect("failed to install the asymmetric authentication key in the YubiHSM");
+        let (installed_id, installed_info) =
+            installed.expect("failed to install the asymmetric authentication key in the YubiHSM");
         provisioning_close.expect("failed to close the YubiHSM provisioning session");
         assert_eq!(installed_id, authkey_id);
+        assert_eq!(installed_info.domains, AUTHENTICATION_KEY_DOMAINS);
 
         let info = crate::HsmAuthClient
             .discover(hsmauth.as_ref())
