@@ -914,7 +914,7 @@ impl Connector for HttpConnector {
             .post(format!("{}/connector/api", self.url))
             .content_type("application/octet-stream")
             .config()
-            .timeout_global(Some(timeout))
+            .timeout_global((!timeout.is_zero()).then_some(timeout))
             .build()
             .send(send_buffer);
         let mut response = match response {
@@ -954,7 +954,7 @@ impl Connector for HttpConnector {
         if !self.connected.get() && !self.reconnectable.get() {
             return Err(CKR_DEVICE_REMOVED.into());
         }
-        match self.status(Duration::from_secs(5)) {
+        match self.status() {
             Ok(status) => {
                 let was_connected = self.connected.replace(true);
                 let identity_changed = self
@@ -987,6 +987,7 @@ impl HttpConnector {
         }
         let config = ureq::Agent::config_builder()
             .user_agent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))
+            .timeout_connect(Some(Duration::from_secs(5)))
             .build();
         Ok(Self {
             serial: String::new(),
@@ -1000,13 +1001,10 @@ impl HttpConnector {
         })
     }
 
-    fn status(&self, timeout: Duration) -> Result<YubiHsmConnectorStatus, Error> {
+    fn status(&self) -> Result<YubiHsmConnectorStatus, Error> {
         let mut response = self
             .agent
             .get(format!("{}/connector/status", self.url))
-            .config()
-            .timeout_global(Some(timeout))
-            .build()
             .call()?;
         let received = response
             .body_mut()
@@ -1018,7 +1016,7 @@ impl HttpConnector {
     }
 
     pub(crate) fn connect(&mut self) -> Result<(), Error> {
-        let status = self.status(Duration::from_secs(5))?;
+        let status = self.status()?;
         self.serial = status.serial.clone();
         self.version = status.version;
         *self.status_identity.get_mut() = Some(status);
@@ -1108,6 +1106,17 @@ mod tests {
         );
         assert!(!connector.is_present());
         assert!(connector.refresh().is_err());
+    }
+
+    #[test]
+    fn http_connector_uses_yubico_curl_timeout_model() {
+        let connector = HttpConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
+        let timeouts = connector.agent.config().timeouts();
+        assert_eq!(timeouts.connect, Some(Duration::from_secs(5)));
+        assert_eq!(timeouts.global, None);
+        assert_eq!(timeouts.per_call, None);
+        assert_eq!(timeouts.recv_response, None);
+        assert_eq!(timeouts.recv_body, None);
     }
 
     #[test]
