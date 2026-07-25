@@ -2610,6 +2610,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                 FIRST_SLOT_ID,
                 Box::new(ConcurrentYubiHsmSlot {
                     state: state.clone(),
+                    slot_index: 0,
                 }),
             )
             .unwrap();
@@ -2618,6 +2619,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                 SECOND_SLOT_ID,
                 Box::new(ConcurrentYubiHsmSlot {
                     state: state.clone(),
+                    slot_index: 1,
                 }),
             )
             .unwrap();
@@ -2674,8 +2676,127 @@ pub fn different_yubihsm_slots_execute_concurrently() {
         2,
         "different YubiHSM slot contexts must not share an operation lock"
     );
+    assert!(
+        !state
+            .same_slot_overlap
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "one operation was active per slot"
+    );
     assert_eq!(crate::api::C_CloseSession(first_session), CKR_OK as CK_RV);
     assert_eq!(crate::api::C_CloseSession(second_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const FIRST_SLOT_ID: CK_SLOT_ID = 210;
+    const SECOND_SLOT_ID: CK_SLOT_ID = 211;
+    const THREAD_COUNT: usize = 16;
+    const CALLS_PER_THREAD: usize = 100;
+
+    let state = std::sync::Arc::new(ConcurrentOperationState::default());
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context
+            .insert_yubihsm_slot(
+                FIRST_SLOT_ID,
+                Box::new(ConcurrentYubiHsmSlot {
+                    state: state.clone(),
+                    slot_index: 0,
+                }),
+            )
+            .unwrap();
+        context
+            .insert_yubihsm_slot(
+                SECOND_SLOT_ID,
+                Box::new(ConcurrentYubiHsmSlot {
+                    state: state.clone(),
+                    slot_index: 1,
+                }),
+            )
+            .unwrap();
+    }
+
+    let mut sessions = Vec::with_capacity(THREAD_COUNT);
+    for thread_index in 0..THREAD_COUNT {
+        let slot_id = if thread_index % 2 == 0 {
+            FIRST_SLOT_ID
+        } else {
+            SECOND_SLOT_ID
+        };
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                ::std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        sessions.push((slot_id, session));
+    }
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+    std::thread::scope(|scope| {
+        let workers = sessions
+            .into_iter()
+            .map(|(slot_id, session)| {
+                let start = start.clone();
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..CALLS_PER_THREAD {
+                        let mut output = [0u8; 8];
+                        assert_eq!(
+                            crate::api::C_GenerateRandom(
+                                session,
+                                output.as_mut_ptr(),
+                                output.len() as CK_ULONG,
+                            ),
+                            CKR_OK as CK_RV
+                        );
+                        assert_eq!(output, [slot_id as u8; 8]);
+                    }
+                    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    assert!(
+        !state
+            .same_slot_overlap
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "operations on one YubiHSM slot must remain serialized"
+    );
+    assert_eq!(
+        state.max_active.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the two YubiHSM slots must make progress concurrently"
+    );
+    assert_eq!(
+        state.operations_by_slot[0].load(std::sync::atomic::Ordering::SeqCst),
+        THREAD_COUNT / 2 * CALLS_PER_THREAD
+    );
+    assert_eq!(
+        state.operations_by_slot[1].load(std::sync::atomic::Ordering::SeqCst),
+        THREAD_COUNT / 2 * CALLS_PER_THREAD
+    );
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV

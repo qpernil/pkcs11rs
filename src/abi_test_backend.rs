@@ -505,6 +505,7 @@ impl Slot for AbiScp03Slot {
 struct AbiYubiHsmSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
+    concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
 }
 
 #[cfg(feature = "abi-tests")]
@@ -523,6 +524,15 @@ impl Session for AbiYubiHsmSession {
 
     fn get_session_info(&self) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
+        if let Some((state, slot_index)) = &self.concurrency {
+            state.overlap(*slot_index)?;
+            output.fill(self.slot_id as u8);
+            return Ok(());
+        }
+        getrandom::fill(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
     }
 
     fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
@@ -625,9 +635,107 @@ impl Session for AbiYubiHsmSession {
 type AbiYubiHsmAttributes = HashMap<String, (Option<Vec<u8>>, Option<String>)>;
 
 #[cfg(feature = "abi-tests")]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct AbiYubiHsmSlot {
     attributes: RefCell<AbiYubiHsmAttributes>,
+    serial: &'static str,
+    concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug, Default)]
+struct AbiYubiHsmConcurrencyRound {
+    arrived: usize,
+    generation: usize,
+}
+
+#[cfg(feature = "abi-tests")]
+#[derive(Debug, Default)]
+struct AbiYubiHsmConcurrencyState {
+    active_by_slot: [std::sync::atomic::AtomicBool; 2],
+    changed: std::sync::Condvar,
+    round: std::sync::Mutex<AbiYubiHsmConcurrencyRound>,
+}
+
+#[cfg(feature = "abi-tests")]
+impl AbiYubiHsmConcurrencyState {
+    fn overlap(&self, slot_index: usize) -> Result<(), Error> {
+        use std::sync::atomic::Ordering;
+
+        if self.active_by_slot[slot_index].swap(true, Ordering::SeqCst) {
+            return Err(CKR_CANT_LOCK.into());
+        }
+        struct ActiveGuard<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for ActiveGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _active = ActiveGuard(&self.active_by_slot[slot_index]);
+
+        let mut round = self.round.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        let generation = round.generation;
+        round.arrived += 1;
+        if round.arrived == 2 {
+            round.arrived = 0;
+            round.generation += 1;
+            self.changed.notify_all();
+            return Ok(());
+        }
+
+        let (mut round, timeout) = self
+            .changed
+            .wait_timeout_while(round, Duration::from_secs(2), |round| {
+                round.generation == generation
+            })
+            .map_err(|_| CKR_MUTEX_BAD)?;
+        if timeout.timed_out() && round.generation == generation {
+            round.arrived = round.arrived.saturating_sub(1);
+            return Err(CKR_FUNCTION_FAILED.into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+impl Default for AbiYubiHsmSlot {
+    fn default() -> Self {
+        Self {
+            attributes: RefCell::default(),
+            serial: "HSM00001",
+            concurrency: None,
+        }
+    }
+}
+
+#[cfg(feature = "abi-tests")]
+pub(super) fn abi_test_yubihsm_slots() -> Vec<(CK_SLOT_ID, Box<dyn Slot>)> {
+    if std::env::var_os("PKCS11RS_ABI_CONCURRENCY_TEST").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return vec![(
+            ABI_TEST_YUBIHSM_SLOT_ID,
+            Box::new(AbiYubiHsmSlot::default()),
+        )];
+    }
+
+    let state = Arc::new(AbiYubiHsmConcurrencyState::default());
+    [
+        (ABI_TEST_YUBIHSM_SLOT_ID, "HSM00001", 0),
+        (ABI_TEST_SECOND_YUBIHSM_SLOT_ID, "HSM00002", 1),
+    ]
+    .into_iter()
+    .map(|(slot_id, serial, slot_index)| {
+        (
+            slot_id,
+            Box::new(AbiYubiHsmSlot {
+                attributes: RefCell::default(),
+                serial,
+                concurrency: Some((state.clone(), slot_index)),
+            }) as Box<dyn Slot>,
+        )
+    })
+    .collect()
 }
 
 #[cfg(feature = "abi-tests")]
@@ -1017,7 +1125,11 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn name(&self) -> String {
-        String::from("PKCS11RS ABI YubiHSM test slot")
+        if self.serial == "HSM00001" {
+            String::from("PKCS11RS ABI YubiHSM test slot")
+        } else {
+            format!("PKCS11RS ABI YubiHSM test slot {}", self.serial)
+        }
     }
 
     fn manufacturer(&self) -> &str {
@@ -1033,7 +1145,7 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn serial(&self) -> &str {
-        "HSM00001"
+        self.serial
     }
 
     fn major(&self) -> u8 {
@@ -1049,7 +1161,11 @@ impl Slot for AbiYubiHsmSlot {
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(AbiYubiHsmSession { slot_id, flags })
+        Box::new(AbiYubiHsmSession {
+            slot_id,
+            flags,
+            concurrency: self.concurrency.clone(),
+        })
     }
 
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
@@ -1057,7 +1173,7 @@ impl Slot for AbiYubiHsmSlot {
             Ok(())
         } else if pin == b":0001default" {
             let password = pinentry::request(pinentry::Prompt {
-                title: "HSM Auth #AUTH0001 accessing ABI YubiHSM #HSM00001",
+                title: &format!("HSM Auth #AUTH0001 accessing ABI YubiHSM #{}", self.serial),
                 description: "Enter the authentication password for \"default\".",
                 label: "Authentication password:",
             })?;

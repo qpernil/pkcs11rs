@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import concurrent.futures
 import os
 import pathlib
 import platform
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 
@@ -152,6 +154,7 @@ ABI_TEST_PIV_SLOT_ID = 78
 ABI_TEST_SCP03_SLOT_ID = 79
 ABI_TEST_YUBIHSM_SLOT_ID = 80
 ABI_TEST_SCP11_SLOT_ID = 81
+ABI_TEST_SECOND_YUBIHSM_SLOT_ID = 82
 CKP_BASELINE_PROVIDER = 1
 CKP_EXTENDED_PROVIDER = 2
 CKP_AUTHENTICATION_TOKEN = 3
@@ -4089,6 +4092,78 @@ done
             CKR_OK,
         )
         self.assertNotEqual(bytes(random_data), bytes(len(random_data)))
+
+    def test_many_threads_repeat_operations_on_independent_yubihsm_slots(
+        self,
+    ) -> None:
+        thread_count = 16
+        calls_per_thread = 100
+        os.environ["PKCS11RS_ABI_CONCURRENCY_TEST"] = "1"
+        try:
+            self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+            sessions = [
+                (
+                    ABI_TEST_YUBIHSM_SLOT_ID
+                    if thread_index % 2 == 0
+                    else ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
+                    CK_ULONG(),
+                )
+                for thread_index in range(thread_count)
+            ]
+            for slot_id, session in sessions:
+                self.assertEqual(
+                    self.lib.C_OpenSession(
+                        slot_id,
+                        CKF_SERIAL_SESSION,
+                        None,
+                        None,
+                        ctypes.byref(session),
+                    ),
+                    CKR_OK,
+                )
+
+            start = threading.Barrier(thread_count)
+
+            def worker(slot_id: int, session: int) -> int:
+                start.wait()
+                try:
+                    for _ in range(calls_per_thread):
+                        output = (CK_BYTE * 8)()
+                        result = self.lib.C_GenerateRandom(
+                            session, output, len(output)
+                        )
+                        if result != CKR_OK:
+                            raise AssertionError(
+                                f"C_GenerateRandom on slot {slot_id} "
+                                f"returned {result:#x}"
+                            )
+                        if bytes(output) != bytes([slot_id]) * len(output):
+                            raise AssertionError(
+                                "operation was routed to the wrong slot: "
+                                f"{bytes(output)!r}"
+                            )
+                    return calls_per_thread
+                finally:
+                    result = self.lib.C_CloseSession(session)
+                    if result != CKR_OK:
+                        raise AssertionError(
+                            f"C_CloseSession({session}) returned {result:#x}"
+                        )
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=thread_count
+            ) as executor:
+                futures = [
+                    executor.submit(worker, slot_id, session.value)
+                    for slot_id, session in sessions
+                ]
+                self.assertEqual(
+                    sum(future.result() for future in futures),
+                    thread_count * calls_per_thread,
+                )
+        finally:
+            self.lib.C_Finalize(None)
+            os.environ.pop("PKCS11RS_ABI_CONCURRENCY_TEST", None)
 
     def test_find_objects_validates_session_handles(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
