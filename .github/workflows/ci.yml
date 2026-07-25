@@ -29,6 +29,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Run release Rust tests
+        run: cargo test --release --locked --all-features
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
