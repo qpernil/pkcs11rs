@@ -2004,7 +2004,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
     assert!(!public.encrypt && !public.verify);
     assert_eq!(
         public.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
-        Some(vec![CK_TRUE as CK_BBOOL])
+        Some(vec![CK_FALSE as CK_BBOOL])
     );
     assert!(matches!(
         public.material,
@@ -2150,7 +2150,7 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
         crate::YUBIHSM_ALGO_RSA_2048,
         &private_wrap_capabilities,
     );
-    assert!(synthetic_public.wrap);
+    assert!(!synthetic_public.wrap);
     assert!(!synthetic_public.unwrap);
     assert!(synthetic_public.extractable);
 }

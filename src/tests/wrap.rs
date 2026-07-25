@@ -34,6 +34,7 @@ fn yubihsm_wrap_test_object(
 }
 
 fn install_yubihsm_wrap_test_objects(
+    session: CK_SESSION_HANDLE,
     slot_id: CK_SLOT_ID,
 ) -> (
     CK_OBJECT_HANDLE,
@@ -46,6 +47,30 @@ fn install_yubihsm_wrap_test_objects(
         algorithm: crate::YUBIHSM_ALGO_RSA_2048,
         key: vec![0xa5; 256],
     };
+    let public_wrap_parameters = crate::yubihsm::DelegatedObjectParameters {
+        object: crate::YubiHsmObjectParameters {
+            id: 33,
+            label: "RSA public wrap",
+            domains: 0xffff,
+            capabilities: [0; 8],
+            algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+        },
+        delegated_capabilities: [0; 8],
+    };
+    let public_wrap_command = crate::YubiHsmCommand::put_delegated_object(
+        crate::YubiHsmCommandCode::PutPublicWrapKey,
+        &public_wrap_parameters,
+        &public_key.key,
+    )
+    .unwrap();
+    crate::with_context_mut(|ctx| {
+        ctx._get_session(session)?
+            .1
+            .yubihsm_command(&public_wrap_command)
+            .map(|_| ())
+    })
+    .unwrap();
+
     let definitions = [
         yubihsm_wrap_test_object(
             slot_id,
@@ -210,7 +235,7 @@ fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u
 #[test]
 fn yubihsm_rsa_wrap_generation_uses_pkcs11_template_roles() {
     let mut modulus_bits = 2048 as CK_ULONG;
-    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut wrap = CK_FALSE as CK_BBOOL;
     let mut unwrap = CK_TRUE as CK_BBOOL;
     let public = [
         scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
@@ -229,6 +254,18 @@ fn yubihsm_rsa_wrap_generation_uses_pkcs11_template_roles() {
         crate::yubihsm_generate_key_pair_command(&mechanism, &public, &private).unwrap();
     assert_eq!(command.code(), crate::YubiHsmCommandCode::GenerateWrapKey);
 
+    let mut unsupported_wrap = CK_TRUE as CK_BBOOL;
+    let unsupported_public = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut unsupported_wrap),
+    ];
+    assert_eq!(
+        CK_RV::from(
+            crate::yubihsm_generate_key_pair_command(&mechanism, &unsupported_public, &private)
+                .unwrap_err()
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
     let mut private_wrap = CK_TRUE as CK_BBOOL;
     let private = [
         scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
@@ -339,6 +376,58 @@ fn checked_ulong_attribute(
     Ok(CK_ULONG::from_ne_bytes(value))
 }
 
+fn provision_rsa_public_wrap_key(
+    session: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+    generated_public: CK_OBJECT_HANDLE,
+) -> Result<CK_OBJECT_HANDLE, String> {
+    let modulus = checked_attribute(session, generated_public, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
+    let algorithm = match modulus.len() {
+        256 => crate::YUBIHSM_ALGO_RSA_2048,
+        384 => crate::YUBIHSM_ALGO_RSA_3072,
+        512 => crate::YUBIHSM_ALGO_RSA_4096,
+        length => return Err(format!("unsupported RSA public modulus length {length}")),
+    };
+    let parameters = crate::yubihsm::DelegatedObjectParameters {
+        object: crate::YubiHsmObjectParameters {
+            id: 0,
+            label: "PKCS11 RSA public wrap test",
+            domains: 0xffff,
+            capabilities: crate::yubihsm_capabilities(&[0x0c]),
+            algorithm,
+        },
+        delegated_capabilities: [0xff; 8],
+    };
+    let command = crate::YubiHsmCommand::put_delegated_object(
+        crate::YubiHsmCommandCode::PutPublicWrapKey,
+        &parameters,
+        &modulus,
+    )
+    .map_err(|error| format!("failed to encode public wrap key: {error:?}"))?;
+
+    crate::with_context_mut(|ctx| {
+        let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
+        let id = crate::parse_yubihsm_object_id(&response)?;
+        ctx.refresh_slot_token_objects(slot_id)?;
+        ctx.resolved_objects()?
+            .into_iter()
+            .find_map(|(handle, object)| {
+                (object.slot_id == Some(slot_id)
+                    && matches!(
+                        object.material,
+                        KeyMaterial::YubiHsm {
+                            id: object_id,
+                            object_type: crate::YUBIHSM_PUBLIC_WRAP_KEY,
+                            ..
+                        } if object_id == id
+                    ))
+                .then_some(handle)
+            })
+            .ok_or(CKR_DEVICE_ERROR.into())
+    })
+    .map_err(|error| format!("failed to provision public wrap key: {error:?}"))
+}
+
 pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     slot_id: CK_SLOT_ID,
     pin: &[u8],
@@ -373,6 +462,7 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     let mut target_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut wrapper_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut wrapper_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut public_wrap_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut restored = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let operation = (|| -> Result<(), String> {
         let mut ec_parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
@@ -407,7 +497,7 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
         let target_id = checked_attribute(session, target_private, CKA_ID as CK_ATTRIBUTE_TYPE)?;
 
         let mut modulus_bits = 2048 as CK_ULONG;
-        let mut wrap = CK_TRUE as CK_BBOOL;
+        let mut wrap = CK_FALSE as CK_BBOOL;
         let mut unwrap = CK_TRUE as CK_BBOOL;
         let mut rsa_public_template = [
             scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
@@ -435,21 +525,37 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
                 &mut wrapper_private,
             ),
         )?;
-        if !checked_bool_attribute(session, wrapper_public, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
+        if checked_bool_attribute(session, wrapper_public, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
             || !checked_bool_attribute(session, wrapper_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
         {
             return Err("generated RSA wrap-key attributes are inconsistent".to_owned());
         }
+        public_wrap_key = provision_rsa_public_wrap_key(session, slot_id, wrapper_public)?;
 
         let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(true);
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
+        let mut denied_length = 0;
+        let denied_rv = crate::api::C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapper_private,
+            target_private,
+            std::ptr::null_mut(),
+            &mut denied_length,
+        );
+        if denied_rv != CKR_OBJECT_HANDLE_INVALID as CK_RV {
+            return Err(format!(
+                "C_WrapKey with a private RSA wrap key returned CK_RV 0x{denied_rv:08x}, expected CKR_OBJECT_HANDLE_INVALID"
+            ));
+        }
+
         let mut wrapped_length = 0;
         checked_rv(
             "C_WrapKey length query",
             crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
-                wrapper_private,
+                public_wrap_key,
                 target_private,
                 std::ptr::null_mut(),
                 &mut wrapped_length,
@@ -461,13 +567,28 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
             crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
-                wrapper_private,
+                public_wrap_key,
                 target_private,
                 wrapped.as_mut_ptr(),
                 &mut wrapped_length,
             ),
         )?;
         wrapped.truncate(wrapped_length as usize);
+
+        let collision_rv = crate::api::C_UnwrapKey(
+            session,
+            &mut mechanism,
+            wrapper_private,
+            wrapped.as_mut_ptr(),
+            wrapped.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            &mut restored,
+        );
+        if collision_rv == CKR_OK as CK_RV {
+            return Err("C_UnwrapKey replaced an existing object ID".to_owned());
+        }
+        restored = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
 
         checked_rv(
             "C_DestroyObject EC target",
@@ -505,6 +626,7 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     for (name, handle) in [
         ("restored EC key", restored),
         ("original EC key", target_private),
+        ("RSA public wrap key", public_wrap_key),
         ("RSA wrap key", wrapper_private),
     ] {
         if handle != CK_INVALID_HANDLE as CK_OBJECT_HANDLE {
@@ -542,6 +664,7 @@ fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
     for command in [
         crate::YubiHsmCommandCode::GenerateAsymmetricKey,
         crate::YubiHsmCommandCode::GenerateWrapKey,
+        crate::YubiHsmCommandCode::PutPublicWrapKey,
         crate::YubiHsmCommandCode::ExportRsaWrapped,
         crate::YubiHsmCommandCode::ImportRsaWrapped,
     ] {
@@ -593,7 +716,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         CKR_OK as CK_RV
     );
     let (target, ccm_wrapper, rsa_private, rsa_synthetic_public, rsa_public_wrap) =
-        install_yubihsm_wrap_test_objects(SLOT_ID);
+        install_yubihsm_wrap_test_objects(session, SLOT_ID);
     let wrap_targets = install_yubihsm_wrap_targets(SLOT_ID);
     assert!(!checked_bool_attribute(session, ccm_wrapper, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
     assert!(

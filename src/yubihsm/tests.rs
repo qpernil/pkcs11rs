@@ -697,7 +697,8 @@ impl ProtocolPeer {
             value
                 if value == CommandCode::GenerateAsymmetricKey as u8
                     || value == CommandCode::PutAsymmetricKey as u8
-                    || value == CommandCode::GenerateWrapKey as u8 =>
+                    || value == CommandCode::GenerateWrapKey as u8
+                    || value == CommandCode::PutPublicWrapKey as u8 && inner.data.len() >= 61 =>
             {
                 let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                 let id = if requested == 0 {
@@ -727,17 +728,23 @@ impl ProtocolPeer {
                         .borrow_mut()
                         .insert(id, private_key);
                 }
-                let object_type = if inner.command == CommandCode::GenerateWrapKey as u8 {
-                    YUBIHSM_WRAP_KEY
-                } else {
-                    YUBIHSM_ASYMMETRIC_KEY
+                let object_type = match inner.command {
+                    value if value == CommandCode::GenerateWrapKey as u8 => YUBIHSM_WRAP_KEY,
+                    value if value == CommandCode::PutPublicWrapKey as u8 => {
+                        crate::YUBIHSM_PUBLIC_WRAP_KEY
+                    }
+                    _ => YUBIHSM_ASYMMETRIC_KEY,
                 };
                 let algorithm = *inner.data.get(52).ok_or(CKR_DATA_LEN_RANGE)?;
-                let length = match algorithm {
-                    YUBIHSM_ALGO_RSA_2048 => 256,
-                    YUBIHSM_ALGO_RSA_3072 => 384,
-                    YUBIHSM_ALGO_RSA_4096 => 512,
-                    _ => 32,
+                let length = if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
+                    inner.data.len().checked_sub(61).ok_or(CKR_DATA_LEN_RANGE)?
+                } else {
+                    match algorithm {
+                        YUBIHSM_ALGO_RSA_2048 => 256,
+                        YUBIHSM_ALGO_RSA_3072 => 384,
+                        YUBIHSM_ALGO_RSA_4096 => 512,
+                        _ => 32,
+                    }
                 };
                 let label = inner.data[2..42]
                     .split(|byte| *byte == 0)
@@ -745,7 +752,10 @@ impl ProtocolPeer {
                     .and_then(|label| std::str::from_utf8(label).ok())
                     .ok_or(CKR_DEVICE_ERROR)?
                     .to_owned();
-                let delegated_capabilities = if object_type == YUBIHSM_WRAP_KEY {
+                let delegated_capabilities = if matches!(
+                    object_type,
+                    YUBIHSM_WRAP_KEY | crate::YUBIHSM_PUBLIC_WRAP_KEY
+                ) {
                     inner
                         .data
                         .get(53..61)
@@ -761,16 +771,24 @@ impl ProtocolPeer {
                         ObjectInfo {
                             capabilities: inner.data[44..52].try_into().unwrap(),
                             id,
-                            length,
+                            length: length as u16,
                             domains: u16::from_be_bytes(inner.data[42..44].try_into().unwrap()),
                             object_type,
                             algorithm,
                             sequence: 1,
-                            origin: 1,
+                            origin: if inner.command == CommandCode::PutPublicWrapKey as u8 {
+                                2
+                            } else {
+                                1
+                            },
                             label,
                             delegated_capabilities,
                         },
-                        Vec::new(),
+                        if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
+                            inner.data[61..].to_vec()
+                        } else {
+                            Vec::new()
+                        },
                     ),
                 );
                 (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
@@ -846,20 +864,36 @@ impl ProtocolPeer {
                         || value == CommandCode::ExportRsaWrapped as u8)
                         && inner.data.len() >= 28 =>
             {
-                let target_type = inner.data[2];
-                let target_id = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
-                if let Some((info, _)) = self
-                    .metadata_objects
-                    .borrow()
-                    .get(&target_id)
-                    .filter(|(info, _)| info.object_type == target_type)
+                let missing_public_wrap_key = if inner.command
+                    == CommandCode::ExportRsaWrapped as u8
                 {
-                    *self.last_wrapped_object.borrow_mut() = Some(info.clone());
+                    let wrapping_key_id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    !self
+                        .metadata_objects
+                        .borrow()
+                        .get(&wrapping_key_id)
+                        .is_some_and(|(info, _)| info.object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY)
+                } else {
+                    false
+                };
+                if missing_public_wrap_key {
+                    (COMMAND_ERROR, vec![0x0b])
+                } else {
+                    let target_type = inner.data[2];
+                    let target_id = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
+                    if let Some((info, _)) = self
+                        .metadata_objects
+                        .borrow()
+                        .get(&target_id)
+                        .filter(|(info, _)| info.object_type == target_type)
+                    {
+                        *self.last_wrapped_object.borrow_mut() = Some(info.clone());
+                    }
+                    let mut wrapped = b"wrapped-object:".to_vec();
+                    wrapped.push(inner.command);
+                    wrapped.extend_from_slice(&inner.data);
+                    (inner.command | RESPONSE_BIT, wrapped)
                 }
-                let mut wrapped = b"wrapped-object:".to_vec();
-                wrapped.push(inner.command);
-                wrapped.extend_from_slice(&inner.data);
-                (inner.command | RESPONSE_BIT, wrapped)
             }
             value if value == CommandCode::ImportWrapped as u8 && inner.data.len() > 2 => {
                 if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
@@ -901,16 +935,25 @@ impl ProtocolPeer {
             }
             value if value == CommandCode::ImportRsaWrapped as u8 && inner.data.len() > 25 => {
                 if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
-                    info.sequence = info.sequence.wrapping_add(1);
-                    info.origin = 2;
-                    self.metadata_objects
-                        .borrow_mut()
-                        .insert(info.id, (info.clone(), Vec::new()));
-                    let [high, low] = info.id.to_be_bytes();
-                    (
-                        inner.command | RESPONSE_BIT,
-                        [info.object_type, high, low].to_vec(),
-                    )
+                    let collision = self
+                        .metadata_objects
+                        .borrow()
+                        .get(&info.id)
+                        .is_some_and(|(existing, _)| existing.object_type == info.object_type);
+                    if collision {
+                        (COMMAND_ERROR, vec![0x0b])
+                    } else {
+                        info.sequence = info.sequence.wrapping_add(1);
+                        info.origin = 2;
+                        self.metadata_objects
+                            .borrow_mut()
+                            .insert(info.id, (info.clone(), Vec::new()));
+                        let [high, low] = info.id.to_be_bytes();
+                        (
+                            inner.command | RESPONSE_BIT,
+                            [info.object_type, high, low].to_vec(),
+                        )
+                    }
                 } else {
                     let id = 21;
                     self.metadata_objects.borrow_mut().insert(

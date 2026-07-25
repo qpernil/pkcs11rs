@@ -933,8 +933,8 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     let hardware = yubihsm_hardware_import_object(&private_object)?;
     let wrap_key = private_unwrap;
     if public_unwrap
+        || public_wrap
         || private_wrap
-        || public_wrap && !wrap_key
         || (wrap_key && key_type != CKK_RSA as CK_KEY_TYPE)
         || (wrap_key
             && (public_object.encrypt
@@ -952,7 +952,7 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     }
     let command = if wrap_key {
         let attributes = YubiHsmPkcs11Attributes {
-            wrap: public_wrap || private_wrap,
+            wrap: false,
             unwrap: true,
             extractable: private_extractable,
             ..YubiHsmPkcs11Attributes::default()
