@@ -1996,10 +1996,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
         .unwrap();
     assert_eq!(private.key_type, CKK_RSA as CK_KEY_TYPE);
     assert!(!private.sign && !private.decrypt);
-    assert_eq!(
-        private.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE),
-        Some(vec![CK_TRUE as CK_BBOOL])
-    );
+    assert_eq!(private.attribute_value(CKA_WRAP as CK_ATTRIBUTE_TYPE), None);
     assert_eq!(
         private.attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
         Some(vec![CK_TRUE as CK_BBOOL])
@@ -2039,7 +2036,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
     );
     assert_eq!(
         public_wrap[0].attribute_value(CKA_UNWRAP as CK_ATTRIBUTE_TYPE),
-        Some(vec![CK_FALSE as CK_BBOOL])
+        None
     );
     assert_eq!(
         public_wrap[0].attribute_value(CKA_MODULUS as CK_ATTRIBUTE_TYPE),
@@ -2340,7 +2337,7 @@ fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
     );
     assert_eq!(
         data.attribute_value(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE),
-        Some(crate::bool_attribute(false))
+        None
     );
     assert!(data
         .attribute_value(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
@@ -5154,10 +5151,7 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
             0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00
         ])
     );
-    assert_eq!(
-        object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE),
-        Some(vec![27])
-    );
+    assert_eq!(object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
     assert_eq!(
         object.attribute_value(crate::CKA_PKCS11RS_PIV_OBJECT_TAG),
         Some(vec![0x5f, 0xc1, 0x02])

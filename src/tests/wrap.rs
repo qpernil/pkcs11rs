@@ -436,7 +436,6 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
             ),
         )?;
         if !checked_bool_attribute(session, wrapper_public, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
-            || !checked_bool_attribute(session, wrapper_private, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
             || !checked_bool_attribute(session, wrapper_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
         {
             return Err("generated RSA wrap-key attributes are inconsistent".to_owned());

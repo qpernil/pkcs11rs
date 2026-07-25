@@ -366,7 +366,7 @@ pub(crate) struct YubiHsmCachedObjectProperties {
     pub(crate) sequence: Option<u8>,
     pub(crate) info: Option<YubiHsmObjectInfo>,
     pub(crate) public_key: Option<YubiHsmPublicKey>,
-    pub(crate) opaque_value: Rc<RefCell<Option<Vec<u8>>>>,
+    pub(crate) object_value: Rc<RefCell<Option<Vec<u8>>>>,
     pub(crate) metadata_sources: Vec<(u16, u8)>,
     pub(crate) inferred_authentication_algorithm: Option<YubiHsmAuthAlgorithm>,
 }
@@ -377,7 +377,7 @@ impl YubiHsmCachedObjectProperties {
             sequence,
             info: None,
             public_key: None,
-            opaque_value: Rc::new(RefCell::new(None)),
+            object_value: Rc::new(RefCell::new(None)),
             metadata_sources: Vec::new(),
             inferred_authentication_algorithm: None,
         }
@@ -691,10 +691,10 @@ impl YubiHsmSlot {
             entry.sequence = Some(info.sequence);
         }
         entry.info.get_or_insert_with(|| info.clone());
-        Ok(entry.opaque_value.clone())
+        Ok(entry.object_value.clone())
     }
 
-    fn read_opaque_with_session(
+    fn read_object_value_with_session(
         &self,
         info: &YubiHsmObjectInfo,
         session: &RefCell<Option<YubiHsmSecureSession>>,
@@ -707,22 +707,39 @@ impl YubiHsmSlot {
         {
             return Ok(value);
         }
+        let command = match info.object_type {
+            YUBIHSM_OPAQUE => YubiHsmCommandCode::GetOpaque,
+            YUBIHSM_TEMPLATE => YubiHsmCommandCode::GetTemplate,
+            _ => return Err(CKR_ATTRIBUTE_TYPE_INVALID.into()),
+        };
         let value = send_yubihsm_secure_command(
             self.connector.as_ref(),
             session,
-            &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, info.id)?,
+            &YubiHsmCommand::get_object(command, info.id)?,
         )?;
         *cached.try_borrow_mut()? = Some(value.clone());
         Ok(value)
     }
 
-    fn read_opaque_by_id(
+    fn read_opaque_with_session(
+        &self,
+        info: &YubiHsmObjectInfo,
+        session: &RefCell<Option<YubiHsmSecureSession>>,
+    ) -> Result<Vec<u8>, Error> {
+        if info.object_type != YUBIHSM_OPAQUE {
+            return Err(CKR_ATTRIBUTE_TYPE_INVALID.into());
+        }
+        self.read_object_value_with_session(info, session)
+    }
+
+    fn read_object_value_by_id(
         &self,
         session: &RefCell<Option<YubiHsmSecureSession>>,
         id: u16,
+        object_type: u8,
     ) -> Result<Vec<u8>, Error> {
-        let info = self.object_info_with_session(session, id, YUBIHSM_OPAQUE)?;
-        self.read_opaque_with_session(&info, session)
+        let info = self.object_info_with_session(session, id, object_type)?;
+        self.read_object_value_with_session(&info, session)
     }
 
     fn public_key_with_session(
@@ -1023,15 +1040,20 @@ impl YubiHsmSlot {
         Ok(())
     }
 
-    fn read_opaque_with_public_discovery(&self, id: u16) -> Result<Vec<u8>, Error> {
+    fn read_object_value_with_public_discovery(
+        &self,
+        id: u16,
+        object_type: u8,
+    ) -> Result<Vec<u8>, Error> {
         for attempt in 0..2 {
             self.ensure_read_session()?;
-            match self.read_opaque_by_id(self.session.as_ref(), id) {
+            match self.read_object_value_by_id(self.session.as_ref(), id, object_type) {
                 Ok(value) => {
                     log!(
                         2,
-                        "YubiHSM public discovery cached opaque object {} from {}",
+                        "YubiHSM public discovery cached object {} type {} from {}",
                         id,
+                        object_type,
                         self.connector.name()
                     );
                     return Ok(value);
@@ -1057,12 +1079,12 @@ impl YubiHsmSlot {
         Err(CKR_DEVICE_ERROR.into())
     }
 
-    fn bind_cached_opaque_value(
+    fn bind_cached_object_value(
         &self,
         info: &YubiHsmObjectInfo,
         objects: &mut [TokenObject],
     ) -> Result<(), Error> {
-        if info.object_type != YUBIHSM_OPAQUE {
+        if !matches!(info.object_type, YUBIHSM_OPAQUE | YUBIHSM_TEMPLATE) {
             return Ok(());
         }
         let cached = self.object_value_cache_entry(info)?;
@@ -1234,7 +1256,7 @@ impl YubiHsmSlot {
                     continue;
                 }
             };
-            self.bind_cached_opaque_value(&info, &mut objects)?;
+            self.bind_cached_object_value(&info, &mut objects)?;
             for object in &mut objects {
                 if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
                     let certificate = certificate.as_deref().ok_or(CKR_DEVICE_ERROR)?;
@@ -2392,7 +2414,7 @@ impl Slot for YubiHsmSlot {
                 generation,
                 attribute_metadata.as_ref(),
             )?;
-            self.bind_cached_opaque_value(&info, &mut discovered_objects)?;
+            self.bind_cached_object_value(&info, &mut discovered_objects)?;
             objects.extend(discovered_objects);
         }
         drop(generations);
@@ -2441,7 +2463,7 @@ impl Slot for YubiHsmSlot {
                 generation,
                 attribute_metadata.as_ref(),
             )?;
-            self.bind_cached_opaque_value(&info, &mut objects)?;
+            self.bind_cached_object_value(&info, &mut objects)?;
             if let Some(object) = objects
                 .into_iter()
                 .find(|object| object.unique_id == unique_id)
@@ -2526,10 +2548,13 @@ impl Slot for YubiHsmSlot {
         true
     }
     fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
+        self.yubihsm_read_object(id, YUBIHSM_OPAQUE)
+    }
+    fn yubihsm_read_object(&self, id: u16, object_type: u8) -> Result<Vec<u8>, Error> {
         if self.has_session_role(YubiHsmSessionRole::User) {
-            return self.read_opaque_by_id(self.session.as_ref(), id);
+            return self.read_object_value_by_id(self.session.as_ref(), id, object_type);
         }
-        self.read_opaque_with_public_discovery(id)
+        self.read_object_value_with_public_discovery(id, object_type)
     }
     fn yubihsm_forget_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
         self.forget_cached_object(id, object_type)

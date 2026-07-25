@@ -12,7 +12,10 @@ use crate::{
     CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
     YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC,
 };
-use rsa::{traits::PublicKeyParts, BigUint, RsaPrivateKey, RsaPublicKey};
+use rsa::{
+    traits::{PrivateKeyParts, PublicKeyParts},
+    BigUint, RsaPrivateKey, RsaPublicKey,
+};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -394,6 +397,225 @@ pub(crate) fn bool_attribute(value: bool) -> Vec<u8> {
     }]
 }
 
+fn is_common_storage_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE
+            || x == CKA_TOKEN as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_LABEL as CK_ATTRIBUTE_TYPE
+            || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_common_key_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE
+            || x == CKA_ID as CK_ATTRIBUTE_TYPE
+            || x == CKA_START_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_END_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_DERIVE as CK_ATTRIBUTE_TYPE
+            || x == CKA_LOCAL as CK_ATTRIBUTE_TYPE
+            || x == CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE
+            || x == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
+            || x == CKA_OBJECT_VALIDATION_FLAGS as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_common_public_key_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+            || x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE
+            || x == CKA_VERIFY as CK_ATTRIBUTE_TYPE
+            || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
+            || x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_CRC64_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_common_private_key_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+            || x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE
+            || x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE
+            || x == CKA_SIGN as CK_ATTRIBUTE_TYPE
+            || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+            || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+            || x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE
+            || x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
+            || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+            || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_CRC64_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_common_secret_key_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE
+            || x == CKA_ENCRYPT as CK_ATTRIBUTE_TYPE
+            || x == CKA_DECRYPT as CK_ATTRIBUTE_TYPE
+            || x == CKA_SIGN as CK_ATTRIBUTE_TYPE
+            || x == CKA_VERIFY as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
+            || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE
+            || x == CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE
+            || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
+            || x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
+            || x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_x509_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE
+            || x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
+            || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
+            || x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_START_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_END_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+            || x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE
+            || x == CKA_ID as CK_ATTRIBUTE_TYPE
+            || x == CKA_ISSUER as CK_ATTRIBUTE_TYPE
+            || x == CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_URL as CK_ATTRIBUTE_TYPE
+            || x == CKA_HASH_OF_SUBJECT_PUBLIC_KEY as CK_ATTRIBUTE_TYPE
+            || x == CKA_HASH_OF_ISSUER_PUBLIC_KEY as CK_ATTRIBUTE_TYPE
+            || x == CKA_JAVA_MIDP_SECURITY_DOMAIN as CK_ATTRIBUTE_TYPE
+            || x == CKA_NAME_HASH_ALGORITHM as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_rsa_public_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
+            || x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_rsa_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
+            || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE
+            || x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE
+            || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
+            || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_ec_public_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+            || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_ec_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
+    CKA_CLASS as CK_ATTRIBUTE_TYPE,
+    CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+    CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
+    CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE,
+    CKA_LABEL as CK_ATTRIBUTE_TYPE,
+    CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+    CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE,
+    CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
+    CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
+    CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
+    CKA_VALUE as CK_ATTRIBUTE_TYPE,
+    CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE,
+    CKA_TRUSTED as CK_ATTRIBUTE_TYPE,
+    CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE,
+    CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE,
+    CKA_START_DATE as CK_ATTRIBUTE_TYPE,
+    CKA_END_DATE as CK_ATTRIBUTE_TYPE,
+    CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
+    CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
+    CKA_ID as CK_ATTRIBUTE_TYPE,
+    CKA_ISSUER as CK_ATTRIBUTE_TYPE,
+    CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
+    CKA_URL as CK_ATTRIBUTE_TYPE,
+    CKA_HASH_OF_SUBJECT_PUBLIC_KEY as CK_ATTRIBUTE_TYPE,
+    CKA_HASH_OF_ISSUER_PUBLIC_KEY as CK_ATTRIBUTE_TYPE,
+    CKA_JAVA_MIDP_SECURITY_DOMAIN as CK_ATTRIBUTE_TYPE,
+    CKA_NAME_HASH_ALGORITHM as CK_ATTRIBUTE_TYPE,
+    CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE,
+    CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+    CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+    CKA_LOCAL as CK_ATTRIBUTE_TYPE,
+    CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
+    CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+    CKA_OBJECT_VALIDATION_FLAGS as CK_ATTRIBUTE_TYPE,
+    CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+    CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+    CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE,
+    CKA_WRAP as CK_ATTRIBUTE_TYPE,
+    CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+    CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE,
+    CKA_PUBLIC_CRC64_VALUE as CK_ATTRIBUTE_TYPE,
+    CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
+    CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+    CKA_SIGN as CK_ATTRIBUTE_TYPE,
+    CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
+    CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+    CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+    CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+    CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
+    CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
+    CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+    CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE,
+    CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
+    CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE,
+    CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+    CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+    CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+    CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE,
+    CKA_PRIME_1 as CK_ATTRIBUTE_TYPE,
+    CKA_PRIME_2 as CK_ATTRIBUTE_TYPE,
+    CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE,
+    CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE,
+    CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE,
+    CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+    CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+    CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+];
+
 pub(crate) fn piv_object_tag(object_id: u32) -> Vec<u8> {
     let bytes = object_id.to_be_bytes();
     let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
@@ -409,9 +631,20 @@ pub(crate) fn piv_certificate_attribute(
         x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE => {
             Some(ulong_attribute(CKC_X_509 as CK_ULONG))
         }
-        x if x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(0)),
+        x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE => Some(bool_attribute(false)),
+        x if x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(
+            CK_CERTIFICATE_CATEGORY_UNSPECIFIED as CK_ULONG,
+        )),
         x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE => {
             Some(hash(MessageDigest::sha1(), value).ok()?[..3].to_vec())
+        }
+        x if x == CKA_START_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_END_DATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_URL as CK_ATTRIBUTE_TYPE
+            || x == CKA_HASH_OF_SUBJECT_PUBLIC_KEY as CK_ATTRIBUTE_TYPE
+            || x == CKA_HASH_OF_ISSUER_PUBLIC_KEY as CK_ATTRIBUTE_TYPE =>
+        {
+            Some(Vec::new())
         }
         x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE => crate::certificate_chain::subject(value).ok(),
         x if x == CKA_ISSUER as CK_ATTRIBUTE_TYPE => crate::certificate_chain::issuer(value).ok(),
@@ -421,6 +654,12 @@ pub(crate) fn piv_certificate_attribute(
         }
         x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => {
             crate::certificate_chain::public_key_info(value).ok()
+        }
+        x if x == CKA_JAVA_MIDP_SECURITY_DOMAIN as CK_ATTRIBUTE_TYPE => {
+            Some(ulong_attribute(CK_SECURITY_DOMAIN_UNSPECIFIED as CK_ULONG))
+        }
+        x if x == CKA_NAME_HASH_ALGORITHM as CK_ATTRIBUTE_TYPE => {
+            Some(ulong_attribute(CKM_SHA_1 as CK_ULONG))
         }
         _ => None,
     }
@@ -564,6 +803,147 @@ pub(crate) fn lazy_yubihsm_attestation_certificate(
 }
 
 impl TokenObject {
+    pub(crate) fn supports_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if is_common_storage_attribute(attribute_type) {
+            return true;
+        }
+
+        let standard = match self.class {
+            x if x == CKO_DATA as CK_OBJECT_CLASS => matches!(
+                attribute_type,
+                x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE
+                    || x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE
+                    || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            ),
+            x if x == CKO_CERTIFICATE as CK_OBJECT_CLASS => {
+                is_x509_certificate_attribute(attribute_type)
+            }
+            x if x == CKO_PROFILE as CK_OBJECT_CLASS => {
+                attribute_type == CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE
+            }
+            x if x == CKO_PUBLIC_KEY as CK_OBJECT_CLASS => {
+                is_common_key_attribute(attribute_type)
+                    || is_common_public_key_attribute(attribute_type)
+                    || match self.key_type {
+                        x if x == CKK_RSA as CK_KEY_TYPE => is_rsa_public_attribute(attribute_type),
+                        x if matches!(
+                            x,
+                            y if y == CKK_EC as CK_KEY_TYPE
+                                || y == CKK_EC_EDWARDS as CK_KEY_TYPE
+                                || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+                        ) =>
+                        {
+                            is_ec_public_attribute(attribute_type)
+                        }
+                        _ => false,
+                    }
+            }
+            x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
+                is_common_key_attribute(attribute_type)
+                    || is_common_private_key_attribute(attribute_type)
+                    || match self.key_type {
+                        x if x == CKK_RSA as CK_KEY_TYPE => {
+                            is_rsa_private_attribute(attribute_type)
+                        }
+                        x if matches!(
+                            x,
+                            y if y == CKK_EC as CK_KEY_TYPE
+                                || y == CKK_EC_EDWARDS as CK_KEY_TYPE
+                                || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+                        ) =>
+                        {
+                            is_ec_private_attribute(attribute_type)
+                        }
+                        _ => false,
+                    }
+            }
+            x if x == CKO_SECRET_KEY as CK_OBJECT_CLASS => {
+                is_common_key_attribute(attribute_type)
+                    || is_common_secret_key_attribute(attribute_type)
+                    || matches!(
+                        attribute_type,
+                        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+                            || x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE
+                    )
+            }
+            _ => false,
+        };
+        standard || self.supports_vendor_attribute(attribute_type)
+    }
+
+    fn supports_vendor_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        match &self.material {
+            KeyMaterial::PivData { .. } => attribute_type == CKA_PKCS11RS_PIV_OBJECT_TAG,
+            KeyMaterial::PivPrivate { .. } => {
+                attribute_type == CKA_YUBICO_TOUCH_POLICY || attribute_type == CKA_YUBICO_PIN_POLICY
+            }
+            KeyMaterial::OpenPgpPrivate { .. } => attribute_type == CKA_YUBICO_TOUCH_POLICY,
+            KeyMaterial::HsmAuthCredential { .. } => matches!(
+                attribute_type,
+                CKA_YUBICO_HSMAUTH_ALGORITHM
+                    | CKA_YUBICO_HSMAUTH_RETRIES
+                    | CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED
+            ),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn attribute_is_sensitive(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if !self.supports_attribute(attribute_type) {
+            return false;
+        }
+        if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+            && attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+        {
+            return self.sensitive;
+        }
+        if self.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || !self.sensitive {
+            return false;
+        }
+        match self.key_type {
+            x if x == CKK_RSA as CK_KEY_TYPE => matches!(
+                attribute_type,
+                x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE
+                    || x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE
+                    || x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE
+                    || x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE
+                    || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
+                    || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
+            ),
+            x if matches!(
+                x,
+                y if y == CKK_EC as CK_KEY_TYPE
+                    || y == CKK_EC_EDWARDS as CK_KEY_TYPE
+                    || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+            ) =>
+            {
+                attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn attribute_types(&self) -> Vec<CK_ATTRIBUTE_TYPE> {
+        let mut types = PKCS11_OBJECT_ATTRIBUTE_TYPES
+            .iter()
+            .copied()
+            .filter(|attribute_type| self.supports_attribute(*attribute_type))
+            .collect::<Vec<_>>();
+        for attribute_type in [
+            CKA_PKCS11RS_PIV_OBJECT_TAG,
+            CKA_YUBICO_HSMAUTH_ALGORITHM,
+            CKA_YUBICO_HSMAUTH_RETRIES,
+            CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
+            CKA_YUBICO_TOUCH_POLICY,
+            CKA_YUBICO_PIN_POLICY,
+        ] {
+            if self.supports_attribute(attribute_type) {
+                types.push(attribute_type);
+            }
+        }
+        types
+    }
+
     pub(crate) fn public_key_info(&self) -> Option<Vec<u8>> {
         if !matches!(
             self.class,
@@ -696,70 +1076,21 @@ impl TokenObject {
                 | KeyMaterial::YubiHsmAttestation { attempted, .. }
                 if !attempted.get()
         );
-        [
-            CKA_CLASS as CK_ATTRIBUTE_TYPE,
-            CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE,
-            CKA_PROFILE_ID as CK_ATTRIBUTE_TYPE,
-            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
-            CKA_LABEL as CK_ATTRIBUTE_TYPE,
-            CKA_ID as CK_ATTRIBUTE_TYPE,
-            CKA_APPLICATION as CK_ATTRIBUTE_TYPE,
-            CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE,
-            CKA_PKCS11RS_PIV_OBJECT_TAG,
-            CKA_YUBICO_HSMAUTH_ALGORITHM,
-            CKA_YUBICO_HSMAUTH_RETRIES,
-            CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
-            CKA_YUBICO_TOUCH_POLICY,
-            CKA_YUBICO_PIN_POLICY,
-            CKA_TOKEN as CK_ATTRIBUTE_TYPE,
-            CKA_PRIVATE as CK_ATTRIBUTE_TYPE,
-            CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE,
-            CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
-            CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
-            CKA_SIGN as CK_ATTRIBUTE_TYPE,
-            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
-            CKA_DERIVE as CK_ATTRIBUTE_TYPE,
-            CKA_WRAP as CK_ATTRIBUTE_TYPE,
-            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
-            CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
-            CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE,
-            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
-            CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE,
-            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
-            CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE,
-            CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
-            CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE,
-            CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
-            CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-            CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE,
-            CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-            CKA_LOCAL as CK_ATTRIBUTE_TYPE,
-            CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE,
-            CKA_MODULUS as CK_ATTRIBUTE_TYPE,
-            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
-            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
-            CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
-            CKA_VALUE as CK_ATTRIBUTE_TYPE,
-            CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE,
-            CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE,
-            CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE,
-            CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
-            CKA_ISSUER as CK_ATTRIBUTE_TYPE,
-            CKA_SERIAL_NUMBER as CK_ATTRIBUTE_TYPE,
-            CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE,
-            CKA_TRUSTED as CK_ATTRIBUTE_TYPE,
-        ]
-        .iter()
-        .filter(|&&attribute_type| {
-            !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
-        })
-        .filter_map(|&attribute_type| self.attribute_value(attribute_type))
-        .map(|value| value.len() as CK_ULONG)
-        .sum()
+        self.attribute_types()
+            .into_iter()
+            .filter(|&attribute_type| {
+                !defer_certificate_attributes || !is_certificate_attribute(attribute_type)
+            })
+            .filter(|&attribute_type| !self.attribute_is_sensitive(attribute_type))
+            .filter_map(|attribute_type| self.attribute_value(attribute_type))
+            .map(|value| value.len() as CK_ULONG)
+            .sum()
     }
 
     pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+        if !self.supports_attribute(attribute_type) {
+            return None;
+        }
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
             x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => {
@@ -773,22 +1104,9 @@ impl TokenObject {
                 Some(ulong_attribute(self.key_type))
             }
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => Some(self.label.as_bytes().to_vec()),
-            x if x == CKA_ID as CK_ATTRIBUTE_TYPE
-                && matches!(self.material, KeyMaterial::Profile { .. }) =>
-            {
-                None
-            }
-            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::PivData { object_id, .. } => {
-                    piv::data_object_mapping(*object_id).map(|mapping| vec![mapping.cka_id])
-                }
-                _ => Some(self.id.clone()),
-            },
+            x if x == CKA_ID as CK_ATTRIBUTE_TYPE => Some(self.id.clone()),
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
             x if x == CKA_PRIVATE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.private)),
-            x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE && self.is_yubihsm_opaque() => {
-                Some(bool_attribute(false))
-            }
             x if x == CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
                 && self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
             {
@@ -825,10 +1143,11 @@ impl TokenObject {
             x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.can_unwrap()))
             }
-            x if self.is_key_object()
-                && (x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
-                    || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
-                    || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE) =>
+            x if x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+                || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
+                || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE =>
             {
                 Some(bool_attribute(false))
             }
@@ -867,15 +1186,16 @@ impl TokenObject {
                 Some(bool_attribute(false))
             }
             x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE => Some(bool_attribute(true)),
-            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE
-                && (self.is_certificate_object() || self.is_yubihsm_opaque()) =>
-            {
-                Some(bool_attribute(false))
-            }
+            x if x == CKA_TRUSTED as CK_ATTRIBUTE_TYPE => Some(bool_attribute(false)),
             x if x == CKA_APPLICATION as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => {
                     Some(b"Opaque object".to_vec())
                 }
+                KeyMaterial::YubiHsm {
+                    object_type: crate::YUBIHSM_TEMPLATE,
+                    ..
+                } => Some(b"Template object".to_vec()),
+                KeyMaterial::YubiHsm { .. } => Some(b"YubiHSM object".to_vec()),
                 KeyMaterial::IssuerSecurityDomainData { application, .. } => {
                     Some(application.as_bytes().to_vec())
                 }
@@ -885,6 +1205,7 @@ impl TokenObject {
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
+                KeyMaterial::YubiHsm { .. } => Some(Vec::new()),
                 KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::PivData { object_id, .. } => {
                     piv::data_object_mapping(*object_id).map(piv::data_object_oid)
@@ -908,17 +1229,6 @@ impl TokenObject {
                     if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
                 {
                     Some(ulong_attribute(*length as CK_ULONG))
-                }
-                _ => None,
-            },
-            x if x == CKA_VALUE_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
-                    Some(ulong_attribute((value.len() * 8) as CK_ULONG))
-                }
-                KeyMaterial::YubiHsm { length, .. }
-                    if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
-                {
-                    Some(ulong_attribute((*length * 8) as CK_ULONG))
                 }
                 _ => None,
             },
@@ -951,6 +1261,27 @@ impl TokenObject {
                         .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 ))
             }
+            x if x == CKA_START_DATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_END_DATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
+                || x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_CRC64_VALUE as CK_ATTRIBUTE_TYPE
+                || x == CKA_URL as CK_ATTRIBUTE_TYPE
+                || x == CKA_HASH_OF_SUBJECT_PUBLIC_KEY as CK_ATTRIBUTE_TYPE
+                || x == CKA_HASH_OF_ISSUER_PUBLIC_KEY as CK_ATTRIBUTE_TYPE =>
+            {
+                Some(Vec::new())
+            }
+            x if x == CKA_OBJECT_VALIDATION_FLAGS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(0)),
+            x if x == CKA_JAVA_MIDP_SECURITY_DOMAIN as CK_ATTRIBUTE_TYPE => {
+                Some(ulong_attribute(CK_SECURITY_DOMAIN_UNSPECIFIED as CK_ULONG))
+            }
+            x if x == CKA_NAME_HASH_ALGORITHM as CK_ATTRIBUTE_TYPE => {
+                Some(ulong_attribute(CKM_SHA_1 as CK_ULONG))
+            }
+            x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE && self.is_key_object() => Some(Vec::new()),
             x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::RsaPrivate(key) => Some(key.n().to_bytes_be()),
                 KeyMaterial::RsaPublic(key) => Some(key.n().to_bytes_be()),
@@ -981,6 +1312,30 @@ impl TokenObject {
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                     Some(vec![0x01, 0x00, 0x01])
                 }
+                _ => None,
+            },
+            x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => Some(key.d().to_bytes_be()),
+                _ => None,
+            },
+            x if x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => key.primes().first().map(BigUint::to_bytes_be),
+                _ => None,
+            },
+            x if x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => key.primes().get(1).map(BigUint::to_bytes_be),
+                _ => None,
+            },
+            x if x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => key.dp().map(BigUint::to_bytes_be),
+                _ => None,
+            },
+            x if x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => key.dq().map(BigUint::to_bytes_be),
+                _ => None,
+            },
+            x if x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::RsaPrivate(key) => key.qinv().map(|value| value.to_signed_bytes_be()),
                 _ => None,
             },
             x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -1123,7 +1478,12 @@ impl TokenObject {
                 _ => None,
             },
             x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
-                self.public_key_info()
+                Some(self.public_key_info().unwrap_or_default())
+            }
+            x if x == CKA_CHECK_VALUE as CK_ATTRIBUTE_TYPE
+                && self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS =>
+            {
+                Some(Vec::new())
             }
             x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_CERTIFICATE_CATEGORY as CK_ATTRIBUTE_TYPE
@@ -1134,7 +1494,9 @@ impl TokenObject {
                 || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
             {
                 match &self.material {
-                    KeyMaterial::DerivedSecret(value) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                    KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value)
+                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
+                    {
                         Some(value.to_vec())
                     }
                     KeyMaterial::PivCertificate { value, .. }
@@ -1328,7 +1690,7 @@ impl TokenObject {
                 self.extractable = requested;
                 Ok(())
             }
-            x if self.attribute_value(x).is_some() => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
+            x if self.supports_attribute(x) => Err(CKR_ATTRIBUTE_READ_ONLY as CK_RV),
             _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
         }
     }
