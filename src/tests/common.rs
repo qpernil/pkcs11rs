@@ -1863,7 +1863,7 @@ fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
 #[test]
 fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
     let capabilities =
-        crate::yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x16, 0x32, 0x33, 0x34, 0x35]);
+        crate::yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x10, 0x16, 0x32, 0x33, 0x34, 0x35]);
     let delegated_capabilities = crate::yubihsm_capabilities(&[0x04, 0x32]);
     for (algorithm, length) in [
         (crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, 32),
@@ -1893,6 +1893,14 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
         assert!(!object.sign);
         assert!(!object.verify);
         assert!(!object.derive);
+        assert_eq!(
+            object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(true))
+        );
+        assert_eq!(
+            object.attribute_value(CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(false))
+        );
         assert_eq!(
             object.attribute_value(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE),
             Some(crate::ulong_attribute(length as CK_ULONG))
