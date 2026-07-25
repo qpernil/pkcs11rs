@@ -20,6 +20,7 @@ jobs:
             libclang-dev \
             libpcsclite-dev \
             libusb-1.0-0-dev \
+            opensc \
             pkg-config
 
       - name: Check generated PKCS #11 bindings

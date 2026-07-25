@@ -483,6 +483,7 @@ fn is_common_secret_key_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
             || x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
             || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
             || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE
     )
 }
 
@@ -854,15 +855,19 @@ impl TokenObject {
             x if x == CKO_SECRET_KEY as CK_OBJECT_CLASS => {
                 is_common_key_attribute(attribute_type)
                     || is_common_secret_key_attribute(attribute_type)
-                    || matches!(
-                        attribute_type,
-                        x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
-                            || x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE
-                    )
+                    || attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
             }
             _ => false,
         };
-        standard || self.supports_vendor_attribute(attribute_type)
+        standard
+            || self.supports_vendor_attribute(attribute_type)
+            || self.supports_compatibility_attribute(attribute_type)
+    }
+
+    fn supports_compatibility_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        // OpenSC queries this public-key capability while rendering secret keys.
+        self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+            && attribute_type == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
     }
 
     fn supports_vendor_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
