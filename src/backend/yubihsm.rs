@@ -233,6 +233,7 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
     pub(crate) algorithms: Vec<u8>,
+    pub(crate) model: String,
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
     pub(crate) hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
     pub(crate) object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
@@ -470,6 +471,7 @@ impl YubiHsmSlot {
             object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
             algorithms,
+            model: String::from("YubiHSM"),
             trust_prefix: None,
             hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
             object_metadata: RefCell::new(HashMap::new()),
@@ -2159,10 +2161,13 @@ impl Slot for YubiHsmSlot {
         self.connector.manufacturer()
     }
     fn product(&self) -> &str {
-        self.connector.product()
+        "YubiHSM"
     }
     fn model(&self) -> &str {
-        "YubiHSM"
+        &self.model
+    }
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
     }
     fn serial(&self) -> &str {
         self.connector.serial()
@@ -2300,6 +2305,9 @@ impl Slot for YubiHsmSlot {
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
         self.algorithms = device_info.algorithms;
+        self.model = device_info
+            .part_number
+            .unwrap_or_else(|| String::from("YubiHSM"));
         Ok(())
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
@@ -2312,8 +2320,10 @@ impl Slot for YubiHsmSlot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.format_token_info(info);
+        let model = device_info.part_number.as_deref().unwrap_or(self.model());
+        str_pad(model, &mut info.model);
         str_pad(
-            &format!("{} #{}", self.model(), device_info.serial),
+            &format!("{} #{}", self.product(), device_info.serial),
             &mut info.label,
         );
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);

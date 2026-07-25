@@ -162,6 +162,12 @@ fn all_sample_commands() -> Vec<Command> {
 }
 
 #[test]
+fn device_info_page_zero_uses_the_legacy_empty_request() {
+    assert!(Command::get_device_info(None).data().is_empty());
+    assert_eq!(Command::get_device_info(Some(1)).data(), [1]);
+}
+
+#[test]
 fn every_official_command_code_has_a_sample_request() {
     let commands = all_sample_commands();
     assert_eq!(commands.len(), 63);

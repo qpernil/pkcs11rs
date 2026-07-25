@@ -357,7 +357,7 @@ fn yubihsm_connector_transport_identity_does_not_leak_into_token_name() {
     slot.get_token_info(&mut info).unwrap();
 
     assert_eq!(&info.label[..19], b"YubiHSM #16909060  ");
-    assert_eq!(&info.model[..16], b"YubiHSM         ");
+    assert_eq!(&info.model[..16], b"78CLUFX5000P    ");
     assert_eq!(&info.serialNumber[..16], b"16909060        ");
 }
 
