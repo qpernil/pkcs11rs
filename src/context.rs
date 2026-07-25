@@ -10,7 +10,7 @@ use crate::{
     ApduCapabilities, CcidApplication, Connector, CryptOperation, DigestOperation, Error,
     FindOperation, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
     PcscAppletConnector, PcscConnector, PivSlot, SecureChannelState, Session, SignatureOperation,
-    Slot, TokenObject, UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot,
+    Slot, TokenObject, UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential, YUBIHSM_DISCOVERY_ENV};
@@ -709,6 +709,7 @@ impl Context {
                         reader,
                         context: context.clone(),
                         card: RefCell::new(None),
+                        yubikey_device_info: OnceLock::new(),
                         firmware_version: Cell::new(None),
                         serial_number: OnceLock::new(),
                         apdu_capabilities: Cell::new(ApduCapabilities::SHORT_ONLY),
@@ -788,6 +789,15 @@ impl Context {
                             }
                         }
                         continue;
+                    }
+                    match YubiKeyClient.discover(&connector) {
+                        Ok(info) => connector.set_yubikey_device_info(info),
+                        Err(error) => log!(
+                            2,
+                            "YubiKey Management device-information discovery failed on {}: {:?}",
+                            name,
+                            error
+                        ),
                     }
                     let configurations = match configured_ccid_configurations() {
                         Ok(configurations) => configurations,

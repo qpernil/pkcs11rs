@@ -171,6 +171,9 @@ use openpgp::{
     PublicKey as OpenPgpPublicKey,
 };
 
+mod yubikey;
+use yubikey::{Client as YubiKeyClient, DeviceInfo as YubiKeyDeviceInfo};
+
 mod yubihsm;
 use yubihsm::{
     device_public_key_bytes as get_yubihsm_device_public_key,

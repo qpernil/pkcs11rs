@@ -158,6 +158,12 @@ impl Slot for OpenPgpSlot {
     fn product(&self) -> &str {
         "YubiKey OpenPGP"
     }
+    fn model(&self) -> &str {
+        self.connector.product()
+    }
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
+    }
     fn serial(&self) -> &str {
         if self.serial == "0" {
             self.connector.serial()

@@ -884,7 +884,7 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
 }
 
 #[test]
-fn issuer_sd_token_model_identifies_the_applet() {
+fn issuer_sd_token_uses_device_model_and_applet_label() {
     let base = std::rc::Rc::new(SelectableConnector {
         present: std::cell::Cell::new(true),
         select_ok: std::cell::Cell::new(true),
@@ -902,7 +902,7 @@ fn issuer_sd_token_model_identifies_the_applet() {
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());
-    assert_eq!(&token_info.model[..9], b"Issuer SD");
+    assert_eq!(&token_info.model, b"Selectable conne");
     assert_eq!(&token_info.label[..21], b"Issuer SD #SELECT0001");
     assert_eq!(token_info.ulMinPinLen, 0);
     assert_eq!(token_info.ulMaxPinLen, 0);

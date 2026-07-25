@@ -29,6 +29,13 @@ PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 Accepted names are `piv`, `openpgp`, `hsmauth`, and `issuer-sd`. Names are
 case-insensitive and duplicates are ignored.
 
+The YubiKey Management applet is probed once per PC/SC device before applet
+discovery. Its device-wide serial number, firmware version, hardware part
+number, capabilities, and configuration metadata are cached on the shared
+connector and are not exposed as a separate PKCS #11 slot. The part number is
+reported as the PKCS #11 token model. Applet-specific metadata overrides the
+shared device identity when an applet supplies it.
+
 ## Secure channels
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, `scp11b`, or `scp11c`

@@ -454,6 +454,12 @@ impl Slot for PivSlot {
     fn product(&self) -> &str {
         "YubiKey PIV"
     }
+    fn model(&self) -> &str {
+        self.connector.product()
+    }
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
+    }
     fn serial(&self) -> &str {
         if self.serial == "0" || self.serial.is_empty() {
             self.connector.serial()
