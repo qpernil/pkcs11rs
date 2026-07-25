@@ -433,8 +433,9 @@ The defaults are YubiHSM Auth management key
 `00000000000000000000000000000000`, credential label
 `pkcs11rs-asymmetric` (`pkcs11rs-asymmetric-touch` for the touch-required
 variant), credential password `password`, YubiHSM administrator key `0001`
-with password `password`, domain `0001`, and no operational or delegated
-capabilities on the new key. Override them with:
+with password `password`, all YubiHSM domains (`0xffff`), and no operational
+or delegated capabilities on the new key. Override the remaining defaults
+with:
 
 - `PKCS11RS_TEST_HSMAUTH_MANAGEMENT_KEY`
 - `PKCS11RS_TEST_HSMAUTH_LABEL`
@@ -442,7 +443,6 @@ capabilities on the new key. Override them with:
 - `PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD`
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_ID`
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`
-- `PKCS11RS_TEST_YUBIHSM_DOMAINS`
 
 When multiple devices are attached, select them by serial number or full device
 name with `PKCS11RS_TEST_HSMAUTH_SOURCE` and `PKCS11RS_TEST_YUBIHSM_SOURCE`.
