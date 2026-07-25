@@ -1894,6 +1894,10 @@ fn yubihsm_authentication_keys_are_non_operational_generic_secrets() {
         assert!(!object.verify);
         assert!(!object.derive);
         assert_eq!(
+            object.attribute_value(CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE),
+            Some(crate::bool_attribute(false))
+        );
+        assert_eq!(
             object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
             Some(crate::bool_attribute(true))
         );

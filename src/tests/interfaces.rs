@@ -1687,7 +1687,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
 
     for (slot_id, model) in [
         (crate::ABI_TEST_SLOT_ID, b"ABI test token".as_slice()),
-        (crate::ABI_TEST_PIV_SLOT_ID, b"YubiKey PIV".as_slice()),
+        (crate::ABI_TEST_PIV_SLOT_ID, b"YubiKey".as_slice()),
         (crate::ABI_TEST_SCP03_SLOT_ID, b"ABI SCP03".as_slice()),
         (crate::ABI_TEST_YUBIHSM_SLOT_ID, b"ABI YubiHSM".as_slice()),
         (crate::ABI_TEST_SCP11_SLOT_ID, b"ABI SCP11".as_slice()),

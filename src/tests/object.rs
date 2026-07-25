@@ -1887,7 +1887,7 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     assert_eq!(
         size,
         (5 * ::std::mem::size_of::<CK_ULONG>()
-            + 19 * ::std::mem::size_of::<CK_BBOOL>()
+            + 20 * ::std::mem::size_of::<CK_BBOOL>()
             + label.len()
             + id.len()
             + 1

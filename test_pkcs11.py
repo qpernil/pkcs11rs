@@ -7,6 +7,8 @@ import ctypes
 import os
 import pathlib
 import platform
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1008,6 +1010,100 @@ class Pkcs11AbiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.lib.C_Finalize(None)
+
+    @unittest.skipUnless(shutil.which("pkcs11-tool"), "OpenSC pkcs11-tool is unavailable")
+    def test_pkcs11_tool_lists_all_mock_slots_without_unsupported_attributes(
+        self,
+    ) -> None:
+        slots = {
+            ABI_TEST_SLOT_ID: (
+                "1234",
+                [
+                    "Test RSA public key",
+                    "Test RSA private key",
+                    "Profile object",
+                ],
+            ),
+            ABI_TEST_PIV_SLOT_ID: (
+                "123456",
+                [
+                    "testrsa-pub",
+                    "testrsa-pri",
+                    "Certificate Object; type = X.509 cert",
+                    "Data object",
+                    "Profile object",
+                ],
+            ),
+            ABI_TEST_SCP03_SLOT_ID: ("1234", ["Profile object"]),
+            ABI_TEST_YUBIHSM_SLOT_ID: (
+                "1234",
+                [
+                    "Private Key Object; RSA",
+                    "Public Key Object; RSA",
+                    "Secret Key Object; AES",
+                    "Secret Key Object; Generic secret",
+                    "Certificate Object; type = X.509 cert",
+                    "Data object",
+                    "Profile object",
+                    "label:      ccm-wrap",
+                    "label:      public-wrap",
+                    "label:      symmetric-auth",
+                    "label:      asymmetric-auth",
+                ],
+            ),
+            ABI_TEST_SCP11_SLOT_ID: ("1234", ["Profile object"]),
+        }
+
+        for slot_id, (pin, expected_output) in slots.items():
+            with self.subTest(slot_id=slot_id):
+                result = subprocess.run(
+                    [
+                        shutil.which("pkcs11-tool") or "pkcs11-tool",
+                        "--module",
+                        str(library_path()),
+                        "--slot",
+                        str(slot_id),
+                        "--login",
+                        "--pin",
+                        pin,
+                        "-O",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    result.returncode, 0, result.stdout + result.stderr
+                )
+
+                warnings = re.findall(
+                    r"C_GetAttributeValue\(([^)]+)\) failed: rv = ([A-Z0-9_]+)",
+                    result.stderr,
+                )
+                unexpected = [
+                    warning
+                    for warning in warnings
+                    if warning != ("VALUE", "CKR_ATTRIBUTE_SENSITIVE")
+                ]
+                self.assertEqual(
+                    unexpected,
+                    [],
+                    f"pkcs11-tool encountered unsupported attributes in slot {slot_id}: "
+                    + ", ".join(
+                        f"{attribute} -> {status}"
+                        for attribute, status in unexpected
+                    ),
+                )
+                if slot_id == ABI_TEST_YUBIHSM_SLOT_ID:
+                    self.assertIn(
+                        ("VALUE", "CKR_ATTRIBUTE_SENSITIVE"), warnings
+                    )
+                else:
+                    self.assertEqual(warnings, [])
+
+                for expected in expected_output:
+                    self.assertIn(expected, result.stdout)
 
     def assert_function_entries_present(self, function_list, names: list[str]) -> None:
         for name in names:
