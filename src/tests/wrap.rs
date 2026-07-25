@@ -7,6 +7,7 @@ fn yubihsm_wrap_test_object(
     object_type: u8,
     algorithm: u8,
     capabilities: &[usize],
+    delegated_capabilities: &[usize],
     label: &str,
     public_key: Option<crate::YubiHsmPublicKey>,
 ) -> Vec<TokenObject> {
@@ -25,7 +26,7 @@ fn yubihsm_wrap_test_object(
             sequence: 1,
             origin: 1,
             label: label.to_owned(),
-            delegated_capabilities: [0; 8],
+            delegated_capabilities: crate::yubihsm_capabilities(delegated_capabilities),
         },
         public_key,
     )
@@ -52,6 +53,7 @@ fn install_yubihsm_wrap_test_objects(
             crate::YUBIHSM_SYMMETRIC_KEY,
             crate::YUBIHSM_ALGO_AES128,
             &[0x10, 0x32, 0x33],
+            &[],
             "exportable AES",
             None,
         ),
@@ -60,7 +62,8 @@ fn install_yubihsm_wrap_test_objects(
             31,
             crate::YUBIHSM_WRAP_KEY,
             crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
-            &[0x0c, 0x0d],
+            &[],
+            &[],
             "AES-CCM wrap",
             None,
         ),
@@ -69,7 +72,8 @@ fn install_yubihsm_wrap_test_objects(
             32,
             crate::YUBIHSM_WRAP_KEY,
             crate::YUBIHSM_ALGO_RSA_2048,
-            &[0x0c, 0x0d, 0x10],
+            &[0x10],
+            &[],
             "RSA wrap",
             Some(public_key.clone()),
         ),
@@ -78,7 +82,8 @@ fn install_yubihsm_wrap_test_objects(
             33,
             crate::YUBIHSM_PUBLIC_WRAP_KEY,
             crate::YUBIHSM_ALGO_RSA_2048,
-            &[0x0c],
+            &[],
+            &[],
             "RSA public wrap",
             Some(public_key),
         ),
@@ -116,6 +121,90 @@ fn install_yubihsm_wrap_test_objects(
         rsa_synthetic_public.unwrap(),
         rsa_public_wrap.unwrap(),
     )
+}
+
+fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u8, u16)> {
+    let definitions = [
+        (
+            34,
+            crate::YUBIHSM_OPAQUE,
+            crate::YUBIHSM_ALGO_OPAQUE_DATA,
+            "exportable opaque",
+            true,
+            false,
+        ),
+        (
+            35,
+            crate::YUBIHSM_OPAQUE,
+            crate::YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
+            "exportable certificate",
+            true,
+            false,
+        ),
+        (
+            36,
+            crate::YUBIHSM_TEMPLATE,
+            crate::YUBIHSM_ALGO_TEMPLATE_SSH,
+            "exportable template",
+            true,
+            false,
+        ),
+        (
+            37,
+            crate::YUBIHSM_OPAQUE,
+            crate::YUBIHSM_ALGO_OPAQUE_DATA,
+            "non-exportable opaque",
+            false,
+            false,
+        ),
+        (
+            38,
+            crate::YUBIHSM_AUTHENTICATION_KEY,
+            crate::YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+            "delegating authentication key",
+            true,
+            true,
+        ),
+    ];
+    let mut context = crate::lock_context().unwrap();
+    let context = context.as_mut().unwrap();
+    definitions
+        .into_iter()
+        .map(
+            |(id, object_type, algorithm, label, extractable, has_delegated_capabilities)| {
+                let [object] = yubihsm_wrap_test_object(
+                    slot_id,
+                    id,
+                    object_type,
+                    algorithm,
+                    if extractable { &[0x10] } else { &[] },
+                    if has_delegated_capabilities {
+                        &[0x04]
+                    } else {
+                        &[]
+                    },
+                    label,
+                    None,
+                )
+                .try_into()
+                .unwrap();
+                assert_eq!(object.extractable, extractable);
+                if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                    || object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+                {
+                    assert_eq!(
+                        object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+                        Some(crate::bool_attribute(extractable))
+                    );
+                } else {
+                    assert!(object
+                        .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
+                        .is_none());
+                }
+                (context.insert_object(object), object_type, id)
+            },
+        )
+        .collect()
 }
 
 #[test]
@@ -506,6 +595,17 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     );
     let (target, ccm_wrapper, rsa_private, rsa_synthetic_public, rsa_public_wrap) =
         install_yubihsm_wrap_test_objects(SLOT_ID);
+    let wrap_targets = install_yubihsm_wrap_targets(SLOT_ID);
+    assert!(!checked_bool_attribute(session, ccm_wrapper, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(
+        !checked_bool_attribute(session, ccm_wrapper, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap()
+    );
+    assert!(
+        !checked_bool_attribute(session, rsa_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap()
+    );
+    assert!(
+        !checked_bool_attribute(session, rsa_public_wrap, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap()
+    );
 
     let mut ccm_mechanism = CK_MECHANISM {
         mechanism: crate::CKM_YUBICO_AES_CCM_WRAP,
@@ -530,6 +630,32 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         crate::YubiHsmCommandCode::ExportWrapped as u8
     );
 
+    for (target, target_type, target_id) in &wrap_targets {
+        let mut length = 0;
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut ccm_mechanism,
+                ccm_wrapper,
+                *target,
+                std::ptr::null_mut(),
+                &mut length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let last = commands.borrow().last().cloned().unwrap();
+        assert_eq!(last.0, crate::YubiHsmCommandCode::ExportWrapped as u8);
+        assert_eq!(
+            last.1,
+            [
+                0,
+                31,
+                *target_type,
+                target_id.to_be_bytes()[0],
+                target_id.to_be_bytes()[1],
+            ]
+        );
+    }
     let mut wrapped = vec![0; wrapped_len as usize];
     assert_eq!(
         crate::api::C_WrapKey(
@@ -633,6 +759,46 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
 
     let (mut full_rsa, mut full_parameters, mut full_oaep) = rsa_wrap_mechanism(true);
     initialize_rsa_wrap_mechanism(&mut full_rsa, &mut full_parameters, &mut full_oaep);
+    for (target, target_type, target_id) in &wrap_targets {
+        let mut length = 0;
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut full_rsa,
+                rsa_public_wrap,
+                *target,
+                std::ptr::null_mut(),
+                &mut length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let last = commands.borrow().last().cloned().unwrap();
+        assert_eq!(last.0, crate::YubiHsmCommandCode::ExportRsaWrapped as u8);
+        assert_eq!(last.1[2], *target_type);
+        assert_eq!(&last.1[3..5], &target_id.to_be_bytes());
+    }
+
+    let (mut key_rsa, mut key_parameters, mut key_oaep) = rsa_wrap_mechanism(false);
+    initialize_rsa_wrap_mechanism(&mut key_rsa, &mut key_parameters, &mut key_oaep);
+    for (target, target_type, target_id) in &wrap_targets {
+        let mut length = 0;
+        assert_eq!(
+            crate::api::C_WrapKey(
+                session,
+                &mut key_rsa,
+                rsa_private,
+                *target,
+                std::ptr::null_mut(),
+                &mut length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let last = commands.borrow().last().cloned().unwrap();
+        assert_eq!(last.0, crate::YubiHsmCommandCode::GetRsaWrappedKey as u8);
+        assert_eq!(last.1[2], *target_type);
+        assert_eq!(&last.1[3..5], &target_id.to_be_bytes());
+    }
+
     assert_eq!(
         crate::api::C_UnwrapKey(
             session,
@@ -651,8 +817,6 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         .iter()
         .any(|(command, _)| { *command == crate::YubiHsmCommandCode::ImportRsaWrapped as u8 }));
 
-    let (mut key_rsa, mut key_parameters, mut key_oaep) = rsa_wrap_mechanism(false);
-    initialize_rsa_wrap_mechanism(&mut key_rsa, &mut key_parameters, &mut key_oaep);
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_AES as CK_KEY_TYPE;
     let mut token = CK_TRUE as CK_BBOOL;

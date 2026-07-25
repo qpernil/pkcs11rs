@@ -173,13 +173,7 @@ fn validate_yubihsm_wrapping_key(
             ) && is_yubihsm_rsa(algorithm)
         }
     };
-    if !compatible
-        || if unwrapping {
-            !object.can_unwrap()
-        } else {
-            !object.can_wrap()
-        }
-    {
+    if !compatible {
         return Err(if unwrapping {
             CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into()
         } else {
@@ -240,16 +234,10 @@ fn wrap_key(
             .resolve_object(key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
-        if !target.is_key_object() {
-            return Err(CKR_KEY_HANDLE_INVALID.into());
-        }
         let (target_id, target_type, _algorithm) =
             yubihsm_material(&target).map_err(|_| Error::from(CKR_KEY_HANDLE_INVALID))?;
         if target_type & 0x80 != 0 {
             return Err(CKR_KEY_NOT_WRAPPABLE.into());
-        }
-        if !target.extractable {
-            return Err(CKR_KEY_UNEXTRACTABLE.into());
         }
         let wrapper = ctx
             .resolve_object(wrapping_key)?
@@ -268,29 +256,22 @@ fn wrap_key(
             YubiHsmWrapMechanism::Rsa {
                 full_object,
                 parameters,
-            } => {
-                if !*full_object
-                    && !matches!(target_type, YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_SYMMETRIC_KEY)
-                {
-                    return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-                }
-                YubiHsmCommand::rsa_wrap(
-                    if *full_object {
-                        YubiHsmCommandCode::ExportRsaWrapped
-                    } else {
-                        YubiHsmCommandCode::GetRsaWrappedKey
-                    },
-                    &YubiHsmRsaWrapParameters {
-                        wrapping_key_id,
-                        object_type: target_type,
-                        object_id: target_id,
-                        aes_algorithm: parameters.aes_algorithm,
-                        hash_algorithm: parameters.hash_algorithm,
-                        mgf1_algorithm: parameters.mgf1_algorithm,
-                        label_digest: &parameters.label_digest,
-                    },
-                )?
-            }
+            } => YubiHsmCommand::rsa_wrap(
+                if *full_object {
+                    YubiHsmCommandCode::ExportRsaWrapped
+                } else {
+                    YubiHsmCommandCode::GetRsaWrappedKey
+                },
+                &YubiHsmRsaWrapParameters {
+                    wrapping_key_id,
+                    object_type: target_type,
+                    object_id: target_id,
+                    aes_algorithm: parameters.aes_algorithm,
+                    hash_algorithm: parameters.hash_algorithm,
+                    mgf1_algorithm: parameters.mgf1_algorithm,
+                    label_digest: &parameters.label_digest,
+                },
+            )?,
         };
         let response = ctx
             ._get_session(session_handle)?
