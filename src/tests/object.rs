@@ -1771,14 +1771,13 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>()
+        (5 * ::std::mem::size_of::<CK_ULONG>()
+            + 13 * ::std::mem::size_of::<CK_BBOOL>()
             + b"Test RSA public key".len()
-            + 2
-            + 7
+            + 1
             + 256
             + 3
             + 1
-            + 8
             + public_key_info_len) as CK_ULONG
     );
 
@@ -1811,15 +1810,13 @@ pub fn get_object_size_reports_attribute_storage_size() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>()
+        (5 * ::std::mem::size_of::<CK_ULONG>()
+            + 13 * ::std::mem::size_of::<CK_BBOOL>()
             + label.len()
             + id.len()
             + 1
-            + 7
             + 256
             + 3
-            + 1
-            + 8
             + public_key_info_len) as CK_ULONG
     );
 
@@ -1889,8 +1886,12 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     );
     assert_eq!(
         size,
-        (4 * ::std::mem::size_of::<CK_ULONG>() + label.len() + id.len() + 1 + 11 + 1 + 16)
-            as CK_ULONG
+        (5 * ::std::mem::size_of::<CK_ULONG>()
+            + 19 * ::std::mem::size_of::<CK_BBOOL>()
+            + label.len()
+            + id.len()
+            + 1
+            + value.len()) as CK_ULONG
     );
     assert_eq!(
         crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
@@ -1965,30 +1966,18 @@ pub fn get_attribute_value_reports_sizes_and_values() {
             attrs.as_mut_ptr(),
             attrs.len() as CK_ULONG
         ),
-        CKR_OK as CK_RV
+        CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
     );
     assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
-    assert_eq!(sign, CK_FALSE as CK_BBOOL);
+    assert_eq!(sign, CK_TRUE as CK_BBOOL);
+    assert_eq!(attrs[1].ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
 
     let mut wrap = CK_FALSE as CK_BBOOL;
-    let mut unwrap = CK_FALSE as CK_BBOOL;
-    let mut sign_recover = CK_FALSE as CK_BBOOL;
     let mut verify_recover = CK_FALSE as CK_BBOOL;
-    let mut wrap_with_trusted = CK_FALSE as CK_BBOOL;
-    let mut operation_attrs = [
+    let mut public_operation_attrs = [
         CK_ATTRIBUTE {
             type_: CKA_WRAP as CK_ATTRIBUTE_TYPE,
             pValue: &mut wrap as *mut CK_BBOOL as CK_VOID_PTR,
-            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            type_: CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
-            pValue: &mut unwrap as *mut CK_BBOOL as CK_VOID_PTR,
-            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            type_: CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE,
-            pValue: &mut sign_recover as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
         CK_ATTRIBUTE {
@@ -1996,37 +1985,33 @@ pub fn get_attribute_value_reports_sizes_and_values() {
             pValue: &mut verify_recover as *mut CK_BBOOL as CK_VOID_PTR,
             ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
         },
-        CK_ATTRIBUTE {
-            type_: CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
-            pValue: &mut wrap_with_trusted as *mut CK_BBOOL as CK_VOID_PTR,
-            ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
-        },
     ];
     assert_eq!(
         crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
-            operation_attrs.as_mut_ptr(),
-            operation_attrs.len() as CK_ULONG
+            public_operation_attrs.as_mut_ptr(),
+            public_operation_attrs.len() as CK_ULONG
         ),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        (
-            wrap,
-            unwrap,
-            sign_recover,
-            verify_recover,
-            wrap_with_trusted
-        ),
-        (
-            CK_FALSE as CK_BBOOL,
-            CK_FALSE as CK_BBOOL,
-            CK_FALSE as CK_BBOOL,
-            CK_FALSE as CK_BBOOL,
-            CK_FALSE as CK_BBOOL
-        )
+        (wrap, verify_recover),
+        (CK_FALSE as CK_BBOOL, CK_FALSE as CK_BBOOL)
     );
+
+    for invalid_type in [CKA_UNWRAP, CKA_SIGN_RECOVER, CKA_WRAP_WITH_TRUSTED] {
+        let mut invalid = CK_ATTRIBUTE {
+            type_: invalid_type as CK_ATTRIBUTE_TYPE,
+            pValue: ::std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut invalid, 1),
+            CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
+        );
+        assert_eq!(invalid.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+    }
 
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),

@@ -208,6 +208,13 @@ pub(crate) trait Slot {
     fn yubihsm_read_opaque(&self, _id: u16) -> Result<Vec<u8>, Error> {
         Err(CKR_USER_NOT_LOGGED_IN.into())
     }
+    fn yubihsm_read_object(&self, id: u16, object_type: u8) -> Result<Vec<u8>, Error> {
+        if object_type == crate::YUBIHSM_OPAQUE {
+            self.yubihsm_read_opaque(id)
+        } else {
+            Err(CKR_ATTRIBUTE_TYPE_INVALID.into())
+        }
+    }
     fn yubihsm_forget_object(&self, _id: u16, _object_type: u8) -> Result<(), Error> {
         Ok(())
     }

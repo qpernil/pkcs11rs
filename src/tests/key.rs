@@ -348,12 +348,9 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
     };
     assert_eq!(
         crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
-        CKR_ATTRIBUTE_SENSITIVE as CK_RV
+        CKR_OK as CK_RV
     );
-    assert_eq!(
-        value_attribute.ulValueLen,
-        CK_UNAVAILABLE_INFORMATION as CK_ULONG
-    );
+    assert_eq!(value_attribute.ulValueLen, value_len);
 
     sensitive = CK_TRUE as CK_BBOOL;
     extractable = CK_FALSE as CK_BBOOL;
@@ -377,6 +374,14 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
             harden.len() as CK_ULONG
         ),
         CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut value_attribute, 1),
+        CKR_ATTRIBUTE_SENSITIVE as CK_RV
+    );
+    assert_eq!(
+        value_attribute.ulValueLen,
+        CK_UNAVAILABLE_INFORMATION as CK_ULONG
     );
 
     let mut make_non_sensitive = CK_FALSE as CK_BBOOL;

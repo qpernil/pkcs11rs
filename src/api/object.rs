@@ -1331,96 +1331,17 @@ fn get_attribute_value(
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
-            if matches!(
-                &object.material,
-                KeyMaterial::YubiHsm {
-                    object_type: YUBIHSM_OPAQUE,
-                    algorithm: YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE,
-                    ..
-                }
-            ) && is_certificate_attribute(attribute.type_)
-            {
-                match object_attribute_value(ctx, session_handle, &object, attribute.type_)? {
-                    Some(value) => {
-                        if let Err(error) = write_attribute_value(attribute, &value) {
-                            rv = combine_attribute_rv(rv, error);
-                        }
-                    }
-                    None => {
-                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
-                    }
-                }
+            if !object.supports_attribute(attribute.type_) {
+                attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
                 continue;
             }
-            if attribute.type_ == CKA_VALUE as CK_ATTRIBUTE_TYPE {
-                match &object.material {
-                    KeyMaterial::DerivedSecret(value) => {
-                        if let Err(e) = write_attribute_value(attribute, value.as_slice()) {
-                            rv = combine_attribute_rv(rv, e);
-                        }
-                    }
-                    KeyMaterial::Secret(value) if !object.sensitive && object.extractable => {
-                        if let Err(e) = write_attribute_value(attribute, value.as_slice()) {
-                            rv = combine_attribute_rv(rv, e);
-                        }
-                    }
-                    KeyMaterial::Secret(_) => {
-                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
-                    }
-                    KeyMaterial::HsmAuthCredential { .. } => {
-                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
-                    }
-                    KeyMaterial::PivCertificate { .. }
-                    | KeyMaterial::PivAttestation { .. }
-                    | KeyMaterial::YubiHsmAttestation { .. }
-                    | KeyMaterial::PivData { .. }
-                    | KeyMaterial::OpenPgpCertificate { .. }
-                    | KeyMaterial::IssuerSecurityDomainData { .. }
-                    | KeyMaterial::IssuerSecurityDomainCertificate { .. } => {
-                        match object.attribute_value(attribute.type_) {
-                            Some(value) => {
-                                if let Err(e) = write_attribute_value(attribute, &value) {
-                                    rv = combine_attribute_rv(rv, e);
-                                }
-                            }
-                            None => {
-                                attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                                rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
-                            }
-                        }
-                    }
-                    KeyMaterial::YubiHsm {
-                        id,
-                        object_type,
-                        value,
-                        ..
-                    } if *object_type == YUBIHSM_OPAQUE => {
-                        if value.borrow().is_none() {
-                            let payload = ctx
-                                ._get_session(session_handle)?
-                                .0
-                                .yubihsm_read_opaque(*id)?;
-                            *value.borrow_mut() = Some(payload);
-                        }
-                        let payload = value.borrow();
-                        if let Err(e) = write_attribute_value(
-                            attribute,
-                            payload.as_deref().ok_or(CKR_DEVICE_ERROR)?,
-                        ) {
-                            rv = combine_attribute_rv(rv, e);
-                        }
-                    }
-                    _ => {
-                        attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
-                        rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_TYPE_INVALID as CK_RV);
-                    }
-                }
+            if object.attribute_is_sensitive(attribute.type_) {
+                attribute.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+                rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
                 continue;
             }
-            match object.attribute_value(attribute.type_) {
+            match object_attribute_value(ctx, session_handle, &object, attribute.type_)? {
                 Some(value) => {
                     if let Err(e) = write_attribute_value(attribute, &value) {
                         rv = combine_attribute_rv(rv, e);
@@ -1441,10 +1362,11 @@ fn get_attribute_value(
     })
 }
 
-fn yubihsm_opaque_value(
+fn yubihsm_object_value(
     ctx: &Context,
     session_handle: CK_SESSION_HANDLE,
     id: u16,
+    object_type: u8,
     value: &Rc<RefCell<Option<Vec<u8>>>>,
 ) -> Result<Vec<u8>, Error> {
     if value
@@ -1455,7 +1377,7 @@ fn yubihsm_opaque_value(
         let payload = ctx
             ._get_session(session_handle)?
             .0
-            .yubihsm_read_opaque(id)?;
+            .yubihsm_read_object(id, object_type)?;
         *value.try_borrow_mut()? = Some(payload);
     }
     value
@@ -1471,6 +1393,9 @@ fn object_attribute_value(
     object: &TokenObject,
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Result<Option<Vec<u8>>, Error> {
+    if object.attribute_is_sensitive(attribute_type) {
+        return Ok(None);
+    }
     if let KeyMaterial::YubiHsm {
         id,
         object_type: YUBIHSM_OPAQUE,
@@ -1480,8 +1405,22 @@ fn object_attribute_value(
     } = &object.material
     {
         if is_certificate_attribute(attribute_type) {
-            let payload = yubihsm_opaque_value(ctx, session_handle, *id, value)?;
+            let payload = yubihsm_object_value(ctx, session_handle, *id, YUBIHSM_OPAQUE, value)?;
             return Ok(piv_certificate_attribute(&payload, attribute_type));
+        }
+    }
+    if attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE {
+        if let KeyMaterial::YubiHsm {
+            id,
+            object_type,
+            value,
+            ..
+        } = &object.material
+        {
+            if matches!(*object_type, YUBIHSM_OPAQUE | crate::YUBIHSM_TEMPLATE) {
+                return yubihsm_object_value(ctx, session_handle, *id, *object_type, value)
+                    .map(Some);
+            }
         }
     }
     Ok(object.attribute_value(attribute_type))
