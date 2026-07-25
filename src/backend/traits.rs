@@ -55,6 +55,7 @@ pub(crate) fn profile_token_objects(
         .collect()
 }
 
+#[cfg(feature = "abi-tests")]
 pub(crate) fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool {
     let supports = |type_: CK_MECHANISM_TYPE, flags: CK_FLAGS| {
         mechanisms
