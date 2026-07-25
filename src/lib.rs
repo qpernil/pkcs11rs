@@ -403,7 +403,10 @@ fn yubihsm_capabilities_to_attributes(
                 attributes.decrypt = yubihsm_capability(capabilities, 0x26);
             }
         }
-        YUBIHSM_WRAP_KEY_PUBLIC | YUBIHSM_PUBLIC_WRAP_KEY => {
+        YUBIHSM_WRAP_KEY_PUBLIC => {
+            attributes.extractable = true;
+        }
+        YUBIHSM_PUBLIC_WRAP_KEY => {
             attributes.extractable = true;
             if is_yubihsm_rsa(algorithm) {
                 attributes.wrap = yubihsm_capability(capabilities, 0x0c);
