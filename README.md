@@ -117,6 +117,8 @@ export PKCS11RS_YUBIHSM_URLS=http://hsm-a:12345,http://hsm-b:12345
 Remote connector slots are added alongside directly attached USB devices. Each
 configured URL always has a slot; an unreachable connector or a connector with
 no device is reported as an empty slot until the module is reinitialized.
+Repeated URLs intentionally create separate slots, each with its own connector
+client and YubiHSM secure session.
 
 Disable direct YubiHSM USB discovery while retaining configured remote slots:
 

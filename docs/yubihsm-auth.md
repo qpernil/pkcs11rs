@@ -4,11 +4,14 @@
 
 The module exposes one slot for every selectable CCID applet, one slot for
 every physical YubiHSM USB device, and one slot for each URL configured in
-`PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated YubiHSM Connector base URLs,
-for example `http://hsm-a:12345,http://hsm-b:12345`. Remote slots are additive;
-they do not disable direct USB discovery. An unreachable configured connector
-is retained as an empty slot until the module is reinitialized. The URL scheme
-selects plain HTTP or rustls-backed HTTPS.
+`PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated YubiHSM Connector base URLs.
+For example: `http://hsm-a:12345,http://hsm-b:12345`.
+Each entry creates a separate slot; repeated URLs are retained so independent
+PKCS #11 logins can use separate YubiHSM secure sessions through the same
+connector service. Remote slots are additive; they do not disable direct USB
+discovery. An unreachable configured connector is retained as an empty slot
+until the module is reinitialized. The URL scheme selects plain HTTP or
+rustls-backed HTTPS.
 
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP

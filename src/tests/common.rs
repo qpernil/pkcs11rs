@@ -73,7 +73,7 @@ fn debug_level_configuration_has_three_modes() {
 }
 
 #[test]
-fn yubihsm_connector_configuration_accepts_multiple_urls() {
+fn yubihsm_connector_configuration_retains_order_and_duplicate_entries() {
     assert_eq!(
         crate::configured_yubihsm_urls(None).unwrap(),
         Vec::<String>::new()
@@ -83,7 +83,11 @@ fn yubihsm_connector_configuration_accepts_multiple_urls() {
             " http://first:12345/,https://second:8443,http://first:12345 ".into()
         ))
         .unwrap(),
-        ["http://first:12345", "https://second:8443"]
+        [
+            "http://first:12345",
+            "https://second:8443",
+            "http://first:12345"
+        ]
     );
     assert!(crate::configured_yubihsm_urls(Some("".into())).is_err());
     assert!(crate::configured_yubihsm_urls(Some("http://first,,http://second".into())).is_err());
