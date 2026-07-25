@@ -116,7 +116,12 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(credential.username, b"00a5");
     assert_eq!(credential.authkey_id, 0x00a5);
     assert_eq!(
-        credential.password.borrow().as_deref().map(Vec::as_slice),
+        credential
+            .password
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(Vec::as_slice),
         Some(b"discovery-password".as_slice())
     );
 
@@ -128,7 +133,12 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(credential.username, b":0001default key@12345678");
     assert_eq!(credential.authkey_id, 1);
     assert_eq!(
-        credential.password.borrow().as_deref().map(Vec::as_slice),
+        credential
+            .password
+            .lock()
+            .unwrap()
+            .as_deref()
+            .map(Vec::as_slice),
         Some(b"password".as_slice())
     );
     assert!(credential.uses_hsmauth());
@@ -5514,6 +5524,48 @@ struct TestSession {
     flags: CK_FLAGS,
 }
 
+#[derive(Debug, Default)]
+struct ConcurrentOperationState {
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+    changed: std::sync::Condvar,
+    wait: std::sync::Mutex<()>,
+}
+
+impl ConcurrentOperationState {
+    fn overlap(&self) {
+        let active = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_all();
+
+        let guard = self.wait.lock().unwrap();
+        let _ = self
+            .changed
+            .wait_timeout_while(guard, std::time::Duration::from_millis(500), |_| {
+                self.max_active.load(std::sync::atomic::Ordering::SeqCst) < 2
+            })
+            .unwrap();
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug)]
+struct ConcurrentYubiHsmSlot {
+    state: std::sync::Arc<ConcurrentOperationState>,
+}
+
+#[derive(Debug)]
+struct ConcurrentYubiHsmSession {
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+    state: std::sync::Arc<ConcurrentOperationState>,
+}
+
 #[derive(Debug)]
 struct PivSigningTestSession {
     slot_id: CK_SLOT_ID,
@@ -5571,6 +5623,56 @@ struct SelectableConnector {
     present: std::cell::Cell<bool>,
     select_ok: std::cell::Cell<bool>,
     serial: &'static str,
+}
+
+#[derive(Debug)]
+struct RecordingConnector {
+    commands: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+}
+
+impl crate::Connector for RecordingConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+
+    fn product(&self) -> &str {
+        "Recording connector"
+    }
+
+    fn serial(&self) -> &str {
+        "RECORD0001"
+    }
+
+    fn major(&self) -> u8 {
+        1
+    }
+
+    fn minor(&self) -> u8 {
+        0
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn buffer_size(&self) -> usize {
+        256
+    }
+
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: std::time::Duration,
+    ) -> Result<&'a [u8], crate::error::Error> {
+        self.commands.borrow_mut().push(send_buffer.to_vec());
+        receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);
+        Ok(&receive_buffer[..2])
+    }
 }
 
 impl crate::Connector for SelectableConnector {
@@ -5707,6 +5809,98 @@ impl crate::Session for TestSession {
 
     fn get_session_info(&self) -> Result<(), crate::error::Error> {
         Ok(())
+    }
+}
+
+impl crate::Session for ConcurrentYubiHsmSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+
+    fn get_session_info(&self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn generate_random(&self, output: &mut [u8]) -> Result<(), crate::error::Error> {
+        self.state.overlap();
+        output.fill(self.slot_id as u8);
+        Ok(())
+    }
+}
+
+impl crate::Slot for ConcurrentYubiHsmSlot {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn name(&self) -> String {
+        String::from("Concurrent YubiHSM")
+    }
+
+    fn manufacturer(&self) -> &str {
+        "Yubico"
+    }
+
+    fn product(&self) -> &str {
+        "YubiHSM"
+    }
+
+    fn serial(&self) -> &str {
+        "CONCURRENT"
+    }
+
+    fn major(&self) -> u8 {
+        2
+    }
+
+    fn minor(&self) -> u8 {
+        4
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
+        Box::new(ConcurrentYubiHsmSession {
+            slot_id: slotID,
+            flags,
+            state: self.state.clone(),
+        })
+    }
+
+    fn login(&mut self, _pin: &[u8]) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn logout(&mut self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn init_slot(&mut self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), crate::error::Error> {
+        self.format_slot_info(info);
+        Ok(())
+    }
+
+    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), crate::error::Error> {
+        self.format_token_info(info);
+        Ok(())
+    }
+
+    fn is_yubihsm(&self) -> bool {
+        true
     }
 }
 

@@ -22,7 +22,7 @@ fn verify_init(
     mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
         if ctx.verify_operations.contains_key(&session_handle) {
@@ -193,7 +193,7 @@ fn verify(
     signature: *const ::std::os::raw::c_uchar,
     signature_len: CK_ULONG,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let operation = ctx
             .verify_operations
@@ -443,7 +443,7 @@ pub extern "C" fn C_VerifyUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(with_context_mut(|ctx| {
+    map(with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let part = from_raw_parts(part, part_len as usize)?.to_vec();
         let operation = ctx

@@ -117,7 +117,7 @@ fn sign_init(
     mechanism: CK_MECHANISM_PTR,
     key: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
         if ctx.sign_operations.contains_key(&session_handle) {
@@ -323,7 +323,7 @@ fn sign(
     signature_len: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     if signature_len.is_null() {
-        let _ = with_context_mut(|ctx| {
+        let _ = with_session_context_mut(session_handle, |ctx| {
             if ctx._get_session(session_handle).is_ok() {
                 ctx.sign_operations.remove(&session_handle);
             }
@@ -332,7 +332,7 @@ fn sign(
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let signature_len = as_mut(signature_len)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let operation = ctx
             .sign_operations
@@ -596,7 +596,7 @@ pub extern "C" fn C_SignUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(with_context_mut(|ctx| {
+    map(with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let part = from_raw_parts(part, part_len as usize)?.to_vec();
         let operation = ctx

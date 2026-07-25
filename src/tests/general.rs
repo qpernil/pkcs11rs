@@ -289,7 +289,7 @@ pub fn yubikey_login_preserves_connector_errors() {
             base,
             &application_aid,
             Some(crate::SecureChannelProtocol::Scp03),
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         )),
         application_aid,
     );
@@ -362,7 +362,7 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
         base.clone(),
         &aid,
         None,
-        std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        std::sync::Arc::new(crate::PcscDeviceState::default()),
     );
 
     assert_eq!(
@@ -397,7 +397,7 @@ fn pcsc_applet_connector_reuses_selected_aid() {
         base.clone(),
         &aid,
         None,
-        std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+        std::sync::Arc::new(crate::PcscDeviceState::default()),
     );
     let mut receive = [0; 16];
 
@@ -416,6 +416,43 @@ fn pcsc_applet_connector_reuses_selected_aid() {
         std::time::Duration::from_secs(1),
     )
     .is_ok());
+}
+
+#[test]
+fn pcsc_applet_connectors_share_selected_aid_state() {
+    let commands = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let base = std::rc::Rc::new(RecordingConnector {
+        commands: commands.clone(),
+    });
+    let state = std::sync::Arc::new(crate::PcscDeviceState::default());
+    let first_aid = vec![1, 2, 3, 4, 5];
+    let second_aid = vec![6, 7, 8, 9, 10];
+    let first = crate::PcscAppletConnector::new(base.clone(), &first_aid, None, state.clone());
+    let second = crate::PcscAppletConnector::new(base, &second_aid, None, state);
+    let command = crate::CommandApdu {
+        cla: 0,
+        ins: 0xca,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+        le: None,
+        extended: false,
+    };
+
+    crate::Connector::send_apdu(&first, &command).unwrap();
+    crate::Connector::send_apdu(&first, &command).unwrap();
+    crate::Connector::send_apdu(&second, &command).unwrap();
+    crate::Connector::send_apdu(&first, &command).unwrap();
+
+    let selected = commands
+        .borrow()
+        .iter()
+        .filter_map(|encoded| {
+            let command = crate::CommandApdu::decode(encoded).ok()?;
+            (command.ins == 0xa4).then_some(command.data)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec![first_aid.clone(), second_aid, first_aid]);
 }
 
 #[test]
@@ -450,7 +487,7 @@ fn openpgp_slot_info_reports_application_version_and_serial() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let mut slot = crate::OpenPgpSlot::new(connector, aid);
     slot.version = (3, 4);
@@ -488,7 +525,7 @@ fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -508,7 +545,7 @@ fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -749,7 +786,7 @@ fn openpgp_metadata_failure_does_not_hide_selected_applet() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let mut slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -867,7 +904,7 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let slot = crate::PivSlot::new(connector, aid);
 
@@ -896,7 +933,7 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
             base,
             &aid,
             None,
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     let mut slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
 
@@ -1111,7 +1148,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
             base,
             &application_aid,
             Some(crate::SecureChannelProtocol::Scp03),
-            std::rc::Rc::new(std::cell::RefCell::new(crate::SecureChannelState::default())),
+            std::sync::Arc::new(crate::PcscDeviceState::default()),
         ));
     {
         let mut context = crate::lock_context().unwrap();
@@ -2547,6 +2584,98 @@ pub fn open_session_refreshes_token_presence() {
     );
     assert_eq!(session, CK_INVALID_HANDLE as CK_SESSION_HANDLE);
 
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+pub fn different_yubihsm_slots_execute_concurrently() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const FIRST_SLOT_ID: CK_SLOT_ID = 200;
+    const SECOND_SLOT_ID: CK_SLOT_ID = 201;
+    let state = std::sync::Arc::new(ConcurrentOperationState::default());
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context
+            .insert_yubihsm_slot(
+                FIRST_SLOT_ID,
+                Box::new(ConcurrentYubiHsmSlot {
+                    state: state.clone(),
+                }),
+            )
+            .unwrap();
+        context
+            .insert_yubihsm_slot(
+                SECOND_SLOT_ID,
+                Box::new(ConcurrentYubiHsmSlot {
+                    state: state.clone(),
+                }),
+            )
+            .unwrap();
+    }
+
+    let mut first_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    let mut second_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            FIRST_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut first_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SECOND_SLOT_ID,
+            CKF_SERIAL_SESSION as CK_FLAGS,
+            ::std::ptr::null_mut(),
+            None,
+            &mut second_session,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_ne!(first_session, second_session);
+
+    let (first_result, second_result) = std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            let mut output = [0u8; 8];
+            crate::api::C_GenerateRandom(
+                first_session,
+                output.as_mut_ptr(),
+                output.len() as CK_ULONG,
+            )
+        });
+        let second = scope.spawn(move || {
+            let mut output = [0u8; 8];
+            crate::api::C_GenerateRandom(
+                second_session,
+                output.as_mut_ptr(),
+                output.len() as CK_ULONG,
+            )
+        });
+        (first.join().unwrap(), second.join().unwrap())
+    });
+
+    assert_eq!(first_result, CKR_OK as CK_RV);
+    assert_eq!(second_result, CKR_OK as CK_RV);
+    assert_eq!(
+        state.max_active.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "different YubiHSM slot contexts must not share an operation lock"
+    );
+    assert_eq!(crate::api::C_CloseSession(first_session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(second_session), CKR_OK as CK_RV);
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV

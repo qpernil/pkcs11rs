@@ -14,7 +14,7 @@ use std::{
     slice,
     sync::{
         atomic::{AtomicU8, Ordering},
-        MutexGuard, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
     },
     time::Duration,
 };
@@ -617,30 +617,106 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn next_key<T>(
-    map: &HashMap<::std::os::raw::c_ulong, T>,
-    min: ::std::os::raw::c_ulong,
-) -> ::std::os::raw::c_ulong {
-    match map.keys().max() {
-        Some(k) => k + 1,
-        None => min,
-    }
-}
-
 fn lock_context() -> Result<MutexGuard<'static, Option<Context>>, Error> {
     G_CONTEXT.lock().map_err(|_| CKR_MUTEX_BAD.into())
 }
 
 fn with_context<T>(f: impl FnOnce(&Context) -> Result<T, Error>) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let guard = lock_context()?;
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
 }
 
 fn with_context_mut<T>(f: impl FnOnce(&mut Context) -> Result<T, Error>) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let mut guard = lock_context()?;
     let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
+}
+
+fn with_slot_context<T>(
+    slot_id: CK_SLOT_ID,
+    f: impl FnOnce(&Context) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let child = {
+        let guard = lock_context()?;
+        let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+        match ctx.yubihsm_contexts.get(&slot_id) {
+            Some(child) => child.clone(),
+            None => return f(ctx),
+        }
+    };
+    let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    f(&child)
+}
+
+fn with_slot_context_mut<T>(
+    slot_id: CK_SLOT_ID,
+    f: impl FnOnce(&mut Context, bool) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let child = {
+        let mut guard = lock_context()?;
+        let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+        match ctx.yubihsm_contexts.get(&slot_id) {
+            Some(child) => child.clone(),
+            None => return f(ctx, false),
+        }
+    };
+    let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    f(&mut child, true)
+}
+
+fn with_session_context<T>(
+    session_handle: CK_SESSION_HANDLE,
+    f: impl FnOnce(&Context) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let slot_id = SESSION_CONTEXTS
+        .lock()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+        .get(&session_handle)
+        .copied();
+    let child = {
+        let guard = lock_context()?;
+        let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+        let Some(slot_id) = slot_id else {
+            return f(ctx);
+        };
+        ctx.yubihsm_contexts
+            .get(&slot_id)
+            .cloned()
+            .ok_or(CKR_SESSION_HANDLE_INVALID)?
+    };
+    let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    f(&child)
+}
+
+fn with_session_context_mut<T>(
+    session_handle: CK_SESSION_HANDLE,
+    f: impl FnOnce(&mut Context) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let slot_id = SESSION_CONTEXTS
+        .lock()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+        .get(&session_handle)
+        .copied();
+    let child = {
+        let mut guard = lock_context()?;
+        let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+        let Some(slot_id) = slot_id else {
+            return f(ctx);
+        };
+        ctx.yubihsm_contexts
+            .get(&slot_id)
+            .cloned()
+            .ok_or(CKR_SESSION_HANDLE_INVALID)?
+    };
+    let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    f(&mut child)
 }
 
 fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
@@ -697,10 +773,10 @@ use abi_test_backend::*;
 mod connector;
 pub(crate) use connector::{
     bulk_out_packet_size, Connector, HttpConnector, PcscAppletConnector, PcscConnector,
-    SecureChannelState, UsbConnector,
+    UsbConnector,
 };
 #[cfg(test)]
-pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet};
+pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscDeviceState};
 
 mod context;
 pub(crate) use context::*;

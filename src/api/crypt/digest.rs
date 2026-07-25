@@ -20,7 +20,7 @@ fn digest_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, _logged_in) = ctx.session_details(session_handle)?;
         if ctx.digest_operations.contains_key(&session_handle) {
             return Err(Error::from(CKR_OPERATION_ACTIVE as CK_RV));
@@ -98,7 +98,7 @@ pub extern "C" fn C_Digest(
     );
     map((|| {
         if digest_len.is_null() {
-            let _ = with_context_mut(|ctx| {
+            let _ = with_session_context_mut(session_handle, |ctx| {
                 if ctx._get_session(session_handle).is_ok() {
                     ctx.digest_operations.remove(&session_handle);
                 }
@@ -106,7 +106,7 @@ pub extern "C" fn C_Digest(
             });
             return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
         }
-        with_context_mut(|ctx| {
+        with_session_context_mut(session_handle, |ctx| {
             ctx._get_session(session_handle)?;
             let operation = ctx
                 .digest_operations
@@ -136,7 +136,7 @@ pub extern "C" fn C_DigestUpdate(
         "C_DigestUpdate called with {:?}",
         (session_handle, part, part_len)
     );
-    map(with_context_mut(|ctx| {
+    map(with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let part = match from_raw_parts(part, part_len as usize) {
             Ok(part) => part,
@@ -157,7 +157,7 @@ pub extern "C" fn C_DigestUpdate(
 #[no_mangle]
 pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
     log!(2, "C_DigestKey called with {:?}", (session_handle, key));
-    map(with_context_mut(|ctx| {
+    map(with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         if !ctx.digest_operations.contains_key(&session_handle) {
             return Err(Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV));
@@ -197,7 +197,7 @@ pub extern "C" fn C_DigestFinal(
     );
     map((|| {
         if digest_len.is_null() {
-            let _ = with_context_mut(|ctx| {
+            let _ = with_session_context_mut(session_handle, |ctx| {
                 if ctx._get_session(session_handle).is_ok() {
                     ctx.digest_operations.remove(&session_handle);
                 }
@@ -205,7 +205,7 @@ pub extern "C" fn C_DigestFinal(
             });
             return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
         }
-        with_context_mut(|ctx| {
+        with_session_context_mut(session_handle, |ctx| {
             ctx._get_session(session_handle)?;
             let operation = ctx
                 .digest_operations

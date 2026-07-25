@@ -217,7 +217,7 @@ fn wrap_key(
     wrapped_key: CK_BYTE_PTR,
     wrapped_key_len: CK_ULONG_PTR,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let mechanism = _as_ref(mechanism)?;
         let output_len = as_mut(wrapped_key_len)?;
@@ -326,7 +326,7 @@ fn unwrap_key(
     attribute_count: CK_ULONG,
     key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mechanism = _as_ref(mechanism)?;
         let output_handle = as_mut(key)?;
