@@ -43,7 +43,6 @@ const P256_PUBLIC_KEY_LENGTH: usize = 65;
 const ASYMMETRIC_RECEIPT_LENGTH: usize = 16;
 const EC_P256_AUTHENTICATION_ALGORITHM: u8 = 49;
 const SCP11_SHARED_INFO: [u8; 3] = [0x3c, 0x88, 0x10];
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);
 const MODERN_MESSAGE_SIZE: usize = 3136;
 const PRE_2_4_MESSAGE_SIZE: usize = 2048;
 
@@ -134,7 +133,7 @@ fn send_plain(connector: &dyn Connector, command: &Command) -> Result<Vec<u8>, E
     }
     let code = command.code() as u8;
     let request = Frame::new(code, command.data().to_vec())?;
-    Frame::parse(&connector.send(&request.encode(), DEFAULT_TIMEOUT)?)?.require_response(code)
+    Frame::parse(&connector.send(&request.encode(), Duration::ZERO)?)?.require_response(code)
 }
 
 fn send_plain_protocol(
@@ -153,8 +152,7 @@ fn send_plain_protocol(
     );
     let result = (|| {
         let request = Frame::new(command, data.to_vec())?;
-        Frame::parse(&connector.send(&request.encode(), DEFAULT_TIMEOUT)?)?
-            .require_response(command)
+        Frame::parse(&connector.send(&request.encode(), Duration::ZERO)?)?.require_response(command)
     })();
     match result {
         Ok(response) => {
@@ -644,7 +642,7 @@ impl SecureSession {
         self.mac_chaining_value = aes_cmac(&self.s_mac[..], &mac_input)?;
         request.extend_from_slice(&self.mac_chaining_value[..MAC_LENGTH]);
 
-        let encoded_response = connector.send(&request, DEFAULT_TIMEOUT)?;
+        let encoded_response = connector.send(&request, Duration::ZERO)?;
         let response = Frame::parse(&encoded_response)?;
         if !require_response_mac && response.command == command | RESPONSE_BIT {
             return Ok(response);
