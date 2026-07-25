@@ -1057,7 +1057,7 @@ impl Slot for AbiYubiHsmSlot {
             Ok(())
         } else if pin == b":0001default" {
             let password = pinentry::request(pinentry::Prompt {
-                title: "YubiHSM Auth #AUTH0001 accessing ABI YubiHSM #HSM00001",
+                title: "HSM Auth #AUTH0001 accessing ABI YubiHSM #HSM00001",
                 description: "Enter the authentication password for \"default\".",
                 label: "Authentication password:",
             })?;

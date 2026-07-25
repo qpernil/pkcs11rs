@@ -458,7 +458,7 @@ impl Slot for PivSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.serial())
+        format!("PIV #{}", self.serial())
     }
     fn serial(&self) -> &str {
         if self.serial == "0" || self.serial.is_empty() {

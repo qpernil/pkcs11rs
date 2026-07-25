@@ -1657,7 +1657,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         (
             crate::ABI_TEST_PIV_SLOT_ID,
-            b"YubiKey PIV #PIV00001".as_slice(),
+            b"PIV #PIV00001".as_slice(),
             b"PIV00001".as_slice(),
         ),
         (

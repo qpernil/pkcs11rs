@@ -19,7 +19,7 @@ impl HsmAuthProvider {
     }
 
     fn slot_label(&self) -> String {
-        format!("YubiHSM Auth #{}", self.source_identifier())
+        format!("HSM Auth #{}", self.source_identifier())
     }
 
     pub(crate) fn authenticate(

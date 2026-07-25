@@ -214,7 +214,7 @@ impl Slot for HsmAuthSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.serial())
+        format!("HSM Auth #{}", self.serial())
     }
     fn serial(&self) -> &str {
         self.connector.serial()
