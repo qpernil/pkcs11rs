@@ -210,6 +210,12 @@ impl Slot for HsmAuthSlot {
     fn product(&self) -> &str {
         "YubiHSM Auth"
     }
+    fn model(&self) -> &str {
+        self.connector.product()
+    }
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
+    }
     fn serial(&self) -> &str {
         self.connector.serial()
     }
@@ -530,7 +536,10 @@ impl Slot for IssuerSecurityDomainSlot {
         "Issuer SD"
     }
     fn model(&self) -> &str {
-        "Issuer SD"
+        self.connector.product()
+    }
+    fn label(&self) -> String {
+        format!("{} #{}", self.product(), self.serial())
     }
     fn serial(&self) -> &str {
         self.connector.serial()

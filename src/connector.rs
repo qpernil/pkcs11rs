@@ -621,6 +621,7 @@ pub(crate) struct PcscConnector {
     pub(crate) reader: std::ffi::CString,
     pub(crate) context: Rc<pcsc::Context>,
     pub(crate) card: RefCell<Option<pcsc::Card>>,
+    pub(crate) yubikey_device_info: OnceLock<YubiKeyDeviceInfo>,
     pub(crate) firmware_version: Cell<Option<(u8, u8, u8)>>,
     pub(crate) serial_number: OnceLock<String>,
     pub(crate) apdu_capabilities: Cell<ApduCapabilities>,
@@ -647,19 +648,33 @@ impl Connector for PcscConnector {
         "Yubico"
     }
     fn product(&self) -> &str {
-        "YubiKey"
+        self.yubikey_device_info
+            .get()
+            .and_then(|info| info.part_number.as_deref())
+            .unwrap_or("YubiKey")
     }
     fn serial(&self) -> &str {
-        self.serial_number.get().map(String::as_str).unwrap_or("0")
+        self.yubikey_device_info
+            .get()
+            .and_then(|info| info.serial.as_deref())
+            .or_else(|| self.serial_number.get().map(String::as_str))
+            .unwrap_or("0")
     }
     fn major(&self) -> u8 {
-        0
+        self.firmware_version()
+            .map(|(major, _, _)| major)
+            .unwrap_or(0)
     }
     fn minor(&self) -> u8 {
-        0
+        self.firmware_version()
+            .map(|(_, minor, patch)| minor.saturating_mul(10).saturating_add(patch))
+            .unwrap_or(0)
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
-        self.firmware_version.get()
+        self.yubikey_device_info
+            .get()
+            .and_then(|info| info.version)
+            .or_else(|| self.firmware_version.get())
     }
     fn connection_epoch(&self) -> u64 {
         self.connection_epoch.get()
@@ -799,6 +814,10 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
 }
 
 impl PcscConnector {
+    pub(crate) fn set_yubikey_device_info(&self, info: YubiKeyDeviceInfo) {
+        let _ = self.yubikey_device_info.set(info);
+    }
+
     fn _reconnect(&self) -> Result<(), Error> {
         match self.card.borrow_mut().as_mut() {
             Some(card) => card
