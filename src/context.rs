@@ -39,9 +39,7 @@ pub(crate) fn configured_yubihsm_urls(
         if url.is_empty() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        if !urls.iter().any(|configured| configured == url) {
-            urls.push(url.to_owned());
-        }
+        urls.push(url.to_owned());
     }
     Ok(urls)
 }
