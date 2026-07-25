@@ -27,7 +27,8 @@ pub(crate) use piv::{
 };
 pub(crate) use traits::{apply_connector_versions, session_state, Session, Slot};
 pub(crate) use yubihsm::{
-    send_yubihsm_secure_command, HsmAuthProvider, YubiHsmPublicDiscoveryCredential, YubiHsmSlot,
+    send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry,
+    YubiHsmPublicDiscoveryCredential, YubiHsmSlot,
 };
 
 #[cfg(any(not(feature = "abi-tests"), test))]

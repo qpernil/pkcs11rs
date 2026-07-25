@@ -50,7 +50,7 @@ fn security_domain_put_scp03_key_set(
     }
     let keys = Scp03ProvisioningKeys { enc, mac, dek };
 
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         validate_security_domain_administration(ctx, slot_id, flags, logged_in)?;
         let result = ctx
@@ -88,7 +88,7 @@ fn security_domain_delete_scp03_key_set(
         x if x == CK_TRUE as CK_BBOOL => true,
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
     };
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         validate_security_domain_administration(ctx, slot_id, flags, logged_in)?;
         let result = ctx
@@ -135,7 +135,7 @@ fn security_domain_generate_scp11_key(
 ) -> Result<(), Error> {
     let required = security_domain::scp11_public_point_length(curve)?;
     let public_key_len = as_mut(public_key_len)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = validate_security_domain_session(ctx, session_handle)?;
         if public_key.is_null() {
             *public_key_len = required as CK_ULONG;
@@ -340,7 +340,7 @@ fn security_domain_mutation(
     session_handle: CK_SESSION_HANDLE,
     operation: Scp11Administration,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = validate_security_domain_session(ctx, session_handle)?;
         let result = ctx
             ._get_session(session_handle)?

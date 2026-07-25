@@ -35,7 +35,7 @@ fn generate_key(
     let mechanism = _as_ref(mechanism)?;
     let templ = from_raw_parts(templ, count as usize)?;
 
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_GENERATE as CK_FLAGS)?;
         if ctx.get_slot(slot_id)?.is_yubihsm() {
@@ -253,13 +253,15 @@ fn generate_key_pair(
     public_key: CK_OBJECT_HANDLE_PTR,
     private_key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    with_context(|ctx| ctx._get_session(session_handle).map(|_| ()))?;
+    with_session_context(session_handle, |ctx| {
+        ctx._get_session(session_handle).map(|_| ())
+    })?;
     let mechanism = _as_ref(mechanism)?;
     let public_template = from_raw_parts(public_template, public_count as usize)?;
     let private_template = from_raw_parts(private_template, private_count as usize)?;
     let public_handle = as_mut(public_key)?;
     let private_handle = as_mut(private_key)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         require_slot_mechanism(
             ctx,
@@ -1037,7 +1039,7 @@ fn derive_key(
     let templ = from_raw_parts(templ, attribute_count as usize)?;
     validate_unique_template(templ)?;
 
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
         let object = ctx
@@ -1238,7 +1240,7 @@ pub extern "C" fn C_SeedRandom(
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     log!(2, "C_SeedRandom called");
-    let result: Result<(), Error> = with_context(|ctx| {
+    let result: Result<(), Error> = with_session_context(session, |ctx| {
         ctx._get_session(session)?;
         Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
     });
@@ -1252,7 +1254,7 @@ pub extern "C" fn C_GenerateRandom(
     random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     log!(2, "C_GenerateRandom called");
-    let result: Result<(), Error> = with_context_mut(|ctx| {
+    let result: Result<(), Error> = with_session_context_mut(session, |ctx| {
         let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
         let slot_id = ctx._get_session(session)?.1.slotID();
         ctx.reconcile_login_state(slot_id);

@@ -11,6 +11,7 @@ use crate::{
     YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
     YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
 };
+use std::sync::Arc;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -1634,13 +1635,13 @@ fn password_derivation_matches_yubihsm_defaults() {
     );
 }
 
-fn public_discovery_credential(password: &str) -> Rc<YubiHsmPublicDiscoveryCredential> {
+fn public_discovery_credential(password: &str) -> Arc<YubiHsmPublicDiscoveryCredential> {
     configured_yubihsm_public_discovery_credential(Some(format!("0001{password}").into()))
         .unwrap()
         .unwrap()
 }
 
-fn hsmauth_public_discovery_credential() -> Rc<YubiHsmPublicDiscoveryCredential> {
+fn hsmauth_public_discovery_credential() -> Arc<YubiHsmPublicDiscoveryCredential> {
     configured_yubihsm_public_discovery_credential(Some(
         ":0001default key@12345678:password".into(),
     ))
@@ -1680,13 +1681,13 @@ fn asymmetric_hsmauth_provider(peer: Rc<AsymmetricHsmAuthPeer>) -> crate::HsmAut
 
 fn public_discovery_test_slot(
     peer: Rc<ProtocolPeer>,
-    credential: Rc<YubiHsmPublicDiscoveryCredential>,
+    credential: Arc<YubiHsmPublicDiscoveryCredential>,
 ) -> YubiHsmSlot {
     YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
         peer,
         (2, 4, 1),
         vec![YUBIHSM_ALGO_RSA_2048, crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256],
-        Rc::new(RefCell::new(Vec::new())),
+        Arc::new(crate::HsmAuthProviderRegistry::default()),
         Some(credential),
     )
 }
@@ -2967,7 +2968,9 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
 fn yubihsm_public_discovery_reuses_the_yubihsm_auth_login_path() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
-    let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+    let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+        symmetric_hsmauth_provider("12345678"),
+    ]));
     let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
         peer.clone(),
         (2, 4, 1),
@@ -2998,7 +3001,9 @@ fn yubihsm_public_discovery_supports_asymmetric_yubihsm_auth_credentials() {
     peer.use_asymmetric_authentication(1);
     peer.add_public_certificate_pair();
     let hsmauth = Rc::new(AsymmetricHsmAuthPeer::new());
-    let providers = Rc::new(RefCell::new(vec![asymmetric_hsmauth_provider(hsmauth)]));
+    let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+        asymmetric_hsmauth_provider(hsmauth),
+    ]));
     let credential = configured_yubihsm_public_discovery_credential(Some(
         ":0001asymmetric@87654321:password".into(),
     ))
@@ -3036,7 +3041,7 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
         let direct_credential = configured_yubihsm_public_discovery_credential(Some("0001".into()))
             .unwrap()
             .unwrap();
-        assert!(direct_credential.password.borrow().is_none());
+        assert!(direct_credential.password.lock().unwrap().is_none());
         credential = configured_yubihsm_public_discovery_credential(Some(
             ":0001default key@12345678".into(),
         ))
@@ -3044,7 +3049,9 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
         .unwrap();
         let peer = Rc::new(ProtocolPeer::new());
         peer.add_public_certificate_pair();
-        let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+        let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+            symmetric_hsmauth_provider("12345678"),
+        ]));
         let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
             peer.clone(),
             (2, 4, 1),
@@ -3066,7 +3073,9 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
     assert!(!crate::pinentry::is_configured());
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
-    let providers = Rc::new(RefCell::new(vec![symmetric_hsmauth_provider("12345678")]));
+    let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+        symmetric_hsmauth_provider("12345678"),
+    ]));
     let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
         peer.clone(),
         (2, 4, 1),
@@ -3089,7 +3098,7 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
 fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
-    let providers = Rc::new(RefCell::new(Vec::new()));
+    let providers = Arc::new(crate::HsmAuthProviderRegistry::default());
     let mut slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
         peer.clone(),
         (2, 4, 1),
@@ -3115,8 +3124,8 @@ fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
     Slot::logout(&mut slot).unwrap();
 
     providers
-        .borrow_mut()
-        .push(symmetric_hsmauth_provider("12345678"));
+        .extend([symmetric_hsmauth_provider("12345678")])
+        .unwrap();
     assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
         matches!(
             object.material,
@@ -3769,7 +3778,9 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         yubihsm.clone(),
         (2, 4, 1),
         vec![crate::YUBIHSM_ALGO_RSA_2048],
-        std::rc::Rc::new(std::cell::RefCell::new(vec![provider, duplicate])),
+        std::sync::Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+            provider, duplicate,
+        ])),
     );
 
     assert!(matches!(
@@ -3845,7 +3856,7 @@ fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
         yubihsm.clone(),
         (2, 4, 1),
         vec![crate::YUBIHSM_ALGO_RSA_2048],
-        std::rc::Rc::new(std::cell::RefCell::new(vec![provider])),
+        std::sync::Arc::new(crate::HsmAuthProviderRegistry::new(vec![provider])),
     );
 
     crate::Slot::login(&mut slot, b":0001asymmetric:password").unwrap();

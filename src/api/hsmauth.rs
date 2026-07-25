@@ -281,7 +281,7 @@ fn hsmauth_mutation(
     session_handle: CK_SESSION_HANDLE,
     operation: HsmAuthAdministration<'_>,
 ) -> Result<Vec<u8>, Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = validate_hsmauth_session(ctx, session_handle)?;
 
         let result = ctx
@@ -309,7 +309,9 @@ fn hsmauth_mutation(
 }
 
 fn hsmauth_validate_session_handle(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
-    with_context_mut(|ctx| validate_hsmauth_session(ctx, session_handle).map(|_| ()))
+    with_session_context_mut(session_handle, |ctx| {
+        validate_hsmauth_session(ctx, session_handle).map(|_| ())
+    })
 }
 
 fn validate_hsmauth_session(

@@ -129,7 +129,7 @@ fn crypt_init(
     key: CK_OBJECT_HANDLE,
     encrypting: bool,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let operation_active = if encrypting {
             ctx.encrypt_operations.contains_key(&session_handle)
@@ -465,7 +465,7 @@ fn crypt(
     finalizing: bool,
 ) -> Result<(), Error> {
     if output_len.is_null() {
-        let _ = with_context_mut(|ctx| {
+        let _ = with_session_context_mut(session_handle, |ctx| {
             ctx.encrypt_operations.remove(&session_handle);
             ctx.decrypt_operations.remove(&session_handle);
             Ok(())
@@ -473,7 +473,7 @@ fn crypt(
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let output_len = as_mut(output_len)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let operation = if encrypting {
             ctx.encrypt_operations.get(&session_handle)
@@ -756,7 +756,7 @@ fn crypt_update(
     encrypting: bool,
 ) -> Result<(), Error> {
     if output_len.is_null() {
-        return with_context_mut(|ctx| {
+        return with_session_context_mut(session_handle, |ctx| {
             ctx._get_session(session_handle)?;
             if encrypting {
                 ctx.encrypt_operations.remove(&session_handle);
@@ -767,7 +767,7 @@ fn crypt_update(
         });
     }
     let output_len = as_mut(output_len)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let operation = if encrypting {
             ctx.encrypt_operations.get(&session_handle)

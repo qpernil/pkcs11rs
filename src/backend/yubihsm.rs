@@ -8,6 +8,88 @@ pub(crate) struct HsmAuthProvider {
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
 }
 
+// Providers contain connector handles that are not marked Send by their
+// dependency crates. They are only shared through HsmAuthProviderRegistry,
+// which keeps selection and use under one mutex; the PC/SC connector then
+// serializes each complete applet exchange on its reader.
+unsafe impl Send for HsmAuthProvider {}
+
+#[derive(Debug, Default)]
+pub(crate) struct HsmAuthProviderRegistry {
+    providers: Mutex<Vec<HsmAuthProvider>>,
+}
+
+impl HsmAuthProviderRegistry {
+    #[cfg(test)]
+    pub(crate) fn new(providers: Vec<HsmAuthProvider>) -> Self {
+        Self {
+            providers: Mutex::new(providers),
+        }
+    }
+
+    pub(crate) fn extend(
+        &self,
+        providers: impl IntoIterator<Item = HsmAuthProvider>,
+    ) -> Result<(), Error> {
+        self.providers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .extend(providers);
+        Ok(())
+    }
+
+    fn is_empty(&self) -> Result<bool, Error> {
+        Ok(self
+            .providers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .is_empty())
+    }
+
+    fn with_provider<T>(
+        &self,
+        login: &HsmAuthLogin<'_>,
+        operation: impl FnOnce(&HsmAuthProvider) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let providers = self
+            .providers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        log!(
+            2,
+            "YubiHSM Auth searching {} discovered credential providers",
+            providers.len()
+        );
+        let mut matches = providers.iter().filter(|provider| {
+            provider.credential.label == login.label
+                && login
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| provider.source_identifier() == *source)
+        });
+        let provider = match matches.next() {
+            Some(provider) => provider,
+            None => {
+                log!(
+                    2,
+                    "YubiHSM Auth found no credential matching label {:?} and source {:?}",
+                    login.label,
+                    login.source
+                );
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+        };
+        if matches.next().is_some() {
+            log!(
+                2,
+                "YubiHSM Auth credential label is ambiguous; add the source serial postfix"
+            );
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        operation(provider)
+    }
+}
+
 impl HsmAuthProvider {
     fn source_identifier(&self) -> String {
         let serial = self.connector.serial();
@@ -229,13 +311,13 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) connector: Rc<dyn Connector>,
     pub(crate) session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
     pub(crate) session_role: Cell<Option<YubiHsmSessionRole>>,
-    pub(crate) public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
+    pub(crate) public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
     pub(crate) algorithms: Vec<u8>,
     pub(crate) model: String,
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
-    pub(crate) hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+    pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
     pub(crate) object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
     pub(crate) object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     pub(crate) attestation_cache:
@@ -256,7 +338,7 @@ pub(crate) const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
 pub(crate) struct YubiHsmPublicDiscoveryCredential {
     pub(crate) username: Vec<u8>,
     pub(crate) authkey_id: u16,
-    pub(crate) password: RefCell<Option<Zeroizing<Vec<u8>>>>,
+    pub(crate) password: Mutex<Option<Zeroizing<Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
@@ -279,21 +361,24 @@ impl YubiHsmPublicDiscoveryCredential {
         prompt: pinentry::Prompt<'_>,
         operation: impl FnOnce(&[u8]) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let mut password = self.password.try_borrow_mut()?;
-        if password.is_none() {
-            let entered = pinentry::request(prompt)?;
-            match parse_yubihsm_login_username(&self.username)? {
-                YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
-                    return Err(CKR_PIN_INCORRECT.into());
+        let password = {
+            let mut password = self.password.lock().map_err(|_| CKR_MUTEX_BAD)?;
+            if password.is_none() {
+                let entered = pinentry::request(prompt)?;
+                match parse_yubihsm_login_username(&self.username)? {
+                    YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
+                        return Err(CKR_PIN_INCORRECT.into());
+                    }
+                    YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
+                        return Err(CKR_PIN_INCORRECT.into());
+                    }
+                    _ => {}
                 }
-                YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
-                    return Err(CKR_PIN_INCORRECT.into());
-                }
-                _ => {}
+                *password = Some(entered);
             }
-            *password = Some(entered);
-        }
-        operation(password.as_deref().ok_or(CKR_PIN_INCORRECT)?.as_slice())
+            password.clone().ok_or(CKR_PIN_INCORRECT)?
+        };
+        operation(password.as_slice())
     }
 }
 
@@ -310,7 +395,7 @@ pub(crate) struct YubiHsmObjectCache {
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
 pub(crate) fn configured_yubihsm_public_discovery_credential(
     credential: Option<std::ffi::OsString>,
-) -> Result<Option<Rc<YubiHsmPublicDiscoveryCredential>>, Error> {
+) -> Result<Option<Arc<YubiHsmPublicDiscoveryCredential>>, Error> {
     let Some(credential) = credential else {
         return Ok(None);
     };
@@ -341,10 +426,10 @@ pub(crate) fn configured_yubihsm_public_discovery_credential(
     if password.is_none() && !pinentry::is_configured() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    Ok(Some(Rc::new(YubiHsmPublicDiscoveryCredential {
+    Ok(Some(Arc::new(YubiHsmPublicDiscoveryCredential {
         username: username.to_vec(),
         authkey_id,
-        password: RefCell::new(password.map(|password| Zeroizing::new(password.to_vec()))),
+        password: Mutex::new(password.map(|password| Zeroizing::new(password.to_vec()))),
     })))
 }
 
@@ -473,7 +558,7 @@ impl YubiHsmSlot {
             algorithms,
             model: String::from("YubiHSM"),
             trust_prefix: None,
-            hsmauth_providers: Rc::new(RefCell::new(Vec::new())),
+            hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             attestation_cache: RefCell::new(HashMap::new()),
@@ -486,7 +571,7 @@ impl YubiHsmSlot {
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
-        hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+        hsmauth_providers: Arc<HsmAuthProviderRegistry>,
     ) -> Self {
         let mut slot = Self::new(connector, version, algorithms);
         slot.hsmauth_providers = hsmauth_providers;
@@ -497,8 +582,8 @@ impl YubiHsmSlot {
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
-        hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
-        public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
+        hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+        public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
     ) -> Self {
         let mut slot =
             Self::with_hsmauth_providers(connector, version, algorithms, hsmauth_providers);
@@ -517,43 +602,12 @@ impl YubiHsmSlot {
             .ok_or_else(|| CKR_DEVICE_ERROR.into())
     }
 
-    fn hsmauth_provider(&self, login: &HsmAuthLogin<'_>) -> Result<HsmAuthProvider, Error> {
-        let providers = self
-            .hsmauth_providers
-            .try_borrow()
-            .map_err(|_| CKR_CANT_LOCK)?;
-        log!(
-            2,
-            "YubiHSM Auth searching {} discovered credential providers",
-            providers.len()
-        );
-        let mut matches = providers.iter().filter(|provider| {
-            provider.credential.label == login.label
-                && login
-                    .source
-                    .as_ref()
-                    .is_none_or(|source| provider.source_identifier() == *source)
-        });
-        let provider = match matches.next().cloned() {
-            Some(provider) => provider,
-            None => {
-                log!(
-                    2,
-                    "YubiHSM Auth found no credential matching label {:?} and source {:?}",
-                    login.label,
-                    login.source
-                );
-                return Err(CKR_PIN_INCORRECT.into());
-            }
-        };
-        if matches.next().is_some() {
-            log!(
-                2,
-                "YubiHSM Auth credential label is ambiguous; add the source serial postfix"
-            );
-            return Err(CKR_PIN_INCORRECT.into());
-        }
-        Ok(provider)
+    fn with_hsmauth_provider<T>(
+        &self,
+        login: &HsmAuthLogin<'_>,
+        operation: impl FnOnce(&HsmAuthProvider) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.hsmauth_providers.with_provider(login, operation)
     }
 
     fn cache_object_info(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
@@ -879,36 +933,37 @@ impl YubiHsmSlot {
                     login.source,
                     login.authkey_id
                 );
-                let provider = self.hsmauth_provider(&login)?;
-                log!(
-                    2,
-                    "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
-                    provider.credential.label,
-                    provider.source_identifier(),
-                    provider.credential.algorithm
-                );
-                let session = match provider.authenticate(
-                    self.connector.as_ref(),
-                    login.authkey_id,
-                    password,
-                ) {
-                    Ok(session) => session,
-                    Err(error) => {
-                        log!(
-                            1,
-                            "YubiHSM Auth secure-session authentication failed: {:?}",
-                            error
-                        );
-                        return Err(error);
-                    }
-                };
-                log!(
-                    2,
-                    "YubiHSM Auth established a secure session with {} using authentication key {:04x}",
-                    self.connector.name(),
-                    login.authkey_id
-                );
-                Ok((session, login.authkey_id))
+                self.with_hsmauth_provider(&login, |provider| {
+                    log!(
+                        2,
+                        "YubiHSM Auth matched credential {:?} from {:?} using algorithm {:?}",
+                        provider.credential.label,
+                        provider.source_identifier(),
+                        provider.credential.algorithm
+                    );
+                    let session = match provider.authenticate(
+                        self.connector.as_ref(),
+                        login.authkey_id,
+                        password,
+                    ) {
+                        Ok(session) => session,
+                        Err(error) => {
+                            log!(
+                                1,
+                                "YubiHSM Auth secure-session authentication failed: {:?}",
+                                error
+                            );
+                            return Err(error);
+                        }
+                    };
+                    log!(
+                        2,
+                        "YubiHSM Auth established a secure session with {} using authentication key {:04x}",
+                        self.connector.name(),
+                        login.authkey_id
+                    );
+                    Ok((session, login.authkey_id))
+                })
             }
             YubiHsmLoginUsername::Direct(authkey_id) => {
                 if !(8..=64).contains(&password.len()) {
@@ -1338,10 +1393,11 @@ impl YubiHsmSlot {
         };
         if credential.uses_hsmauth() {
             let provider_available = match parse_yubihsm_login_username(&credential.username) {
-                Ok(YubiHsmLoginUsername::HsmAuth(login)) => match self.hsmauth_provider(&login) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        log!(
+                Ok(YubiHsmLoginUsername::HsmAuth(login)) => {
+                    match self.with_hsmauth_provider(&login, |_| Ok(())) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            log!(
                                 1,
                                 "YubiHSM pre-login authentication could not resolve YubiHSM Auth credential {:?}, source {:?}, for authentication key {:04x} on {}: {:?}; public discovery remains retryable",
                                 login.label,
@@ -1350,9 +1406,10 @@ impl YubiHsmSlot {
                                 self.connector.name(),
                                 error
                             );
-                        false
+                            false
+                        }
                     }
-                },
+                }
                 _ => false,
             };
             if !provider_available {
@@ -2222,8 +2279,13 @@ impl Slot for YubiHsmSlot {
         let YubiHsmLoginUsername::HsmAuth(login) = parse_yubihsm_login_username(username)? else {
             return Err(CKR_PIN_INCORRECT.into());
         };
-        let provider = self.hsmauth_provider(&login)?;
-        let title = format!("{} accessing {}", provider.slot_label(), self.label());
+        let title = self.with_hsmauth_provider(&login, |provider| {
+            Ok(format!(
+                "{} accessing {}",
+                provider.slot_label(),
+                self.label()
+            ))
+        })?;
         let description = format!("Enter the authentication password for {:?}.", login.label);
         let password = pinentry::request(pinentry::Prompt {
             title: &title,
@@ -2329,11 +2391,7 @@ impl Slot for YubiHsmSlot {
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
-        let has_hsmauth = !self
-            .hsmauth_providers
-            .try_borrow()
-            .map_err(|_| CKR_CANT_LOCK)?
-            .is_empty();
+        let has_hsmauth = !self.hsmauth_providers.is_empty()?;
         if has_hsmauth {
             info.ulMaxPinLen = 216;
             info.ulMinPinLen = 8;

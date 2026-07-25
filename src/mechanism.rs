@@ -1,7 +1,7 @@
 use crate::pkcs11::*;
 use crate::{
-    as_mut, map, with_context_mut, Context, Error, CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP,
-    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
+    as_mut, map, with_slot_context_mut, Context, Error, CKM_YUBICO_AES_CCM_WRAP,
+    CKM_YUBICO_RSA_WRAP, YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
     YUBIHSM_ALGO_AES192_CCM_WRAP, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP,
     YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_EC_BP256,
     YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512, YUBIHSM_ALGO_EC_ECDSA_SHA1,
@@ -534,7 +534,7 @@ pub(crate) fn get_mechanism_list(
     count: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     let count = as_mut(count)?;
-    with_context_mut(|ctx| {
+    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 
         let required = mechanisms.len() as CK_ULONG;
@@ -578,7 +578,7 @@ pub(crate) fn get_mechanism_info(
     info_ptr: CK_MECHANISM_INFO_PTR,
 ) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context_mut(|ctx| {
+    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 
         let mechanism = mechanism_details(&mechanisms, type_)?;

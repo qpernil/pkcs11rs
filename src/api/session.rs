@@ -30,7 +30,7 @@ fn init_pin(
     pin: *const CK_UTF8CHAR,
     pin_len: CK_ULONG,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, _) = ctx.session_details(session_handle)?;
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
@@ -68,7 +68,7 @@ fn set_pin(
     new_pin: *const CK_UTF8CHAR,
     new_len: CK_ULONG,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, _) = ctx.session_details(session_handle)?;
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
@@ -106,7 +106,7 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context_mut(|ctx| {
+        match with_slot_context_mut(slotID, |ctx, is_yubihsm| {
             if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
                 return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
@@ -125,9 +125,19 @@ pub extern "C" fn C_OpenSession(
                     let _ = slot.refresh();
                     log!(2, "{:?}", slot);
                     if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                        let k = next_key(&ctx.sessions, 1);
+                        let k = allocate_session_handle();
                         log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
                         ctx.sessions.insert(k, slot.open_session(slotID, flags));
+                        if is_yubihsm {
+                            if let Err(_error) = SESSION_CONTEXTS
+                                .lock()
+                                .map_err(|_| Error::from(CKR_MUTEX_BAD))
+                                .map(|mut contexts| contexts.insert(k, slotID))
+                            {
+                                ctx.sessions.remove(&k);
+                                return Err(CKR_MUTEX_BAD.into());
+                            }
+                        }
                         log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
                         log!(2, "C_OpenSession returning {:?}", k);
                         *session = k;
@@ -148,7 +158,7 @@ pub extern "C" fn C_OpenSession(
 #[no_mangle]
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     log!(2, "C_CloseSession called with {:?}", session_handle);
-    match with_context_mut(|ctx| {
+    match with_session_context_mut(session_handle, |ctx| {
         log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
         let slot_id = match ctx.sessions.get(&session_handle) {
             Some(session) => session.slotID(),
@@ -182,6 +192,10 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         ctx.verify_operations.remove(&session_handle);
         ctx.memory_objects
             .retain(|_, object| object.owner_session != Some(session_handle));
+        SESSION_CONTEXTS
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .remove(&session_handle);
         log!(2, "C_CloseSession removed {:?}", (session_handle, session));
         log!(2, "C_CloseSession sessions after {:?}", ctx.sessions);
         match logout_error {
@@ -197,7 +211,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    match with_context_mut(|ctx| {
+    match with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
         if !ctx.slots.contains_key(&slotID) {
             return Ok(CKR_SLOT_ID_INVALID as CK_RV);
         }
@@ -242,6 +256,12 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
                 .map(|owner| !closed_sessions.contains(&owner))
                 .unwrap_or(true)
         });
+        SESSION_CONTEXTS
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .retain(|session, route_slot_id| {
+                *route_slot_id != slotID || !closed_sessions.contains(session)
+            });
         log!(2, "C_CloseAllSessions sessions after {:?}", ctx.sessions);
         match logout_error {
             Some(error) => Err(error),
@@ -268,7 +288,7 @@ fn get_session_info(
     info_ptr: *mut CK_SESSION_INFO,
 ) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags) = {
             let session = ctx._get_session(session_handle)?.1;
             (session.slotID(), session.flags())
@@ -354,7 +374,7 @@ fn login(
     pin: *const ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         if user_type == CKU_CONTEXT_SPECIFIC as CK_USER_TYPE {
             return with_pin(pin, pin_len, |pin| {
@@ -460,7 +480,7 @@ fn login_user(
     username: *const CK_UTF8CHAR,
     username_len: CK_ULONG,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
@@ -521,7 +541,7 @@ pub extern "C" fn C_LoginUser(
 }
 
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
         ctx.reconcile_login_state(slot_id);
         if !ctx.is_slot_logged_in(slot_id) {

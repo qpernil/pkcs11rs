@@ -30,7 +30,7 @@ fn create_object(
 ) -> Result<(), Error> {
     let object_handle = as_mut(object)?;
     let templ = from_raw_parts(templ, count as usize)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         if ctx.get_slot(slot_id)?.is_piv() {
             let import = piv_import_parameters(templ)?;
@@ -1081,7 +1081,7 @@ fn copy_object(
     let new_object_handle = as_mut(new_object)?;
     let templ = from_raw_parts(templ, count as usize)?;
     validate_unique_template(templ)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
             .resolve_object(object)?
@@ -1137,7 +1137,7 @@ fn destroy_object(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
 ) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
@@ -1286,7 +1286,7 @@ fn get_object_size(
     size: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     let size = as_mut(size)?;
-    with_context(|ctx| {
+    with_session_context(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .resolve_object(object)?
@@ -1322,7 +1322,7 @@ fn get_attribute_value(
     count: CK_ULONG,
 ) -> Result<(), Error> {
     let templ = _from_raw_parts_mut(templ, count as usize)?;
-    with_context(|ctx| {
+    with_session_context(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .resolve_object(object)?
@@ -1494,7 +1494,7 @@ fn set_attribute_value(
 ) -> Result<(), Error> {
     let templ = from_raw_parts(templ, count as usize)?;
     validate_unique_template(templ)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
@@ -1661,7 +1661,7 @@ fn find_objects_init(
             ))
         })
         .collect::<Result<_, Error>>()?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         if ctx.find_operations.contains_key(&session_handle) {
             return Err(CKR_OPERATION_ACTIVE.into());
@@ -1721,7 +1721,7 @@ fn find_objects(
 ) -> Result<(), Error> {
     let object_count = as_mut(object_count)?;
     let output = _from_raw_parts_mut(object, max_object_count as usize)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         let operation = ctx
             .find_operations
@@ -1745,7 +1745,7 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
 }
 
 fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         ctx.find_operations
             .remove(&session_handle)

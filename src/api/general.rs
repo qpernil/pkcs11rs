@@ -1,7 +1,7 @@
 use crate::*;
 
 pub(super) fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    let result: Result<(), Error> = with_context(|ctx| {
+    let result: Result<(), Error> = with_session_context(session_handle, |ctx| {
         ctx._get_session(session_handle)?;
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     });
@@ -17,6 +17,10 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
     }
+    let _lifecycle = match G_LIFECYCLE.write() {
+        Ok(guard) => guard,
+        Err(_) => return CKR_MUTEX_BAD as CK_RV,
+    };
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
@@ -72,6 +76,10 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     if !pReserved.is_null() {
         return CKR_ARGUMENTS_BAD.into();
     }
+    let _lifecycle = match G_LIFECYCLE.write() {
+        Ok(guard) => guard,
+        Err(_) => return CKR_MUTEX_BAD as CK_RV,
+    };
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
             Some(ctx) => {
@@ -84,8 +92,28 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
                         logout_failed = true;
                     }
                 }
+                for child in ctx.yubihsm_contexts.values() {
+                    let Ok(mut child) = child.lock() else {
+                        logout_failed = true;
+                        continue;
+                    };
+                    let logged_in_slots: Vec<CK_SLOT_ID> =
+                        child.logged_in_slots.keys().copied().collect();
+                    for slot_id in logged_in_slots {
+                        if child.logout_slot(slot_id).is_err() {
+                            child.clear_login_state(slot_id);
+                            logout_failed = true;
+                        }
+                    }
+                }
                 *guard = None;
+                if let Ok(mut session_contexts) = SESSION_CONTEXTS.lock() {
+                    session_contexts.clear();
+                } else {
+                    logout_failed = true;
+                }
                 reset_object_handles();
+                reset_session_handles();
                 if logout_failed {
                     CKR_FUNCTION_FAILED as CK_RV
                 } else {
@@ -149,13 +177,29 @@ pub extern "C" fn C_GetSlotList(
         match with_context_mut(|ctx| {
             ctx.init();
             let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
-                ctx.slots.keys().cloned().collect()
-            } else {
                 ctx.slots
+                    .keys()
+                    .chain(ctx.yubihsm_contexts.keys())
+                    .copied()
+                    .collect()
+            } else {
+                let mut keys: Vec<_> = ctx
+                    .slots
                     .iter()
                     .filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0)
                     .map(|s| *s.0)
-                    .collect()
+                    .collect();
+                for (slot_id, child) in &ctx.yubihsm_contexts {
+                    let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
+                    if child
+                        .slots
+                        .get(slot_id)
+                        .is_some_and(|slot| slot.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0)
+                    {
+                        keys.push(*slot_id);
+                    }
+                }
+                keys
             };
             match slot_list.as_mut() {
                 Some(_) => {
@@ -186,7 +230,7 @@ pub extern "C" fn C_GetSlotList(
 
 fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context(|ctx| ctx.get_slot(slotID)?.get_slot_info(info))
+    with_slot_context(slotID, |ctx| ctx.get_slot(slotID)?.get_slot_info(info))
 }
 
 #[no_mangle]
@@ -197,7 +241,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO)
 
 fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_context_mut(|ctx| {
+    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
         ctx.get_present_slot(slotID)?.get_token_info(info)?;
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = ctx

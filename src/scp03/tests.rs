@@ -244,12 +244,10 @@ fn secure_channel_connector_wraps_encoded_apdus() {
         base,
         application_aid: application_aid.clone(),
         protocol: Some(crate::SecureChannelProtocol::Scp03),
-        state: std::rc::Rc::new(RefCell::new(crate::SecureChannelState {
+        state: std::sync::Arc::new(crate::PcscDeviceState::with_secure_channel(
             application_aid,
-            session: Some(test_session(0x01)),
-            validated_scp11_keys: std::collections::HashMap::new(),
-            connection_epoch: 0,
-        })),
+            test_session(0x01),
+        )),
         enabled: std::cell::Cell::new(true),
         applet_present: std::cell::Cell::new(true),
         discovery_error: RefCell::new(None),

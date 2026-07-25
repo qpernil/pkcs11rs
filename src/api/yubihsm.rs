@@ -87,7 +87,7 @@ pub(crate) fn yubihsm_enroll_device(
     trust_prefix: Option<&std::ffi::OsStr>,
 ) -> Result<(), Error> {
     let fingerprint_len = as_mut(fingerprint_len)?;
-    with_context_mut(|ctx| {
+    with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         validate_yubihsm_enrollment(ctx, slot_id, flags, logged_in)?;
         let session = ctx._get_session(session_handle)?.1;
