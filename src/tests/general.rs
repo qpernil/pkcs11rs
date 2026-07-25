@@ -2679,6 +2679,51 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
 }
 
 #[test]
+fn token_object_handles_are_allocated_in_stable_identity_order() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    fn reconcile_order(context: &mut crate::Context, unique_ids: &[&str]) -> Vec<String> {
+        let template = context.memory_objects.values().next().unwrap().clone();
+        let objects = unique_ids
+            .iter()
+            .map(|unique_id| {
+                let mut object = template.clone();
+                object.slot_id = Some(100);
+                object.unique_id = (*unique_id).to_owned();
+                object.token = true;
+                object
+            })
+            .collect();
+        context.reconcile_slot_token_objects(100, objects).unwrap();
+        let mut handles = context
+            .token_object_handles
+            .iter()
+            .filter(|(_, locator)| locator.slot_id == 100)
+            .map(|(handle, locator)| (*handle, locator.unique_id.clone()))
+            .collect::<Vec<_>>();
+        handles.sort_by_key(|(handle, _)| *handle);
+        handles
+            .into_iter()
+            .map(|(_, unique_id)| unique_id)
+            .collect()
+    }
+
+    crate::reset_object_handles();
+    let mut first = crate::Context::new().unwrap();
+    let first_order = reconcile_order(&mut first, &["object-c", "object-a", "object-b"]);
+    drop(first);
+
+    crate::reset_object_handles();
+    let mut second = crate::Context::new().unwrap();
+    let second_order = reconcile_order(&mut second, &["object-b", "object-c", "object-a"]);
+
+    assert_eq!(first_order, ["object-a", "object-b", "object-c"]);
+    assert_eq!(second_order, first_order);
+    finalize_for_test();
+}
+
+#[test]
 fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

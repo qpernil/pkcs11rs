@@ -427,15 +427,18 @@ impl Context {
             .filter(|locator| locator.slot_id == slot_id)
             .map(|locator| locator.unique_id.clone())
             .collect::<HashSet<_>>();
-        for unique_id in objects_by_id
+        let mut new_unique_ids = objects_by_id
             .keys()
             .filter(|unique_id| !existing.contains(*unique_id))
-        {
+            .cloned()
+            .collect::<Vec<_>>();
+        new_unique_ids.sort();
+        for unique_id in new_unique_ids {
             self.token_object_handles.insert(
                 allocate_object_handle(),
                 TokenObjectLocator {
                     slot_id,
-                    unique_id: unique_id.clone(),
+                    unique_id,
                 },
             );
         }
