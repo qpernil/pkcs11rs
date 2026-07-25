@@ -1,4 +1,3 @@
-use super::traits::mechanisms_support_extended_provider;
 use crate::*;
 
 #[derive(Clone, Debug)]
@@ -2539,7 +2538,7 @@ impl Slot for YubiHsmSlot {
         yubihsm_mechanisms(&self.algorithms)
     }
     fn supports_extended_provider_profile(&self) -> bool {
-        mechanisms_support_extended_provider(&self.mechanisms())
+        true
     }
     fn supports_public_certificates_token_profile(&self, slot_id: CK_SLOT_ID) -> bool {
         self.public_discovery_available(slot_id)

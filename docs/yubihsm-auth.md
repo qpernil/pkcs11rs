@@ -43,15 +43,14 @@ corresponding `CKA_PROFILE_ID`:
 | Profile | When advertised |
 | --- | --- |
 | `CKP_BASELINE_PROVIDER` | Every present YubiHSM slot |
-| `CKP_EXTENDED_PROVIDER` | The slot's mechanism list satisfies the mandatory Extended Provider mechanism and flag vector |
+| `CKP_EXTENDED_PROVIDER` | Every present YubiHSM slot |
 | `CKP_AUTHENTICATION_TOKEN` | The slot advertises signing-capable `CKM_SHA256_RSA_PKCS` |
 | `CKP_PUBLIC_CERTIFICATES_TOKEN` | Successful public discovery on that slot |
 
-Production YubiHSM slots normally expose wrapping through vendor AES-CCM and
-RSA wrap mechanisms rather than all standard `CKM_RSA_PKCS` wrap/unwrap flags.
-They therefore do not normally advertise `CKP_EXTENDED_PROVIDER`. The
-synthetic ABI fixture supplies the standard Extended Provider surface only for
-OASIS profile qualification tests.
+YubiHSM slots advertise the Extended Provider profile because the module
+provides its required provider behavior through the YubiHSM's standard and
+vendor-backed wrapping adaptations. The profile is independent of the objects
+and algorithms currently provisioned on the device.
 
 Profile objects cannot be modified, copied, or destroyed. Configure a direct
 YubiHSM credential or a YubiHSM Auth credential to enable pre-login
