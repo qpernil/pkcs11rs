@@ -55,6 +55,7 @@ pub(crate) struct DeviceInfo {
     pub(crate) log_total: u8,
     pub(crate) log_used: u8,
     pub(crate) algorithms: Vec<u8>,
+    pub(crate) part_number: Option<String>,
 }
 
 #[derive(Debug)]
@@ -113,15 +114,44 @@ pub(crate) fn get_device_info(connector: &dyn Connector) -> Result<DeviceInfo, E
     if data.len() < 9 {
         return Err(CKR_DEVICE_ERROR.into());
     }
+    let major = data[0];
+    let minor = data[1];
+    let part_number = if major > 2 || (major == 2 && minor >= 4) {
+        match get_device_part_number(connector) {
+            Ok(part_number) => Some(part_number),
+            Err(error) => {
+                log!(
+                    2,
+                    "YubiHSM extended device information unavailable: {:?}",
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
     Ok(DeviceInfo {
-        major: data[0],
-        minor: data[1],
+        major,
+        minor,
         patch: data[2],
         serial: u32::from_be_bytes(data[3..7].try_into().map_err(|_| CKR_DEVICE_ERROR)?),
         log_total: data[7],
         log_used: data[8],
         algorithms: data[9..].to_vec(),
+        part_number,
     })
+}
+
+fn get_device_part_number(connector: &dyn Connector) -> Result<String, Error> {
+    let data = send_plain(connector, &Command::get_device_info(Some(1)))?;
+    let part_number = std::str::from_utf8(&data)
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?
+        .trim_end_matches(['\0', ' ']);
+    if part_number.is_empty() || part_number.chars().any(char::is_control) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(part_number.to_owned())
 }
 
 fn send_plain(connector: &dyn Connector, command: &Command) -> Result<Vec<u8>, Error> {

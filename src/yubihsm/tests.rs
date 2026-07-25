@@ -129,6 +129,8 @@ pub(crate) struct ProtocolPeer {
     last_wrapped_object: RefCell<Option<ObjectInfo>>,
     product: &'static str,
     serial: &'static str,
+    device_version: [u8; 3],
+    device_part_number: Option<&'static [u8]>,
 }
 
 fn encode_object_info(info: &ObjectInfo) -> Vec<u8> {
@@ -180,6 +182,8 @@ impl ProtocolPeer {
             last_wrapped_object: RefCell::new(None),
             product: "YubiHSM",
             serial: "16909060",
+            device_version: [2, 4, 1],
+            device_part_number: Some(b"78CLUFX5000P"),
         }
     }
 
@@ -205,6 +209,21 @@ impl ProtocolPeer {
     fn with_authenticate_payload(payload: Vec<u8>) -> Self {
         Self {
             authenticate_payload: payload,
+            ..Self::new()
+        }
+    }
+
+    fn without_extended_device_info() -> Self {
+        Self {
+            device_part_number: None,
+            ..Self::new()
+        }
+    }
+
+    fn legacy_device() -> Self {
+        Self {
+            device_version: [2, 3, 1],
+            device_part_number: None,
             ..Self::new()
         }
     }
@@ -380,11 +399,23 @@ impl ProtocolPeer {
             Some(COMMAND_CREATE_SESSION) => self.create_session(request),
             Some(COMMAND_AUTHENTICATE_SESSION) => self.authenticate_session(request),
             Some(COMMAND_SESSION_MESSAGE) => self.session_message(request),
-            Some(value) if value == CommandCode::GetDeviceInfo as u8 => Frame::new(
-                CommandCode::GetDeviceInfo as u8 | RESPONSE_BIT,
-                vec![2, 4, 1, 0x01, 0x02, 0x03, 0x04, 62, 3, 0x01, 0x02],
-            )
-            .map(|frame| frame.encode()),
+            Some(value) if value == CommandCode::GetDeviceInfo as u8 => {
+                let request = Frame::parse(request)?;
+                let response = match request.data.as_slice() {
+                    [] => [
+                        self.device_version.as_slice(),
+                        &[0x01, 0x02, 0x03, 0x04, 62, 3, 0x01, 0x02],
+                    ]
+                    .concat(),
+                    [1] => self
+                        .device_part_number
+                        .map(<[u8]>::to_vec)
+                        .ok_or(CKR_DEVICE_ERROR)?,
+                    _ => return Err(CKR_DEVICE_ERROR.into()),
+                };
+                Frame::new(CommandCode::GetDeviceInfo as u8 | RESPONSE_BIT, response)
+                    .map(|frame| frame.encode())
+            }
             Some(value) if value == CommandCode::GetDevicePublicKey as u8 => {
                 let key = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
                 let mut public = p256_public_key(&key)?;
@@ -3637,6 +3668,44 @@ fn parses_device_information() {
     assert_eq!(info.log_total, 62);
     assert_eq!(info.log_used, 3);
     assert_eq!(info.algorithms, [1, 2]);
+    assert_eq!(info.part_number.as_deref(), Some("78CLUFX5000P"));
+
+    let commands = peer.commands.borrow();
+    assert_eq!(Frame::parse(&commands[0]).unwrap().data, []);
+    assert_eq!(Frame::parse(&commands[1]).unwrap().data, [1]);
+}
+
+#[test]
+fn extended_device_information_is_optional() {
+    let peer = ProtocolPeer::without_extended_device_info();
+    let info = get_device_info(&peer).unwrap();
+    assert_eq!(info.part_number, None);
+    assert_eq!(peer.commands.borrow().len(), 2);
+}
+
+#[test]
+fn legacy_device_information_omits_the_page_byte() {
+    let peer = ProtocolPeer::legacy_device();
+    let info = get_device_info(&peer).unwrap();
+    assert_eq!((info.major, info.minor, info.patch), (2, 3, 1));
+    assert_eq!(info.part_number, None);
+    let commands = peer.commands.borrow();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(Frame::parse(&commands[0]).unwrap().data, []);
+}
+
+#[test]
+fn yubihsm_slot_uses_the_extended_part_number_as_model() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = YubiHsmSlot::new(peer, (0, 0, 0), Vec::new());
+    Slot::init_slot(&mut slot).unwrap();
+    assert_eq!(slot.model(), "78CLUFX5000P");
+    assert_eq!(slot.label(), "YubiHSM #16909060");
+
+    let mut info = unsafe { std::mem::zeroed::<crate::CK_TOKEN_INFO>() };
+    Slot::get_token_info(&slot, &mut info).unwrap();
+    assert_eq!(&info.model, b"78CLUFX5000P    ");
+    assert_eq!(&info.label[..19], b"YubiHSM #16909060  ");
 }
 
 #[test]
