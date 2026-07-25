@@ -1,12 +1,32 @@
+use crate::pkcs11::*;
+use crate::{
+    as_mut, map, with_context_mut, Context, Error, CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP,
+    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
+    YUBIHSM_ALGO_AES192_CCM_WRAP, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP,
+    YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_EC_BP256,
+    YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512, YUBIHSM_ALGO_EC_ECDSA_SHA1,
+    YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384, YUBIHSM_ALGO_EC_ECDSA_SHA512,
+    YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P384,
+    YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256,
+    YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_RSA_2048,
+    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_RSA_OAEP_SHA1,
+    YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384, YUBIHSM_ALGO_RSA_OAEP_SHA512,
+    YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1, YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+    YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512, YUBIHSM_ALGO_RSA_PSS_SHA1,
+    YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384, YUBIHSM_ALGO_RSA_PSS_SHA512,
+    YUBIHSM_ALGO_X25519,
+};
+use std::slice;
+
 #[derive(Debug, Clone, Copy)]
-struct MechanismDetails {
-    type_: CK_MECHANISM_TYPE,
-    min_key_size: CK_ULONG,
-    max_key_size: CK_ULONG,
-    flags: CK_FLAGS,
+pub(crate) struct MechanismDetails {
+    pub(crate) type_: CK_MECHANISM_TYPE,
+    pub(crate) min_key_size: CK_ULONG,
+    pub(crate) max_key_size: CK_ULONG,
+    pub(crate) flags: CK_FLAGS,
 }
 
-const MECHANISMS: [MechanismDetails; 5] = [
+pub(crate) const MECHANISMS: [MechanismDetails; 5] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 1024,
@@ -40,7 +60,7 @@ const MECHANISMS: [MechanismDetails; 5] = [
     },
 ];
 
-const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
+pub(crate) const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
     MechanismDetails {
         type_: CKM_SHA_1 as CK_MECHANISM_TYPE,
         min_key_size: 0,
@@ -97,7 +117,7 @@ const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
     },
 ];
 
-const YUBIHSM_MECHANISMS: [MechanismDetails; 24] = [
+pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 24] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -244,7 +264,7 @@ const YUBIHSM_MECHANISMS: [MechanismDetails; 24] = [
     },
 ];
 
-fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
+pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
     let any = |candidates: &[u8]| candidates.iter().any(|value| algorithms.contains(value));
     let has_rsa = any(&[
         YUBIHSM_ALGO_RSA_2048,
@@ -392,9 +412,7 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                             YUBIHSM_ALGO_RSA_OAEP_SHA512,
                         ])
                 }
-                x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE
-                    || x == CKM_YUBICO_RSA_WRAP =>
-                {
+                x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE || x == CKM_YUBICO_RSA_WRAP => {
                     has_rsa_wrap
                 }
                 x if x == CKM_YUBICO_AES_CCM_WRAP => !ccm_wrap_sizes.is_empty(),
@@ -472,7 +490,7 @@ fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
     mechanisms
 }
 
-fn mechanism_details(
+pub(crate) fn mechanism_details(
     mechanisms: &[MechanismDetails],
     type_: CK_MECHANISM_TYPE,
 ) -> Result<MechanismDetails, Error> {
@@ -483,7 +501,7 @@ fn mechanism_details(
         .ok_or(CKR_MECHANISM_INVALID.into())
 }
 
-fn require_slot_mechanism(
+pub(crate) fn require_slot_mechanism(
     ctx: &Context,
     slot_id: CK_SLOT_ID,
     type_: CK_MECHANISM_TYPE,
@@ -510,7 +528,7 @@ pub extern "C" fn C_GetMechanismList(
     map(get_mechanism_list(slotID, mechanism_list, count))
 }
 
-fn get_mechanism_list(
+pub(crate) fn get_mechanism_list(
     slotID: CK_SLOT_ID,
     mechanism_list: *mut CK_MECHANISM_TYPE,
     count: CK_ULONG_PTR,
@@ -554,7 +572,7 @@ pub extern "C" fn C_GetMechanismInfo(
     map(get_mechanism_info(slotID, type_, info_ptr))
 }
 
-fn get_mechanism_info(
+pub(crate) fn get_mechanism_info(
     slotID: CK_SLOT_ID,
     type_: CK_MECHANISM_TYPE,
     info_ptr: CK_MECHANISM_INFO_PTR,

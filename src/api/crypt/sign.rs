@@ -1,6 +1,15 @@
+use super::{
+    encrypt::yubihsm_encrypt_ecb_blocks,
+    shared::{
+        encode_pkcs1_v1_5_signature_input, yubihsm_ec_coordinate_length, yubihsm_ecdsa_signature,
+    },
+};
+use crate::api::general::session_function_not_supported;
+use crate::*;
+
 const AES_CMAC_LENGTH: usize = 16;
 
-fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
+pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
     match mechanism.mechanism {
         x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE => {
             if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
@@ -78,7 +87,7 @@ fn aes_cmac_with_encryptor(
     Ok(state.to_vec())
 }
 
-fn yubihsm_aes_cmac(
+pub(crate) fn yubihsm_aes_cmac(
     ctx: &mut Context,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
@@ -188,9 +197,7 @@ fn sign_init(
             None
         };
 
-        let object = ctx
-            .resolve_object(key)?
-            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx.resolve_object(key)?.ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
@@ -425,9 +432,7 @@ fn sign(
 
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
-                KeyMaterial::RsaPrivate(private_key) => {
-                    rsa_pkcs1_sign(private_key, data)
-                }
+                KeyMaterial::RsaPrivate(private_key) => rsa_pkcs1_sign(private_key, data),
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {
@@ -584,7 +589,6 @@ fn sign(
         Ok(())
     })
 }
-
 
 #[no_mangle]
 pub extern "C" fn C_SignUpdate(

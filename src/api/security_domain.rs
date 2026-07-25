@@ -1,3 +1,5 @@
+use crate::*;
+
 #[repr(C)]
 pub struct PKCS11RS_SCP03_KEY_SET {
     pub pEncKey: *const CK_BYTE,
@@ -147,10 +149,7 @@ fn security_domain_generate_scp11_key(
             ._get_session(session_handle)?
             .1
             .security_domain_scp11_administration(&Scp11Administration::GenerateKey {
-                key_ref: security_domain::KeyRef {
-                    kid,
-                    kvn: new_kvn,
-                },
+                key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
                 replace_kvn,
                 curve,
             });
@@ -180,10 +179,7 @@ pub extern "C" fn PKCS11RS_SecurityDomainPutScp11PrivateKey(
     map(security_domain_mutation(
         session_handle,
         Scp11Administration::PutPrivateKey {
-            key_ref: security_domain::KeyRef {
-                kid,
-                kvn: new_kvn,
-            },
+            key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
             replace_kvn,
             encoded: Zeroizing::new(match from_raw_parts(key, key_len as usize) {
                 Ok(key) => key.to_vec(),
@@ -213,10 +209,7 @@ pub extern "C" fn PKCS11RS_SecurityDomainPutScp11PublicKey(
     map(security_domain_mutation(
         session_handle,
         Scp11Administration::PutPublicKey {
-            key_ref: security_domain::KeyRef {
-                kid,
-                kvn: new_kvn,
-            },
+            key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
             replace_kvn,
             encoded: key,
         },

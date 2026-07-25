@@ -1,16 +1,16 @@
-use crate::{error::Error, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE};
+use crate::{error::Error, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE};
 use zeroize::Zeroizing;
 
-const LABEL_LENGTH: usize = 40;
-const CAPABILITIES_LENGTH: usize = 8;
-const MAX_COMMAND_DATA_LENGTH: usize = 3133;
-const MAX_OBJECT_COUNT: usize = 256;
-const MAX_LOG_ENTRY_COUNT: usize = 64;
-const ALGORITHM_AES128_YUBICO_OTP: u8 = 37;
-const ALGORITHM_AES128_YUBICO_AUTHENTICATION: u8 = 38;
-const ALGORITHM_AES192_YUBICO_OTP: u8 = 39;
-const ALGORITHM_AES256_YUBICO_OTP: u8 = 40;
-const ALGORITHM_EC_P256_YUBICO_AUTHENTICATION: u8 = 49;
+pub(super) const LABEL_LENGTH: usize = 40;
+pub(super) const CAPABILITIES_LENGTH: usize = 8;
+pub(super) const MAX_COMMAND_DATA_LENGTH: usize = 3133;
+pub(super) const MAX_OBJECT_COUNT: usize = 256;
+pub(super) const MAX_LOG_ENTRY_COUNT: usize = 64;
+pub(super) const ALGORITHM_AES128_YUBICO_OTP: u8 = 37;
+pub(super) const ALGORITHM_AES128_YUBICO_AUTHENTICATION: u8 = 38;
+pub(super) const ALGORITHM_AES192_YUBICO_OTP: u8 = 39;
+pub(super) const ALGORITHM_AES256_YUBICO_OTP: u8 = 40;
+pub(super) const ALGORITHM_EC_P256_YUBICO_AUTHENTICATION: u8 = 49;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -176,8 +176,8 @@ impl CommandCode {
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Command {
-    code: CommandCode,
-    data: Zeroizing<Vec<u8>>,
+    pub(super) code: CommandCode,
+    pub(super) data: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Command {
@@ -194,7 +194,7 @@ impl Command {
         Self::from_vec(code, data.to_vec())
     }
 
-    fn from_vec(code: CommandCode, data: Vec<u8>) -> Result<Self, Error> {
+    pub(super) fn from_vec(code: CommandCode, data: Vec<u8>) -> Result<Self, Error> {
         if data.len() > MAX_COMMAND_DATA_LENGTH {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
@@ -220,14 +220,14 @@ impl Command {
     }
 }
 
-fn prefixed_u16(value: u16, tail: &[u8]) -> Vec<u8> {
+pub(super) fn prefixed_u16(value: u16, tail: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(2 + tail.len());
     data.extend_from_slice(&value.to_be_bytes());
     data.extend_from_slice(tail);
     data
 }
 
-fn ensure_code(code: CommandCode, allowed: &[CommandCode]) -> Result<(), Error> {
+pub(super) fn ensure_code(code: CommandCode, allowed: &[CommandCode]) -> Result<(), Error> {
     if allowed.contains(&code) {
         Ok(())
     } else {
@@ -235,7 +235,7 @@ fn ensure_code(code: CommandCode, allowed: &[CommandCode]) -> Result<(), Error> 
     }
 }
 
-fn require_digest_length(digest: &[u8]) -> Result<(), Error> {
+pub(super) fn require_digest_length(digest: &[u8]) -> Result<(), Error> {
     if matches!(digest.len(), 20 | 32 | 48 | 64) {
         Ok(())
     } else {

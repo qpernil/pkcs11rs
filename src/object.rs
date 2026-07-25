@@ -1,31 +1,53 @@
+use crate::piv;
+use crate::pkcs11::*;
+use crate::{
+    der_octet_string, hash, is_yubihsm_ec, is_yubihsm_rsa, is_yubihsm_x25519, openpgp_ec_params,
+    openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
+    piv_ec_coordinate_length, piv_ec_parameters, piv_effective_pin_policy,
+    piv_public_key_from_certificate, send_yubihsm_secure_command,
+    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
+    Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
+    PivClient, YubiHsmCommand, YubiHsmSecureSession, CKA_PKCS11RS_PIV_OBJECT_TAG,
+    CKA_YUBICO_HSMAUTH_ALGORITHM, CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
+    CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
+    YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC,
+};
+use rsa::{traits::PublicKeyParts, BigUint, RsaPrivateKey, RsaPublicKey};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    slice,
+};
+use zeroize::Zeroizing;
+
 #[derive(Debug, Clone)]
-struct TokenObject {
-    slot_id: Option<CK_SLOT_ID>,
-    unique_id: String,
-    class: CK_OBJECT_CLASS,
-    key_type: CK_KEY_TYPE,
-    label: String,
-    id: Vec<u8>,
-    token: bool,
-    private: bool,
-    encrypt: bool,
-    decrypt: bool,
-    sign: bool,
-    verify: bool,
-    derive: bool,
-    sensitive: bool,
-    extractable: bool,
-    always_sensitive: bool,
-    never_extractable: bool,
-    local: bool,
-    key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
-    owner_session: Option<CK_SESSION_HANDLE>,
-    material: KeyMaterial,
+pub(crate) struct TokenObject {
+    pub(crate) slot_id: Option<CK_SLOT_ID>,
+    pub(crate) unique_id: String,
+    pub(crate) class: CK_OBJECT_CLASS,
+    pub(crate) key_type: CK_KEY_TYPE,
+    pub(crate) label: String,
+    pub(crate) id: Vec<u8>,
+    pub(crate) token: bool,
+    pub(crate) private: bool,
+    pub(crate) encrypt: bool,
+    pub(crate) decrypt: bool,
+    pub(crate) sign: bool,
+    pub(crate) verify: bool,
+    pub(crate) derive: bool,
+    pub(crate) sensitive: bool,
+    pub(crate) extractable: bool,
+    pub(crate) always_sensitive: bool,
+    pub(crate) never_extractable: bool,
+    pub(crate) local: bool,
+    pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
+    pub(crate) owner_session: Option<CK_SESSION_HANDLE>,
+    pub(crate) material: KeyMaterial,
 }
 
 #[derive(Clone)]
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
-enum KeyMaterial {
+pub(crate) enum KeyMaterial {
     None,
     Profile {
         profile_id: CK_PROFILE_ID,
@@ -280,62 +302,62 @@ impl std::fmt::Debug for KeyMaterial {
 }
 
 #[derive(Debug, Default)]
-struct TokenObjectTemplate {
-    class: Option<CK_OBJECT_CLASS>,
-    key_type: Option<CK_KEY_TYPE>,
-    label: String,
-    id: Vec<u8>,
-    token: bool,
-    private: bool,
-    encrypt: bool,
-    decrypt: bool,
-    sign: bool,
-    verify: bool,
-    derive: bool,
-    sensitive: Option<bool>,
-    extractable: Option<bool>,
+pub(crate) struct TokenObjectTemplate {
+    pub(crate) class: Option<CK_OBJECT_CLASS>,
+    pub(crate) key_type: Option<CK_KEY_TYPE>,
+    pub(crate) label: String,
+    pub(crate) id: Vec<u8>,
+    pub(crate) token: bool,
+    pub(crate) private: bool,
+    pub(crate) encrypt: bool,
+    pub(crate) decrypt: bool,
+    pub(crate) sign: bool,
+    pub(crate) verify: bool,
+    pub(crate) derive: bool,
+    pub(crate) sensitive: Option<bool>,
+    pub(crate) extractable: Option<bool>,
 }
 
 #[derive(Debug)]
-struct FindOperation {
-    objects: Vec<CK_OBJECT_HANDLE>,
-    next: usize,
+pub(crate) struct FindOperation {
+    pub(crate) objects: Vec<CK_OBJECT_HANDLE>,
+    pub(crate) next: usize,
 }
 
 #[derive(Debug, Clone)]
-struct SignatureOperation {
-    key: KeyMaterial,
-    slot_id: CK_SLOT_ID,
-    requires_login: bool,
-    context_specific_extended: bool,
-    mechanism: CK_MECHANISM_TYPE,
-    mac_length: Option<usize>,
-    pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
-    piv_pin_policy: Option<u8>,
-    buffer: Vec<u8>,
+pub(crate) struct SignatureOperation {
+    pub(crate) key: KeyMaterial,
+    pub(crate) slot_id: CK_SLOT_ID,
+    pub(crate) requires_login: bool,
+    pub(crate) context_specific_extended: bool,
+    pub(crate) mechanism: CK_MECHANISM_TYPE,
+    pub(crate) mac_length: Option<usize>,
+    pub(crate) pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    pub(crate) piv_pin_policy: Option<u8>,
+    pub(crate) buffer: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
-struct GcmParameters {
-    iv: Vec<u8>,
-    aad: Vec<u8>,
-    tag_bits: usize,
+pub(crate) struct GcmParameters {
+    pub(crate) iv: Vec<u8>,
+    pub(crate) aad: Vec<u8>,
+    pub(crate) tag_bits: usize,
 }
 
 #[derive(Clone)]
-struct CryptOperation {
-    key: KeyMaterial,
-    slot_id: CK_SLOT_ID,
-    requires_login: bool,
-    context_specific_extended: bool,
-    mechanism: CK_MECHANISM_TYPE,
-    iv: Option<[u8; 16]>,
-    gcm: Option<GcmParameters>,
-    oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
-    piv_pin_policy: Option<u8>,
-    buffer: Zeroizing<Vec<u8>>,
-    multipart: bool,
-    result: Option<Zeroizing<Vec<u8>>>,
+pub(crate) struct CryptOperation {
+    pub(crate) key: KeyMaterial,
+    pub(crate) slot_id: CK_SLOT_ID,
+    pub(crate) requires_login: bool,
+    pub(crate) context_specific_extended: bool,
+    pub(crate) mechanism: CK_MECHANISM_TYPE,
+    pub(crate) iv: Option<[u8; 16]>,
+    pub(crate) gcm: Option<GcmParameters>,
+    pub(crate) oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
+    pub(crate) piv_pin_policy: Option<u8>,
+    pub(crate) buffer: Zeroizing<Vec<u8>>,
+    pub(crate) multipart: bool,
+    pub(crate) result: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for CryptOperation {
@@ -352,17 +374,19 @@ impl std::fmt::Debug for CryptOperation {
             .field("piv_pin_policy", &self.piv_pin_policy)
             .field("buffer_length", &self.buffer.len())
             .field("multipart", &self.multipart)
-            .field("result_length", &self.result.as_ref().map(|result| result.len()))
+            .field(
+                "result_length",
+                &self.result.as_ref().map(|result| result.len()),
+            )
             .finish()
     }
 }
 
-
-fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
+pub(crate) fn ulong_attribute(value: CK_ULONG) -> Vec<u8> {
     value.to_ne_bytes().to_vec()
 }
 
-fn bool_attribute(value: bool) -> Vec<u8> {
+pub(crate) fn bool_attribute(value: bool) -> Vec<u8> {
     vec![if value {
         CK_TRUE as CK_BBOOL
     } else {
@@ -370,13 +394,16 @@ fn bool_attribute(value: bool) -> Vec<u8> {
     }]
 }
 
-fn piv_object_tag(object_id: u32) -> Vec<u8> {
+pub(crate) fn piv_object_tag(object_id: u32) -> Vec<u8> {
     let bytes = object_id.to_be_bytes();
     let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(3);
     bytes[first..].to_vec()
 }
 
-fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+pub(crate) fn piv_certificate_attribute(
+    value: &[u8],
+    attribute_type: CK_ATTRIBUTE_TYPE,
+) -> Option<Vec<u8>> {
     match attribute_type {
         x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => Some(value.to_vec()),
         x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE => {
@@ -399,7 +426,7 @@ fn piv_certificate_attribute(value: &[u8], attribute_type: CK_ATTRIBUTE_TYPE) ->
     }
 }
 
-fn der_integer(magnitude: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn der_integer(magnitude: &[u8]) -> Option<Vec<u8>> {
     let first_nonzero = magnitude
         .iter()
         .position(|byte| *byte != 0)
@@ -415,7 +442,7 @@ fn der_integer(magnitude: &[u8]) -> Option<Vec<u8>> {
     Some(der_tlv(0x02, &content))
 }
 
-fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
+pub(crate) fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(value.len() + 1 + std::mem::size_of::<usize>());
     encoded.push(tag);
     if value.len() < 128 {
@@ -433,7 +460,7 @@ fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     encoded
 }
 
-fn rsa_public_key_info(modulus: &[u8], public_exponent: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn rsa_public_key_info(modulus: &[u8], public_exponent: &[u8]) -> Option<Vec<u8>> {
     if modulus.is_empty() || public_exponent.is_empty() {
         return None;
     }
@@ -444,15 +471,14 @@ fn rsa_public_key_info(modulus: &[u8], public_exponent: &[u8]) -> Option<Vec<u8>
     subject_public_key.extend(public_key);
 
     let algorithm = [
-        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
-        0x00,
+        0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
     ];
     let mut info = algorithm.to_vec();
     info.extend(der_tlv(0x03, &subject_public_key));
     Some(der_tlv(0x30, &info))
 }
 
-fn ec_public_key_info(
+pub(crate) fn ec_public_key_info(
     key_type: CK_KEY_TYPE,
     parameters: Option<&[u8]>,
     public_key: &[u8],
@@ -467,9 +493,7 @@ fn ec_public_key_info(
             algorithm.extend_from_slice(parameters?);
             der_tlv(0x30, &algorithm)
         }
-        x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => {
-            der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70])
-        }
+        x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x70]),
         x if x == CKK_EC_MONTGOMERY as CK_KEY_TYPE => {
             der_tlv(0x30, &[0x06, 0x03, 0x2b, 0x65, 0x6e])
         }
@@ -484,7 +508,7 @@ fn ec_public_key_info(
     Some(der_tlv(0x30, &algorithm))
 }
 
-fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     matches!(
         attribute_type,
         x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
@@ -497,7 +521,7 @@ fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     )
 }
 
-fn lazy_piv_attestation_certificate(
+pub(crate) fn lazy_piv_attestation_certificate(
     connector: &dyn Connector,
     slot: piv::Slot,
     algorithm: piv::Algorithm,
@@ -517,7 +541,7 @@ fn lazy_piv_attestation_certificate(
     Some(certificate)
 }
 
-fn lazy_yubihsm_attestation_certificate(
+pub(crate) fn lazy_yubihsm_attestation_certificate(
     connector: &dyn Connector,
     session: &RefCell<Option<YubiHsmSecureSession>>,
     id: u16,
@@ -540,7 +564,7 @@ fn lazy_yubihsm_attestation_certificate(
 }
 
 impl TokenObject {
-    fn public_key_info(&self) -> Option<Vec<u8>> {
+    pub(crate) fn public_key_info(&self) -> Option<Vec<u8>> {
         if !matches!(
             self.class,
             x if x == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
@@ -613,9 +637,7 @@ impl TokenObject {
                 algorithm,
                 public_key,
                 ..
-            } if is_yubihsm_rsa(*algorithm) => {
-                rsa_public_key_info(public_key, &[0x01, 0x00, 0x01])
-            }
+            } if is_yubihsm_rsa(*algorithm) => rsa_public_key_info(public_key, &[0x01, 0x00, 0x01]),
             KeyMaterial::YubiHsm {
                 algorithm,
                 public_key,
@@ -643,12 +665,12 @@ impl TokenObject {
         }
     }
 
-    fn has_sensitive_attributes(&self) -> bool {
+    pub(crate) fn has_sensitive_attributes(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
-    fn is_visible_to(
+    pub(crate) fn is_visible_to(
         &self,
         session_handle: CK_SESSION_HANDLE,
         slot_id: CK_SLOT_ID,
@@ -662,12 +684,12 @@ impl TokenObject {
                 .unwrap_or(true)
     }
 
-    fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
+    pub(crate) fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
         self.slot_id = Some(slot_id);
         self.owner_session = (!self.token).then_some(session_handle);
     }
 
-    fn size(&self) -> CK_ULONG {
+    pub(crate) fn size(&self) -> CK_ULONG {
         let defer_certificate_attributes = matches!(
             &self.material,
             KeyMaterial::PivAttestation { attempted, .. }
@@ -737,7 +759,7 @@ impl TokenObject {
         .sum()
     }
 
-    fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
+    pub(crate) fn attribute_value(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> Option<Vec<u8>> {
         match attribute_type {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => Some(ulong_attribute(self.class)),
             x if x == CKA_UNIQUE_ID as CK_ATTRIBUTE_TYPE => {
@@ -757,8 +779,9 @@ impl TokenObject {
                 None
             }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
-                    .map(|mapping| vec![mapping.cka_id]),
+                KeyMaterial::PivData { object_id, .. } => {
+                    piv::data_object_mapping(*object_id).map(|mapping| vec![mapping.cka_id])
+                }
                 _ => Some(self.id.clone()),
             },
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => Some(bool_attribute(self.token)),
@@ -863,8 +886,9 @@ impl TokenObject {
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
                 KeyMaterial::YubiHsm { .. } if self.is_yubihsm_opaque() => Some(Vec::new()),
                 KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
-                KeyMaterial::PivData { object_id, .. } => piv::data_object_mapping(*object_id)
-                    .map(piv::data_object_oid),
+                KeyMaterial::PivData { object_id, .. } => {
+                    piv::data_object_mapping(*object_id).map(piv::data_object_oid)
+                }
                 KeyMaterial::OpenPgpData { tag, .. } => Some(tag.to_be_bytes().to_vec()),
                 _ => None,
             },
@@ -1131,11 +1155,10 @@ impl TokenObject {
                         tag,
                         value,
                         attempted,
-                    }
-                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
-                    {
+                    } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         if !attempted.replace(true) {
-                            *value.borrow_mut() = OpenPgpClient.get_data(connector.as_ref(), *tag).ok();
+                            *value.borrow_mut() =
+                                OpenPgpClient.get_data(connector.as_ref(), *tag).ok();
                         }
                         value.borrow().clone().or_else(|| Some(Vec::new()))
                     }
@@ -1180,13 +1203,13 @@ impl TokenObject {
         }
     }
 
-    fn is_key_object(&self) -> bool {
+    pub(crate) fn is_key_object(&self) -> bool {
         self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
             || self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
-    fn can_wrap(&self) -> bool {
+    pub(crate) fn can_wrap(&self) -> bool {
         matches!(
             &self.material,
             KeyMaterial::YubiHsm {
@@ -1198,7 +1221,7 @@ impl TokenObject {
         )
     }
 
-    fn can_unwrap(&self) -> bool {
+    pub(crate) fn can_unwrap(&self) -> bool {
         matches!(
             &self.material,
             KeyMaterial::YubiHsm {
@@ -1210,7 +1233,7 @@ impl TokenObject {
         )
     }
 
-    fn is_nonextractable_key_object(&self) -> bool {
+    pub(crate) fn is_nonextractable_key_object(&self) -> bool {
         (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
             && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
@@ -1221,11 +1244,11 @@ impl TokenObject {
             )
     }
 
-    fn is_certificate_object(&self) -> bool {
+    pub(crate) fn is_certificate_object(&self) -> bool {
         self.class == CKO_CERTIFICATE as CK_OBJECT_CLASS
     }
 
-    fn is_yubihsm_opaque(&self) -> bool {
+    pub(crate) fn is_yubihsm_opaque(&self) -> bool {
         matches!(
             self.material,
             KeyMaterial::YubiHsm {
@@ -1235,7 +1258,7 @@ impl TokenObject {
         )
     }
 
-    fn is_yubihsm_synthetic_public(&self) -> bool {
+    pub(crate) fn is_yubihsm_synthetic_public(&self) -> bool {
         matches!(
             self.material,
             KeyMaterial::YubiHsm {
@@ -1245,7 +1268,7 @@ impl TokenObject {
         )
     }
 
-    fn is_immutable_object(&self) -> bool {
+    pub(crate) fn is_immutable_object(&self) -> bool {
         matches!(
             &self.material,
             KeyMaterial::Profile { .. }
@@ -1268,12 +1291,12 @@ impl TokenObject {
         )
     }
 
-    fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+    pub(crate) fn set_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         let value = read_attribute_value(attribute)?;
         match attribute.type_ {
             x if x == CKA_LABEL as CK_ATTRIBUTE_TYPE => {
-                self.label = String::from_utf8(value)
-                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;
+                self.label =
+                    String::from_utf8(value).map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;
                 Ok(())
             }
             x if x == CKA_ID as CK_ATTRIBUTE_TYPE => {
@@ -1310,7 +1333,10 @@ impl TokenObject {
         }
     }
 
-    fn set_copy_attribute_value(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+    pub(crate) fn set_copy_attribute_value(
+        &mut self,
+        attribute: &CK_ATTRIBUTE,
+    ) -> Result<(), CK_RV> {
         match attribute.type_ {
             x if x == CKA_TOKEN as CK_ATTRIBUTE_TYPE => {
                 self.token = read_bool_template_attribute(attribute)?;
@@ -1323,10 +1349,11 @@ impl TokenObject {
             _ => self.set_attribute_value(attribute),
         }
     }
-
 }
 
-fn rsa_public_key_material(material: &KeyMaterial) -> Result<Option<RsaPublicKey>, Error> {
+pub(crate) fn rsa_public_key_material(
+    material: &KeyMaterial,
+) -> Result<Option<RsaPublicKey>, Error> {
     match material {
         KeyMaterial::RsaPublic(key) => Ok(Some(key.clone())),
         KeyMaterial::YubiHsm {
@@ -1334,17 +1361,16 @@ fn rsa_public_key_material(material: &KeyMaterial) -> Result<Option<RsaPublicKey
             algorithm,
             public_key,
             ..
-        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => RsaPublicKey::new(
-            BigUint::from_bytes_be(public_key),
-            BigUint::from(65537u32),
-        )
-        .map(Some)
-        .map_err(|_| Error::from(CKR_DATA_INVALID)),
+        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+            RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
+                .map(Some)
+                .map_err(|_| Error::from(CKR_DATA_INVALID))
+        }
         _ => Ok(None),
     }
 }
 
-fn validate_new_object_access(
+pub(crate) fn validate_new_object_access(
     object: &TokenObject,
     session_flags: CK_FLAGS,
     logged_in: bool,
@@ -1359,7 +1385,7 @@ fn validate_new_object_access(
 }
 
 impl TokenObjectTemplate {
-    fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
+    pub(crate) fn apply_attribute(&mut self, attribute: &CK_ATTRIBUTE) -> Result<(), CK_RV> {
         match attribute.type_ {
             x if x == CKA_CLASS as CK_ATTRIBUTE_TYPE => {
                 self.class = Some(read_ulong_template_attribute(attribute)?);
@@ -1418,7 +1444,7 @@ impl TokenObjectTemplate {
         }
     }
 
-    fn into_object(self) -> Result<TokenObject, CK_RV> {
+    pub(crate) fn into_object(self) -> Result<TokenObject, CK_RV> {
         let sensitive = self.sensitive.unwrap_or(false);
         let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
         let nonextractable_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -1450,5 +1476,41 @@ impl TokenObjectTemplate {
             owner_session: None,
             material: KeyMaterial::None,
         })
+    }
+}
+
+pub(crate) fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
+    if attribute.ulValueLen > 0 && attribute.pValue.is_null() {
+        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    }
+    let value = if attribute.ulValueLen == 0 {
+        &[]
+    } else {
+        unsafe {
+            slice::from_raw_parts(attribute.pValue as *const u8, attribute.ulValueLen as usize)
+        }
+    };
+    Ok(value.to_vec())
+}
+
+pub(crate) fn read_ulong_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<CK_ULONG, CK_RV> {
+    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_ULONG>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let value = read_attribute_value(attribute)?;
+    let mut bytes = [0u8; ::std::mem::size_of::<CK_ULONG>()];
+    bytes.copy_from_slice(&value);
+    Ok(CK_ULONG::from_ne_bytes(bytes))
+}
+
+pub(crate) fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<bool, CK_RV> {
+    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_BBOOL>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let value = read_attribute_value(attribute)?[0];
+    match value {
+        x if x == CK_FALSE as CK_BBOOL => Ok(false),
+        x if x == CK_TRUE as CK_BBOOL => Ok(true),
+        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV),
     }
 }

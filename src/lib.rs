@@ -5,7 +5,6 @@ use rsa::{
     traits::{PrivateKeyParts, PublicKeyParts},
     BigUint, RsaPrivateKey, RsaPublicKey,
 };
-use rusb::UsbContext;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -15,7 +14,7 @@ use std::{
     slice,
     sync::{
         atomic::{AtomicU8, Ordering},
-        Mutex, MutexGuard, OnceLock,
+        MutexGuard, OnceLock,
     },
     time::Duration,
 };
@@ -666,17 +665,8 @@ fn _from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], Er
     }
 }
 
-include!("backend/traits.rs");
-
-include!("backend/yubihsm.rs");
-
-include!("backend/piv.rs");
-
-include!("backend/crypto.rs");
-
-include!("backend/ccid.rs");
-
-include!("backend/openpgp.rs");
+mod backend;
+pub(crate) use backend::*;
 
 #[cfg(any(test, feature = "abi-tests"))]
 const ABI_TEST_SLOT_ID: CK_SLOT_ID = 77;
@@ -706,28 +696,25 @@ pub(crate) use connector::{
 #[cfg(test)]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet};
 
-include!("context.rs");
+mod context;
+pub(crate) use context::*;
 
-include!("object.rs");
+mod object;
+pub(crate) use object::*;
 
-include!("api/general.rs");
+mod mechanism;
+pub(crate) use mechanism::*;
+pub use mechanism::{C_GetMechanismInfo, C_GetMechanismList};
 
-include!("mechanism.rs");
-
-include!("api/session.rs");
-
-include!("api/object.rs");
-
-include!("api/crypt.rs");
-
-include!("api/wrap.rs");
-
-include!("api/key.rs");
-
-include!("api/security_domain.rs");
-
-include!("api/yubihsm.rs");
-
-include!("api/hsmauth.rs");
-
-include!("api/interfaces.rs");
+pub mod api;
+use api::DigestOperation;
+#[cfg(feature = "abi-tests")]
+use api::AES_BLOCK_LENGTH;
+#[cfg(test)]
+use api::{
+    aes_gcm, encode_pkcs1_v1_5_signature_input, openpgp_generate_key_pair_parameters,
+    openpgp_private_import, parse_create_object_template, parse_gcm_parameters,
+    parse_yubihsm_wrap_mechanism, rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad,
+    yubihsm_ec_algorithm, yubihsm_enroll_device, yubihsm_generate_key_pair_command,
+    YubiHsmEnrollment,
+};

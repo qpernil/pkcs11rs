@@ -1,6 +1,8 @@
+use crate::api::general::session_function_not_supported;
+use crate::*;
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
-fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
+pub(crate) fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
     match algorithm {
         YUBIHSM_ALGO_EC_P224 => Ok(28),
         YUBIHSM_ALGO_EC_P256 | YUBIHSM_ALGO_EC_K256 | YUBIHSM_ALGO_EC_BP256 => Ok(32),
@@ -11,11 +13,17 @@ fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
     }
 }
 
-fn yubihsm_ecdsa_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
+pub(super) fn yubihsm_ecdsa_signature(
+    signature: &[u8],
+    coordinate_length: usize,
+) -> Result<Vec<u8>, Error> {
     ecdsa_der_to_raw(signature, coordinate_length)
 }
 
-fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn encode_pkcs1_v1_5_signature_input(
+    data: &[u8],
+    modulus_size: usize,
+) -> Result<Vec<u8>, Error> {
     if data.len() > modulus_size.saturating_sub(11) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
@@ -27,7 +35,7 @@ fn encode_pkcs1_v1_5_signature_input(data: &[u8], modulus_size: usize) -> Result
     Ok(encoded)
 }
 
-fn rsa_pkcs1_v1_5_unpad(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_pkcs1_v1_5_unpad(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     if encoded.len() < 11 {
         return Err(CKR_ENCRYPTED_DATA_INVALID.into());
     }
@@ -49,7 +57,7 @@ fn rsa_pkcs1_v1_5_unpad(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(encoded[separator as usize + 1..].to_vec())
 }
 
-fn rsa_oaep_unpad(
+pub(crate) fn rsa_oaep_unpad(
     encoded: &[u8],
     mgf_code: u8,
     hash_mechanism: CK_MECHANISM_TYPE,
@@ -95,7 +103,7 @@ fn rsa_oaep_unpad(
     Ok(db[separator as usize + 1..].to_vec())
 }
 
-fn rsa_oaep_pad(
+pub(crate) fn rsa_oaep_pad(
     input: &[u8],
     modulus_size: usize,
     mgf_code: u8,
@@ -128,7 +136,6 @@ fn rsa_oaep_pad(
     encoded.extend_from_slice(&db);
     Ok(encoded)
 }
-
 
 #[no_mangle]
 pub extern "C" fn C_DigestEncryptUpdate(

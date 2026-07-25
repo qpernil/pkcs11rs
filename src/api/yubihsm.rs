@@ -1,7 +1,9 @@
+use crate::*;
+
 const YUBIHSM_DEVICE_FINGERPRINT_LENGTH: usize = 32;
 
 #[derive(Clone, Copy)]
-enum YubiHsmEnrollment {
+pub(crate) enum YubiHsmEnrollment {
     Attestation {
         key_id: u16,
         validation: crate::yubihsm::trust::AttestationValidation,
@@ -77,7 +79,7 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDevicePublicKey(
     ))
 }
 
-fn yubihsm_enroll_device(
+pub(crate) fn yubihsm_enroll_device(
     session_handle: CK_SESSION_HANDLE,
     fingerprint: CK_BYTE_PTR,
     fingerprint_len: CK_ULONG_PTR,
@@ -101,17 +103,16 @@ fn yubihsm_enroll_device(
         }
 
         let installed = match enrollment {
-            YubiHsmEnrollment::PublicKey => crate::yubihsm::trust::install_public_key(
-                &device_public_key,
-                trust_prefix,
-            )?,
+            YubiHsmEnrollment::PublicKey => {
+                crate::yubihsm::trust::install_public_key(&device_public_key, trust_prefix)?
+            }
             YubiHsmEnrollment::Attestation { key_id, validation } => {
-                let attestation = session.yubihsm_command(
-                    &YubiHsmCommand::sign_attestation_certificate(0, key_id),
-                )?;
-                let device_certificate = session.yubihsm_command(
-                    &YubiHsmCommand::get_object(YubiHsmCommandCode::GetOpaque, key_id)?,
-                )?;
+                let attestation = session
+                    .yubihsm_command(&YubiHsmCommand::sign_attestation_certificate(0, key_id))?;
+                let device_certificate = session.yubihsm_command(&YubiHsmCommand::get_object(
+                    YubiHsmCommandCode::GetOpaque,
+                    key_id,
+                )?)?;
                 crate::yubihsm::trust::install_attestation(
                     &device_public_key,
                     &attestation,

@@ -1,3 +1,6 @@
+use super::general::session_function_not_supported;
+use crate::*;
+
 #[no_mangle]
 pub extern "C" fn C_InitToken(
     _slotID: CK_SLOT_ID,
@@ -14,7 +17,11 @@ pub extern "C" fn C_InitPIN(
     pin: *mut ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(2, "C_InitPIN called with {:?}", (session_handle, pin, pin_len));
+    log!(
+        2,
+        "C_InitPIN called with {:?}",
+        (session_handle, pin, pin_len)
+    );
     map(init_pin(session_handle, pin, pin_len))
 }
 
@@ -51,13 +58,7 @@ pub extern "C" fn C_SetPIN(
         "C_SetPIN called with {:?}",
         (session_handle, old_pin, old_len, new_pin, new_len)
     );
-    map(set_pin(
-        session_handle,
-        old_pin,
-        old_len,
-        new_pin,
-        new_len,
-    ))
+    map(set_pin(session_handle, old_pin, old_len, new_pin, new_len))
 }
 
 fn set_pin(
@@ -77,9 +78,7 @@ fn set_pin(
                 ctx.reconcile_login_state(slot_id);
                 let role = ctx.login_role(slot_id);
                 let result = match role {
-                    Some(LoginRole::So) => {
-                        ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin)
-                    }
+                    Some(LoginRole::So) => ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin),
                     _ => ctx._get_slot_mut(slot_id)?.set_pin(old_pin, new_pin),
                 };
                 if !matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV)
@@ -275,9 +274,7 @@ fn get_session_info(
             (session.slotID(), session.flags())
         };
         ctx.reconcile_login_state(slot_id);
-        if ctx.is_slot_logged_in(slot_id)
-            || ctx.get_slot(slot_id)?.backend_session_is_active()
-        {
+        if ctx.is_slot_logged_in(slot_id) || ctx.get_slot(slot_id)?.backend_session_is_active() {
             if let Err(error) = ctx._get_session(session_handle)?.1.get_session_info() {
                 ctx.reconcile_login_state(slot_id);
                 return Err(error);

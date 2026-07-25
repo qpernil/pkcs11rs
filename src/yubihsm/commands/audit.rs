@@ -1,3 +1,6 @@
+use super::protocol::*;
+use zeroize::Zeroizing;
+
 impl Command {
     pub(crate) fn get_log_entries() -> Self {
         Self::empty(CommandCode::GetLogEntries)

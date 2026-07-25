@@ -1,5 +1,11 @@
+use super::{
+    key::yubihsm_ec_algorithm,
+    object::{validate_unique_template, yubihsm_hardware_import_object, yubihsm_id},
+};
+use crate::*;
+
 #[derive(Clone, Debug)]
-struct RsaAesWrapParameters {
+pub(crate) struct RsaAesWrapParameters {
     aes_algorithm: u8,
     hash_algorithm: u8,
     mgf1_algorithm: u8,
@@ -7,7 +13,7 @@ struct RsaAesWrapParameters {
 }
 
 #[derive(Clone, Debug)]
-enum YubiHsmWrapMechanism {
+pub(crate) enum YubiHsmWrapMechanism {
     AesCcm {
         format: u8,
     },
@@ -37,9 +43,7 @@ impl YubiHsmUnwrapTemplate {
     }
 }
 
-fn rsa_wrap_hash_algorithm(
-    mechanism: CK_MECHANISM_TYPE,
-) -> Result<(u8, MessageDigest), Error> {
+fn rsa_wrap_hash_algorithm(mechanism: CK_MECHANISM_TYPE) -> Result<(u8, MessageDigest), Error> {
     match mechanism {
         x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => {
             Ok((YUBIHSM_ALGO_RSA_OAEP_SHA1, MessageDigest::Sha1))
@@ -67,9 +71,7 @@ fn rsa_wrap_mgf_algorithm(mgf: CK_RSA_PKCS_MGF_TYPE) -> Result<u8, Error> {
     }
 }
 
-fn parse_rsa_wrap_parameters(
-    mechanism: &CK_MECHANISM,
-) -> Result<RsaAesWrapParameters, Error> {
+fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParameters, Error> {
     if mechanism.pParameter.is_null()
         || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>()
     {
@@ -83,18 +85,15 @@ fn parse_rsa_wrap_parameters(
         256 => YUBIHSM_ALGO_AES256,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
-    let oaep = _as_ref(parameters.pOAEPParams)
-        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let oaep =
+        _as_ref(parameters.pOAEPParams).map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     if oaep.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
     let (hash_algorithm, digest) = rsa_wrap_hash_algorithm(oaep.hashAlg)?;
     let mgf1_algorithm = rsa_wrap_mgf_algorithm(oaep.mgf)?;
-    let label = from_raw_parts(
-        oaep.pSourceData as *const u8,
-        oaep.ulSourceDataLen as usize,
-    )
-    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let label = from_raw_parts(oaep.pSourceData as *const u8, oaep.ulSourceDataLen as usize)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     Ok(RsaAesWrapParameters {
         aes_algorithm,
         hash_algorithm,
@@ -103,7 +102,7 @@ fn parse_rsa_wrap_parameters(
     })
 }
 
-fn parse_yubihsm_wrap_mechanism(
+pub(crate) fn parse_yubihsm_wrap_mechanism(
     mechanism: &CK_MECHANISM,
 ) -> Result<YubiHsmWrapMechanism, Error> {
     match mechanism.mechanism {
@@ -142,9 +141,7 @@ fn parse_yubihsm_wrap_mechanism(
     }
 }
 
-fn yubihsm_material(
-    object: &TokenObject,
-) -> Result<(u16, u8, u8), Error> {
+fn yubihsm_material(object: &TokenObject) -> Result<(u16, u8, u8), Error> {
     match &object.material {
         KeyMaterial::YubiHsm {
             id,
@@ -238,12 +235,7 @@ fn wrap_key(
         if !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_WRAP as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_WRAP as CK_FLAGS)?;
         let target = ctx
             .resolve_object(key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
@@ -278,10 +270,7 @@ fn wrap_key(
                 parameters,
             } => {
                 if !*full_object
-                    && !matches!(
-                        target_type,
-                        YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_SYMMETRIC_KEY
-                    )
+                    && !matches!(target_type, YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_SYMMETRIC_KEY)
                 {
                     return Err(CKR_KEY_TYPE_INCONSISTENT.into());
                 }
@@ -376,12 +365,7 @@ fn unwrap_key(
         if flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
         }
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_UNWRAP as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
         let wrapper = ctx
             .resolve_object(unwrapping_key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
@@ -436,9 +420,10 @@ fn unwrap_key(
             .yubihsm_command(&command)?;
         let (target_type, target_id) = parse_yubihsm_import_response(&response)?;
         if expected_target_type.is_some_and(|expected| expected != target_type) {
-            let _ = ctx._get_session(session_handle)?.1.yubihsm_command(
-                &YubiHsmCommand::delete_object(target_id, target_type),
-            );
+            let _ = ctx
+                ._get_session(session_handle)?
+                .1
+                .yubihsm_command(&YubiHsmCommand::delete_object(target_id, target_type));
             let _ = ctx.refresh_slot_token_objects(slot_id);
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -538,8 +523,7 @@ fn parse_yubihsm_unwrap_template(
                         || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
                 ) =>
         {
-            let algorithm =
-                yubihsm_ec_algorithm(&ec_parameters.ok_or(CKR_TEMPLATE_INCOMPLETE)?)?;
+            let algorithm = yubihsm_ec_algorithm(&ec_parameters.ok_or(CKR_TEMPLATE_INCOMPLETE)?)?;
             let compatible = match key_type {
                 x if x == CKK_EC as CK_KEY_TYPE => is_yubihsm_ec(algorithm),
                 x if x == CKK_EC_EDWARDS as CK_KEY_TYPE => algorithm == YUBIHSM_ALGO_ED25519,
@@ -551,8 +535,7 @@ fn parse_yubihsm_unwrap_template(
             algorithm
         }
         (class, key_type)
-            if class == CKO_SECRET_KEY as CK_OBJECT_CLASS
-                && key_type == CKK_AES as CK_KEY_TYPE =>
+            if class == CKO_SECRET_KEY as CK_OBJECT_CLASS && key_type == CKK_AES as CK_KEY_TYPE =>
         {
             match value_len.ok_or(CKR_TEMPLATE_INCOMPLETE)? {
                 16 => YUBIHSM_ALGO_AES128,

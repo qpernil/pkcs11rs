@@ -1,4 +1,6 @@
-fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_ID) -> TokenObject {
+use crate::*;
+
+pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_ID) -> TokenObject {
     let label = match profile_id as u32 {
         CKP_BASELINE_PROVIDER => "PKCS #11 Baseline Provider",
         CKP_EXTENDED_PROVIDER => "PKCS #11 Extended Provider",
@@ -31,7 +33,7 @@ fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_ID) -> Token
     }
 }
 
-fn profile_token_objects(
+pub(crate) fn profile_token_objects(
     slot_id: CK_SLOT_ID,
     extended_provider: bool,
     authentication_token: bool,
@@ -53,11 +55,11 @@ fn profile_token_objects(
         .collect()
 }
 
-fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool {
+pub(crate) fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool {
     let supports = |type_: CK_MECHANISM_TYPE, flags: CK_FLAGS| {
-        mechanisms.iter().any(|mechanism| {
-            mechanism.type_ == type_ && mechanism.flags & flags == flags
-        })
+        mechanisms
+            .iter()
+            .any(|mechanism| mechanism.type_ == type_ && mechanism.flags & flags == flags)
     };
     supports(CKM_SHA512 as CK_MECHANISM_TYPE, CKF_DIGEST as CK_FLAGS)
         && supports(
@@ -66,16 +68,11 @@ fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool
         )
         && supports(
             CKM_RSA_PKCS as CK_MECHANISM_TYPE,
-            (CKF_ENCRYPT
-                | CKF_DECRYPT
-                | CKF_SIGN
-                | CKF_VERIFY
-                | CKF_WRAP
-                | CKF_UNWRAP) as CK_FLAGS,
+            (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
         )
 }
 
-trait Slot {
+pub(crate) trait Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
@@ -377,7 +374,7 @@ trait Slot {
     }
 }
 
-fn apply_connector_versions(info: &mut CK_SLOT_INFO, connector: &dyn Connector) {
+pub(crate) fn apply_connector_versions(info: &mut CK_SLOT_INFO, connector: &dyn Connector) {
     if let Some((major, minor)) = connector.hardware_version() {
         info.hardwareVersion.major = major;
         info.hardwareVersion.minor = minor;
@@ -394,7 +391,7 @@ impl std::fmt::Debug for dyn Slot + '_ {
     }
 }
 
-trait Session {
+pub(crate) trait Session {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
@@ -470,7 +467,7 @@ trait Session {
     }
 }
 
-fn session_state(flags: CK_FLAGS, role: Option<LoginRole>) -> CK_STATE {
+pub(crate) fn session_state(flags: CK_FLAGS, role: Option<LoginRole>) -> CK_STATE {
     match (flags & CKF_RW_SESSION as CK_FLAGS != 0, role) {
         (_, Some(LoginRole::So)) => CKS_RW_SO_FUNCTIONS as CK_STATE,
         (false, Some(LoginRole::User)) => CKS_RO_USER_FUNCTIONS as CK_STATE,

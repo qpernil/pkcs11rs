@@ -1,3 +1,6 @@
+use super::protocol::{CAPABILITIES_LENGTH, MAX_LOG_ENTRY_COUNT, MAX_OBJECT_COUNT};
+use crate::{error::Error, CKR_DATA_INVALID};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StorageInfo {
     pub(crate) total_records: u16,

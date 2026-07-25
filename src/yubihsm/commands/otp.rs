@@ -1,3 +1,7 @@
+use super::{object::ObjectParameters, protocol::*};
+use crate::{error::Error, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_LEN_RANGE};
+use zeroize::Zeroizing;
+
 impl Command {
     pub(crate) fn decrypt_otp(key_id: u16, aead: &[u8; 36], otp: &[u8; 16]) -> Self {
         let mut data = prefixed_u16(key_id, aead);

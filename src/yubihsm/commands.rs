@@ -1,11 +1,31 @@
-include!("commands/protocol.rs");
-include!("commands/device.rs");
-include!("commands/audit.rs");
-include!("commands/object.rs");
-include!("commands/crypto.rs");
-include!("commands/wrapping.rs");
-include!("commands/otp.rs");
-include!("commands/response.rs");
+mod audit;
+mod crypto;
+mod device;
+mod object;
+mod otp;
+mod protocol;
+mod response;
+mod wrapping;
+
+#[cfg(test)]
+pub(crate) use object::ObjectFilter;
+pub(crate) use object::{DelegatedObjectParameters, ObjectParameters};
+#[cfg(test)]
+pub(crate) use protocol::ALL_COMMAND_CODES;
+pub(crate) use protocol::{Command, CommandCode};
+#[cfg(test)]
+use protocol::{
+    ALGORITHM_AES128_YUBICO_AUTHENTICATION, ALGORITHM_AES128_YUBICO_OTP,
+    ALGORITHM_AES192_YUBICO_OTP, ALGORITHM_AES256_YUBICO_OTP,
+    ALGORITHM_EC_P256_YUBICO_AUTHENTICATION, MAX_COMMAND_DATA_LENGTH, MAX_LOG_ENTRY_COUNT,
+    MAX_OBJECT_COUNT,
+};
+pub(crate) use response::{parse_object_id, parse_object_list, ObjectInfo, PublicKey};
+#[cfg(test)]
+use response::{
+    require_empty, ImportedObject, LogEntries, ObjectEntry, OtpDecryption, StorageInfo,
+};
+pub(crate) use wrapping::RsaWrapParameters;
 
 #[cfg(test)]
 mod tests;

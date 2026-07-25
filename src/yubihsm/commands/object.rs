@@ -1,3 +1,7 @@
+use super::protocol::*;
+use crate::{error::Error, CKR_DATA_LEN_RANGE};
+use zeroize::Zeroizing;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectParameters<'a> {
     pub(crate) id: u16,
@@ -8,7 +12,7 @@ pub(crate) struct ObjectParameters<'a> {
 }
 
 impl ObjectParameters<'_> {
-    fn encode(&self) -> Result<Vec<u8>, Error> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, Error> {
         if self.label.len() > LABEL_LENGTH {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
@@ -30,7 +34,7 @@ pub(crate) struct DelegatedObjectParameters<'a> {
 }
 
 impl DelegatedObjectParameters<'_> {
-    fn encode(&self) -> Result<Vec<u8>, Error> {
+    pub(super) fn encode(&self) -> Result<Vec<u8>, Error> {
         let mut data = self.object.encode()?;
         data.extend_from_slice(&self.delegated_capabilities);
         Ok(data)

@@ -1,3 +1,9 @@
+use super::key::{
+    find_openpgp_key_handle, find_piv_key_handle, key_pair_object, openpgp_curve, openpgp_key_ref,
+    piv_key_pair_object, piv_policy_attribute, template_attribute,
+};
+use crate::*;
+
 #[no_mangle]
 pub extern "C" fn C_CreateObject(
     session_handle: CK_SESSION_HANDLE,
@@ -101,12 +107,12 @@ fn create_object(
                         .filter_map(|(handle, candidate)| {
                             (candidate.slot_id == Some(slot_id)
                                 && matches!(
-                                candidate.material,
-                                KeyMaterial::PivData {
-                                    object_id: candidate,
-                                    ..
-                                } if candidate == object_id
-                            ))
+                                    candidate.material,
+                                    KeyMaterial::PivData {
+                                        object_id: candidate,
+                                        ..
+                                    } if candidate == object_id
+                                ))
                             .then_some(handle)
                         })
                         .collect::<Vec<_>>();
@@ -144,10 +150,8 @@ fn create_object(
                 &import.material,
             )?;
             if import.touch_policy != 0 {
-                ctx._get_slot_mut(slot_id)?.openpgp_set_touch_policy(
-                    import.key_ref,
-                    import.touch_policy,
-                )?;
+                ctx._get_slot_mut(slot_id)?
+                    .openpgp_set_touch_policy(import.key_ref, import.touch_policy)?;
             }
             ctx.refresh_slot_token_objects(slot_id)?;
             *object_handle = find_openpgp_key_handle(
@@ -200,19 +204,18 @@ fn create_object(
     })
 }
 
-struct OpenPgpImport {
-    key_ref: OpenPgpKeyRef,
-    algorithm: OpenPgpAlgorithm,
-    material: KeyMaterial,
+pub(crate) struct OpenPgpImport {
+    pub(crate) key_ref: OpenPgpKeyRef,
+    pub(crate) algorithm: OpenPgpAlgorithm,
+    pub(crate) material: KeyMaterial,
     object: TokenObject,
-    touch_policy: u8,
+    pub(crate) touch_policy: u8,
 }
 
-fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error> {
+pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error> {
     validate_unique_template(templ)?;
-    let key_type_attribute =
-        template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
-            .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
     let filtered = templ
         .iter()
@@ -226,11 +229,7 @@ fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error
         })
         .copied()
         .collect::<Vec<_>>();
-    let object = key_pair_object(
-        &filtered,
-        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-        key_type,
-    )?;
+    let object = key_pair_object(&filtered, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, key_type)?;
     if !object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
@@ -298,7 +297,7 @@ fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpImport, Error
     })
 }
 
-fn piv_key_object_handles(
+pub(super) fn piv_key_object_handles(
     ctx: &Context,
     slot_id: CK_SLOT_ID,
     piv_slot: piv::Slot,
@@ -344,7 +343,7 @@ enum PivImport {
     },
 }
 
-fn required_template_value(
+pub(super) fn required_template_value(
     templ: &[CK_ATTRIBUTE],
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -390,17 +389,12 @@ fn piv_private_template_object(
         })
         .copied()
         .collect::<Vec<_>>();
-    piv_key_pair_object(
-        &filtered,
-        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
-        key_type,
-    )
+    piv_key_pair_object(&filtered, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, key_type)
 }
 
 fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
-    let key_type_attribute =
-        template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
-            .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let key_type_attribute = template_attribute(templ, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     let key_type = read_ulong_template_attribute(key_type_attribute).map_err(Error::from)?;
     let object = piv_private_template_object(templ, key_type)?;
     if !object.token {
@@ -483,9 +477,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
                 [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => {
                     (piv::Algorithm::EccP256, 32)
                 }
-                [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => {
-                    (piv::Algorithm::EccP384, 48)
-                }
+                [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => (piv::Algorithm::EccP384, 48),
                 _ => return Err(CKR_CURVE_NOT_SUPPORTED.into()),
             };
             if private.len() > length {
@@ -496,21 +488,15 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             let public = if algorithm == piv::Algorithm::EccP256 {
                 let key = p256::SecretKey::from_slice(&scalar)
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
-                    &key.public_key(),
-                    false,
-                )
-                .as_bytes()
-                .to_vec()
+                p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&key.public_key(), false)
+                    .as_bytes()
+                    .to_vec()
             } else {
                 let key = p384::SecretKey::from_slice(&scalar)
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
-                    &key.public_key(),
-                    false,
-                )
-                .as_bytes()
-                .to_vec()
+                p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&key.public_key(), false)
+                    .as_bytes()
+                    .to_vec()
             };
             (algorithm, 0x06, MetadataPublicKey::Ec(public))
         } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
@@ -539,9 +525,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             (
                 piv::Algorithm::X25519,
                 0x08,
-                MetadataPublicKey::Raw(
-                    x25519_dalek::PublicKey::from(&key).as_bytes().to_vec(),
-                ),
+                MetadataPublicKey::Raw(x25519_dalek::PublicKey::from(&key).as_bytes().to_vec()),
             )
         } else {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -761,8 +745,8 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
 
 fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     validate_unique_template(templ)?;
-    let class_attribute = template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE)
-        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let class_attribute =
+        template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE).ok_or(CKR_TEMPLATE_INCOMPLETE)?;
     match read_ulong_template_attribute(class_attribute).map_err(Error::from)? {
         class if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => piv_private_import(templ),
         class if class == CKO_CERTIFICATE as CK_OBJECT_CLASS => piv_certificate_import(templ),
@@ -771,7 +755,7 @@ fn piv_import_parameters(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
     }
 }
 
-fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
+pub(super) fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
     match id {
         [] => Ok(0),
         [high, low] => Ok(u16::from_be_bytes([*high, *low])),
@@ -779,12 +763,11 @@ fn yubihsm_id(id: &[u8]) -> Result<u16, Error> {
     }
 }
 
-fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<TokenObject, Error> {
+pub(super) fn yubihsm_hardware_import_object(object: &TokenObject) -> Result<TokenObject, Error> {
     const HARDWARE_LABEL_LENGTH: usize = 40;
     const METADATA_ATTRIBUTE_LENGTH: usize = 256;
 
-    if object.id.len() > METADATA_ATTRIBUTE_LENGTH
-        || object.label.len() > METADATA_ATTRIBUTE_LENGTH
+    if object.id.len() > METADATA_ATTRIBUTE_LENGTH || object.label.len() > METADATA_ATTRIBUTE_LENGTH
     {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
     }
@@ -816,7 +799,7 @@ fn padded_big_num(value: &BigUint, length: usize) -> Result<Vec<u8>, Error> {
     Ok(padded)
 }
 
-fn yubihsm_object_parameters(
+pub(super) fn yubihsm_object_parameters(
     object: &TokenObject,
     object_type: u8,
     algorithm: u8,
@@ -915,7 +898,7 @@ fn yubihsm_import_command(
     }
 }
 
-fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+pub(crate) fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
     validate_unique_template(templ)?;
     let mut object_template = TokenObjectTemplate::default();
     let mut key_components = HashMap::new();
@@ -1060,7 +1043,7 @@ fn build_imported_key_material(
     }
 }
 
-fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
+pub(super) fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
     let mut types = HashSet::new();
     if templ.iter().all(|attribute| types.insert(attribute.type_)) {
         Ok(())
@@ -1238,10 +1221,8 @@ fn destroy_object(
                 match ctx
                     ._get_session(session_handle)?
                     .1
-                    .yubihsm_command(&YubiHsmCommand::delete_object(
-                        metadata_id,
-                        YUBIHSM_OPAQUE,
-                    )) {
+                    .yubihsm_command(&YubiHsmCommand::delete_object(metadata_id, YUBIHSM_OPAQUE))
+                {
                     Ok(_) => {
                         if let Err(error) = ctx
                             .get_slot(slot_id)?
@@ -1524,42 +1505,6 @@ fn write_attribute_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(
     Ok(())
 }
 
-fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
-    if attribute.ulValueLen > 0 && attribute.pValue.is_null() {
-        return Err(CKR_ARGUMENTS_BAD as CK_RV);
-    }
-    let value = if attribute.ulValueLen == 0 {
-        &[]
-    } else {
-        unsafe {
-            slice::from_raw_parts(attribute.pValue as *const u8, attribute.ulValueLen as usize)
-        }
-    };
-    Ok(value.to_vec())
-}
-
-fn read_ulong_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<CK_ULONG, CK_RV> {
-    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_ULONG>() {
-        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
-    }
-    let value = read_attribute_value(attribute)?;
-    let mut bytes = [0u8; ::std::mem::size_of::<CK_ULONG>()];
-    bytes.copy_from_slice(&value);
-    Ok(CK_ULONG::from_ne_bytes(bytes))
-}
-
-fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<bool, CK_RV> {
-    if attribute.ulValueLen as usize != ::std::mem::size_of::<CK_BBOOL>() {
-        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
-    }
-    let value = read_attribute_value(attribute)?[0];
-    match value {
-        x if x == CK_FALSE as CK_BBOOL => Ok(false),
-        x if x == CK_TRUE as CK_BBOOL => Ok(true),
-        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV),
-    }
-}
-
 fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
     if current == CKR_ARGUMENTS_BAD as CK_RV {
         current
@@ -1719,18 +1664,12 @@ fn set_attribute_value(
                 let target = token_objects
                     .iter()
                     .find(|candidate| {
-                        candidate.id == [to.cka_id()]
-                            && candidate.class == class
-                            && candidate.token
+                        candidate.id == [to.cka_id()] && candidate.class == class && candidate.token
                     })
                     .ok_or(CKR_DEVICE_ERROR)?;
                 rebindings.push((handle, target.unique_id.clone()));
             }
-            ctx.reconcile_slot_token_objects_with_rebindings(
-                slot_id,
-                token_objects,
-                &rebindings,
-            )?;
+            ctx.reconcile_slot_token_objects_with_rebindings(slot_id, token_objects, &rebindings)?;
             return Ok(());
         }
         let mut updated_object = stored_object;
@@ -1797,8 +1736,7 @@ fn find_objects_init(
             }
             let mut matches = true;
             for (attribute_type, expected) in &templ {
-                if object_attribute_value(ctx, session_handle, &object, *attribute_type)?
-                    .as_ref()
+                if object_attribute_value(ctx, session_handle, &object, *attribute_type)?.as_ref()
                     != Some(expected)
                 {
                     matches = false;

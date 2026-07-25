@@ -1,4 +1,6 @@
-fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+use crate::*;
+
+pub(super) fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     let result: Result<(), Error> = with_context(|ctx| {
         ctx._get_session(session_handle)?;
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
@@ -106,8 +108,8 @@ pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -
         log!(2, "C_GetFunctionList called with {:?}", function_list);
         match function_list.as_mut() {
             Some(function_list) => {
-                *function_list =
-                    &G_FUNCTION_LIST as *const CK_FUNCTION_LIST as CK_FUNCTION_LIST_PTR;
+                *function_list = &super::interfaces::G_FUNCTION_LIST as *const CK_FUNCTION_LIST
+                    as CK_FUNCTION_LIST_PTR;
                 log!(2, "C_GetFunctionList returning {:?}", *function_list);
                 CKR_OK
             }

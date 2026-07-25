@@ -1,3 +1,4 @@
+use super::*;
 use crate::{KeyMaterial, TokenObject};
 
 fn yubihsm_wrap_test_object(
@@ -102,9 +103,7 @@ fn install_yubihsm_wrap_test_objects(
                 (30, crate::YUBIHSM_SYMMETRIC_KEY) => target = Some(handle),
                 (31, crate::YUBIHSM_WRAP_KEY) => ccm = Some(handle),
                 (32, crate::YUBIHSM_WRAP_KEY) => rsa_private = Some(handle),
-                (32, crate::YUBIHSM_WRAP_KEY_PUBLIC) => {
-                    rsa_synthetic_public = Some(handle)
-                }
+                (32, crate::YUBIHSM_WRAP_KEY_PUBLIC) => rsa_synthetic_public = Some(handle),
                 (33, crate::YUBIHSM_PUBLIC_WRAP_KEY) => rsa_public_wrap = Some(handle),
                 _ => {}
             }
@@ -125,10 +124,7 @@ fn yubihsm_rsa_wrap_generation_uses_pkcs11_template_roles() {
     let mut wrap = CK_TRUE as CK_BBOOL;
     let mut unwrap = CK_TRUE as CK_BBOOL;
     let public = [
-        scalar_attribute(
-            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-            &mut modulus_bits,
-        ),
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
         scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
     ];
     let private = [scalar_attribute(
@@ -146,14 +142,8 @@ fn yubihsm_rsa_wrap_generation_uses_pkcs11_template_roles() {
 
     let mut private_wrap = CK_TRUE as CK_BBOOL;
     let private = [
-        scalar_attribute(
-            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
-            &mut unwrap,
-        ),
-        scalar_attribute(
-            CKA_WRAP as CK_ATTRIBUTE_TYPE,
-            &mut private_wrap,
-        ),
+        scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut private_wrap),
     ];
     assert_eq!(
         CK_RV::from(
@@ -222,13 +212,13 @@ fn checked_attribute(
     };
     checked_rv(
         "C_GetAttributeValue length query",
-        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
     )?;
     let mut value = vec![0; attribute.ulValueLen as usize];
     attribute.pValue = value.as_mut_ptr().cast();
     checked_rv(
         "C_GetAttributeValue",
-        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
     )?;
     Ok(value)
 }
@@ -260,14 +250,14 @@ fn checked_ulong_attribute(
     Ok(CK_ULONG::from_ne_bytes(value))
 }
 
-fn generated_ec_private_rsa_wrap_round_trip(
+pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     slot_id: CK_SLOT_ID,
     pin: &[u8],
 ) -> Result<(), String> {
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     checked_rv(
         "C_OpenSession",
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             slot_id,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -278,7 +268,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
     let mut pin = pin.to_vec();
     let login = checked_rv(
         "C_Login",
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -286,7 +276,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         ),
     );
     if let Err(error) = login {
-        let _ = crate::C_CloseSession(session);
+        let _ = crate::api::C_CloseSession(session);
         return Err(error);
     }
 
@@ -296,8 +286,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
     let mut wrapper_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut restored = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let operation = (|| -> Result<(), String> {
-        let mut ec_parameters =
-            [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+        let mut ec_parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
         let mut sign = CK_TRUE as CK_BBOOL;
         let mut extractable = CK_TRUE as CK_BBOOL;
         let mut ec_public_template = [bytes_attribute(
@@ -315,7 +304,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         };
         checked_rv(
             "C_GenerateKeyPair EC target",
-            crate::C_GenerateKeyPair(
+            crate::api::C_GenerateKeyPair(
                 session,
                 &mut ec_generation,
                 ec_public_template.as_mut_ptr(),
@@ -326,21 +315,19 @@ fn generated_ec_private_rsa_wrap_round_trip(
                 &mut target_private,
             ),
         )?;
-        let target_id =
-            checked_attribute(session, target_private, CKA_ID as CK_ATTRIBUTE_TYPE)?;
+        let target_id = checked_attribute(session, target_private, CKA_ID as CK_ATTRIBUTE_TYPE)?;
 
         let mut modulus_bits = 2048 as CK_ULONG;
         let mut wrap = CK_TRUE as CK_BBOOL;
         let mut unwrap = CK_TRUE as CK_BBOOL;
         let mut rsa_public_template = [
-            scalar_attribute(
-                CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-                &mut modulus_bits,
-            ),
+            scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
             scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
         ];
-        let mut rsa_private_template =
-            [scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap)];
+        let mut rsa_private_template = [scalar_attribute(
+            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+            &mut unwrap,
+        )];
         let mut rsa_generation = CK_MECHANISM {
             mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             pParameter: std::ptr::null_mut(),
@@ -348,7 +335,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         };
         checked_rv(
             "C_GenerateKeyPair RSA wrap key",
-            crate::C_GenerateKeyPair(
+            crate::api::C_GenerateKeyPair(
                 session,
                 &mut rsa_generation,
                 rsa_public_template.as_mut_ptr(),
@@ -361,11 +348,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         )?;
         if !checked_bool_attribute(session, wrapper_public, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
             || !checked_bool_attribute(session, wrapper_private, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
-            || !checked_bool_attribute(
-                session,
-                wrapper_private,
-                CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
-            )?
+            || !checked_bool_attribute(session, wrapper_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
         {
             return Err("generated RSA wrap-key attributes are inconsistent".to_owned());
         }
@@ -375,7 +358,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         let mut wrapped_length = 0;
         checked_rv(
             "C_WrapKey length query",
-            crate::C_WrapKey(
+            crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
                 wrapper_private,
@@ -387,7 +370,7 @@ fn generated_ec_private_rsa_wrap_round_trip(
         let mut wrapped = vec![0; wrapped_length as usize];
         checked_rv(
             "C_WrapKey",
-            crate::C_WrapKey(
+            crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
                 wrapper_private,
@@ -400,12 +383,12 @@ fn generated_ec_private_rsa_wrap_round_trip(
 
         checked_rv(
             "C_DestroyObject EC target",
-            crate::C_DestroyObject(session, target_private),
+            crate::api::C_DestroyObject(session, target_private),
         )?;
         target_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
         checked_rv(
             "C_UnwrapKey",
-            crate::C_UnwrapKey(
+            crate::api::C_UnwrapKey(
                 session,
                 &mut mechanism,
                 wrapper_private,
@@ -437,19 +420,15 @@ fn generated_ec_private_rsa_wrap_round_trip(
         ("RSA wrap key", wrapper_private),
     ] {
         if handle != CK_INVALID_HANDLE as CK_OBJECT_HANDLE {
-            let rv = crate::C_DestroyObject(session, handle);
+            let rv = crate::api::C_DestroyObject(session, handle);
             if rv != CKR_OK as CK_RV && cleanup_error.is_none() {
-                cleanup_error = Some(format!(
-                    "cleanup of {name} failed with CK_RV 0x{rv:08x}"
-                ));
+                cleanup_error = Some(format!("cleanup of {name} failed with CK_RV 0x{rv:08x}"));
             }
         }
     }
-    let close_rv = crate::C_CloseSession(session);
+    let close_rv = crate::api::C_CloseSession(session);
     if operation.is_ok() && cleanup_error.is_none() && close_rv != CKR_OK as CK_RV {
-        cleanup_error = Some(format!(
-            "C_CloseSession failed with CK_RV 0x{close_rv:08x}"
-        ));
+        cleanup_error = Some(format!("C_CloseSession failed with CK_RV 0x{close_rv:08x}"));
     }
     operation.and_then(|()| cleanup_error.map_or(Ok(()), Err))
 }
@@ -458,7 +437,10 @@ fn generated_ec_private_rsa_wrap_round_trip(
 fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -480,14 +462,20 @@ fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
             "missing mock command {command:?}"
         );
     }
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -497,7 +485,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     }
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -508,7 +496,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -526,7 +514,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     };
     let mut wrapped_len = 0;
     assert_eq!(
-        crate::C_WrapKey(
+        crate::api::C_WrapKey(
             session,
             &mut ccm_mechanism,
             ccm_wrapper,
@@ -544,7 +532,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
 
     let mut wrapped = vec![0; wrapped_len as usize];
     assert_eq!(
-        crate::C_WrapKey(
+        crate::api::C_WrapKey(
             session,
             &mut ccm_mechanism,
             ccm_wrapper,
@@ -562,7 +550,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
 
     let mut imported = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_UnwrapKey(
+        crate::api::C_UnwrapKey(
             session,
             &mut ccm_mechanism,
             ccm_wrapper,
@@ -604,7 +592,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
         let mut length = 0;
         assert_eq!(
-            crate::C_WrapKey(
+            crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
                 wrapper,
@@ -616,7 +604,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         );
         let mut output = vec![0; length as usize];
         assert_eq!(
-            crate::C_WrapKey(
+            crate::api::C_WrapKey(
                 session,
                 &mut mechanism,
                 wrapper,
@@ -632,7 +620,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let mut synthetic_output = [0u8; 32];
     let mut synthetic_output_len = synthetic_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_WrapKey(
+        crate::api::C_WrapKey(
             session,
             &mut ccm_mechanism,
             ccm_wrapper,
@@ -646,7 +634,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
     let (mut full_rsa, mut full_parameters, mut full_oaep) = rsa_wrap_mechanism(true);
     initialize_rsa_wrap_mechanism(&mut full_rsa, &mut full_parameters, &mut full_oaep);
     assert_eq!(
-        crate::C_UnwrapKey(
+        crate::api::C_UnwrapKey(
             session,
             &mut full_rsa,
             rsa_private,
@@ -658,9 +646,10 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    assert!(commands.borrow().iter().any(|(command, _)| {
-        *command == crate::YubiHsmCommandCode::ImportRsaWrapped as u8
-    }));
+    assert!(commands
+        .borrow()
+        .iter()
+        .any(|(command, _)| { *command == crate::YubiHsmCommandCode::ImportRsaWrapped as u8 }));
 
     let (mut key_rsa, mut key_parameters, mut key_oaep) = rsa_wrap_mechanism(false);
     initialize_rsa_wrap_mechanism(&mut key_rsa, &mut key_parameters, &mut key_oaep);
@@ -689,7 +678,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
     ];
     assert_eq!(
-        crate::C_UnwrapKey(
+        crate::api::C_UnwrapKey(
             session,
             &mut key_rsa,
             rsa_private,
@@ -719,7 +708,10 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         1
     );
 
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]

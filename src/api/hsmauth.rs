@@ -1,3 +1,5 @@
+use crate::*;
+
 const HSMAUTH_P256_PUBLIC_KEY_LENGTH: usize = 65;
 
 #[no_mangle]
@@ -37,8 +39,7 @@ pub extern "C" fn PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
     touch_required: CK_BBOOL,
 ) -> CK_RV {
     map((|| {
-        let derivation_password =
-            hsmauth_utf8(derivation_password, derivation_password_len)?;
+        let derivation_password = hsmauth_utf8(derivation_password, derivation_password_len)?;
         let keys = crate::yubico_password_kdf(derivation_password.as_bytes())?;
         hsmauth_put_symmetric(
             session_handle,
@@ -70,8 +71,7 @@ fn hsmauth_put_symmetric(
     if enc_key.len() != 16 || mac_key.len() != 16 {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
-    let credential_password =
-        hsmauth_password(credential_password, credential_password_len)?;
+    let credential_password = hsmauth_password(credential_password, credential_password_len)?;
     let touch_required = hsmauth_bool(touch_required)?;
     hsmauth_mutation(
         session_handle,
@@ -134,10 +134,8 @@ pub extern "C" fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
     public_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
     map((|| {
-        let derivation_password =
-            hsmauth_utf8(derivation_password, derivation_password_len)?;
-        let key =
-            crate::yubico_kdf::yubico_password_p256_key(derivation_password.as_bytes())?;
+        let derivation_password = hsmauth_utf8(derivation_password, derivation_password_len)?;
+        let key = crate::yubico_kdf::yubico_password_p256_key(derivation_password.as_bytes())?;
         let private_key = Zeroizing::new(key.to_bytes());
         hsmauth_put_asymmetric(
             session_handle,
@@ -201,8 +199,7 @@ fn hsmauth_put_asymmetric(
     }
 
     let label = hsmauth_utf8(label, label_len)?;
-    let credential_password =
-        hsmauth_password(credential_password, credential_password_len)?;
+    let credential_password = hsmauth_password(credential_password, credential_password_len)?;
     let touch_required = hsmauth_bool(touch_required)?;
     let value = hsmauth_mutation(
         session_handle,
@@ -231,11 +228,7 @@ pub extern "C" fn PKCS11RS_HsmAuthDeleteCredential(
 ) -> CK_RV {
     map((|| {
         let label = hsmauth_utf8(label, label_len)?;
-        hsmauth_mutation(
-            session_handle,
-            HsmAuthAdministration::Delete { label },
-        )
-        .map(|_| ())
+        hsmauth_mutation(session_handle, HsmAuthAdministration::Delete { label }).map(|_| ())
     })())
 }
 
@@ -249,8 +242,7 @@ pub extern "C" fn PKCS11RS_HsmAuthChangeCredentialPassword(
 ) -> CK_RV {
     map((|| {
         let label = hsmauth_utf8(label, label_len)?;
-        let password =
-            hsmauth_password(new_credential_password, new_credential_password_len)?;
+        let password = hsmauth_password(new_credential_password, new_credential_password_len)?;
         hsmauth_mutation(
             session_handle,
             HsmAuthAdministration::ChangeCredentialPassword {
@@ -269,8 +261,7 @@ pub extern "C" fn PKCS11RS_HsmAuthChangeManagementPassword(
     new_management_password_len: CK_ULONG,
 ) -> CK_RV {
     map((|| {
-        let password =
-            hsmauth_password(new_management_password, new_management_password_len)?;
+        let password = hsmauth_password(new_management_password, new_management_password_len)?;
         hsmauth_mutation(
             session_handle,
             HsmAuthAdministration::ChangeManagementKey {
@@ -282,14 +273,8 @@ pub extern "C" fn PKCS11RS_HsmAuthChangeManagementPassword(
 }
 
 #[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthReset(
-    session_handle: CK_SESSION_HANDLE,
-) -> CK_RV {
-    map(hsmauth_mutation(
-        session_handle,
-        HsmAuthAdministration::Reset,
-    )
-    .map(|_| ()))
+pub extern "C" fn PKCS11RS_HsmAuthReset(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    map(hsmauth_mutation(session_handle, HsmAuthAdministration::Reset).map(|_| ()))
 }
 
 fn hsmauth_mutation(
@@ -345,10 +330,7 @@ fn validate_hsmauth_session(
     Ok(slot_id)
 }
 
-fn hsmauth_utf8<'a>(
-    value: *const CK_UTF8CHAR,
-    value_len: CK_ULONG,
-) -> Result<&'a str, Error> {
+fn hsmauth_utf8<'a>(value: *const CK_UTF8CHAR, value_len: CK_ULONG) -> Result<&'a str, Error> {
     std::str::from_utf8(from_raw_parts(value, value_len as usize)?)
         .map_err(|_| CKR_ARGUMENTS_BAD.into())
 }

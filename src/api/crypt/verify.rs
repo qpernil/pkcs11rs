@@ -1,3 +1,8 @@
+use super::shared::yubihsm_ec_coordinate_length;
+use super::sign::{aes_cmac_length, yubihsm_aes_cmac};
+use crate::api::general::session_function_not_supported;
+use crate::*;
+
 #[no_mangle]
 pub extern "C" fn C_VerifyInit(
     session_handle: CK_SESSION_HANDLE,
@@ -25,12 +30,7 @@ fn verify_init(
         }
 
         let mechanism = _as_ref(mechanism)?;
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_VERIFY as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_VERIFY as CK_FLAGS)?;
         let mac_length = aes_cmac_length(mechanism)?;
         let pss = if mac_length.is_some() {
             None
@@ -89,9 +89,7 @@ fn verify_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
-        let object = ctx
-            .resolve_object(key)?
-            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let object = ctx.resolve_object(key)?.ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
@@ -107,9 +105,7 @@ fn verify_init(
                 || !matches!(
                     object.material,
                     KeyMaterial::YubiHsm {
-                        algorithm: YUBIHSM_ALGO_AES128
-                            | YUBIHSM_ALGO_AES192
-                            | YUBIHSM_ALGO_AES256,
+                        algorithm: YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256,
                         ..
                     }
                 )))
@@ -286,12 +282,7 @@ fn verify(
                 if signature.len() != coordinate_length * 2 {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                verify_ecdsa(
-                    piv_ec_curve(*algorithm)?,
-                    public_key,
-                    &digest,
-                    signature,
-                )
+                verify_ecdsa(piv_ec_curve(*algorithm)?, public_key, &digest, signature)
             }
             KeyMaterial::OpenPgpPublic {
                 algorithm: OpenPgpAlgorithm::Ed25519,
@@ -320,12 +311,7 @@ fn verify(
                 if signature.len() != coordinate_length * 2 {
                     return Err(CKR_SIGNATURE_LEN_RANGE.into());
                 }
-                verify_ecdsa(
-                    openpgp_ec_curve(*curve)?,
-                    public_key,
-                    &digest,
-                    signature,
-                )
+                verify_ecdsa(openpgp_ec_curve(*curve)?, public_key, &digest, signature)
             }
             KeyMaterial::YubiHsm {
                 algorithm,
@@ -367,28 +353,20 @@ fn verify(
     })
 }
 
-fn yubihsm_hmac_mechanism(
-    mechanism: CK_MECHANISM_TYPE,
-) -> Option<(CK_KEY_TYPE, u8, usize)> {
+fn yubihsm_hmac_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<(CK_KEY_TYPE, u8, usize)> {
     match mechanism {
         x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => {
             Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, YUBIHSM_ALGO_HMAC_SHA1, 20))
         }
-        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => Some((
-            CKK_SHA256_HMAC as CK_KEY_TYPE,
-            YUBIHSM_ALGO_HMAC_SHA256,
-            32,
-        )),
-        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => Some((
-            CKK_SHA384_HMAC as CK_KEY_TYPE,
-            YUBIHSM_ALGO_HMAC_SHA384,
-            48,
-        )),
-        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => Some((
-            CKK_SHA512_HMAC as CK_KEY_TYPE,
-            YUBIHSM_ALGO_HMAC_SHA512,
-            64,
-        )),
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA256_HMAC as CK_KEY_TYPE, YUBIHSM_ALGO_HMAC_SHA256, 32))
+        }
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA384_HMAC as CK_KEY_TYPE, YUBIHSM_ALGO_HMAC_SHA384, 48))
+        }
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA512_HMAC as CK_KEY_TYPE, YUBIHSM_ALGO_HMAC_SHA512, 64))
+        }
         _ => None,
     }
 }
