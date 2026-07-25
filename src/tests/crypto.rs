@@ -1,8 +1,13 @@
+use super::*;
+
 #[test]
 pub fn mechanism_list_reports_supported_mechanisms() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_slot(TEST_SLOT_ID);
 
     let mut expected = vec![
@@ -46,14 +51,20 @@ pub fn mechanism_list_reports_supported_mechanisms() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn mechanism_info_reports_supported_mechanism_details() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_slot(TEST_SLOT_ID);
 
     let mut info = CK_MECHANISM_INFO {
@@ -104,21 +115,27 @@ pub fn mechanism_info_reports_supported_mechanism_details() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn find_objects_tracks_empty_search_lifecycle() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
     let mut count = 999;
 
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -127,20 +144,20 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
         CKR_OPERATION_ACTIVE as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             ::std::ptr::null_mut(),
             objects.len() as CK_ULONG,
@@ -149,7 +166,7 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -160,7 +177,7 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
 
     count = 999;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -173,7 +190,7 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
 
     count = 999;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -184,22 +201,28 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
     assert_eq!(count, 0);
 
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn sign_tracks_single_part_operation_lifecycle() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -211,7 +234,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
     let mut signature_len = 0;
 
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -221,11 +244,11 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -239,7 +262,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
     let mut small_signature = [0u8; 4];
     signature_len = small_signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -253,7 +276,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
     let mut signature = [0u8; 256];
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -265,7 +288,7 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
     assert_eq!(signature_len, 256);
     assert!(signature.iter().any(|byte| *byte != 0));
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -275,14 +298,20 @@ pub fn sign_tracks_single_part_operation_lifecycle() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn sign_and_verify_update_final_buffer_multipart_data() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -293,11 +322,11 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
     let mut first = *b"ab";
     let mut second = *b"cd";
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_SignUpdate(
+        crate::api::C_SignUpdate(
             TEST_SESSION_HANDLE,
             first.as_mut_ptr(),
             first.len() as CK_ULONG
@@ -305,7 +334,7 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_SignUpdate(
+        crate::api::C_SignUpdate(
             TEST_SESSION_HANDLE,
             second.as_mut_ptr(),
             second.len() as CK_ULONG
@@ -314,7 +343,7 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
     );
     let mut signature_len = 0;
     assert_eq!(
-        crate::C_SignFinal(
+        crate::api::C_SignFinal(
             TEST_SESSION_HANDLE,
             ::std::ptr::null_mut(),
             &mut signature_len,
@@ -324,7 +353,7 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
     let mut signature = vec![0; signature_len as usize];
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_SignFinal(
+        crate::api::C_SignFinal(
             TEST_SESSION_HANDLE,
             signature.as_mut_ptr(),
             &mut signature_len,
@@ -333,11 +362,11 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
     );
 
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyUpdate(
+        crate::api::C_VerifyUpdate(
             TEST_SESSION_HANDLE,
             first.as_mut_ptr(),
             first.len() as CK_ULONG
@@ -345,7 +374,7 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyUpdate(
+        crate::api::C_VerifyUpdate(
             TEST_SESSION_HANDLE,
             second.as_mut_ptr(),
             second.len() as CK_ULONG
@@ -353,11 +382,14 @@ pub fn sign_and_verify_update_final_buffer_multipart_data() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), signature_len,),
+        crate::api::C_VerifyFinal(TEST_SESSION_HANDLE, signature.as_mut_ptr(), signature_len,),
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -402,14 +434,10 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     .unwrap();
     let signature = crate::rsa_private_operation(&private, &pss).unwrap();
     let recovered = crate::rsa_public_operation(&public, &signature).unwrap();
-    assert!(crate::verify_rsa_pss(
-        &recovered,
-        &digest,
-        CKM_SHA256 as CK_MECHANISM_TYPE,
-        33,
-        32,
-    )
-    .unwrap());
+    assert!(
+        crate::verify_rsa_pss(&recovered, &digest, CKM_SHA256 as CK_MECHANISM_TYPE, 33, 32,)
+            .unwrap()
+    );
 
     let label = <sha2::Sha256 as sha2::Digest>::digest(b"");
     let encoded = crate::rsa_oaep_pad(
@@ -421,25 +449,13 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     )
     .unwrap();
     assert_eq!(
-        crate::rsa_oaep_unpad(
-            &encoded,
-            33,
-            CKM_SHA256 as CK_MECHANISM_TYPE,
-            &label,
-        )
-        .unwrap(),
+        crate::rsa_oaep_unpad(&encoded, 33, CKM_SHA256 as CK_MECHANISM_TYPE, &label,).unwrap(),
         data
     );
     let ciphertext = crate::rsa_public_operation(&public, &encoded).unwrap();
     let plaintext = crate::rsa_private_operation(&private, &ciphertext).unwrap();
     assert_eq!(
-        crate::rsa_oaep_unpad(
-            &plaintext,
-            33,
-            CKM_SHA256 as CK_MECHANISM_TYPE,
-            &label,
-        )
-        .unwrap(),
+        crate::rsa_oaep_unpad(&plaintext, 33, CKM_SHA256 as CK_MECHANISM_TYPE, &label,).unwrap(),
         data
     );
 }
@@ -463,8 +479,7 @@ pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
     }
 
     fn encode_oaep_db(db: &[u8], seed: &[u8]) -> Vec<u8> {
-        let digest =
-            crate::mgf_digest(33, CKM_SHA256 as CK_MECHANISM_TYPE).unwrap();
+        let digest = crate::mgf_digest(33, CKM_SHA256 as CK_MECHANISM_TYPE).unwrap();
         let db_mask = crate::mgf1(seed, db.len(), digest).unwrap();
         let masked_db = db
             .iter()
@@ -485,13 +500,7 @@ pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
     valid_db.extend(b"message");
     let valid = encode_oaep_db(&valid_db, &seed);
     assert_eq!(
-        crate::rsa_oaep_unpad(
-            &valid,
-            33,
-            CKM_SHA256 as CK_MECHANISM_TYPE,
-            &label_digest,
-        )
-        .unwrap(),
+        crate::rsa_oaep_unpad(&valid, 33, CKM_SHA256 as CK_MECHANISM_TYPE, &label_digest,).unwrap(),
         b"message"
     );
 
@@ -526,7 +535,10 @@ pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
 pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     {
@@ -597,14 +609,14 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
         CKR_OK as CK_RV
     );
     let mut data = *b"abc";
     let mut signature = [0u8; 128];
     let mut signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -623,11 +635,11 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     let mut long_message = vec![0x42; 512];
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             long_message.as_mut_ptr(),
             long_message.len() as CK_ULONG,
@@ -646,11 +658,11 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     mechanism.mechanism = CKM_RSA_X_509 as CK_MECHANISM_TYPE;
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 42),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -663,14 +675,20 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     raw_input.extend_from_slice(b"abc");
     assert_eq!(*captured.borrow(), raw_input);
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn verify_accepts_raw_rsa_and_pss_signatures() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     {
         let mut context = crate::lock_context().unwrap();
@@ -679,10 +697,7 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
             Box::new(test_slot_with_mechanisms(
                 true,
                 &[
-                    (
-                        CKM_RSA_X_509 as CK_MECHANISM_TYPE,
-                        CKF_VERIFY as CK_FLAGS,
-                    ),
+                    (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
                     (
                         CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
                         CKF_VERIFY as CK_FLAGS,
@@ -718,11 +733,11 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut raw_mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut raw_mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             raw_data.as_mut_ptr(),
             raw_data.len() as CK_ULONG,
@@ -732,16 +747,9 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         CKR_OK as CK_RV
     );
 
-    let mut digest =
-        <sha2::Sha256 as sha2::Digest>::digest(b"RSA-PSS verification").to_vec();
-    let pss = crate::encode_rsa_pss(
-        &digest,
-        key_size,
-        CKM_SHA256 as CK_MECHANISM_TYPE,
-        33,
-        32,
-    )
-    .unwrap();
+    let mut digest = <sha2::Sha256 as sha2::Digest>::digest(b"RSA-PSS verification").to_vec();
+    let pss =
+        crate::encode_rsa_pss(&digest, key_size, CKM_SHA256 as CK_MECHANISM_TYPE, 33, 32).unwrap();
     let mut pss_signature = crate::rsa_private_operation(&private_key, &pss).unwrap();
     let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
         hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
@@ -754,11 +762,11 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut pss_mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut pss_mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             digest.as_mut_ptr(),
             digest.len() as CK_ULONG,
@@ -768,14 +776,20 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn sign_terminal_errors_clear_the_operation() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -786,11 +800,11 @@ pub fn sign_terminal_errors_clear_the_operation() {
     let mut oversized_data = [0u8; 246];
     let mut signature_len = 0;
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             oversized_data.as_mut_ptr(),
             oversized_data.len() as CK_ULONG,
@@ -800,7 +814,7 @@ pub fn sign_terminal_errors_clear_the_operation() {
         CKR_DATA_LEN_RANGE as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             oversized_data.as_mut_ptr(),
             oversized_data.len() as CK_ULONG,
@@ -812,11 +826,11 @@ pub fn sign_terminal_errors_clear_the_operation() {
 
     let mut data = [1u8];
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -826,7 +840,7 @@ pub fn sign_terminal_errors_clear_the_operation() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -836,7 +850,10 @@ pub fn sign_terminal_errors_clear_the_operation() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -850,19 +867,22 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     assert_eq!(
-        crate::C_SignInit(999, &mut mechanism, 2),
+        crate::api::C_SignInit(999, &mut mechanism, 2),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 2),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
@@ -872,7 +892,7 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut unsupported, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut unsupported, 2),
         CKR_MECHANISM_INVALID as CK_RV
     );
 
@@ -882,7 +902,7 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut unadvertised, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut unadvertised, 2),
         CKR_MECHANISM_INVALID as CK_RV
     );
 
@@ -890,38 +910,44 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
     mechanism.pParameter = &mut parameter as *mut u8 as CK_VOID_PTR;
     mechanism.ulParameterLen = 1;
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
     mechanism.pParameter = ::std::ptr::null_mut();
     mechanism.ulParameterLen = 0;
 
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 999),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 999),
         CKR_KEY_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV
     );
 
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OPERATION_ACTIVE as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn sign_operation_is_cleared_when_session_closes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -930,15 +956,18 @@ pub fn sign_operation_is_cleared_when_session_closes() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
 
     let mut data = [1u8];
     let mut signature_len = 0;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -948,14 +977,20 @@ pub fn sign_operation_is_cleared_when_session_closes() {
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn verify_accepts_matching_rsa_signature() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -968,11 +1003,11 @@ pub fn verify_accepts_matching_rsa_signature() {
     let mut signature_len = signature.len() as CK_ULONG;
 
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -983,7 +1018,7 @@ pub fn verify_accepts_matching_rsa_signature() {
     );
 
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -993,11 +1028,11 @@ pub fn verify_accepts_matching_rsa_signature() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1007,7 +1042,7 @@ pub fn verify_accepts_matching_rsa_signature() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1017,11 +1052,11 @@ pub fn verify_accepts_matching_rsa_signature() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             ::std::ptr::null_mut(),
             1,
@@ -1031,7 +1066,7 @@ pub fn verify_accepts_matching_rsa_signature() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1041,14 +1076,20 @@ pub fn verify_accepts_matching_rsa_signature() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn verify_accepts_yubihsm_rsa_public_material() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     {
@@ -1084,11 +1125,11 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
     let mut signature = [0u8; 256];
     let mut signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1098,11 +1139,11 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1111,14 +1152,20 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     {
         let mut context = crate::lock_context().unwrap();
@@ -1138,15 +1185,13 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     }
 
     let signing_key = crate::certificate_builder::p256_key();
-    let point =
-        crate::certificate_builder::p256_public_point(signing_key.verifying_key());
+    let point = crate::certificate_builder::p256_public_point(signing_key.verifying_key());
     let public_key = point[1..].to_vec();
     let data = b"hardware-backed signature";
     let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
     let signature: p256::ecdsa::Signature =
         signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest).unwrap();
-    let signature =
-        crate::piv_ecdsa_signature(signature.to_der().as_bytes(), 32).unwrap();
+    let signature = crate::piv_ecdsa_signature(signature.to_der().as_bytes(), 32).unwrap();
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
@@ -1190,11 +1235,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             object.material = material;
         }
         assert_eq!(
-            crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
             CKR_OK as CK_RV
         );
         assert_eq!(
-            crate::C_Verify(
+            crate::api::C_Verify(
                 TEST_SESSION_HANDLE,
                 data.as_mut_ptr(),
                 data.len() as CK_ULONG,
@@ -1249,11 +1294,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             object.material = material;
         }
         assert_eq!(
-            crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
             CKR_OK as CK_RV
         );
         assert_eq!(
-            crate::C_Verify(
+            crate::api::C_Verify(
                 TEST_SESSION_HANDLE,
                 data.as_mut_ptr(),
                 data.len() as CK_ULONG,
@@ -1264,7 +1309,10 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
         );
     }
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -1297,24 +1345,16 @@ fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
         let nonce_point = crate::ec_multiply(&nonce, &generator, &parameters);
         let inverse = nonce_point
             .z
-            .modpow(
-                &(&parameters.p - rsa::BigUint::from(2u8)),
-                &parameters.p,
-            );
-        let r =
-            (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
+            .modpow(&(&parameters.p - rsa::BigUint::from(2u8)), &parameters.p);
+        let r = (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
         let mut z = rsa::BigUint::from_bytes_be(&digest);
         if digest.len() * 8 > parameters.n.bits() {
             z >>= digest.len() * 8 - parameters.n.bits();
         }
-        let nonce_inverse =
-            nonce.modpow(&(&parameters.n - rsa::BigUint::from(2u8)), &parameters.n);
+        let nonce_inverse = nonce.modpow(&(&parameters.n - rsa::BigUint::from(2u8)), &parameters.n);
         let s = ((z + &r) * nonce_inverse) % &parameters.n;
         let mut public_key = padded(&parameters.gx, parameters.coordinate_length);
-        public_key.extend_from_slice(&padded(
-            &parameters.gy,
-            parameters.coordinate_length,
-        ));
+        public_key.extend_from_slice(&padded(&parameters.gy, parameters.coordinate_length));
         let mut signature = padded(&r, parameters.coordinate_length);
         signature.extend_from_slice(&padded(&s, parameters.coordinate_length));
 
@@ -1345,8 +1385,7 @@ fn piv_attestation_certificate_supplies_public_key_for_metadata_fallback() {
     let crate::PivPublicKey::Ec(parsed) = parsed else {
         panic!("expected an EC public key");
     };
-    let expected =
-        crate::certificate_builder::p256_public_point(signing_key.verifying_key());
+    let expected = crate::certificate_builder::p256_public_point(signing_key.verifying_key());
     assert_eq!(parsed, expected[1..]);
 }
 
@@ -1409,9 +1448,9 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
 #[test]
 fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
     let private_key = crate::certificate_builder::p256_key();
-    let public_key = crate::PivPublicKey::Ec(
-        crate::certificate_builder::p256_public_point(private_key.verifying_key()),
-    );
+    let public_key = crate::PivPublicKey::Ec(crate::certificate_builder::p256_public_point(
+        private_key.verifying_key(),
+    ));
     let slot = crate::PivSlot {
         connector: std::rc::Rc::new(FailingConnector),
         application_aid: crate::piv::PIV_AID.to_vec(),
@@ -1452,7 +1491,10 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
 pub fn verify_reports_signature_mismatches() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -1465,11 +1507,11 @@ pub fn verify_reports_signature_mismatches() {
     let mut signature_len = signature.len() as CK_ULONG;
 
     assert_eq!(
-        crate::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1481,11 +1523,11 @@ pub fn verify_reports_signature_mismatches() {
 
     let mut short_signature = [0u8; 4];
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1497,11 +1539,11 @@ pub fn verify_reports_signature_mismatches() {
 
     signature[0] ^= 0xff;
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1511,7 +1553,10 @@ pub fn verify_reports_signature_mismatches() {
         CKR_SIGNATURE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -1525,19 +1570,22 @@ pub fn verify_init_reports_key_and_mechanism_errors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     assert_eq!(
-        crate::C_VerifyInit(999, &mut mechanism, 1),
+        crate::api::C_VerifyInit(999, &mut mechanism, 1),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
@@ -1547,7 +1595,7 @@ pub fn verify_init_reports_key_and_mechanism_errors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut unsupported, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut unsupported, 1),
         CKR_MECHANISM_INVALID as CK_RV
     );
 
@@ -1555,38 +1603,44 @@ pub fn verify_init_reports_key_and_mechanism_errors() {
     mechanism.pParameter = &mut parameter as *mut u8 as CK_VOID_PTR;
     mechanism.ulParameterLen = 1;
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
     mechanism.pParameter = ::std::ptr::null_mut();
     mechanism.ulParameterLen = 0;
 
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 999),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 999),
         CKR_KEY_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 2),
         CKR_KEY_FUNCTION_NOT_PERMITTED as CK_RV
     );
 
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OPERATION_ACTIVE as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn verify_operation_is_cleared_when_session_closes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut mechanism = CK_MECHANISM {
@@ -1595,15 +1649,18 @@ pub fn verify_operation_is_cleared_when_session_closes() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
 
     let mut data = [1u8];
     let mut signature = [0u8; 32];
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             TEST_SESSION_HANDLE,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -1613,5 +1670,8 @@ pub fn verify_operation_is_cleared_when_session_closes() {
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }

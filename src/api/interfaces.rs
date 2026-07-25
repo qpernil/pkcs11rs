@@ -1,3 +1,6 @@
+use super::general::session_function_not_supported;
+use crate::*;
+
 #[no_mangle]
 pub extern "C" fn C_GetFunctionStatus(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     session_function_not_supported(session_handle)
@@ -639,7 +642,7 @@ const fn function_list_3_2(version: CK_VERSION) -> CK_FUNCTION_LIST_3_2 {
     }
 }
 
-static G_FUNCTION_LIST: CK_FUNCTION_LIST = function_list_2_40(CK_VERSION {
+pub(super) static G_FUNCTION_LIST: CK_FUNCTION_LIST = function_list_2_40(CK_VERSION {
     major: 2,
     minor: 40,
 });

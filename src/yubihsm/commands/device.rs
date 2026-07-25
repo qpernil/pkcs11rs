@@ -1,3 +1,7 @@
+use super::protocol::*;
+use crate::{error::Error, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_LEN_RANGE};
+use zeroize::Zeroizing;
+
 impl Command {
     pub(crate) fn echo(data: &[u8]) -> Result<Self, Error> {
         Self::raw(CommandCode::Echo, data)

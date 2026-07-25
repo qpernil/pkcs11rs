@@ -1,5 +1,8 @@
 #[cfg(test)]
 use crate::pkcs11::*;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use rsa::RsaPrivateKey;
 
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
@@ -28,6 +31,23 @@ fn scalar_attribute<T>(type_: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE 
     }
 }
 
+#[path = "crypto.rs"]
+mod crypto;
+#[path = "general.rs"]
+mod general;
+#[path = "hardware.rs"]
+mod hardware;
+#[path = "interfaces.rs"]
+mod interfaces;
+#[path = "key.rs"]
+mod key;
+#[path = "object.rs"]
+mod object;
+#[path = "wrap.rs"]
+mod wrap;
+#[cfg(not(feature = "abi-tests"))]
+use wrap::generated_ec_private_rsa_wrap_round_trip;
+
 fn bytes_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut [u8]) -> CK_ATTRIBUTE {
     CK_ATTRIBUTE {
         type_,
@@ -54,11 +74,13 @@ fn debug_level_configuration_has_three_modes() {
 
 #[test]
 fn yubihsm_connector_configuration_accepts_multiple_urls() {
-    assert_eq!(crate::configured_yubihsm_urls(None).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        crate::configured_yubihsm_urls(None).unwrap(),
+        Vec::<String>::new()
+    );
     assert_eq!(
         crate::configured_yubihsm_urls(Some(
-            " http://first:12345/,https://second:8443,http://first:12345 "
-                .into()
+            " http://first:12345/,https://second:8443,http://first:12345 ".into()
         ))
         .unwrap(),
         ["http://first:12345", "https://second:8443"]
@@ -79,11 +101,9 @@ fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
 
 #[test]
 fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential() {
-    assert!(
-        crate::configured_yubihsm_public_discovery_credential(None)
-            .unwrap()
-            .is_none()
-    );
+    assert!(crate::configured_yubihsm_public_discovery_credential(None)
+        .unwrap()
+        .is_none());
     let credential = crate::configured_yubihsm_public_discovery_credential(Some(
         "00a5discovery-password".into(),
     ))
@@ -92,11 +112,7 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(credential.username, b"00a5");
     assert_eq!(credential.authkey_id, 0x00a5);
     assert_eq!(
-        credential
-            .password
-            .borrow()
-            .as_deref()
-            .map(Vec::as_slice),
+        credential.password.borrow().as_deref().map(Vec::as_slice),
         Some(b"discovery-password".as_slice())
     );
 
@@ -108,11 +124,7 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(credential.username, b":0001default key@12345678");
     assert_eq!(credential.authkey_id, 1);
     assert_eq!(
-        credential
-            .password
-            .borrow()
-            .as_deref()
-            .map(Vec::as_slice),
+        credential.password.borrow().as_deref().map(Vec::as_slice),
         Some(b"password".as_slice())
     );
     assert!(credential.uses_hsmauth());
@@ -180,7 +192,10 @@ fn profile_objects_are_public_immutable_token_objects() {
 fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let vectors: [(CK_MECHANISM_TYPE, &str); 9] = [
@@ -238,13 +253,13 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
             ulParameterLen: 0,
         };
         assert_eq!(
-            crate::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+            crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
             CKR_OK as CK_RV
         );
         let mut input = *b"abc";
         let mut output_len = 0;
         assert_eq!(
-            crate::C_Digest(
+            crate::api::C_Digest(
                 TEST_SESSION_HANDLE,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
@@ -256,7 +271,7 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
         assert_eq!(output_len as usize, expected.len());
         let mut output = vec![0; output_len as usize];
         assert_eq!(
-            crate::C_Digest(
+            crate::api::C_Digest(
                 TEST_SESSION_HANDLE,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
@@ -267,7 +282,7 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
         );
         assert_eq!(output, expected);
         assert_eq!(
-            crate::C_Digest(
+            crate::api::C_Digest(
                 TEST_SESSION_HANDLE,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
@@ -284,13 +299,13 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+        crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
         CKR_OK as CK_RV
     );
     let mut first = *b"a";
     let mut second = *b"bc";
     assert_eq!(
-        crate::C_DigestUpdate(
+        crate::api::C_DigestUpdate(
             TEST_SESSION_HANDLE,
             first.as_mut_ptr(),
             first.len() as CK_ULONG,
@@ -298,7 +313,7 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_DigestUpdate(
+        crate::api::C_DigestUpdate(
             TEST_SESSION_HANDLE,
             second.as_mut_ptr(),
             second.len() as CK_ULONG,
@@ -308,13 +323,13 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
     let mut short = [0; 16];
     let mut output_len = short.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DigestFinal(TEST_SESSION_HANDLE, short.as_mut_ptr(), &mut output_len),
+        crate::api::C_DigestFinal(TEST_SESSION_HANDLE, short.as_mut_ptr(), &mut output_len),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(output_len, 64);
     let mut output = [0; 64];
     assert_eq!(
-        crate::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut output_len),
+        crate::api::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut output_len),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -356,7 +371,12 @@ fn yubihsm_generated_key_attestation_is_a_lazy_session_object() {
     let objects = slot.session_objects(1).unwrap();
     let attestation = objects
         .iter()
-        .find(|object| matches!(object.material, crate::KeyMaterial::YubiHsmAttestation { .. }))
+        .find(|object| {
+            matches!(
+                object.material,
+                crate::KeyMaterial::YubiHsmAttestation { .. }
+            )
+        })
         .unwrap();
     assert!(!attestation.token);
     assert_eq!(attestation.class, CKO_CERTIFICATE as CK_OBJECT_CLASS);
@@ -399,17 +419,17 @@ fn yubihsm_imported_keys_do_not_expose_attestation_objects() {
 }
 
 fn finalize_for_test() {
-    let _ = crate::C_Finalize(::std::ptr::null_mut());
+    let _ = crate::api::C_Finalize(::std::ptr::null_mut());
     crate::reset_object_handles();
 }
 
 const HSMAUTH_ADMIN_SLOT_ID: CK_SLOT_ID = 95;
 const HSMAUTH_TEST_PUBLIC_KEY: [u8; 65] = [
-    0x04, 0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4,
-    0x40, 0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8,
-    0x98, 0xc2, 0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a,
-    0x7c, 0x0f, 0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40,
-    0x68, 0x37, 0xbf, 0x51, 0xf5,
+    0x04, 0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
+    0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2,
+    0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e,
+    0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51,
+    0xf5,
 ];
 
 #[derive(Debug, Default)]
@@ -488,11 +508,7 @@ impl crate::Connector for HsmAuthAdminConnector {
     }
 }
 
-fn install_hsmauth_admin_slot(
-) -> (
-    std::rc::Rc<HsmAuthAdminConnector>,
-    CK_SESSION_HANDLE,
-) {
+fn install_hsmauth_admin_slot() -> (std::rc::Rc<HsmAuthAdminConnector>, CK_SESSION_HANDLE) {
     let connector = std::rc::Rc::new(HsmAuthAdminConnector::default());
     {
         let mut context = crate::lock_context().unwrap();
@@ -506,7 +522,7 @@ fn install_hsmauth_admin_slot(
     }
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             HSMAUTH_ADMIN_SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -590,24 +606,22 @@ fn assert_short_tlv(command: &crate::CommandApdu, tag: u8, value: &[u8]) {
 fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     let _pinentry = TestPinentry::new("admin");
     let (connector, session) = install_hsmauth_admin_slot();
 
     assert_eq!(
-        crate::C_Login(
-            session,
-            CKU_SO as CK_USER_TYPE,
-            ::std::ptr::null_mut(),
-            0,
-        ),
+        crate::api::C_Login(session, CKU_SO as CK_USER_TYPE, ::std::ptr::null_mut(), 0,),
         CKR_OK as CK_RV
     );
     assert_eq!(connector.secure_channel_starts.get(), 1);
 
     let label = b"prompted";
     assert_eq!(
-        crate::PKCS11RS_HsmAuthDeleteCredential(
+        crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -615,16 +629,13 @@ fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
         CKR_OK as CK_RV
     );
     let commands = connector.commands.borrow();
-    let delete = commands
-        .iter()
-        .find(|command| command.ins == 0x02)
-        .unwrap();
+    let delete = commands.iter().find(|command| command.ins == 0x02).unwrap();
     let mut management_key = [0; 16];
     management_key[..5].copy_from_slice(b"admin");
     assert_short_tlv(delete, 0x7b, &management_key);
     drop(commands);
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -632,12 +643,15 @@ fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
 fn hsmauth_so_login_authorizes_password_derived_administration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     let (connector, session) = install_hsmauth_admin_slot();
 
     let mut management_password = *b"admin";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_SO as CK_USER_TYPE,
             management_password.as_mut_ptr(),
@@ -651,7 +665,7 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
     let derivation_password = "lösenord".as_bytes();
     let credential_password = b"access";
     assert_eq!(
-        crate::PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+        crate::api::PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -680,7 +694,7 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
 
     let new_management_password = b"new-admin";
     assert_eq!(
-        crate::PKCS11RS_HsmAuthChangeManagementPassword(
+        crate::api::PKCS11RS_HsmAuthChangeManagementPassword(
             session,
             new_management_password.as_ptr(),
             new_management_password.len() as CK_ULONG,
@@ -688,7 +702,7 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::PKCS11RS_HsmAuthDeleteCredential(
+        crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -696,17 +710,20 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
         CKR_OK as CK_RV
     );
     let commands = connector.commands.borrow();
-    let delete = commands.iter().rev().find(|command| command.ins == 0x02).unwrap();
+    let delete = commands
+        .iter()
+        .rev()
+        .find(|command| command.ins == 0x02)
+        .unwrap();
     let mut new_management_key = [0; 16];
-    new_management_key[..new_management_password.len()]
-        .copy_from_slice(new_management_password);
+    new_management_key[..new_management_password.len()].copy_from_slice(new_management_password);
     assert_short_tlv(delete, 0x7b, &new_management_key);
     drop(commands);
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     assert!(connector.secure_channel_clears.get() >= 1);
     assert_eq!(
-        crate::PKCS11RS_HsmAuthDeleteCredential(
+        crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -720,11 +737,14 @@ fn hsmauth_so_login_authorizes_password_derived_administration() {
 fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     let (connector, session) = install_hsmauth_admin_slot();
     let mut management_password = *b"000102030405060708090a0b0c0d0e0f";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_SO as CK_USER_TYPE,
             management_password.as_mut_ptr(),
@@ -738,7 +758,7 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
     let credential_password = b"entry";
     let mut public_key_len = 0;
     assert_eq!(
-        crate::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+        crate::api::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -757,7 +777,7 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
 
     let mut public_key = [0; 65];
     assert_eq!(
-        crate::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+        crate::api::PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -783,7 +803,7 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
 
     connector.reject_next_management_command.set(true);
     assert_eq!(
-        crate::PKCS11RS_HsmAuthDeleteCredential(
+        crate::api::PKCS11RS_HsmAuthDeleteCredential(
             session,
             label.as_ptr(),
             label.len() as CK_ULONG,
@@ -791,7 +811,10 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
         CKR_PIN_INCORRECT as CK_RV
     );
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
-    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
     finalize_for_test();
 }
@@ -802,7 +825,10 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -812,7 +838,7 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
     }
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -823,7 +849,7 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -877,7 +903,7 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
     );
 
     std::fs::remove_file(path).unwrap();
-    assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -888,11 +914,14 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             crate::ABI_TEST_YUBIHSM_SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -903,7 +932,7 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
     );
     let mut pin = *b"1234";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -945,7 +974,7 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
     assert!(pem.starts_with(b"-----BEGIN CERTIFICATE-----"));
     std::fs::remove_file(path).unwrap();
 
-    assert_eq!(crate::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -953,7 +982,10 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
 fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, corrupt_response_mac, _trust) =
@@ -965,7 +997,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -981,7 +1013,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ulDeviceError: 0,
     };
     assert_eq!(
-        crate::C_GetSessionInfo(session, &mut public_info),
+        crate::api::C_GetSessionInfo(session, &mut public_info),
         CKR_OK as CK_RV
     );
     assert_eq!(public_info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
@@ -1019,7 +1051,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_ne!(mechanism_info.flags & CKF_HW as CK_FLAGS, 0);
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -1035,17 +1067,17 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_FindObjectsInit(session, find_template.as_mut_ptr(), 1),
+        crate::api::C_FindObjectsInit(session, find_template.as_mut_ptr(), 1),
         CKR_OK as CK_RV
     );
     let mut private_key = 0;
     let mut found = 0;
     assert_eq!(
-        crate::C_FindObjects(session, &mut private_key, 1, &mut found),
+        crate::api::C_FindObjects(session, &mut private_key, 1, &mut found),
         CKR_OK as CK_RV
     );
     assert_eq!(found, 1);
-    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
     let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
     let mut rsa_key_type = CKK_RSA as CK_KEY_TYPE;
@@ -1062,16 +1094,16 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         },
     ];
     assert_eq!(
-        crate::C_FindObjectsInit(session, public_template.as_mut_ptr(), 2),
+        crate::api::C_FindObjectsInit(session, public_template.as_mut_ptr(), 2),
         CKR_OK as CK_RV
     );
     let mut public_key = 0;
     assert_eq!(
-        crate::C_FindObjects(session, &mut public_key, 1, &mut found),
+        crate::api::C_FindObjects(session, &mut public_key, 1, &mut found),
         CKR_OK as CK_RV
     );
     assert_eq!(found, 1);
-    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
     let mut raw_rsa_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_X_509 as CK_MECHANISM_TYPE,
@@ -1079,7 +1111,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(session, &mut raw_rsa_mechanism, private_key),
+        crate::api::C_SignInit(session, &mut raw_rsa_mechanism, private_key),
         CKR_MECHANISM_INVALID as CK_RV
     );
 
@@ -1092,11 +1124,11 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut ciphertext = [0u8; 256];
     let mut ciphertext_len = ciphertext.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptInit(session, &mut rsa_mechanism, public_key),
+        crate::api::C_EncryptInit(session, &mut rsa_mechanism, public_key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             plaintext.as_mut_ptr(),
             plaintext.len() as CK_ULONG,
@@ -1112,11 +1144,11 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut no_output = [0u8; 1];
     let mut update_len = no_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptInit(session, &mut rsa_mechanism, public_key),
+        crate::api::C_EncryptInit(session, &mut rsa_mechanism, public_key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             plaintext.as_mut_ptr(),
             2,
@@ -1128,7 +1160,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(update_len, 0);
     update_len = no_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             plaintext[2..].as_mut_ptr(),
             (plaintext.len() - 2) as CK_ULONG,
@@ -1139,7 +1171,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     );
     assert_eq!(update_len, 0);
     assert_eq!(
-        crate::C_EncryptFinal(
+        crate::api::C_EncryptFinal(
             session,
             multipart_ciphertext.as_mut_ptr(),
             &mut multipart_ciphertext_len,
@@ -1151,13 +1183,13 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut multipart_plaintext = [0u8; 256];
     let mut multipart_plaintext_len = multipart_plaintext.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut rsa_mechanism, private_key),
+        crate::api::C_DecryptInit(session, &mut rsa_mechanism, private_key),
         CKR_OK as CK_RV
     );
     for range in [0..100, 100..multipart_ciphertext.len()] {
         update_len = no_output.len() as CK_ULONG;
         assert_eq!(
-            crate::C_DecryptUpdate(
+            crate::api::C_DecryptUpdate(
                 session,
                 multipart_ciphertext[range.clone()].as_mut_ptr(),
                 range.len() as CK_ULONG,
@@ -1169,7 +1201,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         assert_eq!(update_len, 0);
     }
     assert_eq!(
-        crate::C_DecryptFinal(
+        crate::api::C_DecryptFinal(
             session,
             multipart_plaintext.as_mut_ptr(),
             &mut multipart_plaintext_len,
@@ -1192,11 +1224,11 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut too_small = [0u8; 1];
     let mut decrypted_len = too_small.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut rsa_mechanism, private_key),
+        crate::api::C_DecryptInit(session, &mut rsa_mechanism, private_key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             ciphertext.as_mut_ptr(),
             ciphertext_len,
@@ -1225,7 +1257,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut decrypted = [0u8; 32];
     decrypted_len = decrypted.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             ciphertext.as_mut_ptr(),
             ciphertext_len,
@@ -1243,14 +1275,14 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(session, &mut sign_mechanism, private_key),
+        crate::api::C_SignInit(session, &mut sign_mechanism, private_key),
         CKR_OK as CK_RV
     );
     let mut message = *b"message";
     let mut signature = [0u8; 256];
     let mut signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             session,
             message.as_mut_ptr(),
             message.len() as CK_ULONG,
@@ -1264,13 +1296,13 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 
     sign_mechanism.mechanism = CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE;
     assert_eq!(
-        crate::C_SignInit(session, &mut sign_mechanism, private_key),
+        crate::api::C_SignInit(session, &mut sign_mechanism, private_key),
         CKR_OK as CK_RV
     );
     let mut hashed_message = *b"oasis authentication";
     signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             session,
             hashed_message.as_mut_ptr(),
             hashed_message.len() as CK_ULONG,
@@ -1286,9 +1318,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         let (_, hashed_sign_data) = command_log
             .iter()
             .rev()
-            .find(|(command, _)| {
-                *command == crate::yubihsm::CommandCode::SignPkcs1 as u8
-            })
+            .find(|(command, _)| *command == crate::yubihsm::CommandCode::SignPkcs1 as u8)
             .unwrap();
         assert_eq!(hashed_sign_data.len(), digest_info.len() + 2);
         assert!(hashed_sign_data.ends_with(&digest_info));
@@ -1364,7 +1394,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     let mut generated_public = 0;
     let mut generated_private = 0;
     assert_eq!(
-        crate::C_GenerateKeyPair(
+        crate::api::C_GenerateKeyPair(
             session,
             &mut generate_mechanism,
             public_template.as_mut_ptr(),
@@ -1412,7 +1442,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert!(!metadata_puts.is_empty());
     assert!(metadata_puts.iter().all(|value| value[..2] == [0, 0]));
     assert_eq!(
-        crate::C_DestroyObject(session, generated_private),
+        crate::api::C_DestroyObject(session, generated_private),
         CKR_OK as CK_RV
     );
 
@@ -1422,7 +1452,10 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         flags: 0,
         ulDeviceError: 0,
     };
-    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
     let command_codes: Vec<u8> = commands
         .borrow()
         .iter()
@@ -1447,10 +1480,13 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 
     corrupt_response_mac.set(true);
     assert_eq!(
-        crate::C_GetSessionInfo(session, &mut info),
+        crate::api::C_GetSessionInfo(session, &mut info),
         CKR_DEVICE_ERROR as CK_RV
     );
-    assert_eq!(crate::C_Logout(session), CKR_USER_NOT_LOGGED_IN as CK_RV);
+    assert_eq!(
+        crate::api::C_Logout(session),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
     finalize_for_test();
 }
 
@@ -1458,11 +1494,13 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
 fn yubihsm_session_info_uses_the_retained_backend_session_role() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, peer, commands) =
-        crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
+    let (slot, peer, commands) = crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
     slot.token_objects(SLOT_ID).unwrap();
     assert!(slot.backend_session_is_active());
     assert!(!slot.login_is_active());
@@ -1473,7 +1511,7 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -1490,13 +1528,16 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
             .count()
     };
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
-    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
     assert_eq!(storage_queries(), 1);
 
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -1504,12 +1545,18 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
     assert_eq!(info.state, CKS_RW_USER_FUNCTIONS as CK_STATE);
     assert_eq!(storage_queries(), 2);
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
-    assert_eq!(crate::C_GetSessionInfo(session, &mut info), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_GetSessionInfo(session, &mut info),
+        CKR_OK as CK_RV
+    );
     assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
     assert_eq!(storage_queries(), 2);
     assert_eq!(peer.create_session_count(), 2);
@@ -1517,7 +1564,7 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
 
     let mut random = [0; 16];
     assert_eq!(
-        crate::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
+        crate::api::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
         CKR_OK as CK_RV
     );
     assert_eq!(peer.create_session_count(), 3);
@@ -1540,13 +1587,13 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
 
     fn find_all(session: CK_SESSION_HANDLE) -> Vec<CK_OBJECT_HANDLE> {
         assert_eq!(
-            crate::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
+            crate::api::C_FindObjectsInit(session, std::ptr::null_mut(), 0),
             CKR_OK as CK_RV
         );
         let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 64];
         let mut count = 0;
         assert_eq!(
-            crate::C_FindObjects(
+            crate::api::C_FindObjects(
                 session,
                 handles.as_mut_ptr(),
                 handles.len() as CK_ULONG,
@@ -1554,7 +1601,7 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
             ),
             CKR_OK as CK_RV
         );
-        assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
         handles[..count as usize].to_vec()
     }
 
@@ -1568,7 +1615,7 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
             pValue: std::ptr::null_mut(),
             ulValueLen: 0,
         };
-        let result = crate::C_GetAttributeValue(session, object, &mut attribute, 1);
+        let result = crate::api::C_GetAttributeValue(session, object, &mut attribute, 1);
         if result != CKR_OK as CK_RV {
             assert!(
                 result == CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
@@ -1579,7 +1626,7 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
         let mut value = vec![0; attribute.ulValueLen as usize];
         attribute.pValue = value.as_mut_ptr().cast();
         assert_eq!(
-            crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
             CKR_OK as CK_RV
         );
     }
@@ -1604,11 +1651,13 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
 
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, peer, commands) =
-        crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
+    let (slot, peer, commands) = crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
     {
         let mut context = crate::lock_context().unwrap();
         let context = context.as_mut().unwrap();
@@ -1617,7 +1666,7 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
     }
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             CKF_SERIAL_SESSION as CK_FLAGS,
             std::ptr::null_mut(),
@@ -1664,11 +1713,13 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
 fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, _, _trust) =
-        crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
     {
         let mut context = crate::lock_context().unwrap();
         context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
@@ -1676,7 +1727,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             CKF_SERIAL_SESSION as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -1687,7 +1738,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -1699,7 +1750,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
         .borrow()
         .iter()
         .any(|(command, _)| *command == crate::yubihsm::CommandCode::ListObjects as u8));
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -2062,11 +2113,7 @@ fn yubihsm_capability_and_pkcs11_attribute_mappings_are_consistent() {
             crate::yubihsm_attributes_to_capabilities(object_type, algorithm, attributes);
         assert_eq!(capabilities, crate::yubihsm_capabilities(&bits));
         assert_eq!(
-            crate::yubihsm_capabilities_to_attributes(
-                object_type,
-                algorithm,
-                &capabilities
-            ),
+            crate::yubihsm_capabilities_to_attributes(object_type, algorithm, &capabilities),
             attributes
         );
     }
@@ -2321,10 +2368,7 @@ fn yubihsm_opaque_objects_match_reference_pkcs11_classes() {
 #[test]
 fn certificate_serial_numbers_are_der_integers() {
     assert_eq!(crate::der_integer(&[]).unwrap(), [0x02, 0x01, 0x00]);
-    assert_eq!(
-        crate::der_integer(&[0, 0x7f]).unwrap(),
-        [0x02, 0x01, 0x7f]
-    );
+    assert_eq!(crate::der_integer(&[0, 0x7f]).unwrap(), [0x02, 0x01, 0x7f]);
     assert_eq!(
         crate::der_integer(&[0x80]).unwrap(),
         [0x02, 0x02, 0x00, 0x80]
@@ -2383,7 +2427,10 @@ fn yubihsm_user_opaque_objects_with_metadata_prefix_remain_visible() {
         object("Meta object 0001 extra"),
         object("Meta object G001"),
     ] {
-        assert_eq!(crate::yubihsm_token_objects(99, info, None).unwrap().len(), 1);
+        assert_eq!(
+            crate::yubihsm_token_objects(99, info, None).unwrap().len(),
+            1
+        );
     }
 }
 
@@ -2402,7 +2449,10 @@ fn yubihsm_invalid_reference_metadata_remains_an_opaque_object() {
         delegated_capabilities: [0; 8],
     };
     assert!(crate::parse_yubihsm_pkcs11_metadata(&info, b"not metadata").is_err());
-    assert_eq!(crate::yubihsm_token_objects(99, info, None).unwrap().len(), 1);
+    assert_eq!(
+        crate::yubihsm_token_objects(99, info, None).unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -2528,13 +2578,13 @@ fn find_yubihsm_object(
         },
     ];
     assert_eq!(
-        crate::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
+        crate::api::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
         CKR_OK as CK_RV
     );
     let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 4];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             session,
             handles.as_mut_ptr(),
             handles.len() as CK_ULONG,
@@ -2542,7 +2592,7 @@ fn find_yubihsm_object(
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
     handles[..count as usize].to_vec()
 }
 
@@ -2557,13 +2607,13 @@ fn read_bytes_attribute(
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
         CKR_OK as CK_RV
     );
     let mut value = vec![0; attribute.ulValueLen as usize];
     attribute.pValue = value.as_mut_ptr().cast();
     assert_eq!(
-        crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
         CKR_OK as CK_RV
     );
     value
@@ -2582,13 +2632,13 @@ fn find_by_bytes_attribute(
         bytes_attribute(attribute_type, &mut value),
     ];
     assert_eq!(
-        crate::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
+        crate::api::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
         CKR_OK as CK_RV
     );
     let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 4];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             session,
             handles.as_mut_ptr(),
             handles.len() as CK_ULONG,
@@ -2596,13 +2646,16 @@ fn find_by_bytes_attribute(
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
     handles[..count as usize].to_vec()
 }
 
 fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discovery: bool) {
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, peer, commands) =
         crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(public_discovery);
@@ -2620,7 +2673,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -2655,7 +2708,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
                 scalar_attribute(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE, &mut destroyable),
             ];
             assert_eq!(
-                crate::C_GetAttributeValue(
+                crate::api::C_GetAttributeValue(
                     session,
                     handle,
                     attributes.as_mut_ptr(),
@@ -2687,31 +2740,31 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         let mut blocked_attribute =
             bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut blocked_label);
         assert_eq!(
-            crate::C_SetAttributeValue(session, public[0], &mut blocked_attribute, 1),
+            crate::api::C_SetAttributeValue(session, public[0], &mut blocked_attribute, 1),
             CKR_USER_NOT_LOGGED_IN as CK_RV
         );
         assert_eq!(
-            crate::C_SetAttributeValue(session, certificate[0], &mut blocked_attribute, 1),
+            crate::api::C_SetAttributeValue(session, certificate[0], &mut blocked_attribute, 1),
             CKR_USER_NOT_LOGGED_IN as CK_RV
         );
         assert_eq!(
-            crate::C_DestroyObject(session, public[0]),
+            crate::api::C_DestroyObject(session, public[0]),
             CKR_ACTION_PROHIBITED as CK_RV
         );
         assert_eq!(
-            crate::C_DestroyObject(session, certificate[0]),
+            crate::api::C_DestroyObject(session, certificate[0]),
             CKR_USER_NOT_LOGGED_IN as CK_RV
         );
         let mut copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
         assert_eq!(
-            crate::C_CopyObject(session, public[0], std::ptr::null_mut(), 0, &mut copy),
+            crate::api::C_CopyObject(session, public[0], std::ptr::null_mut(), 0, &mut copy),
             CKR_ACTION_PROHIBITED as CK_RV
         );
         assert_eq!(commands.borrow().len(), command_count);
     }
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -2747,8 +2800,12 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         );
     }
 
-    let initial =
-        find_yubihsm_object(session, CKO_PRIVATE_KEY as CK_OBJECT_CLASS, b"shared-id", "metadata private key");
+    let initial = find_yubihsm_object(
+        session,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        b"shared-id",
+        "metadata private key",
+    );
     assert_eq!(initial.len(), 1);
     assert!(find_yubihsm_object(
         session,
@@ -2758,7 +2815,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     )
     .is_empty());
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     crate::yubihsm::tests::replace_metadata(
         &peer,
         100,
@@ -2781,7 +2838,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ],
     );
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -2821,7 +2878,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         },
     ];
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             session,
             updated[0],
             replacement.as_mut_ptr(),
@@ -2874,7 +2931,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     ];
     let command_start = commands.borrow().len();
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             session,
             public[0],
             public_replacement.as_mut_ptr(),
@@ -2918,7 +2975,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut empty_label),
     ];
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             session,
             public[0],
             clear_public_attributes.as_mut_ptr(),
@@ -2945,14 +3002,14 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, updated[0]),
+        crate::api::C_SignInit(session, &mut mechanism, updated[0]),
         CKR_OK as CK_RV
     );
     let mut input = *b"metadata search";
     let mut signature = [0u8; 256];
     let mut signature_len = signature.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             session,
             input.as_mut_ptr(),
             input.len() as CK_ULONG,
@@ -2964,7 +3021,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     assert_eq!(signature_len, 256);
 
     assert_eq!(
-        crate::C_DestroyObject(session, updated[0]),
+        crate::api::C_DestroyObject(session, updated[0]),
         CKR_OK as CK_RV
     );
     let deletes = commands
@@ -2983,7 +3040,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     )
     .is_empty());
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -3003,7 +3060,10 @@ fn yubihsm_metadata_drives_search_and_operations_without_public_discovery_creden
 fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     crate::lock_context()
@@ -3015,7 +3075,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -3026,7 +3086,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -3035,18 +3095,16 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
         CKR_OK as CK_RV
     );
 
-    let private_key = RsaPrivateKey::from_pkcs8_pem(include_str!(
-        "../fixtures/test-rsa-private-key.pem"
-    ))
-    .unwrap();
+    let private_key =
+        RsaPrivateKey::from_pkcs8_pem(include_str!("../fixtures/test-rsa-private-key.pem"))
+            .unwrap();
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
     let mut token = CK_TRUE as CK_BBOOL;
     let mut private = CK_TRUE as CK_BBOOL;
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut id = b"non-native-id".to_vec();
-    let mut label =
-        b"created YubiHSM private key with a label longer than forty bytes".to_vec();
+    let mut label = b"created YubiHSM private key with a label longer than forty bytes".to_vec();
     let mut modulus = private_key.n().to_bytes_be();
     let mut public_exponent = private_key.e().to_bytes_be();
     let mut private_exponent = private_key.d().to_bytes_be();
@@ -3074,7 +3132,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             session,
             template.as_mut_ptr(),
             template.len() as CK_ULONG,
@@ -3105,8 +3163,11 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     assert_eq!(&metadata.1[..2], &[0, 0]);
     drop(commands);
 
-    assert_eq!(crate::C_DestroyObject(session, object), CKR_OK as CK_RV);
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_DestroyObject(session, object),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -3114,7 +3175,10 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
 fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, peer, commands) =
         crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(false);
@@ -3136,7 +3200,7 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -3147,7 +3211,7 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -3173,7 +3237,7 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
     }
 
     assert_eq!(
-        crate::C_DestroyObject(session, private[0]),
+        crate::api::C_DestroyObject(session, private[0]),
         CKR_OK as CK_RV
     );
     let deletes = commands
@@ -3197,7 +3261,7 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
     )
     .is_empty());
 
-    assert_eq!(crate::C_Logout(session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -3327,11 +3391,11 @@ fn assert_pkcs11_aes_vector(
     let mut output = vec![0; ciphertext.len()];
     let mut output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             input.as_mut_ptr(),
             input.len() as CK_ULONG,
@@ -3343,13 +3407,13 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(&output[..output_len as usize], ciphertext);
 
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     let split = plaintext.len().min(17);
     let mut update_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             input.as_mut_ptr(),
             split as CK_ULONG,
@@ -3361,7 +3425,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(update_len, 0);
     update_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             input[split..].as_mut_ptr(),
             (input.len() - split) as CK_ULONG,
@@ -3373,7 +3437,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(update_len, 0);
     output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptFinal(session, output.as_mut_ptr(), &mut output_len),
+        crate::api::C_EncryptFinal(session, output.as_mut_ptr(), &mut output_len),
         CKR_OK as CK_RV
     );
     assert_eq!(&output[..output_len as usize], ciphertext);
@@ -3382,11 +3446,11 @@ fn assert_pkcs11_aes_vector(
     let mut output = vec![0; plaintext.len()];
     let mut output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             input.as_mut_ptr(),
             input.len() as CK_ULONG,
@@ -3398,13 +3462,13 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(&output[..output_len as usize], plaintext);
 
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     let split = input.len().min(19);
     update_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptUpdate(
+        crate::api::C_DecryptUpdate(
             session,
             input.as_mut_ptr(),
             split as CK_ULONG,
@@ -3416,7 +3480,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(update_len, 0);
     update_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptUpdate(
+        crate::api::C_DecryptUpdate(
             session,
             input[split..].as_mut_ptr(),
             (input.len() - split) as CK_ULONG,
@@ -3428,7 +3492,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(update_len, 0);
     output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptFinal(session, output.as_mut_ptr(), &mut output_len),
+        crate::api::C_DecryptFinal(session, output.as_mut_ptr(), &mut output_len),
         CKR_OK as CK_RV
     );
     assert_eq!(&output[..output_len as usize], plaintext);
@@ -3607,7 +3671,10 @@ fn aes_gcm_parameters_are_validated_and_copied_at_init() {
 fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -3617,7 +3684,7 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
     }
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -3628,7 +3695,7 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -3678,14 +3745,20 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
         &cbc_ciphertext,
     );
 
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 fn yubihsm_aes_cmac_variants_match_nist_vectors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -3695,7 +3768,7 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
     }
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -3711,16 +3784,16 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_USER_NOT_LOGGED_IN as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(session, &mut mechanism, key),
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
         CKR_USER_NOT_LOGGED_IN as CK_RV
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -3756,12 +3829,12 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         let mut message = test_hex(message);
         let expected = test_hex(expected);
         assert_eq!(
-            crate::C_SignInit(session, &mut mechanism, key),
+            crate::api::C_SignInit(session, &mut mechanism, key),
             CKR_OK as CK_RV
         );
         let mut mac_length = 0;
         assert_eq!(
-            crate::C_Sign(
+            crate::api::C_Sign(
                 session,
                 message.as_mut_ptr(),
                 message.len() as CK_ULONG,
@@ -3773,7 +3846,7 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         assert_eq!(mac_length, 16);
         let mut mac = [0; 16];
         assert_eq!(
-            crate::C_Sign(
+            crate::api::C_Sign(
                 session,
                 message.as_mut_ptr(),
                 message.len() as CK_ULONG,
@@ -3785,11 +3858,11 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         assert_eq!(mac, expected.as_slice());
 
         assert_eq!(
-            crate::C_VerifyInit(session, &mut mechanism, key),
+            crate::api::C_VerifyInit(session, &mut mechanism, key),
             CKR_OK as CK_RV
         );
         assert_eq!(
-            crate::C_Verify(
+            crate::api::C_Verify(
                 session,
                 message.as_mut_ptr(),
                 message.len() as CK_ULONG,
@@ -3810,15 +3883,15 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
     mechanism.pParameter = (&mut general_length as *mut CK_ULONG).cast();
     mechanism.ulParameterLen = std::mem::size_of::<CK_ULONG>() as CK_ULONG;
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_SignUpdate(session, message.as_mut_ptr(), 17),
+        crate::api::C_SignUpdate(session, message.as_mut_ptr(), 17),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_SignUpdate(
+        crate::api::C_SignUpdate(
             session,
             message[17..].as_mut_ptr(),
             (message.len() - 17) as CK_ULONG,
@@ -3828,21 +3901,21 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
     let mut mac = [0; 8];
     let mut mac_length = mac.len() as CK_ULONG;
     assert_eq!(
-        crate::C_SignFinal(session, mac.as_mut_ptr(), &mut mac_length),
+        crate::api::C_SignFinal(session, mac.as_mut_ptr(), &mut mac_length),
         CKR_OK as CK_RV
     );
     assert_eq!(mac, test_hex("dfa66747de9ae630").as_slice());
 
     assert_eq!(
-        crate::C_VerifyInit(session, &mut mechanism, key),
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyUpdate(session, message.as_mut_ptr(), 17),
+        crate::api::C_VerifyUpdate(session, message.as_mut_ptr(), 17),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyUpdate(
+        crate::api::C_VerifyUpdate(
             session,
             message[17..].as_mut_ptr(),
             (message.len() - 17) as CK_ULONG,
@@ -3850,17 +3923,17 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyFinal(session, mac.as_mut_ptr(), mac.len() as CK_ULONG),
+        crate::api::C_VerifyFinal(session, mac.as_mut_ptr(), mac.len() as CK_ULONG),
         CKR_OK as CK_RV
     );
 
     mac[0] ^= 1;
     assert_eq!(
-        crate::C_VerifyInit(session, &mut mechanism, key),
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             session,
             message.as_mut_ptr(),
             message.len() as CK_ULONG,
@@ -3870,11 +3943,11 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         CKR_SIGNATURE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(session, &mut mechanism, key),
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             session,
             message.as_mut_ptr(),
             message.len() as CK_ULONG,
@@ -3886,25 +3959,25 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
 
     mechanism.mechanism = CKM_AES_CMAC as CK_MECHANISM_TYPE;
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
     mechanism.mechanism = CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE;
     mechanism.pParameter = std::ptr::null_mut();
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
     general_length = 0;
     mechanism.pParameter = (&mut general_length as *mut CK_ULONG).cast();
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     let mut empty_mac = [];
     let mut empty_mac_length = 0;
     assert_eq!(
-        crate::C_Sign(
+        crate::api::C_Sign(
             session,
             message.as_mut_ptr(),
             message.len() as CK_ULONG,
@@ -3914,11 +3987,11 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_VerifyInit(session, &mut mechanism, key),
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Verify(
+        crate::api::C_Verify(
             session,
             message.as_mut_ptr(),
             message.len() as CK_ULONG,
@@ -3931,23 +4004,29 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
     let mut invalid_length = 17 as CK_ULONG;
     mechanism.pParameter = (&mut invalid_length as *mut CK_ULONG).cast();
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
     mechanism.ulParameterLen = 1;
     assert_eq!(
-        crate::C_SignInit(session, &mut mechanism, key),
+        crate::api::C_SignInit(session, &mut mechanism, key),
         CKR_MECHANISM_PARAM_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     const KEY_ID: u16 = 0x1235;
@@ -3958,7 +4037,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     }
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -3969,7 +4048,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -3997,11 +4076,11 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     let mut plaintext: Vec<u8> = (0..5003).map(|index| index as u8).collect();
     let mut encrypted_len = 0;
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             plaintext.as_mut_ptr(),
             plaintext.len() as CK_ULONG,
@@ -4013,7 +4092,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     assert_eq!(encrypted_len as usize, plaintext.len() + 16);
     let mut encrypted = vec![0; encrypted_len as usize];
     assert_eq!(
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             plaintext.as_mut_ptr(),
             plaintext.len() as CK_ULONG,
@@ -4027,11 +4106,11 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
 
     let mut decrypted_len = 0;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             encrypted.as_mut_ptr(),
             encrypted.len() as CK_ULONG,
@@ -4043,7 +4122,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     assert_eq!(decrypted_len as usize, plaintext.len());
     let mut decrypted = vec![0; decrypted_len as usize];
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             encrypted.as_mut_ptr(),
             encrypted.len() as CK_ULONG,
@@ -4056,11 +4135,11 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
 
     *encrypted.last_mut().unwrap() ^= 1;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             encrypted.as_mut_ptr(),
             encrypted.len() as CK_ULONG,
@@ -4083,14 +4162,20 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     drop(ecb_commands);
     drop(commands);
 
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     const KEY_ID: u16 = 0x1235;
@@ -4101,7 +4186,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     }
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             std::ptr::null_mut(),
@@ -4112,7 +4197,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -4147,13 +4232,13 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     };
 
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     let commands_before_updates = ecb_command_count();
     let mut update_len = 123;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             plaintext.as_mut_ptr(),
             13,
@@ -4167,7 +4252,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     for range in [0..13, 13..47, 47..plaintext.len()] {
         update_len = no_output.len() as CK_ULONG;
         assert_eq!(
-            crate::C_EncryptUpdate(
+            crate::api::C_EncryptUpdate(
                 session,
                 plaintext[range.clone()].as_mut_ptr(),
                 range.len() as CK_ULONG,
@@ -4180,7 +4265,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     }
     let mut encrypted_len = 0;
     assert_eq!(
-        crate::C_EncryptFinal(session, std::ptr::null_mut(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, std::ptr::null_mut(), &mut encrypted_len),
         CKR_OK as CK_RV
     );
     assert_eq!(encrypted_len as usize, plaintext.len() + 16);
@@ -4189,7 +4274,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     let mut too_small = [0u8; 1];
     let mut too_small_len = too_small.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptFinal(session, too_small.as_mut_ptr(), &mut too_small_len),
+        crate::api::C_EncryptFinal(session, too_small.as_mut_ptr(), &mut too_small_len),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(too_small_len, encrypted_len);
@@ -4198,22 +4283,22 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
 
     let mut encrypted = vec![0; encrypted_len as usize];
     assert_eq!(
-        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
         CKR_OK as CK_RV
     );
     assert_eq!(ecb_command_count(), commands_after_encryption);
     assert_eq!(
-        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     let mut plaintext_len = 99;
     assert_eq!(
-        crate::C_DecryptUpdate(
+        crate::api::C_DecryptUpdate(
             session,
             encrypted.as_mut_ptr(),
             17,
@@ -4226,7 +4311,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     for range in [0..17, 17..encrypted.len()] {
         update_len = no_output.len() as CK_ULONG;
         assert_eq!(
-            crate::C_DecryptUpdate(
+            crate::api::C_DecryptUpdate(
                 session,
                 encrypted[range.clone()].as_mut_ptr(),
                 range.len() as CK_ULONG,
@@ -4238,25 +4323,25 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
         assert_eq!(update_len, 0);
     }
     assert_eq!(
-        crate::C_DecryptFinal(session, std::ptr::null_mut(), &mut plaintext_len),
+        crate::api::C_DecryptFinal(session, std::ptr::null_mut(), &mut plaintext_len),
         CKR_OK as CK_RV
     );
     assert_eq!(plaintext_len as usize, plaintext.len());
     let mut decrypted = vec![0; plaintext_len as usize];
     assert_eq!(
-        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        crate::api::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
         CKR_OK as CK_RV
     );
     assert_eq!(&decrypted[..plaintext_len as usize], plaintext);
 
     *encrypted.last_mut().unwrap() ^= 1;
     assert_eq!(
-        crate::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     update_len = no_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptUpdate(
+        crate::api::C_DecryptUpdate(
             session,
             encrypted.as_mut_ptr(),
             encrypted.len() as CK_ULONG,
@@ -4267,21 +4352,21 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     );
     plaintext_len = decrypted.len() as CK_ULONG;
     assert_eq!(
-        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        crate::api::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
         CKR_ENCRYPTED_DATA_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
+        crate::api::C_DecryptFinal(session, decrypted.as_mut_ptr(), &mut plaintext_len),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     update_len = no_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             plaintext.as_mut_ptr(),
             plaintext.len() as CK_ULONG,
@@ -4292,7 +4377,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     );
     encrypted_len = encrypted.len() as CK_ULONG;
     assert_eq!(
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             std::ptr::null_mut(),
             0,
@@ -4302,34 +4387,34 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
         CKR_OPERATION_ACTIVE as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
         CKR_OK as CK_RV
     );
 
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptInit(session, std::ptr::null_mut(), 0),
+        crate::api::C_EncryptInit(session, std::ptr::null_mut(), 0),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptInit(session, std::ptr::null_mut(), 0),
+        crate::api::C_EncryptInit(session, std::ptr::null_mut(), 0),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
     assert_eq!(
-        crate::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
         CKR_OK as CK_RV
     );
     update_len = no_output.len() as CK_ULONG;
     assert_eq!(
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             std::ptr::null_mut(),
             1,
@@ -4339,11 +4424,14 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
+        crate::api::C_EncryptFinal(session, encrypted.as_mut_ptr(), &mut encrypted_len),
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -4504,8 +4592,7 @@ fn yubihsm_object_identity_survives_device_sequence_wraps() {
     };
     let first =
         crate::yubihsm_token_objects_with_generation(99, info.clone(), None, 1, None).unwrap();
-    let wrapped =
-        crate::yubihsm_token_objects_with_generation(99, info, None, 257, None).unwrap();
+    let wrapped = crate::yubihsm_token_objects_with_generation(99, info, None, 257, None).unwrap();
     assert_ne!(first[0].unique_id, wrapped[0].unique_id);
 }
 
@@ -4531,7 +4618,10 @@ fn yubihsm_x25519_two_way_derive(
 ) {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
@@ -4542,7 +4632,7 @@ fn yubihsm_x25519_two_way_derive(
 
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             SLOT_ID,
             (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -4553,7 +4643,7 @@ fn yubihsm_x25519_two_way_derive(
     );
     let mut pin = *b"0001password";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_mut_ptr(),
@@ -4610,7 +4700,7 @@ fn yubihsm_x25519_two_way_derive(
             pParameter: ::std::ptr::null_mut(),
             ulParameterLen: 0,
         };
-        let rv = crate::C_GenerateKeyPair(
+        let rv = crate::api::C_GenerateKeyPair(
             session,
             &mut mechanism,
             public_template.as_mut_ptr(),
@@ -4642,17 +4732,21 @@ fn yubihsm_x25519_two_way_derive(
             },
         ];
         assert_eq!(
-            crate::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG,),
+            crate::api::C_FindObjectsInit(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+            ),
             CKR_OK as CK_RV
         );
         let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
         let mut count = 0;
         assert_eq!(
-            crate::C_FindObjects(session, &mut object, 1, &mut count),
+            crate::api::C_FindObjects(session, &mut object, 1, &mut count),
             CKR_OK as CK_RV
         );
         assert_eq!(count, 1);
-        assert_eq!(crate::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
         object
     };
     let public_key_one = find_key(first_id, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
@@ -4668,7 +4762,7 @@ fn yubihsm_x25519_two_way_derive(
             ulValueLen: point.len() as CK_ULONG,
         };
         assert_eq!(
-            crate::C_GetAttributeValue(session, object, &mut attribute, 1),
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
             CKR_OK as CK_RV
         );
         point.truncate(attribute.ulValueLen as usize);
@@ -4699,7 +4793,7 @@ fn yubihsm_x25519_two_way_derive(
     let command_count = commands.borrow().len();
     let mut invalid_derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_DeriveKey(
+        crate::api::C_DeriveKey(
             session,
             &mut mechanism,
             private_handle,
@@ -4713,7 +4807,7 @@ fn yubihsm_x25519_two_way_derive(
 
     let mut derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_DeriveKey(
+        crate::api::C_DeriveKey(
             session,
             &mut mechanism,
             private_handle,
@@ -4787,7 +4881,7 @@ fn yubihsm_x25519_two_way_derive(
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             session,
             derived_key,
             attributes.as_mut_ptr(),
@@ -4823,7 +4917,7 @@ fn yubihsm_x25519_two_way_derive(
     };
     let mut reverse_derived_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_DeriveKey(
+        crate::api::C_DeriveKey(
             session,
             &mut reverse_mechanism,
             other_private_handle,
@@ -4840,7 +4934,7 @@ fn yubihsm_x25519_two_way_derive(
         ulValueLen: reverse_value.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             session,
             reverse_derived_key,
             &mut reverse_value_attribute,
@@ -5026,13 +5120,16 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
         serial: String::from("TEST0001"),
         keys: Vec::new(),
         certificates: Vec::new(),
-        data_objects: vec![crate::PivDataObject {
-            object_id: 0x5f_c102,
-            value: vec![1, 2, 3],
-        }, crate::PivDataObject {
-            object_id: 0x5f_ff10,
-            value: vec![4, 5, 6],
-        }],
+        data_objects: vec![
+            crate::PivDataObject {
+                object_id: 0x5f_c102,
+                value: vec![1, 2, 3],
+            },
+            crate::PivDataObject {
+                object_id: 0x5f_ff10,
+                value: vec![4, 5, 6],
+            },
+        ],
     };
     let objects = crate::Slot::token_objects(&piv, 7).unwrap();
     let object = objects
@@ -5045,7 +5142,9 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
     );
     assert_eq!(
         object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
-        Some(vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00])
+        Some(vec![
+            0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00
+        ])
     );
     assert_eq!(
         object.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE),
@@ -5066,7 +5165,15 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
 
     let vendor = objects
         .iter()
-        .find(|object| matches!(object.material, crate::KeyMaterial::PivData { object_id: 0x5f_ff10, .. }))
+        .find(|object| {
+            matches!(
+                object.material,
+                crate::KeyMaterial::PivData {
+                    object_id: 0x5f_ff10,
+                    ..
+                }
+            )
+        })
         .unwrap();
     assert_eq!(vendor.attribute_value(CKA_ID as CK_ATTRIBUTE_TYPE), None);
     assert_eq!(
@@ -5148,7 +5255,11 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
     );
     assert_eq!(
         private.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
-        Some((CKM_RSA_PKCS_KEY_PAIR_GEN as CK_ULONG).to_ne_bytes().to_vec())
+        Some(
+            (CKM_RSA_PKCS_KEY_PAIR_GEN as CK_ULONG)
+                .to_ne_bytes()
+                .to_vec()
+        )
     );
     assert_eq!(
         private.attribute_value(crate::CKA_YUBICO_PIN_POLICY),
@@ -5171,7 +5282,11 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
     );
     assert_eq!(
         imported.attribute_value(CKA_KEY_GEN_MECHANISM as CK_ATTRIBUTE_TYPE),
-        Some((CK_UNAVAILABLE_INFORMATION as CK_ULONG).to_ne_bytes().to_vec())
+        Some(
+            (CK_UNAVAILABLE_INFORMATION as CK_ULONG)
+                .to_ne_bytes()
+                .to_vec()
+        )
     );
 
     slot.version = crate::piv::Version {
@@ -5185,11 +5300,12 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
     let rsa_generation = mechanisms
         .iter()
-        .find(|mechanism| {
-            mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
-        })
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!((rsa_generation.min_key_size, rsa_generation.max_key_size), (1024, 2048));
+    assert_eq!(
+        (rsa_generation.min_key_size, rsa_generation.max_key_size),
+        (1024, 2048)
+    );
 }
 
 #[test]
@@ -5290,10 +5406,7 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
             .find(|mechanism| mechanism.type_ == mechanism_type)
             .unwrap();
         assert_eq!((details.min_key_size, details.max_key_size), (2048, 2048));
-        assert_eq!(
-            details.flags,
-            (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS
-        );
+        assert_eq!(details.flags, (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS);
     }
     let ccm = wrapping
         .iter()
@@ -5684,11 +5797,7 @@ impl crate::Slot for TestSlot {
         Ok(())
     }
 
-    fn set_so_pin(
-        &mut self,
-        old_pin: &[u8],
-        new_pin: &[u8],
-    ) -> Result<(), crate::error::Error> {
+    fn set_so_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), crate::error::Error> {
         if old_pin != b"12345678" {
             return Err(CKR_PIN_INCORRECT.into());
         }
@@ -5759,13 +5868,16 @@ fn test_slot_with_mechanisms(
     additional: &[(CK_MECHANISM_TYPE, CK_FLAGS)],
 ) -> TestSlot {
     let mut slot = test_slot(present);
-    slot.mechanisms
-        .extend(additional.iter().map(|(type_, flags)| crate::MechanismDetails {
-            type_: *type_,
-            min_key_size: 0,
-            max_key_size: CK_UNAVAILABLE_INFORMATION as CK_ULONG,
-            flags: *flags,
-        }));
+    slot.mechanisms.extend(
+        additional
+            .iter()
+            .map(|(type_, flags)| crate::MechanismDetails {
+                type_: *type_,
+                min_key_size: 0,
+                max_key_size: CK_UNAVAILABLE_INFORMATION as CK_ULONG,
+                flags: *flags,
+            }),
+    );
     slot
 }
 
@@ -5809,7 +5921,9 @@ fn install_test_session_with_state(
         .sessions
         .insert(session_handle, Box::new(TestSession { slot_id, flags }));
     if logged_in {
-        context.logged_in_slots.insert(slot_id, crate::LoginRole::User);
+        context
+            .logged_in_slots
+            .insert(slot_id, crate::LoginRole::User);
     }
 }
 
@@ -5852,11 +5966,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
 
     assert_stub!(
         "C_InitPIN",
-        crate::C_InitPIN(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+        crate::api::C_InitPIN(session, data.as_mut_ptr(), data.len() as CK_ULONG)
     );
     assert_stub!(
         "C_SetPIN",
-        crate::C_SetPIN(
+        crate::api::C_SetPIN(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5866,40 +5980,40 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_GetOperationState",
-        crate::C_GetOperationState(session, data.as_mut_ptr(), &mut data_len)
+        crate::api::C_GetOperationState(session, data.as_mut_ptr(), &mut data_len)
     );
     assert_stub!(
         "C_SetOperationState",
-        crate::C_SetOperationState(session, data.as_mut_ptr(), data.len() as CK_ULONG, 0, 0)
+        crate::api::C_SetOperationState(session, data.as_mut_ptr(), data.len() as CK_ULONG, 0, 0)
     );
     assert_stub!(
         "C_CreateObject",
-        crate::C_CreateObject(session, ::std::ptr::null_mut(), 0, &mut object)
+        crate::api::C_CreateObject(session, ::std::ptr::null_mut(), 0, &mut object)
     );
     assert_stub!(
         "C_CopyObject",
-        crate::C_CopyObject(session, 0, ::std::ptr::null_mut(), 0, &mut object)
+        crate::api::C_CopyObject(session, 0, ::std::ptr::null_mut(), 0, &mut object)
     );
-    assert_stub!("C_DestroyObject", crate::C_DestroyObject(session, 0));
+    assert_stub!("C_DestroyObject", crate::api::C_DestroyObject(session, 0));
     assert_stub!(
         "C_GetObjectSize",
-        crate::C_GetObjectSize(session, 0, &mut data_len)
+        crate::api::C_GetObjectSize(session, 0, &mut data_len)
     );
     assert_stub!(
         "C_GetAttributeValue",
-        crate::C_GetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
+        crate::api::C_GetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_SetAttributeValue",
-        crate::C_SetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
+        crate::api::C_SetAttributeValue(session, 0, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_EncryptInit",
-        crate::C_EncryptInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_EncryptInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_Encrypt",
-        crate::C_Encrypt(
+        crate::api::C_Encrypt(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5909,7 +6023,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_EncryptUpdate",
-        crate::C_EncryptUpdate(
+        crate::api::C_EncryptUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5919,15 +6033,15 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_EncryptFinal",
-        crate::C_EncryptFinal(session, data.as_mut_ptr(), &mut data_len)
+        crate::api::C_EncryptFinal(session, data.as_mut_ptr(), &mut data_len)
     );
     assert_stub!(
         "C_DecryptInit",
-        crate::C_DecryptInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_DecryptInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_Decrypt",
-        crate::C_Decrypt(
+        crate::api::C_Decrypt(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5937,7 +6051,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptUpdate",
-        crate::C_DecryptUpdate(
+        crate::api::C_DecryptUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5947,15 +6061,15 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptFinal",
-        crate::C_DecryptFinal(session, data.as_mut_ptr(), &mut data_len)
+        crate::api::C_DecryptFinal(session, data.as_mut_ptr(), &mut data_len)
     );
     assert_stub!(
         "C_SignInit",
-        crate::C_SignInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_SignInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_Sign",
-        crate::C_Sign(
+        crate::api::C_Sign(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5965,11 +6079,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_SignRecoverInit",
-        crate::C_SignRecoverInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_SignRecoverInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_SignRecover",
-        crate::C_SignRecover(
+        crate::api::C_SignRecover(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5979,11 +6093,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_VerifyInit",
-        crate::C_VerifyInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_VerifyInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_Verify",
-        crate::C_Verify(
+        crate::api::C_Verify(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -5993,11 +6107,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_VerifyRecoverInit",
-        crate::C_VerifyRecoverInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_VerifyRecoverInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_VerifyRecover",
-        crate::C_VerifyRecover(
+        crate::api::C_VerifyRecover(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -6007,7 +6121,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DigestEncryptUpdate",
-        crate::C_DigestEncryptUpdate(
+        crate::api::C_DigestEncryptUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -6017,7 +6131,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptDigestUpdate",
-        crate::C_DecryptDigestUpdate(
+        crate::api::C_DecryptDigestUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -6027,7 +6141,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_SignEncryptUpdate",
-        crate::C_SignEncryptUpdate(
+        crate::api::C_SignEncryptUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -6037,7 +6151,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptVerifyUpdate",
-        crate::C_DecryptVerifyUpdate(
+        crate::api::C_DecryptVerifyUpdate(
             session,
             data.as_mut_ptr(),
             data.len() as CK_ULONG,
@@ -6047,7 +6161,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_GenerateKeyPair",
-        crate::C_GenerateKeyPair(
+        crate::api::C_GenerateKeyPair(
             session,
             ::std::ptr::null_mut(),
             ::std::ptr::null_mut(),
@@ -6060,7 +6174,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_WrapKey",
-        crate::C_WrapKey(
+        crate::api::C_WrapKey(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6071,7 +6185,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_UnwrapKey",
-        crate::C_UnwrapKey(
+        crate::api::C_UnwrapKey(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6083,7 +6197,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
         )
     );
     assert_eq!(
-        crate::C_DeriveKey(
+        crate::api::C_DeriveKey(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6094,11 +6208,14 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
         CKR_ARGUMENTS_BAD as CK_RV,
         "C_DeriveKey validates its mechanism arguments"
     );
-    assert_stub!("C_GetFunctionStatus", crate::C_GetFunctionStatus(session));
-    assert_stub!("C_CancelFunction", crate::C_CancelFunction(session));
+    assert_stub!(
+        "C_GetFunctionStatus",
+        crate::api::C_GetFunctionStatus(session)
+    );
+    assert_stub!("C_CancelFunction", crate::api::C_CancelFunction(session));
     assert_stub!(
         "C_LoginUser",
-        crate::C_LoginUser(
+        crate::api::C_LoginUser(
             session,
             CKU_USER as CK_USER_TYPE,
             data.as_mut_ptr(),
@@ -6107,14 +6224,14 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
             data.len() as CK_ULONG
         )
     );
-    assert_stub!("C_SessionCancel", crate::C_SessionCancel(session, 0));
+    assert_stub!("C_SessionCancel", crate::api::C_SessionCancel(session, 0));
     assert_stub!(
         "C_MessageEncryptInit",
-        crate::C_MessageEncryptInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_MessageEncryptInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_EncryptMessage",
-        crate::C_EncryptMessage(
+        crate::api::C_EncryptMessage(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6128,7 +6245,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_EncryptMessageBegin",
-        crate::C_EncryptMessageBegin(
+        crate::api::C_EncryptMessageBegin(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6138,7 +6255,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_EncryptMessageNext",
-        crate::C_EncryptMessageNext(
+        crate::api::C_EncryptMessageNext(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6151,15 +6268,15 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_MessageEncryptFinal",
-        crate::C_MessageEncryptFinal(session)
+        crate::api::C_MessageEncryptFinal(session)
     );
     assert_stub!(
         "C_MessageDecryptInit",
-        crate::C_MessageDecryptInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_MessageDecryptInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_DecryptMessage",
-        crate::C_DecryptMessage(
+        crate::api::C_DecryptMessage(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6173,7 +6290,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptMessageBegin",
-        crate::C_DecryptMessageBegin(
+        crate::api::C_DecryptMessageBegin(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6183,7 +6300,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecryptMessageNext",
-        crate::C_DecryptMessageNext(
+        crate::api::C_DecryptMessageNext(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6196,15 +6313,15 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_MessageDecryptFinal",
-        crate::C_MessageDecryptFinal(session)
+        crate::api::C_MessageDecryptFinal(session)
     );
     assert_stub!(
         "C_MessageSignInit",
-        crate::C_MessageSignInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_MessageSignInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_SignMessage",
-        crate::C_SignMessage(
+        crate::api::C_SignMessage(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6216,11 +6333,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_SignMessageBegin",
-        crate::C_SignMessageBegin(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_SignMessageBegin(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_SignMessageNext",
-        crate::C_SignMessageNext(
+        crate::api::C_SignMessageNext(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6230,14 +6347,17 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
             &mut data_len
         )
     );
-    assert_stub!("C_MessageSignFinal", crate::C_MessageSignFinal(session));
+    assert_stub!(
+        "C_MessageSignFinal",
+        crate::api::C_MessageSignFinal(session)
+    );
     assert_stub!(
         "C_MessageVerifyInit",
-        crate::C_MessageVerifyInit(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_MessageVerifyInit(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_VerifyMessage",
-        crate::C_VerifyMessage(
+        crate::api::C_VerifyMessage(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6249,11 +6369,11 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_VerifyMessageBegin",
-        crate::C_VerifyMessageBegin(session, ::std::ptr::null_mut(), 0)
+        crate::api::C_VerifyMessageBegin(session, ::std::ptr::null_mut(), 0)
     );
     assert_stub!(
         "C_VerifyMessageNext",
-        crate::C_VerifyMessageNext(
+        crate::api::C_VerifyMessageNext(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6263,10 +6383,13 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
             data.len() as CK_ULONG
         )
     );
-    assert_stub!("C_MessageVerifyFinal", crate::C_MessageVerifyFinal(session));
+    assert_stub!(
+        "C_MessageVerifyFinal",
+        crate::api::C_MessageVerifyFinal(session)
+    );
     assert_stub!(
         "C_EncapsulateKey",
-        crate::C_EncapsulateKey(
+        crate::api::C_EncapsulateKey(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6279,7 +6402,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_DecapsulateKey",
-        crate::C_DecapsulateKey(
+        crate::api::C_DecapsulateKey(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6292,7 +6415,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_VerifySignatureInit",
-        crate::C_VerifySignatureInit(
+        crate::api::C_VerifySignatureInit(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6302,31 +6425,31 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_VerifySignature",
-        crate::C_VerifySignature(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+        crate::api::C_VerifySignature(session, data.as_mut_ptr(), data.len() as CK_ULONG)
     );
     assert_stub!(
         "C_VerifySignatureUpdate",
-        crate::C_VerifySignatureUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
+        crate::api::C_VerifySignatureUpdate(session, data.as_mut_ptr(), data.len() as CK_ULONG)
     );
     assert_stub!(
         "C_VerifySignatureFinal",
-        crate::C_VerifySignatureFinal(session)
+        crate::api::C_VerifySignatureFinal(session)
     );
     assert_stub!(
         "C_GetSessionValidationFlags",
-        crate::C_GetSessionValidationFlags(session, 0, &mut flags)
+        crate::api::C_GetSessionValidationFlags(session, 0, &mut flags)
     );
     assert_stub!(
         "C_AsyncComplete",
-        crate::C_AsyncComplete(session, data.as_mut_ptr(), &mut async_data)
+        crate::api::C_AsyncComplete(session, data.as_mut_ptr(), &mut async_data)
     );
     assert_stub!(
         "C_AsyncGetID",
-        crate::C_AsyncGetID(session, data.as_mut_ptr(), &mut data_len)
+        crate::api::C_AsyncGetID(session, data.as_mut_ptr(), &mut data_len)
     );
     assert_stub!(
         "C_AsyncJoin",
-        crate::C_AsyncJoin(
+        crate::api::C_AsyncJoin(
             session,
             data.as_mut_ptr(),
             0,
@@ -6336,7 +6459,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_WrapKeyAuthenticated",
-        crate::C_WrapKeyAuthenticated(
+        crate::api::C_WrapKeyAuthenticated(
             session,
             ::std::ptr::null_mut(),
             0,
@@ -6349,7 +6472,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     );
     assert_stub!(
         "C_UnwrapKeyAuthenticated",
-        crate::C_UnwrapKeyAuthenticated(
+        crate::api::C_UnwrapKeyAuthenticated(
             session,
             ::std::ptr::null_mut(),
             0,

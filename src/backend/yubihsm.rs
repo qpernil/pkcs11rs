@@ -1,9 +1,12 @@
+use super::traits::mechanisms_support_extended_provider;
+use crate::*;
+
 #[derive(Clone, Debug)]
-struct HsmAuthProvider {
-    connector: Rc<dyn Connector>,
-    credential: HsmAuthCredential,
-    version: (u8, u8, u8),
-    trust_prefix: Option<std::ffi::OsString>,
+pub(crate) struct HsmAuthProvider {
+    pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) credential: HsmAuthCredential,
+    pub(crate) version: (u8, u8, u8),
+    pub(crate) trust_prefix: Option<std::ffi::OsString>,
 }
 
 impl HsmAuthProvider {
@@ -20,7 +23,7 @@ impl HsmAuthProvider {
         format!("YubiHSM Auth #{}", self.source_identifier())
     }
 
-    fn authenticate(
+    pub(crate) fn authenticate(
         &self,
         yubihsm_connector: &dyn Connector,
         authkey_id: u16,
@@ -50,8 +53,7 @@ impl HsmAuthProvider {
                     authkey_id
                 );
                 let mut challenge = [0; 8];
-                getrandom::fill(&mut challenge)
-                    .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+                getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
                 let handshake = YubiHsmSecureSession::begin_symmetric(
                     yubihsm_connector,
                     authkey_id,
@@ -111,9 +113,8 @@ impl HsmAuthProvider {
                 Ok(session)
             }
             HsmAuthAlgorithm::EcP256YubicoAuthentication => {
-                let challenge_password =
-                    (self.version.0 == 0 || self.version >= (5, 7, 1))
-                        .then_some(credential_password);
+                let challenge_password = (self.version.0 == 0 || self.version >= (5, 7, 1))
+                    .then_some(credential_password);
                 log!(
                     2,
                     "YubiHSM Auth requesting an asymmetric challenge for credential {:?}{}",
@@ -211,10 +212,7 @@ impl HsmAuthProvider {
                 };
                 let session_id = handshake.sid;
                 let session = YubiHsmSecureSession::complete_asymmetric_with_session_keys(
-                    handshake,
-                    keys.enc,
-                    keys.mac,
-                    keys.rmac,
+                    handshake, keys.enc, keys.mac, keys.rmac,
                 );
                 log!(
                     2,
@@ -228,36 +226,37 @@ impl HsmAuthProvider {
 }
 
 #[derive(Debug)]
-struct YubiHsmSlot {
-    connector: Rc<dyn Connector>,
-    session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
-    session_role: Cell<Option<YubiHsmSessionRole>>,
-    public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
-    object_cache: RefCell<YubiHsmObjectCache>,
-    version: (u8, u8, u8),
-    algorithms: Vec<u8>,
-    trust_prefix: Option<std::ffi::OsString>,
-    hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
-    object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
-    object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
-    attestation_cache: RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
-    next_object_generation: Cell<u64>,
-    device_public_key: OnceLock<Vec<u8>>,
+pub(crate) struct YubiHsmSlot {
+    pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+    pub(crate) session_role: Cell<Option<YubiHsmSessionRole>>,
+    pub(crate) public_discovery_credential: Option<Rc<YubiHsmPublicDiscoveryCredential>>,
+    pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
+    pub(crate) version: (u8, u8, u8),
+    pub(crate) algorithms: Vec<u8>,
+    pub(crate) trust_prefix: Option<std::ffi::OsString>,
+    pub(crate) hsmauth_providers: Rc<RefCell<Vec<HsmAuthProvider>>>,
+    pub(crate) object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
+    pub(crate) object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
+    pub(crate) attestation_cache:
+        RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
+    pub(crate) next_object_generation: Cell<u64>,
+    pub(crate) device_public_key: OnceLock<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum YubiHsmSessionRole {
+pub(crate) enum YubiHsmSessionRole {
     PublicDiscovery,
     User,
 }
 
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
-const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
+pub(crate) const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
 
-struct YubiHsmPublicDiscoveryCredential {
-    username: Vec<u8>,
-    authkey_id: u16,
-    password: RefCell<Option<Zeroizing<Vec<u8>>>>,
+pub(crate) struct YubiHsmPublicDiscoveryCredential {
+    pub(crate) username: Vec<u8>,
+    pub(crate) authkey_id: u16,
+    pub(crate) password: RefCell<Option<Zeroizing<Vec<u8>>>>,
 }
 
 impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
@@ -271,7 +270,7 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
 }
 
 impl YubiHsmPublicDiscoveryCredential {
-    fn uses_hsmauth(&self) -> bool {
+    pub(crate) fn uses_hsmauth(&self) -> bool {
         self.username.first() == Some(&b':')
     }
 
@@ -294,27 +293,22 @@ impl YubiHsmPublicDiscoveryCredential {
             }
             *password = Some(entered);
         }
-        operation(
-            password
-                .as_deref()
-                .ok_or(CKR_PIN_INCORRECT)?
-                .as_slice(),
-        )
+        operation(password.as_deref().ok_or(CKR_PIN_INCORRECT)?.as_slice())
     }
 }
 
 #[derive(Debug, Default)]
-struct YubiHsmObjectCache {
-    connection_epoch: u64,
-    attempted: bool,
-    available: bool,
-    authkey_domains: Option<u16>,
-    native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
-    objects: Vec<TokenObject>,
+pub(crate) struct YubiHsmObjectCache {
+    pub(crate) connection_epoch: u64,
+    pub(crate) attempted: bool,
+    pub(crate) available: bool,
+    pub(crate) authkey_domains: Option<u16>,
+    pub(crate) native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
+    pub(crate) objects: Vec<TokenObject>,
 }
 
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
-fn configured_yubihsm_public_discovery_credential(
+pub(crate) fn configured_yubihsm_public_discovery_credential(
     credential: Option<std::ffi::OsString>,
 ) -> Result<Option<Rc<YubiHsmPublicDiscoveryCredential>>, Error> {
     let Some(credential) = credential else {
@@ -326,9 +320,9 @@ fn configured_yubihsm_public_discovery_credential(
     let login = parse_yubihsm_login_username(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
     let authkey_id = match &login {
         YubiHsmLoginUsername::Direct(authkey_id) => {
-            if password.is_some_and(|password| {
-                !password.is_empty() && !(8..=64).contains(&password.len())
-            }) {
+            if password
+                .is_some_and(|password| !password.is_empty() && !(8..=64).contains(&password.len()))
+            {
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
             *authkey_id
@@ -354,27 +348,27 @@ fn configured_yubihsm_public_discovery_credential(
     })))
 }
 
-type YubiHsmObjectKey = (u8, u16);
-type YubiHsmMetadataTarget = (u8, u16, u8);
-type YubiHsmObjectMetadata = (
+pub(crate) type YubiHsmObjectKey = (u8, u16);
+pub(crate) type YubiHsmMetadataTarget = (u8, u16, u8);
+pub(crate) type YubiHsmObjectMetadata = (
     YubiHsmObjectInfo,
     Option<YubiHsmPublicKey>,
     u64,
     Option<YubiHsmPkcs11Metadata>,
 );
-type YubiHsmDiscoveredObjects = (
+pub(crate) type YubiHsmDiscoveredObjects = (
     Vec<(YubiHsmObjectInfo, Option<YubiHsmPublicKey>)>,
     HashMap<(u8, u16, u8, u16), YubiHsmPkcs11Metadata>,
 );
 
 #[derive(Clone, Debug)]
-struct YubiHsmCachedObjectProperties {
-    sequence: Option<u8>,
-    info: Option<YubiHsmObjectInfo>,
-    public_key: Option<YubiHsmPublicKey>,
-    opaque_value: Rc<RefCell<Option<Vec<u8>>>>,
-    metadata_sources: Vec<(u16, u8)>,
-    inferred_authentication_algorithm: Option<YubiHsmAuthAlgorithm>,
+pub(crate) struct YubiHsmCachedObjectProperties {
+    pub(crate) sequence: Option<u8>,
+    pub(crate) info: Option<YubiHsmObjectInfo>,
+    pub(crate) public_key: Option<YubiHsmPublicKey>,
+    pub(crate) opaque_value: Rc<RefCell<Option<Vec<u8>>>>,
+    pub(crate) metadata_sources: Vec<(u16, u8)>,
+    pub(crate) inferred_authentication_algorithm: Option<YubiHsmAuthAlgorithm>,
 }
 
 impl YubiHsmCachedObjectProperties {
@@ -391,9 +385,9 @@ impl YubiHsmCachedObjectProperties {
 }
 
 #[derive(Clone, Debug)]
-struct YubiHsmAttestationCache {
-    value: Rc<RefCell<Option<Vec<u8>>>>,
-    attempted: Rc<Cell<bool>>,
+pub(crate) struct YubiHsmAttestationCache {
+    pub(crate) value: Rc<RefCell<Option<Vec<u8>>>>,
+    pub(crate) attempted: Rc<Cell<bool>>,
 }
 
 impl YubiHsmAttestationCache {
@@ -406,14 +400,14 @@ impl YubiHsmAttestationCache {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct YubiHsmPkcs11Metadata {
-    target_type: u8,
-    target_id: u16,
-    target_sequence: u8,
-    id: Option<Vec<u8>>,
-    label: Option<String>,
-    public_id: Option<Vec<u8>>,
-    public_label: Option<String>,
+pub(crate) struct YubiHsmPkcs11Metadata {
+    pub(crate) target_type: u8,
+    pub(crate) target_id: u16,
+    pub(crate) target_sequence: u8,
+    pub(crate) id: Option<Vec<u8>>,
+    pub(crate) label: Option<String>,
+    pub(crate) public_id: Option<Vec<u8>>,
+    pub(crate) public_label: Option<String>,
 }
 
 impl YubiHsmPkcs11Metadata {
@@ -464,7 +458,11 @@ impl YubiHsmSlot {
         }
     }
 
-    fn new(connector: Rc<dyn Connector>, version: (u8, u8, u8), algorithms: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        connector: Rc<dyn Connector>,
+        version: (u8, u8, u8),
+        algorithms: Vec<u8>,
+    ) -> Self {
         Self {
             connector,
             session: Rc::new(RefCell::new(None)),
@@ -483,7 +481,7 @@ impl YubiHsmSlot {
         }
     }
 
-    fn with_hsmauth_providers(
+    pub(crate) fn with_hsmauth_providers(
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
@@ -494,7 +492,7 @@ impl YubiHsmSlot {
         slot
     }
 
-    fn with_hsmauth_providers_and_public_discovery(
+    pub(crate) fn with_hsmauth_providers_and_public_discovery(
         connector: Rc<dyn Connector>,
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
@@ -604,7 +602,7 @@ impl YubiHsmSlot {
             .and_then(|entry| entry.info.clone()))
     }
 
-    fn read_object_info(
+    pub(crate) fn read_object_info(
         &self,
         session: &RefCell<Option<YubiHsmSecureSession>>,
         id: u16,
@@ -640,9 +638,7 @@ impl YubiHsmSlot {
                     .native_objects
                     .entry((object_type, id))
                     .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(sequence)));
-                let sequence_changed = entry
-                    .sequence
-                    .is_some_and(|cached| cached != sequence);
+                let sequence_changed = entry.sequence.is_some_and(|cached| cached != sequence);
                 if sequence_changed {
                     *entry = YubiHsmCachedObjectProperties::new(Some(sequence));
                 } else {
@@ -686,7 +682,10 @@ impl YubiHsmSlot {
             .native_objects
             .entry((info.object_type, info.id))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
-        if entry.sequence.is_some_and(|sequence| sequence != info.sequence) {
+        if entry
+            .sequence
+            .is_some_and(|sequence| sequence != info.sequence)
+        {
             *entry = YubiHsmCachedObjectProperties::new(Some(info.sequence));
         } else {
             entry.sequence = Some(info.sequence);
@@ -753,7 +752,10 @@ impl YubiHsmSlot {
             .native_objects
             .entry((info.object_type, info.id))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
-        if entry.sequence.is_some_and(|sequence| sequence != info.sequence) {
+        if entry
+            .sequence
+            .is_some_and(|sequence| sequence != info.sequence)
+        {
             *entry = YubiHsmCachedObjectProperties::new(Some(info.sequence));
         } else {
             entry.sequence = Some(info.sequence);
@@ -787,15 +789,10 @@ impl YubiHsmSlot {
         session: &RefCell<Option<YubiHsmSecureSession>>,
         authkey_id: u16,
     ) -> Result<YubiHsmObjectInfo, Error> {
-        self.read_object_info(
-            session,
-            authkey_id,
-            YUBIHSM_AUTHENTICATION_KEY,
-            None,
-        )
+        self.read_object_info(session, authkey_id, YUBIHSM_AUTHENTICATION_KEY, None)
     }
 
-    fn cached_authentication_algorithm(
+    pub(crate) fn cached_authentication_algorithm(
         &self,
         authkey_id: u16,
     ) -> Result<Option<YubiHsmAuthAlgorithm>, Error> {
@@ -833,11 +830,7 @@ impl YubiHsmSlot {
             .native_objects
             .entry((YUBIHSM_AUTHENTICATION_KEY, authkey_id))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(None));
-        match entry
-            .info
-            .as_ref()
-            .and_then(Self::authentication_algorithm)
-        {
+        match entry.info.as_ref().and_then(Self::authentication_algorithm) {
             Some(cached) if cached == algorithm => {
                 entry.inferred_authentication_algorithm = None;
             }
@@ -903,10 +896,7 @@ impl YubiHsmSlot {
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                Ok((
-                    self.authenticate_direct(authkey_id, password)?,
-                    authkey_id,
-                ))
+                Ok((self.authenticate_direct(authkey_id, password)?, authkey_id))
             }
         }
     }
@@ -917,13 +907,12 @@ impl YubiHsmSlot {
     ) -> Result<(YubiHsmSecureSession, u16), Error> {
         let title = format!("Public discovery on {}", self.label());
         let description = match parse_yubihsm_login_username(&credential.username)? {
-            YubiHsmLoginUsername::Direct(authkey_id) => format!(
-                "Enter the password for YubiHSM Authentication Key {authkey_id:04x}."
-            ),
-            YubiHsmLoginUsername::HsmAuth(login) => format!(
-                "Enter the authentication password for {:?}.",
-                login.label
-            ),
+            YubiHsmLoginUsername::Direct(authkey_id) => {
+                format!("Enter the password for YubiHSM Authentication Key {authkey_id:04x}.")
+            }
+            YubiHsmLoginUsername::HsmAuth(login) => {
+                format!("Enter the authentication password for {:?}.", login.label)
+            }
         };
         credential.with_password(
             pinentry::Prompt {
@@ -1079,9 +1068,7 @@ impl YubiHsmSlot {
         let cached = self.object_value_cache_entry(info)?;
         for object in objects {
             if let KeyMaterial::YubiHsm {
-                object_type,
-                value,
-                ..
+                object_type, value, ..
             } = &mut object.material
             {
                 if *object_type == YUBIHSM_OPAQUE {
@@ -1113,15 +1100,9 @@ impl YubiHsmSlot {
         let mut ambiguous_metadata = HashSet::new();
         let mut related_metadata = HashMap::<_, Vec<_>>::new();
         for entry in listed {
-            let info = self.listed_object_info(
-                session,
-                entry.id,
-                entry.object_type,
-                entry.sequence,
-            )?;
-            if info.object_type == YUBIHSM_OPAQUE
-                && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
-            {
+            let info =
+                self.listed_object_info(session, entry.id, entry.object_type, entry.sequence)?;
+            if info.object_type == YUBIHSM_OPAQUE && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA {
                 let Some((target_sequence, target_type, target_id)) =
                     yubihsm_metadata_label_target(&info.label)
                 else {
@@ -1257,11 +1238,8 @@ impl YubiHsmSlot {
             for object in &mut objects {
                 if object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS {
                     let certificate = certificate.as_deref().ok_or(CKR_DEVICE_ERROR)?;
-                    if piv_certificate_attribute(
-                        certificate,
-                        CKA_SUBJECT as CK_ATTRIBUTE_TYPE,
-                    )
-                    .is_none()
+                    if piv_certificate_attribute(certificate, CKA_SUBJECT as CK_ATTRIBUTE_TYPE)
+                        .is_none()
                     {
                         log!(
                             2,
@@ -1337,11 +1315,10 @@ impl YubiHsmSlot {
         };
         if credential.uses_hsmauth() {
             let provider_available = match parse_yubihsm_login_username(&credential.username) {
-                Ok(YubiHsmLoginUsername::HsmAuth(login)) => {
-                    match self.hsmauth_provider(&login) {
-                        Ok(_) => true,
-                        Err(error) => {
-                            log!(
+                Ok(YubiHsmLoginUsername::HsmAuth(login)) => match self.hsmauth_provider(&login) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        log!(
                                 1,
                                 "YubiHSM pre-login authentication could not resolve YubiHSM Auth credential {:?}, source {:?}, for authentication key {:04x} on {}: {:?}; public discovery remains retryable",
                                 login.label,
@@ -1350,10 +1327,9 @@ impl YubiHsmSlot {
                                 self.connector.name(),
                                 error
                             );
-                            false
-                        }
+                        false
                     }
-                }
+                },
                 _ => false,
             };
             if !provider_available {
@@ -1474,12 +1450,10 @@ impl YubiHsmSlot {
             }
         };
         if changed {
-            let user_session_was_active =
-                self.session_role.get() == Some(YubiHsmSessionRole::User);
+            let user_session_was_active = self.session_role.get() == Some(YubiHsmSessionRole::User);
             self.session.try_borrow_mut()?.take();
-            self.session_role.set(
-                user_session_was_active.then_some(YubiHsmSessionRole::User),
-            );
+            self.session_role
+                .set(user_session_was_active.then_some(YubiHsmSessionRole::User));
             log!(
                 2,
                 "YubiHSM discovery cache reset on {} after connector state changed",
@@ -1554,25 +1528,23 @@ impl YubiHsmSlot {
                 .flat_map(|entry| entry.metadata_sources.iter())
                 .map(|(id, _)| *id)
                 .collect::<HashSet<_>>();
-            state
-                .native_objects
-                .retain(|(object_type, id), entry| {
-                    if private_targets.contains(&(*object_type, *id)) {
-                        if *object_type != YUBIHSM_AUTHENTICATION_KEY {
-                            return false;
-                        }
-                        let sequence = entry.sequence;
-                        let authentication_algorithm = entry
-                            .info
-                            .as_ref()
-                            .and_then(Self::authentication_algorithm)
-                            .or(entry.inferred_authentication_algorithm);
-                        *entry = YubiHsmCachedObjectProperties::new(sequence);
-                        entry.inferred_authentication_algorithm = authentication_algorithm;
-                        return true;
+            state.native_objects.retain(|(object_type, id), entry| {
+                if private_targets.contains(&(*object_type, *id)) {
+                    if *object_type != YUBIHSM_AUTHENTICATION_KEY {
+                        return false;
                     }
-                    *object_type != YUBIHSM_OPAQUE || !metadata_ids.contains(id)
-                });
+                    let sequence = entry.sequence;
+                    let authentication_algorithm = entry
+                        .info
+                        .as_ref()
+                        .and_then(Self::authentication_algorithm)
+                        .or(entry.inferred_authentication_algorithm);
+                    *entry = YubiHsmCachedObjectProperties::new(sequence);
+                    entry.inferred_authentication_algorithm = authentication_algorithm;
+                    return true;
+                }
+                *object_type != YUBIHSM_OPAQUE || !metadata_ids.contains(id)
+            });
             private_targets
         };
         if private_targets.is_empty() {
@@ -1624,11 +1596,7 @@ impl YubiHsmSlot {
         Ok(())
     }
 
-    fn related_metadata_object(
-        &self,
-        id: u16,
-        object_type: u8,
-    ) -> Result<Vec<(u16, u8)>, Error> {
+    fn related_metadata_object(&self, id: u16, object_type: u8) -> Result<Vec<(u16, u8)>, Error> {
         Ok(self
             .object_cache
             .try_borrow()
@@ -1763,10 +1731,9 @@ impl YubiHsmSlot {
             .collect::<Vec<_>>();
         self.delete_metadata_objects(&old_objects)
     }
-
 }
 
-fn send_yubihsm_secure_command(
+pub(crate) fn send_yubihsm_secure_command(
     connector: &dyn Connector,
     shared_session: &RefCell<Option<YubiHsmSecureSession>>,
     command: &YubiHsmCommand,
@@ -1775,7 +1742,7 @@ fn send_yubihsm_secure_command(
     send_yubihsm_secure_command_with_session(connector, &mut session_guard, command)
 }
 
-fn send_yubihsm_secure_command_with_session(
+pub(crate) fn send_yubihsm_secure_command_with_session(
     connector: &dyn Connector,
     shared_session: &mut Option<YubiHsmSecureSession>,
     command: &YubiHsmCommand,
@@ -1791,7 +1758,7 @@ fn send_yubihsm_secure_command_with_session(
     result
 }
 
-fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
+pub(crate) fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
     match algorithm {
         YUBIHSM_ALGO_AES128_CCM_WRAP => CKK_YUBICO_AES128_CCM_WRAP,
         YUBIHSM_ALGO_AES192_CCM_WRAP => CKK_YUBICO_AES192_CCM_WRAP,
@@ -1812,11 +1779,11 @@ fn yubihsm_key_type(algorithm: u8) -> CK_KEY_TYPE {
     }
 }
 
-fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
+pub(crate) fn yubihsm_algorithm_supported(algorithm: u8) -> bool {
     yubihsm_key_type(algorithm) < CKK_VENDOR_DEFINED as CK_KEY_TYPE
 }
 
-fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
+pub(crate) fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> {
     if is_yubihsm_rsa(algorithm) {
         Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
     } else if is_yubihsm_x25519(algorithm) {
@@ -1843,11 +1810,14 @@ fn yubihsm_key_generation_mechanism(algorithm: u8) -> Option<CK_MECHANISM_TYPE> 
     }
 }
 
-fn yubihsm_remote_material(info: &YubiHsmObjectInfo, public_key: Vec<u8>) -> KeyMaterial {
+pub(crate) fn yubihsm_remote_material(
+    info: &YubiHsmObjectInfo,
+    public_key: Vec<u8>,
+) -> KeyMaterial {
     yubihsm_remote_material_with_type(info, info.object_type, public_key)
 }
 
-fn yubihsm_remote_material_with_type(
+pub(crate) fn yubihsm_remote_material_with_type(
     info: &YubiHsmObjectInfo,
     object_type: u8,
     public_key: Vec<u8>,
@@ -1865,7 +1835,7 @@ fn yubihsm_remote_material_with_type(
     }
 }
 
-fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
+pub(crate) fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
     if !info.label.is_empty() {
         return info.label.clone();
     }
@@ -1885,7 +1855,7 @@ fn yubihsm_object_label(info: &YubiHsmObjectInfo) -> String {
     format!("YubiHSM {kind} {}", info.id)
 }
 
-fn yubihsm_device_public_key_object(
+pub(crate) fn yubihsm_device_public_key_object(
     slot_id: CK_SLOT_ID,
     public_key: &[u8],
 ) -> Result<TokenObject, Error> {
@@ -1918,14 +1888,14 @@ fn yubihsm_device_public_key_object(
     })
 }
 
-fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
+pub(crate) fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
     matches!(
         info.object_type,
         YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_PUBLIC_WRAP_KEY
     ) || (info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm))
 }
 
-fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
+pub(crate) fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
     let encoded = label.strip_prefix("Meta object for 0x")?;
     if encoded.len() != 8 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
@@ -1937,7 +1907,7 @@ fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
     ))
 }
 
-fn parse_yubihsm_pkcs11_metadata(
+pub(crate) fn parse_yubihsm_pkcs11_metadata(
     info: &YubiHsmObjectInfo,
     value: &[u8],
 ) -> Result<YubiHsmPkcs11Metadata, Error> {
@@ -2010,7 +1980,7 @@ fn parse_yubihsm_pkcs11_metadata(
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
-fn yubihsm_token_objects(
+pub(crate) fn yubihsm_token_objects(
     slot_id: CK_SLOT_ID,
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
@@ -2019,7 +1989,7 @@ fn yubihsm_token_objects(
     yubihsm_token_objects_with_generation(slot_id, info, public_key, generation, None)
 }
 
-fn yubihsm_token_objects_with_generation(
+pub(crate) fn yubihsm_token_objects_with_generation(
     slot_id: CK_SLOT_ID,
     info: YubiHsmObjectInfo,
     public_key: Option<YubiHsmPublicKey>,
@@ -2073,8 +2043,8 @@ fn yubihsm_token_objects_with_generation(
         | YUBIHSM_OTP_AEAD_KEY => CKO_SECRET_KEY as CK_OBJECT_CLASS,
         _ => CKO_DATA as CK_OBJECT_CLASS,
     };
-    let private = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-        || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let private =
+        class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut objects = vec![TokenObject {
         slot_id: Some(slot_id),
         unique_id: unique.clone(),
@@ -2117,11 +2087,7 @@ fn yubihsm_token_objects_with_generation(
             &info.capabilities,
         );
         let public_material = if rsa_wrap_key {
-            yubihsm_remote_material_with_type(
-                &info,
-                public_object_type,
-                public_key.key.clone(),
-            )
+            yubihsm_remote_material_with_type(&info, public_object_type, public_key.key.clone())
         } else {
             yubihsm_remote_material_with_type(&info, public_object_type, public_key.key)
         };
@@ -2232,8 +2198,7 @@ impl Slot for YubiHsmSlot {
         };
         let provider = self.hsmauth_provider(&login)?;
         let title = format!("{} accessing {}", provider.slot_label(), self.label());
-        let description =
-            format!("Enter the authentication password for {:?}.", login.label);
+        let description = format!("Enter the authentication password for {:?}.", login.label);
         let password = pinentry::request(pinentry::Prompt {
             title: &title,
             description: &description,
@@ -2272,8 +2237,7 @@ impl Slot for YubiHsmSlot {
                 }
             }
         }
-        *self.session.try_borrow_mut()? =
-            Some(session.into_inner().ok_or(CKR_DEVICE_ERROR)?);
+        *self.session.try_borrow_mut()? = Some(session.into_inner().ok_or(CKR_DEVICE_ERROR)?);
         self.session_role.set(Some(YubiHsmSessionRole::User));
         for cache in self
             .attestation_cache
@@ -2378,8 +2342,7 @@ impl Slot for YubiHsmSlot {
         if !self.has_session_role(YubiHsmSessionRole::User) {
             return Ok(self.cached_objects());
         }
-        let (discovered, mut pkcs11_metadata) =
-            self.discover_objects(self.session.as_ref())?;
+        let (discovered, mut pkcs11_metadata) = self.discover_objects(self.session.as_ref())?;
 
         let discovered_keys = discovered
             .iter()
@@ -2405,17 +2368,14 @@ impl Slot for YubiHsmSlot {
                 Some((sequence, generation)) if *sequence == info.sequence => *generation,
                 _ => {
                     let generation = self.next_object_generation.get();
-                    self.next_object_generation.set(
-                        generation
-                            .checked_add(1)
-                            .ok_or(CKR_DEVICE_MEMORY)?,
-                    );
+                    self.next_object_generation
+                        .set(generation.checked_add(1).ok_or(CKR_DEVICE_MEMORY)?);
                     generations.insert(key, (info.sequence, generation));
                     generation
                 }
             };
-            let attribute_metadata = pkcs11_metadata
-                .remove(&(info.object_type, info.id, info.sequence, info.domains));
+            let attribute_metadata =
+                pkcs11_metadata.remove(&(info.object_type, info.id, info.sequence, info.domains));
             metadata.insert(
                 key,
                 (
@@ -2483,8 +2443,8 @@ impl Slot for YubiHsmSlot {
             )?;
             self.bind_cached_opaque_value(&info, &mut objects)?;
             if let Some(object) = objects
-            .into_iter()
-            .find(|object| object.unique_id == unique_id)
+                .into_iter()
+                .find(|object| object.unique_id == unique_id)
             {
                 return Ok(Some(object));
             }
@@ -2593,18 +2553,18 @@ impl Slot for YubiHsmSlot {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct HsmAuthLogin<'a> {
-    label: &'a str,
-    source: Option<&'a str>,
-    authkey_id: u16,
+pub(crate) struct HsmAuthLogin<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) source: Option<&'a str>,
+    pub(crate) authkey_id: u16,
 }
 
-enum YubiHsmLoginUsername<'a> {
+pub(crate) enum YubiHsmLoginUsername<'a> {
     Direct(u16),
     HsmAuth(HsmAuthLogin<'a>),
 }
 
-fn parse_yubihsm_authkey_id(value: &[u8]) -> Result<u16, Error> {
+pub(crate) fn parse_yubihsm_authkey_id(value: &[u8]) -> Result<u16, Error> {
     if value.len() != 4 {
         return Err(CKR_PIN_INCORRECT.into());
     }
@@ -2614,7 +2574,7 @@ fn parse_yubihsm_authkey_id(value: &[u8]) -> Result<u16, Error> {
         .ok_or_else(|| CKR_PIN_INCORRECT.into())
 }
 
-fn parse_hsmauth_username(username: &[u8]) -> Result<HsmAuthLogin<'_>, Error> {
+pub(crate) fn parse_hsmauth_username(username: &[u8]) -> Result<HsmAuthLogin<'_>, Error> {
     if username.len() < 6 || username.first() != Some(&b':') {
         return Err(CKR_PIN_INCORRECT.into());
     }
@@ -2635,14 +2595,16 @@ fn parse_hsmauth_username(username: &[u8]) -> Result<HsmAuthLogin<'_>, Error> {
     })
 }
 
-fn parse_yubihsm_login_username(username: &[u8]) -> Result<YubiHsmLoginUsername<'_>, Error> {
+pub(crate) fn parse_yubihsm_login_username(
+    username: &[u8],
+) -> Result<YubiHsmLoginUsername<'_>, Error> {
     match username.first() {
         Some(b':') => parse_hsmauth_username(username).map(YubiHsmLoginUsername::HsmAuth),
         _ => parse_yubihsm_authkey_id(username).map(YubiHsmLoginUsername::Direct),
     }
 }
 
-fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), Error> {
+pub(crate) fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), Error> {
     let username_length = match pin.first() {
         Some(b':') => match pin
             .get(5..)
@@ -2657,13 +2619,14 @@ fn split_yubihsm_login(pin: &[u8]) -> Result<(&[u8], Option<&[u8]>), Error> {
         return Err(CKR_PIN_INCORRECT.into());
     }
     let password_offset = username_length + usize::from(pin.first() == Some(&b':'));
-    let password = pin
-        .get(password_offset..)
-        .ok_or(CKR_PIN_INCORRECT)?;
+    let password = pin.get(password_offset..).ok_or(CKR_PIN_INCORRECT)?;
     Ok((&pin[..username_length], Some(password)))
 }
 
-fn parse_hsmauth_selector_part(value: &[u8], maximum_length: usize) -> Result<&str, Error> {
+pub(crate) fn parse_hsmauth_selector_part(
+    value: &[u8],
+    maximum_length: usize,
+) -> Result<&str, Error> {
     if value.is_empty() || value.len() > maximum_length {
         return Err(CKR_PIN_INCORRECT.into());
     }
@@ -2679,7 +2642,7 @@ fn parse_hsmauth_selector_part(value: &[u8], maximum_length: usize) -> Result<&s
 
 #[derive(Debug)]
 
-struct YubiHsmSession {
+pub(crate) struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,

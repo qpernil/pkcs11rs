@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 pub fn interface_list_checks_buffer_size() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -9,7 +11,7 @@ pub fn interface_list_checks_buffer_size() {
     };
 
     assert_eq!(
-        crate::C_GetInterfaceList(&mut interface, &mut count),
+        crate::api::C_GetInterfaceList(&mut interface, &mut count),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(count, 4);
@@ -21,7 +23,7 @@ fn assert_get_interface_returns_requested_table(version: CK_VERSION) {
     let name = b"PKCS 11\0";
 
     assert_eq!(
-        crate::C_GetInterface(
+        crate::api::C_GetInterface(
             name.as_ptr() as *mut CK_BYTE,
             &mut version,
             &mut interface,
@@ -100,7 +102,7 @@ pub fn get_interface_rejects_wrong_version_and_name() {
         let mut version = rejected_version;
         let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
         assert_eq!(
-            crate::C_GetInterface(
+            crate::api::C_GetInterface(
                 name.as_ptr() as *mut CK_BYTE,
                 &mut version,
                 &mut interface,
@@ -113,7 +115,7 @@ pub fn get_interface_rejects_wrong_version_and_name() {
     let mut version = CK_VERSION { major: 3, minor: 2 };
     let mut interface: CK_INTERFACE_PTR = ::std::ptr::null_mut();
     assert_eq!(
-        crate::C_GetInterface(
+        crate::api::C_GetInterface(
             wrong_name.as_ptr() as *mut CK_BYTE,
             &mut version,
             &mut interface,
@@ -122,7 +124,7 @@ pub fn get_interface_rejects_wrong_version_and_name() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_GetInterface(
+        crate::api::C_GetInterface(
             short_name.as_ptr() as *mut CK_BYTE,
             &mut version,
             &mut interface,
@@ -131,7 +133,7 @@ pub fn get_interface_rejects_wrong_version_and_name() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_GetInterface(
+        crate::api::C_GetInterface(
             name.as_ptr() as *mut CK_BYTE,
             &mut version,
             &mut interface,
@@ -1605,16 +1607,19 @@ fn bindgen_test_layout_CK_FUNCTION_LIST() {
 fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     let mut count = 0;
     assert_eq!(
-        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
     let mut slots = vec![0; count as usize];
     assert_eq!(
-        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -1631,7 +1636,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     for slot_id in &slots {
         let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
         assert_eq!(
-            crate::C_GetSlotInfo(*slot_id, &mut slot_info),
+            crate::api::C_GetSlotInfo(*slot_id, &mut slot_info),
             CKR_OK as CK_RV
         );
         let description = String::from_utf8_lossy(&slot_info.slotDescription);
@@ -1673,7 +1678,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     ] {
         let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert_eq!(
-            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            crate::api::C_GetTokenInfo(slot_id, &mut token_info),
             CKR_OK as CK_RV
         );
         assert_eq!(&token_info.label[..label.len()], label);
@@ -1689,7 +1694,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     ] {
         let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert_eq!(
-            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            crate::api::C_GetTokenInfo(slot_id, &mut token_info),
             CKR_OK as CK_RV
         );
         assert_eq!(&token_info.model[..model.len()], model);
@@ -1700,7 +1705,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
 
     let mut session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             crate::ABI_TEST_SCP03_SLOT_ID,
             CKF_SERIAL_SESSION as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -1711,7 +1716,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     );
     let pin = *b"1234";
     assert_eq!(
-        crate::C_Login(
+        crate::api::C_Login(
             session,
             CKU_USER as CK_USER_TYPE,
             pin.as_ptr() as *mut CK_BYTE,
@@ -1721,14 +1726,14 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     );
     let mut random = [0; 16];
     assert_eq!(
-        crate::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
+        crate::api::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),
         CKR_OK as CK_RV
     );
     assert_eq!(random, [0; 16]);
 
     let mut yubihsm_session = 0;
     assert_eq!(
-        crate::C_OpenSession(
+        crate::api::C_OpenSession(
             crate::ABI_TEST_YUBIHSM_SLOT_ID,
             CKF_SERIAL_SESSION as CK_FLAGS,
             ::std::ptr::null_mut(),
@@ -1739,7 +1744,7 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
     );
     let username = *b"0001";
     assert_eq!(
-        crate::C_LoginUser(
+        crate::api::C_LoginUser(
             yubihsm_session,
             CKU_USER as CK_USER_TYPE,
             pin.as_ptr() as *mut CK_BYTE,
@@ -1749,9 +1754,9 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_Logout(yubihsm_session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_Logout(yubihsm_session), CKR_OK as CK_RV);
     assert_eq!(
-        crate::C_LoginUser(
+        crate::api::C_LoginUser(
             yubihsm_session,
             CKU_SO as CK_USER_TYPE,
             pin.as_ptr() as *mut CK_BYTE,
@@ -1771,16 +1776,19 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
 fn live_hardware_slots_report_metadata() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 
     let mut count = 0;
     assert_eq!(
-        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
     );
     let mut slots = vec![0; count as usize];
     assert_eq!(
-        crate::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
         CKR_OK as CK_RV
     );
     slots.truncate(count as usize);
@@ -1813,11 +1821,11 @@ fn live_hardware_slots_report_metadata() {
             utcTime: [0; 16],
         };
         assert_eq!(
-            crate::C_GetSlotInfo(slot_id, &mut slot_info),
+            crate::api::C_GetSlotInfo(slot_id, &mut slot_info),
             CKR_OK as CK_RV
         );
         assert_eq!(
-            crate::C_GetTokenInfo(slot_id, &mut token_info),
+            crate::api::C_GetTokenInfo(slot_id, &mut token_info),
             CKR_OK as CK_RV
         );
     }

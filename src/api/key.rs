@@ -1,3 +1,10 @@
+use super::crypt::yubihsm_ec_coordinate_length;
+use super::object::{
+    piv_key_object_handles, required_template_value, validate_unique_template,
+    yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
+};
+use crate::*;
+
 #[no_mangle]
 pub extern "C" fn C_GenerateKey(
     session_handle: CK_SESSION_HANDLE,
@@ -30,12 +37,7 @@ fn generate_key(
 
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_GENERATE as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_GENERATE as CK_FLAGS)?;
         if ctx.get_slot(slot_id)?.is_yubihsm() {
             let (object, command) = yubihsm_generate_key_command(mechanism, templ)?;
             validate_new_object_access(&object, flags, logged_in)?;
@@ -266,11 +268,8 @@ fn generate_key_pair(
             CKF_GENERATE_KEY_PAIR as CK_FLAGS,
         )?;
         if ctx.get_slot(slot_id)?.is_piv() {
-            let generation = piv_generate_key_pair_parameters(
-                mechanism,
-                public_template,
-                private_template,
-            )?;
+            let generation =
+                piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;
             validate_new_object_access(&generation.public_object, flags, logged_in)?;
             validate_new_object_access(&generation.private_object, flags, logged_in)?;
             let replaced = piv_key_object_handles(ctx, slot_id, generation.slot)?;
@@ -299,22 +298,15 @@ fn generate_key_pair(
             return Ok(());
         }
         if ctx.get_slot(slot_id)?.is_openpgp() {
-            let generation = openpgp_generate_key_pair_parameters(
-                mechanism,
-                public_template,
-                private_template,
-            )?;
+            let generation =
+                openpgp_generate_key_pair_parameters(mechanism, public_template, private_template)?;
             validate_new_object_access(&generation.public_object, flags, logged_in)?;
             validate_new_object_access(&generation.private_object, flags, logged_in)?;
-            ctx._get_slot_mut(slot_id)?.openpgp_generate_key_pair(
-                generation.key_ref,
-                generation.algorithm,
-            )?;
+            ctx._get_slot_mut(slot_id)?
+                .openpgp_generate_key_pair(generation.key_ref, generation.algorithm)?;
             if generation.touch_policy != 0 {
-                ctx._get_slot_mut(slot_id)?.openpgp_set_touch_policy(
-                    generation.key_ref,
-                    generation.touch_policy,
-                )?;
+                ctx._get_slot_mut(slot_id)?
+                    .openpgp_set_touch_policy(generation.key_ref, generation.touch_policy)?;
             }
             ctx.refresh_slot_token_objects(slot_id)?;
             *private_handle = find_openpgp_key_handle(
@@ -417,15 +409,15 @@ fn generate_key_pair(
     })
 }
 
-struct OpenPgpGeneration {
-    key_ref: OpenPgpKeyRef,
-    algorithm: OpenPgpAlgorithm,
+pub(crate) struct OpenPgpGeneration {
+    pub(crate) key_ref: OpenPgpKeyRef,
+    pub(crate) algorithm: OpenPgpAlgorithm,
     public_object: TokenObject,
     private_object: TokenObject,
-    touch_policy: u8,
+    pub(crate) touch_policy: u8,
 }
 
-fn openpgp_key_ref(id: &[u8]) -> Result<OpenPgpKeyRef, Error> {
+pub(super) fn openpgp_key_ref(id: &[u8]) -> Result<OpenPgpKeyRef, Error> {
     match id {
         [1] => Ok(OpenPgpKeyRef::Signature),
         [2] => Ok(OpenPgpKeyRef::Decipher),
@@ -434,7 +426,7 @@ fn openpgp_key_ref(id: &[u8]) -> Result<OpenPgpKeyRef, Error> {
     }
 }
 
-fn openpgp_generate_key_pair_parameters(
+pub(crate) fn openpgp_generate_key_pair_parameters(
     mechanism: &CK_MECHANISM,
     public_template: &[CK_ATTRIBUTE],
     private_template: &[CK_ATTRIBUTE],
@@ -445,19 +437,14 @@ fn openpgp_generate_key_pair_parameters(
     let key_type = match mechanism.mechanism {
         x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => CKK_RSA as CK_KEY_TYPE,
         x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => CKK_EC as CK_KEY_TYPE,
-        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            CKK_EC_EDWARDS as CK_KEY_TYPE
-        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
         x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             CKK_EC_MONTGOMERY as CK_KEY_TYPE
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
-    let public_object = key_pair_object(
-        public_template,
-        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-        key_type,
-    )?;
+    let public_object =
+        key_pair_object(public_template, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, key_type)?;
     let filtered_private_template = private_template
         .iter()
         .filter(|attribute| attribute.type_ != CKA_YUBICO_TOUCH_POLICY)
@@ -486,12 +473,15 @@ fn openpgp_generate_key_pair_parameters(
                 }
             }
             match bits {
-                2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa { bits: bits as usize },
+                2048 | 3072 | 4096 => OpenPgpAlgorithm::Rsa {
+                    bits: bits as usize,
+                },
                 _ => return Err(CKR_KEY_SIZE_RANGE.into()),
             }
         }
         x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            let params =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
             let curve = openpgp_curve(&params)?;
             if key_ref == OpenPgpKeyRef::Decipher {
                 OpenPgpAlgorithm::Ecdh(curve)
@@ -500,15 +490,21 @@ fn openpgp_generate_key_pair_parameters(
             }
         }
         x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            if params.as_slice() != openpgp::Curve::Ed25519.oid() || key_ref == OpenPgpKeyRef::Decipher {
+            let params =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if params.as_slice() != openpgp::Curve::Ed25519.oid()
+                || key_ref == OpenPgpKeyRef::Decipher
+            {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
             OpenPgpAlgorithm::Ed25519
         }
         _ => {
-            let params = required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            if params.as_slice() != openpgp::Curve::X25519.oid() || key_ref != OpenPgpKeyRef::Decipher {
+            let params =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if params.as_slice() != openpgp::Curve::X25519.oid()
+                || key_ref != OpenPgpKeyRef::Decipher
+            {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
             OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
@@ -533,7 +529,7 @@ fn openpgp_generate_key_pair_parameters(
     })
 }
 
-fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> {
+pub(super) fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> {
     [
         openpgp::Curve::P256,
         openpgp::Curve::P384,
@@ -548,7 +544,7 @@ fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> {
     .ok_or_else(|| CKR_CURVE_NOT_SUPPORTED.into())
 }
 
-fn find_openpgp_key_handle(
+pub(super) fn find_openpgp_key_handle(
     ctx: &Context,
     slot_id: CK_SLOT_ID,
     key_ref: OpenPgpKeyRef,
@@ -557,9 +553,7 @@ fn find_openpgp_key_handle(
     ctx.resolved_objects()?
         .into_iter()
         .find(|(_, object)| {
-            object.slot_id == Some(slot_id)
-                && object.class == class
-                && object.id == [key_ref as u8]
+            object.slot_id == Some(slot_id) && object.class == class && object.id == [key_ref as u8]
         })
         .map(|(handle, _)| handle)
         .ok_or_else(|| CKR_DEVICE_ERROR.into())
@@ -574,7 +568,7 @@ struct PivGeneration {
     private_object: TokenObject,
 }
 
-fn piv_policy_attribute(
+pub(super) fn piv_policy_attribute(
     templ: &[CK_ATTRIBUTE],
     attribute_type: CK_ATTRIBUTE_TYPE,
     maximum: CK_ULONG,
@@ -589,7 +583,7 @@ fn piv_policy_attribute(
     Ok(value as u8)
 }
 
-fn piv_key_pair_object(
+pub(super) fn piv_key_pair_object(
     templ: &[CK_ATTRIBUTE],
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
@@ -653,25 +647,18 @@ fn piv_generate_key_pair_parameters(
             };
             (CKK_EC as CK_KEY_TYPE, algorithm)
         }
-        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            (
-                CKK_EC_EDWARDS as CK_KEY_TYPE,
-                piv_generation_25519_algorithm(public_template, piv::Algorithm::Ed25519)?,
-            )
-        }
-        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
-            (
-                CKK_EC_MONTGOMERY as CK_KEY_TYPE,
-                piv_generation_25519_algorithm(public_template, piv::Algorithm::X25519)?,
-            )
-        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => (
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+            piv_generation_25519_algorithm(public_template, piv::Algorithm::Ed25519)?,
+        ),
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => (
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            piv_generation_25519_algorithm(public_template, piv::Algorithm::X25519)?,
+        ),
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
-    let public_object = piv_key_pair_object(
-        public_template,
-        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-        key_type,
-    )?;
+    let public_object =
+        piv_key_pair_object(public_template, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, key_type)?;
     let private_object = piv_key_pair_object(
         private_template,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -717,7 +704,7 @@ fn piv_generation_25519_algorithm(
     Ok(algorithm)
 }
 
-fn find_piv_key_handle(
+pub(super) fn find_piv_key_handle(
     ctx: &Context,
     slot_id: CK_SLOT_ID,
     piv_slot: piv::Slot,
@@ -734,7 +721,7 @@ fn find_piv_key_handle(
         .ok_or_else(|| CKR_DEVICE_ERROR.into())
 }
 
-fn key_pair_object(
+pub(super) fn key_pair_object(
     templ: &[CK_ATTRIBUTE],
     class: CK_OBJECT_CLASS,
     key_type: CK_KEY_TYPE,
@@ -767,7 +754,7 @@ fn key_pair_object(
     Ok(object)
 }
 
-fn template_attribute(
+pub(super) fn template_attribute(
     templ: &[CK_ATTRIBUTE],
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Option<&CK_ATTRIBUTE> {
@@ -785,7 +772,7 @@ fn optional_bool_template_attribute(
         .transpose()
 }
 
-fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
+pub(crate) fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
     match parameters {
         [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21] => Ok(YUBIHSM_ALGO_EC_P224),
         [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => Ok(YUBIHSM_ALGO_EC_P256),
@@ -811,7 +798,7 @@ fn yubihsm_ec_algorithm(parameters: &[u8]) -> Result<u8, Error> {
     }
 }
 
-fn yubihsm_generate_key_pair_command(
+pub(crate) fn yubihsm_generate_key_pair_command(
     mechanism: &CK_MECHANISM,
     public_template: &[CK_ATTRIBUTE],
     private_template: &[CK_ATTRIBUTE],
@@ -889,11 +876,9 @@ fn yubihsm_generate_key_pair_command(
     let private_unwrap =
         optional_bool_template_attribute(private_template, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
             .unwrap_or(false);
-    let private_extractable = optional_bool_template_attribute(
-        private_template,
-        CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE,
-    )?
-    .unwrap_or(false);
+    let private_extractable =
+        optional_bool_template_attribute(private_template, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false);
     let public_filtered = public_template
         .iter()
         .copied()
@@ -1054,12 +1039,7 @@ fn derive_key(
 
     with_context_mut(|ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_DERIVE as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
         let object = ctx
             .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
@@ -1161,37 +1141,37 @@ fn derive_key(
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let (mut derived_object, requested_length) =
-            derived_secret_object(templ, expected_length)?;
+        let (mut derived_object, requested_length) = derived_secret_object(templ, expected_length)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
-        let derived = match source {
-            DeriveSource::Piv {
-                slot,
-                algorithm,
-                pin_policy,
-            } => ctx._get_session(session_handle)?.1.piv_decipher(
-                slot,
-                algorithm,
-                public_data,
-                pin_policy,
-            )?,
-            DeriveSource::OpenPgp {
-                key_ref,
-                algorithm,
-                pin_policy,
-            } => ctx._get_session(session_handle)?.1.openpgp_derive(
-                key_ref,
-                algorithm,
-                public_data,
-                pin_policy,
-            )?,
-            DeriveSource::YubiHsm { id, .. } => {
-                ctx._get_session(session_handle)?.1.yubihsm_command(
-                    &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
-                )?
-            }
-        };
+        let derived =
+            match source {
+                DeriveSource::Piv {
+                    slot,
+                    algorithm,
+                    pin_policy,
+                } => ctx._get_session(session_handle)?.1.piv_decipher(
+                    slot,
+                    algorithm,
+                    public_data,
+                    pin_policy,
+                )?,
+                DeriveSource::OpenPgp {
+                    key_ref,
+                    algorithm,
+                    pin_policy,
+                } => ctx._get_session(session_handle)?.1.openpgp_derive(
+                    key_ref,
+                    algorithm,
+                    public_data,
+                    pin_policy,
+                )?,
+                DeriveSource::YubiHsm { id, .. } => {
+                    ctx._get_session(session_handle)?.1.yubihsm_command(
+                        &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
+                    )?
+                }
+            };
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }

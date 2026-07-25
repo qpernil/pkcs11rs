@@ -1,4 +1,6 @@
-fn openpgp_sign_mechanism_supported(
+use crate::*;
+
+pub(crate) fn openpgp_sign_mechanism_supported(
     algorithm: OpenPgpAlgorithm,
     mechanism: CK_MECHANISM_TYPE,
 ) -> bool {
@@ -24,7 +26,7 @@ fn openpgp_sign_mechanism_supported(
     }
 }
 
-fn openpgp_ec_coordinate_length(algorithm: OpenPgpAlgorithm) -> Option<usize> {
+pub(crate) fn openpgp_ec_coordinate_length(algorithm: OpenPgpAlgorithm) -> Option<usize> {
     match algorithm {
         OpenPgpAlgorithm::Ecdsa(curve) | OpenPgpAlgorithm::Ecdh(curve) => curve.coordinate_length(),
         OpenPgpAlgorithm::Ed25519 => Some(32),
@@ -32,7 +34,7 @@ fn openpgp_ec_coordinate_length(algorithm: OpenPgpAlgorithm) -> Option<usize> {
     }
 }
 
-fn openpgp_ec_params(algorithm: OpenPgpAlgorithm) -> Option<Vec<u8>> {
+pub(crate) fn openpgp_ec_params(algorithm: OpenPgpAlgorithm) -> Option<Vec<u8>> {
     match algorithm {
         OpenPgpAlgorithm::Ecdsa(curve) | OpenPgpAlgorithm::Ecdh(curve) => {
             Some(curve.oid().to_vec())
@@ -42,14 +44,17 @@ fn openpgp_ec_params(algorithm: OpenPgpAlgorithm) -> Option<Vec<u8>> {
     }
 }
 
-fn openpgp_signature(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn openpgp_signature(
+    signature: &[u8],
+    coordinate_length: usize,
+) -> Result<Vec<u8>, Error> {
     if signature.len() == coordinate_length * 2 {
         return Ok(signature.to_vec());
     }
     piv_ecdsa_signature(signature, coordinate_length)
 }
 
-fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<MessageDigest> {
+pub(crate) fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<MessageDigest> {
     match mechanism {
         x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
             || x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
@@ -109,7 +114,7 @@ fn piv_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<MessageDigest> {
     }
 }
 
-fn piv_is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
+pub(crate) fn piv_is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
     mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
         || mechanism == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE
         || mechanism == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE
@@ -122,7 +127,7 @@ fn piv_is_pss_mechanism(mechanism: CK_MECHANISM_TYPE) -> bool {
         || mechanism == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE
 }
 
-fn piv_is_hashed_rsa_pkcs(mechanism: CK_MECHANISM_TYPE) -> bool {
+pub(crate) fn piv_is_hashed_rsa_pkcs(mechanism: CK_MECHANISM_TYPE) -> bool {
     piv_hash_mechanism(mechanism).is_some()
         && !piv_is_pss_mechanism(mechanism)
         && mechanism != CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
@@ -133,7 +138,7 @@ fn piv_is_hashed_rsa_pkcs(mechanism: CK_MECHANISM_TYPE) -> bool {
         && mechanism < CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE
 }
 
-fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
+pub(crate) fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
     mechanism == CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE
         || mechanism == CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE
         || mechanism == CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE
@@ -145,7 +150,7 @@ fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
         || mechanism == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
 }
 
-fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8>> {
     let prefix: &[u8] = match mechanism {
         x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE => &[
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
@@ -189,7 +194,9 @@ fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8
     Some(result)
 }
 
-fn digest_for_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
+pub(crate) fn digest_for_hash_mechanism(
+    mechanism: CK_MECHANISM_TYPE,
+) -> Result<MessageDigest, Error> {
     match mechanism {
         x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha1()),
         x if x == CKM_SHA224 as CK_MECHANISM_TYPE => Ok(MessageDigest::sha224()),
@@ -204,7 +211,7 @@ fn digest_for_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<MessageDige
     }
 }
 
-fn pss_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<CK_MECHANISM_TYPE, Error> {
+pub(crate) fn pss_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<CK_MECHANISM_TYPE, Error> {
     match mechanism {
         x if x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE => Ok(CKM_SHA_1 as CK_MECHANISM_TYPE),
         x if x == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
@@ -235,7 +242,7 @@ fn pss_hash_mechanism(mechanism: CK_MECHANISM_TYPE) -> Result<CK_MECHANISM_TYPE,
     }
 }
 
-fn mgf_digest(mgf: u8, hash: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
+pub(crate) fn mgf_digest(mgf: u8, hash: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> {
     match mgf {
         0 => digest_for_hash_mechanism(hash),
         32 => Ok(MessageDigest::sha1()),
@@ -251,7 +258,7 @@ fn mgf_digest(mgf: u8, hash: CK_MECHANISM_TYPE) -> Result<MessageDigest, Error> 
     }
 }
 
-fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
+pub(crate) fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
     let mut output = Vec::with_capacity(length);
     let mut counter = 0u32;
     while output.len() < length {
@@ -264,7 +271,7 @@ fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Er
     Ok(output)
 }
 
-fn encode_rsa_pss(
+pub(crate) fn encode_rsa_pss(
     digest: &[u8],
     modulus_size: usize,
     hash_mechanism: CK_MECHANISM_TYPE,
@@ -313,7 +320,7 @@ fn encode_rsa_pss(
 }
 
 #[derive(Clone, Copy)]
-enum EcCurve {
+pub(crate) enum EcCurve {
     P224,
     P256,
     P384,
@@ -324,28 +331,28 @@ enum EcCurve {
     BrainpoolP512,
 }
 
-struct EcParameters {
-    p: BigUint,
+pub(crate) struct EcParameters {
+    pub(crate) p: BigUint,
     a: BigUint,
     b: BigUint,
-    gx: BigUint,
-    gy: BigUint,
-    n: BigUint,
-    coordinate_length: usize,
+    pub(crate) gx: BigUint,
+    pub(crate) gy: BigUint,
+    pub(crate) n: BigUint,
+    pub(crate) coordinate_length: usize,
 }
 
 #[derive(Clone)]
-struct EcPointValue {
-    x: BigUint,
-    y: BigUint,
-    z: BigUint,
+pub(crate) struct EcPointValue {
+    pub(crate) x: BigUint,
+    pub(crate) y: BigUint,
+    pub(crate) z: BigUint,
 }
 
-fn biguint_hex(value: &str) -> BigUint {
+pub(crate) fn biguint_hex(value: &str) -> BigUint {
     BigUint::parse_bytes(value.as_bytes(), 16).expect("valid embedded EC parameter")
 }
 
-fn ec_parameters(curve: EcCurve) -> EcParameters {
+pub(crate) fn ec_parameters(curve: EcCurve) -> EcParameters {
     let values = match curve {
         EcCurve::P224 => (
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000001",
@@ -431,7 +438,7 @@ fn ec_parameters(curve: EcCurve) -> EcParameters {
     }
 }
 
-fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
+pub(crate) fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
     if left >= right {
         (left - right) % modulus
     } else {
@@ -439,7 +446,7 @@ fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
     }
 }
 
-fn ec_infinity() -> EcPointValue {
+pub(crate) fn ec_infinity() -> EcPointValue {
     EcPointValue {
         x: BigUint::from(0u8),
         y: BigUint::from(1u8),
@@ -447,7 +454,7 @@ fn ec_infinity() -> EcPointValue {
     }
 }
 
-fn ec_double(point: &EcPointValue, parameters: &EcParameters) -> EcPointValue {
+pub(crate) fn ec_double(point: &EcPointValue, parameters: &EcParameters) -> EcPointValue {
     let zero = BigUint::from(0u8);
     if point.z == zero || point.y == zero {
         return ec_infinity();
@@ -471,7 +478,11 @@ fn ec_double(point: &EcPointValue, parameters: &EcParameters) -> EcPointValue {
     EcPointValue { x, y, z }
 }
 
-fn ec_add(left: &EcPointValue, right: &EcPointValue, parameters: &EcParameters) -> EcPointValue {
+pub(crate) fn ec_add(
+    left: &EcPointValue,
+    right: &EcPointValue,
+    parameters: &EcParameters,
+) -> EcPointValue {
     let zero = BigUint::from(0u8);
     if left.z == zero {
         return right.clone();
@@ -510,7 +521,7 @@ fn ec_add(left: &EcPointValue, right: &EcPointValue, parameters: &EcParameters) 
     EcPointValue { x, y, z }
 }
 
-fn ec_multiply(
+pub(crate) fn ec_multiply(
     scalar: &BigUint,
     point: &EcPointValue,
     parameters: &EcParameters,
@@ -527,7 +538,7 @@ fn ec_multiply(
     result
 }
 
-fn verify_ecdsa(
+pub(crate) fn verify_ecdsa(
     curve: EcCurve,
     public_key: &[u8],
     digest: &[u8],
@@ -550,8 +561,7 @@ fn verify_ecdsa(
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
     let lhs = (&q.y * &q.y) % &parameters.p;
-    let rhs = (((&q.x * &q.x * &q.x) + (&parameters.a * &q.x)) + &parameters.b)
-        % &parameters.p;
+    let rhs = (((&q.x * &q.x * &q.x) + (&parameters.a * &q.x)) + &parameters.b) % &parameters.p;
     if lhs != rhs {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
@@ -593,7 +603,7 @@ fn verify_ecdsa(
     }
 }
 
-fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
+pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
     let parameters = ec_parameters(curve);
     if point.len() != 1 + parameters.coordinate_length * 2 || point[0] != 0x04 {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -604,8 +614,7 @@ fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
     let lhs = (&y * &y) % &parameters.p;
-    let rhs =
-        (((&x * &x * &x) + (&parameters.a * &x)) + &parameters.b) % &parameters.p;
+    let rhs = (((&x * &x * &x) + (&parameters.a * &x)) + &parameters.b) % &parameters.p;
     if lhs == rhs {
         Ok(())
     } else {
@@ -613,7 +622,7 @@ fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
     }
 }
 
-fn piv_ec_curve(algorithm: piv::Algorithm) -> Result<EcCurve, Error> {
+pub(crate) fn piv_ec_curve(algorithm: piv::Algorithm) -> Result<EcCurve, Error> {
     match algorithm {
         piv::Algorithm::EccP256 => Ok(EcCurve::P256),
         piv::Algorithm::EccP384 => Ok(EcCurve::P384),
@@ -621,7 +630,7 @@ fn piv_ec_curve(algorithm: piv::Algorithm) -> Result<EcCurve, Error> {
     }
 }
 
-fn openpgp_ec_curve(curve: openpgp::Curve) -> Result<EcCurve, Error> {
+pub(crate) fn openpgp_ec_curve(curve: openpgp::Curve) -> Result<EcCurve, Error> {
     match curve {
         openpgp::Curve::P256 => Ok(EcCurve::P256),
         openpgp::Curve::P384 => Ok(EcCurve::P384),
@@ -630,13 +639,11 @@ fn openpgp_ec_curve(curve: openpgp::Curve) -> Result<EcCurve, Error> {
         openpgp::Curve::BrainpoolP384 => Ok(EcCurve::BrainpoolP384),
         openpgp::Curve::BrainpoolP512 => Ok(EcCurve::BrainpoolP512),
         openpgp::Curve::Secp256k1 => Ok(EcCurve::K256),
-        openpgp::Curve::Ed25519 | openpgp::Curve::X25519 => {
-            Err(CKR_KEY_TYPE_INCONSISTENT.into())
-        }
+        openpgp::Curve::Ed25519 | openpgp::Curve::X25519 => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
-fn yubihsm_ec_curve(algorithm: u8) -> Result<EcCurve, Error> {
+pub(crate) fn yubihsm_ec_curve(algorithm: u8) -> Result<EcCurve, Error> {
     match algorithm {
         YUBIHSM_ALGO_EC_P224 => Ok(EcCurve::P224),
         YUBIHSM_ALGO_EC_P256 => Ok(EcCurve::P256),
@@ -650,7 +657,11 @@ fn yubihsm_ec_curve(algorithm: u8) -> Result<EcCurve, Error> {
     }
 }
 
-fn verify_ed25519(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<(), Error> {
+pub(crate) fn verify_ed25519(
+    public_key: &[u8],
+    data: &[u8],
+    signature: &[u8],
+) -> Result<(), Error> {
     if public_key.len() != 32 || signature.len() != 64 {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
@@ -665,7 +676,7 @@ fn verify_ed25519(public_key: &[u8], data: &[u8], signature: &[u8]) -> Result<()
         .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))
 }
 
-fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
+pub(crate) fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
     let first = *encoded.get(*offset)?;
     *offset += 1;
     match first {
@@ -679,7 +690,7 @@ fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
     }
 }
 
-fn der_positive_integer<'a>(encoded: &'a [u8], offset: &mut usize) -> Option<&'a [u8]> {
+pub(crate) fn der_positive_integer<'a>(encoded: &'a [u8], offset: &mut usize) -> Option<&'a [u8]> {
     if *encoded.get(*offset)? != 0x02 {
         return None;
     }
@@ -700,7 +711,10 @@ fn der_positive_integer<'a>(encoded: &'a [u8], offset: &mut usize) -> Option<&'a
     }
 }
 
-fn ecdsa_der_to_raw(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn ecdsa_der_to_raw(
+    signature: &[u8],
+    coordinate_length: usize,
+) -> Result<Vec<u8>, Error> {
     let mut offset = 0;
     if signature.get(offset) != Some(&0x30) {
         return Err(CKR_DEVICE_ERROR.into());
@@ -721,7 +735,7 @@ fn ecdsa_der_to_raw(signature: &[u8], coordinate_length: usize) -> Result<Vec<u8
     Ok(output)
 }
 
-fn rsa_operation(
+pub(crate) fn rsa_operation(
     input: &[u8],
     exponent: &BigUint,
     modulus: &BigUint,
@@ -740,24 +754,15 @@ fn rsa_operation(
     Ok(output)
 }
 
-pub(crate) fn rsa_public_operation(
-    key: &RsaPublicKey,
-    input: &[u8],
-) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_public_operation(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<u8>, Error> {
     rsa_operation(input, key.e(), key.n(), key.size())
 }
 
-pub(crate) fn rsa_private_operation(
-    key: &RsaPrivateKey,
-    input: &[u8],
-) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_private_operation(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, Error> {
     rsa_operation(input, key.d(), key.n(), key.size())
 }
 
-pub(crate) fn rsa_pkcs1_encrypt(
-    key: &RsaPublicKey,
-    input: &[u8],
-) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_pkcs1_encrypt(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<u8>, Error> {
     let size = key.size();
     if input.len() > size.saturating_sub(11) {
         return Err(CKR_DATA_LEN_RANGE.into());
@@ -776,10 +781,7 @@ pub(crate) fn rsa_pkcs1_encrypt(
     rsa_public_operation(key, &encoded)
 }
 
-pub(crate) fn rsa_pkcs1_sign(
-    key: &RsaPrivateKey,
-    input: &[u8],
-) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_pkcs1_sign(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, Error> {
     let size = key.size();
     if input.len() > size.saturating_sub(11) {
         return Err(CKR_DATA_LEN_RANGE.into());
@@ -791,10 +793,7 @@ pub(crate) fn rsa_pkcs1_sign(
     rsa_private_operation(key, &encoded)
 }
 
-pub(crate) fn rsa_pkcs1_recover(
-    key: &RsaPublicKey,
-    signature: &[u8],
-) -> Result<Vec<u8>, Error> {
+pub(crate) fn rsa_pkcs1_recover(key: &RsaPublicKey, signature: &[u8]) -> Result<Vec<u8>, Error> {
     let encoded = rsa_public_operation(key, signature)?;
     if encoded.len() < 11 || encoded[..2] != [0, 1] {
         return Err(CKR_SIGNATURE_INVALID.into());
@@ -810,7 +809,7 @@ pub(crate) fn rsa_pkcs1_recover(
     Ok(encoded[separator + 1..].to_vec())
 }
 
-fn verify_rsa_pss(
+pub(crate) fn verify_rsa_pss(
     encoded: &[u8],
     digest: &[u8],
     hash_mechanism: CK_MECHANISM_TYPE,

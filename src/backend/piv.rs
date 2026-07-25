@@ -1,58 +1,60 @@
+use crate::*;
+
 #[derive(Debug)]
-struct PivSlot {
-    connector: Rc<dyn Connector>,
-    application_aid: Vec<u8>,
-    slot_description: Option<String>,
-    authenticated: Rc<Cell<bool>>,
-    management_authenticated: Rc<Cell<bool>>,
-    version: piv::Version,
-    serial: String,
-    keys: Vec<PivKey>,
-    certificates: Vec<PivCertificate>,
-    data_objects: Vec<PivDataObject>,
+pub(crate) struct PivSlot {
+    pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) application_aid: Vec<u8>,
+    pub(crate) slot_description: Option<String>,
+    pub(crate) authenticated: Rc<Cell<bool>>,
+    pub(crate) management_authenticated: Rc<Cell<bool>>,
+    pub(crate) version: piv::Version,
+    pub(crate) serial: String,
+    pub(crate) keys: Vec<PivKey>,
+    pub(crate) certificates: Vec<PivCertificate>,
+    pub(crate) data_objects: Vec<PivDataObject>,
 }
 
 #[derive(Clone, Debug)]
-struct PivKey {
-    slot: piv::Slot,
-    algorithm: piv::Algorithm,
-    public_key: PivPublicKey,
-    attestation: Rc<RefCell<Option<Vec<u8>>>>,
-    attestation_attempted: Rc<Cell<bool>>,
-    pin_policy: u8,
-    touch_policy: u8,
-    origin: u8,
+pub(crate) struct PivKey {
+    pub(crate) slot: piv::Slot,
+    pub(crate) algorithm: piv::Algorithm,
+    pub(crate) public_key: PivPublicKey,
+    pub(crate) attestation: Rc<RefCell<Option<Vec<u8>>>>,
+    pub(crate) attestation_attempted: Rc<Cell<bool>>,
+    pub(crate) pin_policy: u8,
+    pub(crate) touch_policy: u8,
+    pub(crate) origin: u8,
     #[cfg(feature = "abi-tests")]
-    public_label: Option<String>,
+    pub(crate) public_label: Option<String>,
     #[cfg(feature = "abi-tests")]
-    private_label: Option<String>,
+    pub(crate) private_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-struct PivCertificate {
-    slot: piv::Slot,
-    algorithm: piv::Algorithm,
-    value: Vec<u8>,
-    attestation: bool,
+pub(crate) struct PivCertificate {
+    pub(crate) slot: piv::Slot,
+    pub(crate) algorithm: piv::Algorithm,
+    pub(crate) value: Vec<u8>,
+    pub(crate) attestation: bool,
     #[cfg(feature = "abi-tests")]
-    label: Option<String>,
+    pub(crate) label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
-struct PivDataObject {
-    object_id: u32,
-    value: Vec<u8>,
+pub(crate) struct PivDataObject {
+    pub(crate) object_id: u32,
+    pub(crate) value: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
-enum PivPublicKey {
+pub(crate) enum PivPublicKey {
     Rsa(RsaPublicKey),
     Ec(Vec<u8>),
     Raw(Vec<u8>),
 }
 
 impl PivPublicKey {
-    fn key_type(&self, algorithm: piv::Algorithm) -> CK_KEY_TYPE {
+    pub(crate) fn key_type(&self, algorithm: piv::Algorithm) -> CK_KEY_TYPE {
         match algorithm {
             piv::Algorithm::Rsa1024
             | piv::Algorithm::Rsa2048
@@ -65,12 +67,12 @@ impl PivPublicKey {
     }
 }
 
-fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
+pub(crate) fn piv_object_fingerprint(value: &[u8]) -> Result<String, Error> {
     let digest = hash(MessageDigest::sha256(), value)?;
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
+pub(crate) fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
     let mut encoded = vec![key.algorithm as u8];
     match &key.public_key {
         PivPublicKey::Rsa(public_key) => {
@@ -84,7 +86,7 @@ fn piv_key_fingerprint(key: &PivKey) -> Result<String, Error> {
     piv_object_fingerprint(&encoded)
 }
 
-fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
+pub(crate) fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
     match algorithm {
         piv::Algorithm::EccP256 => {
             Some(&[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07])
@@ -100,7 +102,7 @@ fn piv_ec_parameters(algorithm: piv::Algorithm) -> Option<&'static [u8]> {
     }
 }
 
-fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> bool {
+pub(crate) fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> bool {
     !matches!(
         algorithm,
         piv::Algorithm::Rsa3072
@@ -110,7 +112,7 @@ fn piv_algorithm_supported(version: piv::Version, algorithm: piv::Algorithm) -> 
     ) || (version.major, version.minor) >= (5, 7)
 }
 
-fn piv_effective_pin_policy(slot: piv::Slot, policy: u8) -> u8 {
+pub(crate) fn piv_effective_pin_policy(slot: piv::Slot, policy: u8) -> u8 {
     if policy != 0 {
         return policy;
     }
@@ -121,11 +123,11 @@ fn piv_effective_pin_policy(slot: piv::Slot, policy: u8) -> u8 {
     }
 }
 
-fn piv_policy_requires_login(slot: piv::Slot, policy: u8) -> bool {
+pub(crate) fn piv_policy_requires_login(slot: piv::Slot, policy: u8) -> bool {
     piv_effective_pin_policy(slot, policy) != 1
 }
 
-fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> String {
+pub(crate) fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> String {
     let kind = if attestation {
         "Attestation certificate"
     } else if certificate {
@@ -136,7 +138,7 @@ fn piv_slot_label(slot: piv::Slot, certificate: bool, attestation: bool) -> Stri
     format!("{kind} {:02X}", slot as u8)
 }
 
-fn piv_public_key_from_metadata(
+pub(crate) fn piv_public_key_from_metadata(
     algorithm: piv::Algorithm,
     metadata: MetadataPublicKey,
 ) -> Result<PivPublicKey, Error> {
@@ -175,10 +177,11 @@ fn piv_public_key_from_metadata(
     }
 }
 
-fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> {
+pub(crate) fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> {
     use rsa::pkcs1::DecodeRsaPublicKey;
 
-    let (algorithm, parameters, key) = crate::certificate_chain::public_key_parts(certificate).ok()?;
+    let (algorithm, parameters, key) =
+        crate::certificate_chain::public_key_parts(certificate).ok()?;
     match algorithm.to_string().as_str() {
         "1.2.840.113549.1.1.1" => match RsaPublicKey::from_pkcs1_der(&key).ok()?.size() {
             128 => Some(piv::Algorithm::Rsa1024),
@@ -198,7 +201,7 @@ fn piv_algorithm_from_certificate(certificate: &[u8]) -> Option<piv::Algorithm> 
     }
 }
 
-fn piv_public_key_from_certificate(
+pub(crate) fn piv_public_key_from_certificate(
     algorithm: piv::Algorithm,
     certificate_der: &[u8],
 ) -> Result<PivPublicKey, Error> {
@@ -252,7 +255,7 @@ fn piv_public_key_from_certificate(
     }
 }
 
-fn piv_ec_coordinate_length(algorithm: piv::Algorithm) -> Option<usize> {
+pub(crate) fn piv_ec_coordinate_length(algorithm: piv::Algorithm) -> Option<usize> {
     match algorithm {
         piv::Algorithm::EccP256 => Some(32),
         piv::Algorithm::EccP384 => Some(48),
@@ -260,7 +263,10 @@ fn piv_ec_coordinate_length(algorithm: piv::Algorithm) -> Option<usize> {
     }
 }
 
-fn piv_sign_mechanism_supported(algorithm: piv::Algorithm, mechanism: CK_MECHANISM_TYPE) -> bool {
+pub(crate) fn piv_sign_mechanism_supported(
+    algorithm: piv::Algorithm,
+    mechanism: CK_MECHANISM_TYPE,
+) -> bool {
     match algorithm {
         piv::Algorithm::Rsa1024
         | piv::Algorithm::Rsa2048
@@ -309,9 +315,8 @@ fn piv_sign_mechanism_supported(algorithm: piv::Algorithm, mechanism: CK_MECHANI
     }
 }
 
-
 impl PivSlot {
-    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+    pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         let version = connector
             .firmware_version()
             .map(|(major, minor, patch)| piv::Version {
@@ -749,12 +754,7 @@ impl Slot for PivSlot {
             } else {
                 (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
             };
-            add(
-                type_ as CK_MECHANISM_TYPE,
-                1024,
-                rsa_max,
-                flags,
-            );
+            add(type_ as CK_MECHANISM_TYPE, 1024, rsa_max, flags);
         }
         for type_ in [
             CKM_ECDSA,
@@ -911,11 +911,7 @@ impl Slot for PivSlot {
         });
         Ok(())
     }
-    fn piv_import_certificate(
-        &mut self,
-        slot: piv::Slot,
-        certificate: &[u8],
-    ) -> Result<(), Error> {
+    fn piv_import_certificate(&mut self, slot: piv::Slot, certificate: &[u8]) -> Result<(), Error> {
         if !self.management_authenticated.get() {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
@@ -1264,7 +1260,7 @@ impl Slot for PivSlot {
 
 #[derive(Debug)]
 
-struct PivSession {
+pub(crate) struct PivSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,

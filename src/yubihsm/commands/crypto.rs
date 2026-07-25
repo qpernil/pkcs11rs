@@ -1,3 +1,7 @@
+use super::protocol::*;
+use crate::{error::Error, CKR_DATA_LEN_RANGE};
+use zeroize::Zeroizing;
+
 impl Command {
     pub(crate) fn key_data(code: CommandCode, key_id: u16, value: &[u8]) -> Result<Self, Error> {
         ensure_code(

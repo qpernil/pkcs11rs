@@ -1,4 +1,6 @@
-use ghash::{GHash, universal_hash::UniversalHash};
+use super::shared::{rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad};
+use crate::*;
+use ghash::{universal_hash::UniversalHash, GHash};
 
 #[no_mangle]
 pub extern "C" fn C_EncryptInit(
@@ -91,7 +93,8 @@ pub extern "C" fn C_Decrypt(
     ))
 }
 
-fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParameters, Error> {
+#[cfg_attr(test, allow(private_interfaces))]
+pub(crate) fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParameters, Error> {
     if mechanism.pParameter.is_null()
         || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_GCM_PARAMS>()
     {
@@ -291,7 +294,7 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
     }
 }
 
-const AES_BLOCK_LENGTH: usize = 16;
+pub(crate) const AES_BLOCK_LENGTH: usize = 16;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 
 fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
@@ -326,7 +329,7 @@ fn gcm_tag(full_tag: [u8; AES_BLOCK_LENGTH], tag_bits: usize) -> Vec<u8> {
     tag
 }
 
-fn aes_gcm<F>(
+pub(crate) fn aes_gcm<F>(
     parameters: &GcmParameters,
     input: &[u8],
     encrypting: bool,
@@ -428,7 +431,7 @@ where
     }
 }
 
-fn yubihsm_encrypt_ecb_blocks(
+pub(super) fn yubihsm_encrypt_ecb_blocks(
     ctx: &mut Context,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
@@ -548,107 +551,115 @@ fn crypt(
             result.to_vec()
         } else {
             let result = (|| -> Result<Vec<u8>, Error> {
-            if encrypting {
-                if let Some(public_key) = rsa_public_key_material(&operation.key)? {
-                    return rsa_public_encrypt(
-                        &public_key,
-                        operation.mechanism,
-                        operation.oaep.as_ref(),
-                        input,
-                    );
+                if encrypting {
+                    if let Some(public_key) = rsa_public_key_material(&operation.key)? {
+                        return rsa_public_encrypt(
+                            &public_key,
+                            operation.mechanism,
+                            operation.oaep.as_ref(),
+                            input,
+                        );
+                    }
                 }
-            }
-            match &operation.key {
-                KeyMaterial::PivPrivate {
-                    slot, algorithm, ..
-                } if !encrypting => {
-                    let raw = ctx._get_session(session_handle)?.1.piv_decipher(
-                        *slot,
-                        *algorithm,
-                        input,
-                        operation.piv_pin_policy.unwrap_or_default(),
-                    )?;
-                    let raw = if let Some(expected) = algorithm.rsa_input_length() {
-                        if raw.len() > expected {
-                            return Err(CKR_DEVICE_ERROR.into());
-                        }
-                        if raw.len() < expected {
-                            let mut padded = vec![0; expected - raw.len()];
-                            padded.extend_from_slice(&raw);
-                            padded
+                match &operation.key {
+                    KeyMaterial::PivPrivate {
+                        slot, algorithm, ..
+                    } if !encrypting => {
+                        let raw = ctx._get_session(session_handle)?.1.piv_decipher(
+                            *slot,
+                            *algorithm,
+                            input,
+                            operation.piv_pin_policy.unwrap_or_default(),
+                        )?;
+                        let raw = if let Some(expected) = algorithm.rsa_input_length() {
+                            if raw.len() > expected {
+                                return Err(CKR_DEVICE_ERROR.into());
+                            }
+                            if raw.len() < expected {
+                                let mut padded = vec![0; expected - raw.len()];
+                                padded.extend_from_slice(&raw);
+                                padded
+                            } else {
+                                raw
+                            }
                         } else {
                             raw
+                        };
+                        match operation.mechanism {
+                            x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE => Ok(raw),
+                            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
+                                rsa_pkcs1_v1_5_unpad(&raw)
+                            }
+                            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
+                                let (mgf, hash_mechanism, label_digest) =
+                                    operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                                rsa_oaep_unpad(&raw, *mgf, *hash_mechanism, label_digest)
+                            }
+                            _ => Err(CKR_MECHANISM_INVALID.into()),
                         }
-                    } else {
-                        raw
-                    };
-                    match operation.mechanism {
-                        x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE => Ok(raw),
-                        x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => rsa_pkcs1_v1_5_unpad(&raw),
-                        x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
-                            let (mgf, hash_mechanism, label_digest) =
-                                operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                            rsa_oaep_unpad(&raw, *mgf, *hash_mechanism, label_digest)
-                        }
-                        _ => Err(CKR_MECHANISM_INVALID.into()),
                     }
-                }
-                KeyMaterial::OpenPgpPrivate { algorithm, .. } if !encrypting => {
-                    if !matches!(algorithm, OpenPgpAlgorithm::Rsa { .. }) {
-                        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+                    KeyMaterial::OpenPgpPrivate { algorithm, .. } if !encrypting => {
+                        if !matches!(algorithm, OpenPgpAlgorithm::Rsa { .. }) {
+                            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+                        }
+                        ctx._get_session(session_handle)?.1.openpgp_decipher(
+                            input,
+                            operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+                        )
                     }
-                    ctx._get_session(session_handle)?.1.openpgp_decipher(
-                        input,
-                        operation.mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE,
-                    )
-                }
-                KeyMaterial::YubiHsm { id, .. } => {
-                    let command = match operation.mechanism {
-                        x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE && !encrypting => {
-                            YubiHsmCommand::key_data(YubiHsmCommandCode::DecryptPkcs1, *id, input)?
-                        }
-                        x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE && !encrypting => {
-                            let (mgf, _hash_mechanism, label_digest) =
-                                operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                            YubiHsmCommand::decrypt_oaep(*id, *mgf, input, label_digest)?
-                        }
-                        x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => YubiHsmCommand::key_data(
-                            if encrypting {
-                                YubiHsmCommandCode::EncryptEcb
-                            } else {
-                                YubiHsmCommandCode::DecryptEcb
-                            },
-                            *id,
-                            input,
-                        )?,
-                        x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => YubiHsmCommand::crypt_cbc(
-                            if encrypting {
-                                YubiHsmCommandCode::EncryptCbc
-                            } else {
-                                YubiHsmCommandCode::DecryptCbc
-                            },
-                            *id,
-                            operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
-                            input,
-                        )?,
-                        x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
-                            return aes_gcm(
-                                operation.gcm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
-                                input,
-                                encrypting,
-                                |blocks| {
-                                    yubihsm_encrypt_ecb_blocks(ctx, session_handle, *id, blocks)
+                    KeyMaterial::YubiHsm { id, .. } => {
+                        let command = match operation.mechanism {
+                            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE && !encrypting => {
+                                YubiHsmCommand::key_data(
+                                    YubiHsmCommandCode::DecryptPkcs1,
+                                    *id,
+                                    input,
+                                )?
+                            }
+                            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE && !encrypting => {
+                                let (mgf, _hash_mechanism, label_digest) =
+                                    operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                                YubiHsmCommand::decrypt_oaep(*id, *mgf, input, label_digest)?
+                            }
+                            x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => YubiHsmCommand::key_data(
+                                if encrypting {
+                                    YubiHsmCommandCode::EncryptEcb
+                                } else {
+                                    YubiHsmCommandCode::DecryptEcb
                                 },
-                            );
-                        }
-                        _ => return Err(CKR_MECHANISM_INVALID.into()),
-                    };
-                    ctx._get_session(session_handle)?
-                        .1
-                        .yubihsm_command(&command)
+                                *id,
+                                input,
+                            )?,
+                            x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => {
+                                YubiHsmCommand::crypt_cbc(
+                                    if encrypting {
+                                        YubiHsmCommandCode::EncryptCbc
+                                    } else {
+                                        YubiHsmCommandCode::DecryptCbc
+                                    },
+                                    *id,
+                                    operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                    input,
+                                )?
+                            }
+                            x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
+                                return aes_gcm(
+                                    operation.gcm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                    input,
+                                    encrypting,
+                                    |blocks| {
+                                        yubihsm_encrypt_ecb_blocks(ctx, session_handle, *id, blocks)
+                                    },
+                                );
+                            }
+                            _ => return Err(CKR_MECHANISM_INVALID.into()),
+                        };
+                        ctx._get_session(session_handle)?
+                            .1
+                            .yubihsm_command(&command)
+                    }
+                    _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
                 }
-                _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-            }
             })();
             match result {
                 Ok(result) => result,

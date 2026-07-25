@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 pub fn openpgp_private_import_templates_select_reference_and_scalar() {
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
@@ -62,7 +64,10 @@ pub fn openpgp_private_import_templates_select_reference_and_scalar() {
 pub fn find_objects_filters_by_attribute_template() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
@@ -75,7 +80,7 @@ pub fn find_objects_filters_by_attribute_template() {
     let mut count = 0;
 
     assert_eq!(
-        crate::C_FindObjectsInit(
+        crate::api::C_FindObjectsInit(
             TEST_SESSION_HANDLE,
             templ.as_mut_ptr(),
             templ.len() as CK_ULONG
@@ -83,7 +88,7 @@ pub fn find_objects_filters_by_attribute_template() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -94,18 +99,24 @@ pub fn find_objects_filters_by_attribute_template() {
     assert_eq!(count, 1);
     assert_eq!(objects[0], 2);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn find_objects_matches_empty_attributes_exactly() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
@@ -130,7 +141,7 @@ pub fn find_objects_matches_empty_attributes_exactly() {
     ];
     let mut empty_label_object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             create_template.as_mut_ptr(),
             create_template.len() as CK_ULONG,
@@ -145,7 +156,7 @@ pub fn find_objects_matches_empty_attributes_exactly() {
         ulValueLen: 0,
     }];
     assert_eq!(
-        crate::C_FindObjectsInit(
+        crate::api::C_FindObjectsInit(
             TEST_SESSION_HANDLE,
             empty_label_template.as_mut_ptr(),
             empty_label_template.len() as CK_ULONG
@@ -155,7 +166,7 @@ pub fn find_objects_matches_empty_attributes_exactly() {
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 3];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -166,13 +177,13 @@ pub fn find_objects_matches_empty_attributes_exactly() {
     assert_eq!(count, 1);
     assert_eq!(objects[0], empty_label_object);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
     empty_label_template[0].ulValueLen = 1;
     assert_eq!(
-        crate::C_FindObjectsInit(
+        crate::api::C_FindObjectsInit(
             TEST_SESSION_HANDLE,
             empty_label_template.as_mut_ptr(),
             empty_label_template.len() as CK_ULONG
@@ -180,7 +191,7 @@ pub fn find_objects_matches_empty_attributes_exactly() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -189,56 +200,71 @@ pub fn find_objects_matches_empty_attributes_exactly() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn find_objects_validates_sessions_and_cleans_up_on_close() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     let mut count = 0;
 
     assert_eq!(
-        crate::C_FindObjectsInit(999, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(999, ::std::ptr::null_mut(), 0),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(999, ::std::ptr::null_mut(), 0, &mut count),
+        crate::api::C_FindObjects(999, ::std::ptr::null_mut(), 0, &mut count),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjectsFinal(999),
+        crate::api::C_FindObjectsFinal(999),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
         CKR_OK as CK_RV
     );
-    assert_eq!(crate::C_CloseSession(TEST_SESSION_HANDLE), CKR_OK as CK_RV);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn destroy_object_removes_object_from_store_and_search() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     assert_eq!(
-        crate::C_DestroyObject(TEST_SESSION_HANDLE, 1),
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, 1),
         CKR_OK as CK_RV
     );
 
@@ -248,22 +274,22 @@ pub fn destroy_object_removes_object_from_store_and_search() {
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_DestroyObject(TEST_SESSION_HANDLE, 1),
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
 
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
         CKR_OK as CK_RV
     );
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjects(
+        crate::api::C_FindObjects(
             TEST_SESSION_HANDLE,
             objects.as_mut_ptr(),
             objects.len() as CK_ULONG,
@@ -274,18 +300,24 @@ pub fn destroy_object_removes_object_from_store_and_search() {
     assert_eq!(count, 1);
     assert_eq!(objects[0], 2);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let handles: Vec<_> = [crate::YUBIHSM_PUBLIC_KEY, crate::YUBIHSM_WRAP_KEY_PUBLIC]
@@ -350,7 +382,7 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
             Some(crate::bool_attribute(false))
         );
         assert_eq!(
-            crate::C_DestroyObject(TEST_SESSION_HANDLE, handle),
+            crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),
             CKR_ACTION_PROHIBITED as CK_RV
         );
         let mut class = 0 as CK_OBJECT_CLASS;
@@ -360,13 +392,16 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
             ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
         };
         assert_eq!(
-            crate::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut attribute, 1),
+            crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, handle, &mut attribute, 1),
             CKR_OK as CK_RV
         );
         assert_eq!(class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     }
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -421,7 +456,10 @@ fn yubihsm_empty_hardware_labels_receive_descriptive_fallbacks() {
 pub fn destroy_openpgp_objects_is_prohibited() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let base = crate::TokenObject {
@@ -482,7 +520,7 @@ pub fn destroy_openpgp_objects_is_prohibited() {
 
     for handle in handles {
         assert_eq!(
-            crate::C_DestroyObject(TEST_SESSION_HANDLE, handle),
+            crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),
             CKR_ACTION_PROHIBITED as CK_RV
         );
         let context = crate::lock_context().unwrap();
@@ -493,52 +531,64 @@ pub fn destroy_openpgp_objects_is_prohibited() {
             .contains_key(&handle));
     }
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn destroy_object_updates_active_search_results() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     assert_eq!(
-        crate::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
         CKR_OK as CK_RV
     );
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        crate::api::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
         CKR_OK as CK_RV
     );
     assert_eq!(count, 1);
     assert_eq!(objects[0], 1);
 
     assert_eq!(
-        crate::C_DestroyObject(TEST_SESSION_HANDLE, 2),
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, 2),
         CKR_OK as CK_RV
     );
     count = 999;
     assert_eq!(
-        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        crate::api::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
         CKR_OK as CK_RV
     );
     assert_eq!(count, 0);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn create_object_adds_readable_findable_object() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
@@ -582,7 +632,7 @@ pub fn create_object_adds_readable_findable_object() {
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
 
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             templ.as_mut_ptr(),
             templ.len() as CK_ULONG,
@@ -607,7 +657,7 @@ pub fn create_object_adds_readable_findable_object() {
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             object,
             read_attrs.as_mut_ptr(),
@@ -627,7 +677,7 @@ pub fn create_object_adds_readable_findable_object() {
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjectsInit(
+        crate::api::C_FindObjectsInit(
             TEST_SESSION_HANDLE,
             search_templ.as_mut_ptr(),
             search_templ.len() as CK_ULONG
@@ -635,33 +685,39 @@ pub fn create_object_adds_readable_findable_object() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        crate::api::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
         CKR_OK as CK_RV
     );
     assert_eq!(count, 1);
     assert_eq!(objects[0], object);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
     assert_eq!(
-        crate::C_DestroyObject(TEST_SESSION_HANDLE, object),
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, object),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object, read_attrs.as_mut_ptr(), 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, object, read_attrs.as_mut_ptr(), 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn create_object_preserves_all_supported_template_attributes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
@@ -735,7 +791,7 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
 
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             templ.as_mut_ptr(),
             templ.len() as CK_ULONG,
@@ -808,7 +864,7 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     ];
 
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             object,
             read_attrs.as_mut_ptr(),
@@ -827,14 +883,20 @@ pub fn create_object_preserves_all_supported_template_attributes() {
     assert_eq!(read_sign, CK_TRUE as CK_BBOOL);
     assert_eq!(read_verify, CK_FALSE as CK_BBOOL);
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn create_object_defaults_optional_attributes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
@@ -859,7 +921,7 @@ pub fn create_object_defaults_optional_attributes() {
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             templ.as_mut_ptr(),
             templ.len() as CK_ULONG,
@@ -879,12 +941,12 @@ pub fn create_object_defaults_optional_attributes() {
         ulValueLen: 999,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object, &mut label_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, object, &mut label_attr, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(label_attr.ulValueLen, 0);
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object, &mut id_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, object, &mut id_attr, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(id_attr.ulValueLen, 0);
@@ -928,7 +990,7 @@ pub fn create_object_defaults_optional_attributes() {
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             object,
             bool_attrs.as_mut_ptr(),
@@ -943,27 +1005,33 @@ pub fn create_object_defaults_optional_attributes() {
     assert_eq!(sign, CK_FALSE as CK_BBOOL);
     assert_eq!(verify, CK_FALSE as CK_BBOOL);
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn create_object_reports_template_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0, &mut object),
+        crate::api::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0, &mut object),
         CKR_TEMPLATE_INCOMPLETE as CK_RV
     );
     assert_eq!(
-        crate::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1, &mut object),
+        crate::api::C_CreateObject(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 1, &mut object),
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             ::std::ptr::null_mut(),
             0,
@@ -979,7 +1047,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             incomplete.as_mut_ptr(),
             incomplete.len() as CK_ULONG,
@@ -995,7 +1063,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: bad_class.len() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             invalid_class_len.as_mut_ptr(),
             invalid_class_len.len() as CK_ULONG,
@@ -1011,7 +1079,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: ::std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             invalid_bool.as_mut_ptr(),
             invalid_bool.len() as CK_ULONG,
@@ -1027,7 +1095,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: invalid_utf8.len() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             invalid_label.as_mut_ptr(),
             invalid_label.len() as CK_ULONG,
@@ -1042,7 +1110,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: 0,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             invalid_bool_len.as_mut_ptr(),
             invalid_bool_len.len() as CK_ULONG,
@@ -1057,7 +1125,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             null_class_value.as_mut_ptr(),
             null_class_value.len() as CK_ULONG,
@@ -1072,7 +1140,7 @@ pub fn create_object_reports_template_errors() {
         ulValueLen: 0,
     }];
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             unknown.as_mut_ptr(),
             unknown.len() as CK_ULONG,
@@ -1081,7 +1149,7 @@ pub fn create_object_reports_template_errors() {
         CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             999,
             unknown.as_mut_ptr(),
             unknown.len() as CK_ULONG,
@@ -1090,14 +1158,20 @@ pub fn create_object_reports_template_errors() {
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
@@ -1115,7 +1189,7 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
     ];
     let mut handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             duplicate_class.as_mut_ptr(),
             duplicate_class.len() as CK_ULONG,
@@ -1138,7 +1212,7 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
         },
     ];
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             update.as_mut_ptr(),
@@ -1153,14 +1227,14 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
         ulValueLen: original_label.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut read_label, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut read_label, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(&original_label, b"Test RSA public key");
 
     let duplicate_label = [update[0], update[0]];
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             duplicate_label.as_ptr() as CK_ATTRIBUTE_PTR,
@@ -1186,7 +1260,7 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
         update[0],
     ];
     assert_eq!(
-        crate::C_GenerateKey(
+        crate::api::C_GenerateKey(
             TEST_SESSION_HANDLE,
             &mut mechanism,
             generate_template.as_mut_ptr(),
@@ -1196,7 +1270,10 @@ pub fn object_templates_reject_duplicates_and_updates_are_atomic() {
         CKR_TEMPLATE_INCONSISTENT as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
@@ -1294,7 +1371,10 @@ pub fn create_object_requires_and_imports_real_key_material() {
 pub fn ec_key_pairs_expose_matching_public_key_info() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     let base = crate::lock_context()
         .unwrap()
         .as_ref()
@@ -1395,7 +1475,10 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
 pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut label = *b"Copied public key";
@@ -1427,7 +1510,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
 
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             templ.as_mut_ptr(),
@@ -1489,7 +1572,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             copied,
             copied_attrs.as_mut_ptr(),
@@ -1513,7 +1596,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
         ulValueLen: original_label.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_attr, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(&original_label, b"Test RSA public key");
@@ -1524,7 +1607,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
         ulValueLen: original_unique_id.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_unique_id_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut original_unique_id_attr, 1),
         CKR_OK as CK_RV
     );
     assert_ne!(
@@ -1541,7 +1624,7 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
     let mut count = 0;
     assert_eq!(
-        crate::C_FindObjectsInit(
+        crate::api::C_FindObjectsInit(
             TEST_SESSION_HANDLE,
             search_templ.as_mut_ptr(),
             search_templ.len() as CK_ULONG
@@ -1549,29 +1632,35 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
+        crate::api::C_FindObjects(TEST_SESSION_HANDLE, objects.as_mut_ptr(), 1, &mut count),
         CKR_OK as CK_RV
     );
     assert_eq!(count, 1);
     assert_eq!(objects[0], copied);
     assert_eq!(
-        crate::C_FindObjectsFinal(TEST_SESSION_HANDLE),
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn copy_object_reports_template_and_handle_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             999,
             ::std::ptr::null_mut(),
@@ -1581,7 +1670,7 @@ pub fn copy_object_reports_template_and_handle_errors() {
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             ::std::ptr::null_mut(),
@@ -1591,7 +1680,7 @@ pub fn copy_object_reports_template_and_handle_errors() {
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             ::std::ptr::null_mut(),
@@ -1608,7 +1697,7 @@ pub fn copy_object_reports_template_and_handle_errors() {
         ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
     }];
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             readonly_attr.as_mut_ptr(),
@@ -1624,7 +1713,7 @@ pub fn copy_object_reports_template_and_handle_errors() {
         ulValueLen: 0,
     }];
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             1,
             unknown.as_mut_ptr(),
@@ -1634,7 +1723,7 @@ pub fn copy_object_reports_template_and_handle_errors() {
         CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             999,
             1,
             unknown.as_mut_ptr(),
@@ -1645,18 +1734,24 @@ pub fn copy_object_reports_template_and_handle_errors() {
     );
 
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 3, unknown.as_mut_ptr(), 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 3, unknown.as_mut_ptr(), 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn get_object_size_reports_attribute_storage_size() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     let public_key_info_len = crate::lock_context()
         .unwrap()
@@ -1671,7 +1766,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
 
     let mut size = 0;
     assert_eq!(
-        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
+        crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -1702,7 +1797,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
         },
     ];
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             attrs.as_mut_ptr(),
@@ -1711,7 +1806,7 @@ pub fn get_object_size_reports_attribute_storage_size() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
+        crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, 1, &mut size),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -1728,14 +1823,20 @@ pub fn get_object_size_reports_attribute_storage_size() {
             + public_key_info_len) as CK_ULONG
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn get_object_size_reports_created_object_size_and_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
@@ -1772,7 +1873,7 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
     ];
     let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CreateObject(
+        crate::api::C_CreateObject(
             TEST_SESSION_HANDLE,
             templ.as_mut_ptr(),
             templ.len() as CK_ULONG,
@@ -1783,7 +1884,7 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
 
     let mut size = 0;
     assert_eq!(
-        crate::C_GetObjectSize(TEST_SESSION_HANDLE, object, &mut size),
+        crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, object, &mut size),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -1792,26 +1893,32 @@ pub fn get_object_size_reports_created_object_size_and_errors() {
             as CK_ULONG
     );
     assert_eq!(
-        crate::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
+        crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, 999, &mut size),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_GetObjectSize(999, object, &mut size),
+        crate::api::C_GetObjectSize(999, object, &mut size),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_GetObjectSize(TEST_SESSION_HANDLE, object, ::std::ptr::null_mut()),
+        crate::api::C_GetObjectSize(TEST_SESSION_HANDLE, object, ::std::ptr::null_mut()),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn get_attribute_value_reports_sizes_and_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut label_attr = CK_ATTRIBUTE {
@@ -1820,7 +1927,7 @@ pub fn get_attribute_value_reports_sizes_and_values() {
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -1832,7 +1939,7 @@ pub fn get_attribute_value_reports_sizes_and_values() {
     label_attr.pValue = label.as_mut_ptr() as CK_VOID_PTR;
     label_attr.ulValueLen = label.len() as CK_ULONG;
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut label_attr, 1),
         CKR_OK as CK_RV
     );
     assert_eq!(&label, b"Test RSA public key");
@@ -1852,7 +1959,7 @@ pub fn get_attribute_value_reports_sizes_and_values() {
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             attrs.as_mut_ptr(),
@@ -1896,7 +2003,7 @@ pub fn get_attribute_value_reports_sizes_and_values() {
         },
     ];
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             operation_attrs.as_mut_ptr(),
@@ -1921,14 +2028,20 @@ pub fn get_attribute_value_reports_sizes_and_values() {
         )
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn get_attribute_value_reads_certificate_values() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let certificate = b"synthetic certificate".to_vec();
@@ -1968,7 +2081,12 @@ pub fn get_attribute_value_reads_certificate_values() {
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        crate::api::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            object_handle,
+            &mut value_attribute,
+            1
+        ),
         CKR_OK as CK_RV
     );
     assert_eq!(value_attribute.ulValueLen, certificate.len() as CK_ULONG);
@@ -1977,19 +2095,30 @@ pub fn get_attribute_value_reads_certificate_values() {
     value_attribute.pValue = value.as_mut_ptr() as CK_VOID_PTR;
     value_attribute.ulValueLen = value.len() as CK_ULONG;
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        crate::api::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            object_handle,
+            &mut value_attribute,
+            1
+        ),
         CKR_OK as CK_RV
     );
     assert_eq!(value, certificate);
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let value = vec![0xb1, 32];
@@ -2032,14 +2161,19 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         ulValueLen: returned.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, object_handle, &mut value_attribute, 1),
+        crate::api::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            object_handle,
+            &mut value_attribute,
+            1
+        ),
         CKR_OK as CK_RV
     );
     assert_eq!(returned.as_slice(), value);
 
     let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::C_CopyObject(
+        crate::api::C_CopyObject(
             TEST_SESSION_HANDLE,
             object_handle,
             ::std::ptr::null_mut(),
@@ -2049,18 +2183,24 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         CKR_ACTION_PROHIBITED as CK_RV
     );
     assert_eq!(
-        crate::C_DestroyObject(TEST_SESSION_HANDLE, object_handle),
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, object_handle),
         CKR_ACTION_PROHIBITED as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn get_attribute_value_reports_attribute_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut small_label = [0u8; 4];
@@ -2070,7 +2210,7 @@ pub fn get_attribute_value_reports_attribute_errors() {
         ulValueLen: small_label.len() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut small_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut small_attr, 1),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(
@@ -2084,7 +2224,7 @@ pub fn get_attribute_value_reports_attribute_errors() {
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut unknown_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, &mut unknown_attr, 1),
         CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
     );
     assert_eq!(
@@ -2093,26 +2233,32 @@ pub fn get_attribute_value_reports_attribute_errors() {
     );
 
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 999, &mut unknown_attr, 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 999, &mut unknown_attr, 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_GetAttributeValue(999, 1, &mut unknown_attr, 1),
+        crate::api::C_GetAttributeValue(999, 1, &mut unknown_attr, 1),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn set_attribute_value_updates_mutable_attributes() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut label = *b"Renamed public key";
@@ -2131,7 +2277,7 @@ pub fn set_attribute_value_updates_mutable_attributes() {
     ];
 
     assert_eq!(
-        crate::C_SetAttributeValue(
+        crate::api::C_SetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             attrs.as_mut_ptr(),
@@ -2156,7 +2302,7 @@ pub fn set_attribute_value_updates_mutable_attributes() {
     ];
 
     assert_eq!(
-        crate::C_GetAttributeValue(
+        crate::api::C_GetAttributeValue(
             TEST_SESSION_HANDLE,
             1,
             read_attrs.as_mut_ptr(),
@@ -2167,14 +2313,20 @@ pub fn set_attribute_value_updates_mutable_attributes() {
     assert_eq!(&read_label, b"Renamed public key");
     assert_eq!(read_id, id);
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }
 
 #[test]
 pub fn set_attribute_value_reports_attribute_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    assert_eq!(crate::C_Initialize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
@@ -2184,7 +2336,7 @@ pub fn set_attribute_value_reports_attribute_errors() {
         ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
     };
     assert_eq!(
-        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut readonly_attr, 1),
+        crate::api::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut readonly_attr, 1),
         CKR_ATTRIBUTE_READ_ONLY as CK_RV
     );
 
@@ -2194,7 +2346,7 @@ pub fn set_attribute_value_reports_attribute_errors() {
         ulValueLen: 0,
     };
     assert_eq!(
-        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut invalid_attr, 1),
+        crate::api::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut invalid_attr, 1),
         CKR_ATTRIBUTE_TYPE_INVALID as CK_RV
     );
 
@@ -2204,21 +2356,24 @@ pub fn set_attribute_value_reports_attribute_errors() {
         ulValueLen: 1,
     };
     assert_eq!(
-        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut bad_attr, 1),
+        crate::api::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, &mut bad_attr, 1),
         CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
-        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 999, &mut invalid_attr, 1),
+        crate::api::C_SetAttributeValue(TEST_SESSION_HANDLE, 999, &mut invalid_attr, 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_SetAttributeValue(999, 1, &mut invalid_attr, 1),
+        crate::api::C_SetAttributeValue(999, 1, &mut invalid_attr, 1),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
     assert_eq!(
-        crate::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
+        crate::api::C_SetAttributeValue(TEST_SESSION_HANDLE, 1, ::std::ptr::null_mut(), 1),
         CKR_ARGUMENTS_BAD as CK_RV
     );
 
-    assert_eq!(crate::C_Finalize(::std::ptr::null_mut()), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
 }

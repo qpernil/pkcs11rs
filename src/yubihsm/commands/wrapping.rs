@@ -1,3 +1,10 @@
+use super::{
+    object::{DelegatedObjectParameters, ObjectParameters},
+    protocol::*,
+};
+use crate::error::Error;
+use zeroize::Zeroizing;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RsaWrapParameters<'a> {
     pub(crate) wrapping_key_id: u16,

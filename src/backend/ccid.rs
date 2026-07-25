@@ -1,5 +1,7 @@
+use crate::*;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CcidApplication {
+pub(crate) enum CcidApplication {
     Piv,
     OpenPgp,
     HsmAuth,
@@ -7,20 +9,20 @@ enum CcidApplication {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CcidConfiguration {
-    application: CcidApplication,
-    secure_channel: Option<SecureChannelProtocol>,
+pub(crate) struct CcidConfiguration {
+    pub(crate) application: CcidApplication,
+    pub(crate) secure_channel: Option<SecureChannelProtocol>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SecureChannelProtocol {
+pub(crate) enum SecureChannelProtocol {
     Scp03,
     Scp11a,
     Scp11b,
     Scp11c,
 }
 
-fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
+pub(crate) fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
     let secure_channel = configured_secure_channel_optional()?;
     let applications = match std::env::var("PKCS11RS_CCID_APPLICATIONS") {
         Ok(value) => parse_ccid_application_list(&value)?,
@@ -45,7 +47,7 @@ fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
         .collect()
 }
 
-fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Error> {
+pub(crate) fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Error> {
     let mut applications = Vec::new();
     for application in value
         .split(',')
@@ -63,7 +65,7 @@ fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Erro
     Ok(applications)
 }
 
-fn default_ccid_applications() -> Vec<CcidApplication> {
+pub(crate) fn default_ccid_applications() -> Vec<CcidApplication> {
     vec![
         CcidApplication::Piv,
         CcidApplication::OpenPgp,
@@ -72,7 +74,7 @@ fn default_ccid_applications() -> Vec<CcidApplication> {
     ]
 }
 
-fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
+pub(crate) fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
     match value.to_ascii_lowercase().as_str() {
         "piv" => Ok(CcidApplication::Piv),
         "openpgp" => Ok(CcidApplication::OpenPgp),
@@ -82,7 +84,7 @@ fn parse_ccid_application(value: &str) -> Result<CcidApplication, Error> {
     }
 }
 
-fn ccid_application_label(application: CcidApplication) -> &'static str {
+pub(crate) fn ccid_application_label(application: CcidApplication) -> &'static str {
     match application {
         CcidApplication::Piv => "PIV",
         CcidApplication::OpenPgp => "OpenPGP",
@@ -91,17 +93,14 @@ fn ccid_application_label(application: CcidApplication) -> &'static str {
     }
 }
 
-fn ccid_application_aid(
+pub(crate) fn ccid_application_aid(
     application: CcidApplication,
     _secure_channel: Option<SecureChannelProtocol>,
 ) -> Result<Vec<u8>, Error> {
     let (name, default) = match application {
         CcidApplication::Piv => ("PKCS11RS_PIV_AID", &piv::PIV_AID[..]),
         CcidApplication::OpenPgp => ("PKCS11RS_OPENPGP_AID", &openpgp::OPENPGP_AID[..]),
-        CcidApplication::HsmAuth => (
-            "PKCS11RS_HSMAUTH_AID",
-            &hsmauth::AID[..],
-        ),
+        CcidApplication::HsmAuth => ("PKCS11RS_HSMAUTH_AID", &hsmauth::AID[..]),
         CcidApplication::IssuerSecurityDomain => (
             "PKCS11RS_ISSUER_SD_AID",
             &DEFAULT_ISSUER_SECURITY_DOMAIN_AID[..],
@@ -117,7 +116,7 @@ pub(crate) fn configured_issuer_security_domain_aid() -> Result<Vec<u8>, Error> 
     )
 }
 
-fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
     let aid = match std::env::var(name) {
         Ok(value) => parse_hex(&value)?,
         Err(std::env::VarError::NotPresent) => default.to_vec(),
@@ -129,7 +128,7 @@ fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(aid)
 }
 
-fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>, Error> {
+pub(crate) fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>, Error> {
     match std::env::var("PKCS11RS_CCID_SECURE_CHANNEL") {
         Ok(value) => parse_secure_channel(&value).map(Some),
         Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
@@ -137,7 +136,7 @@ fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>,
     }
 }
 
-fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
+pub(crate) fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
     match value.to_ascii_lowercase().as_str() {
         "scp03" => Ok(SecureChannelProtocol::Scp03),
         "scp11a" => Ok(SecureChannelProtocol::Scp11a),
@@ -147,8 +146,7 @@ fn parse_secure_channel(value: &str) -> Result<SecureChannelProtocol, Error> {
     }
 }
 
-
-struct HsmAuthManagementKey(Zeroizing<[u8; 16]>);
+pub(crate) struct HsmAuthManagementKey(Zeroizing<[u8; 16]>);
 
 impl std::fmt::Debug for HsmAuthManagementKey {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,7 +155,7 @@ impl std::fmt::Debug for HsmAuthManagementKey {
 }
 
 #[derive(Debug)]
-struct HsmAuthSlot {
+pub(crate) struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
@@ -166,7 +164,7 @@ struct HsmAuthSlot {
 }
 
 impl HsmAuthSlot {
-    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+    pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
             application_aid,
@@ -184,7 +182,7 @@ impl HsmAuthSlot {
         info.clone().ok_or(CKR_DEVICE_ERROR.into())
     }
 
-    fn providers(&self) -> Result<Vec<HsmAuthProvider>, Error> {
+    pub(crate) fn providers(&self) -> Result<Vec<HsmAuthProvider>, Error> {
         let info = self.discovered_info()?;
         Ok(info
             .credentials
@@ -366,11 +364,7 @@ impl Slot for HsmAuthSlot {
                     )
                     .and_then(|_| HsmAuthClient.get_public_key(self.connector.as_ref(), label)),
                 HsmAuthAdministration::Delete { label } => HsmAuthClient
-                    .delete_credential(
-                        self.connector.as_ref(),
-                        management_key.as_slice(),
-                        label,
-                    )
+                    .delete_credential(self.connector.as_ref(), management_key.as_slice(), label)
                     .map(|_| Vec::new()),
                 HsmAuthAdministration::ChangeCredentialPassword {
                     label,
@@ -383,15 +377,13 @@ impl Slot for HsmAuthSlot {
                         new_credential_password,
                     )
                     .map(|_| Vec::new()),
-                HsmAuthAdministration::ChangeManagementKey { new_management_key } => {
-                    HsmAuthClient
-                        .change_management_key(
-                            self.connector.as_ref(),
-                            management_key.as_slice(),
-                            new_management_key,
-                        )
-                        .map(|_| Vec::new())
-                }
+                HsmAuthAdministration::ChangeManagementKey { new_management_key } => HsmAuthClient
+                    .change_management_key(
+                        self.connector.as_ref(),
+                        management_key.as_slice(),
+                        new_management_key,
+                    )
+                    .map(|_| Vec::new()),
                 HsmAuthAdministration::Reset => HsmAuthClient
                     .reset(self.connector.as_ref())
                     .map(|_| Vec::new()),
@@ -435,7 +427,7 @@ impl Slot for HsmAuthSlot {
     }
 }
 
-fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenObject> {
+pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenObject> {
     let mut objects = Vec::new();
     for credential in &info.credentials {
         let id = credential.label.as_bytes().to_vec();
@@ -498,7 +490,7 @@ fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> Vec<TokenOb
 }
 
 #[derive(Debug)]
-struct IssuerSecurityDomainSlot {
+pub(crate) struct IssuerSecurityDomainSlot {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
@@ -506,7 +498,7 @@ struct IssuerSecurityDomainSlot {
 }
 
 impl IssuerSecurityDomainSlot {
-    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+    pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
             application_aid,
@@ -630,9 +622,9 @@ impl Slot for IssuerSecurityDomainSlot {
     }
 }
 
-const ISSUER_SECURITY_DOMAIN_APPLICATION: &str = "Issuer SD";
+pub(crate) const ISSUER_SECURITY_DOMAIN_APPLICATION: &str = "Issuer SD";
 
-fn issuer_security_domain_data_object(
+pub(crate) fn issuer_security_domain_data_object(
     slot_id: CK_SLOT_ID,
     unique_id: String,
     label: String,
@@ -669,7 +661,7 @@ fn issuer_security_domain_data_object(
     }
 }
 
-fn issuer_security_domain_key_name(kid: u8) -> String {
+pub(crate) fn issuer_security_domain_key_name(kid: u8) -> String {
     match kid {
         security_domain::KID_SCP03 => "SCP03 K-ENC".to_string(),
         0x02 => "SCP03 K-MAC".to_string(),
@@ -683,7 +675,7 @@ fn issuer_security_domain_key_name(kid: u8) -> String {
     }
 }
 
-fn issuer_security_domain_token_objects(
+pub(crate) fn issuer_security_domain_token_objects(
     slot_id: CK_SLOT_ID,
     info: &SecurityDomainInfo,
 ) -> Vec<TokenObject> {
@@ -697,7 +689,10 @@ fn issuer_security_domain_token_objects(
         let name = issuer_security_domain_key_name(key.key_ref.kid);
         objects.push(issuer_security_domain_data_object(
             slot_id,
-            format!("issuer-sd-key-{:02x}-{:02x}", key.key_ref.kid, key.key_ref.kvn),
+            format!(
+                "issuer-sd-key-{:02x}-{:02x}",
+                key.key_ref.kid, key.key_ref.kvn
+            ),
             format!("Issuer SD {name} KVN {}", key.key_ref.kvn),
             vec![key.key_ref.kid, key.key_ref.kvn],
             vec![key.key_ref.kid, key.key_ref.kvn],
@@ -802,10 +797,10 @@ fn issuer_security_domain_token_objects(
 }
 
 #[derive(Debug)]
-struct PcscAppletSession {
-    slotID: CK_SLOT_ID,
-    flags: CK_FLAGS,
-    connector: Rc<dyn Connector>,
+pub(crate) struct PcscAppletSession {
+    pub(crate) slotID: CK_SLOT_ID,
+    pub(crate) flags: CK_FLAGS,
+    pub(crate) connector: Rc<dyn Connector>,
 }
 
 impl Session for PcscAppletSession {
@@ -875,13 +870,12 @@ impl Session for PcscAppletSession {
     }
 }
 
-
 #[derive(Debug)]
-struct IssuerSecurityDomainSession {
-    slotID: CK_SLOT_ID,
-    flags: CK_FLAGS,
-    connector: Rc<dyn Connector>,
-    session: Rc<RefCell<Option<Scp03Session>>>,
+pub(crate) struct IssuerSecurityDomainSession {
+    pub(crate) slotID: CK_SLOT_ID,
+    pub(crate) flags: CK_FLAGS,
+    pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
 impl Session for IssuerSecurityDomainSession {
@@ -982,7 +976,11 @@ impl Session for IssuerSecurityDomainSession {
 }
 
 impl IssuerSecurityDomainSession {
-    fn send_apdu(&self, command: &CommandApdu, chained: bool) -> Result<ResponseApdu, Error> {
+    pub(crate) fn send_apdu(
+        &self,
+        command: &CommandApdu,
+        chained: bool,
+    ) -> Result<ResponseApdu, Error> {
         let mut session_guard = self.session.try_borrow_mut()?;
         let result = {
             let session = session_guard.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;

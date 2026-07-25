@@ -1,4 +1,7 @@
 #[cfg(not(feature = "abi-tests"))]
+use super::*;
+
+#[cfg(not(feature = "abi-tests"))]
 mod hardware_provisioning {
     use super::*;
     use p256::ecdsa::SigningKey;
@@ -40,8 +43,8 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     }
 
     fn required_byte(name: &str) -> u8 {
-        let value = std::env::var(name)
-            .unwrap_or_else(|_| panic!("{name} is required when provisioning"));
+        let value =
+            std::env::var(name).unwrap_or_else(|_| panic!("{name} is required when provisioning"));
         let parsed = value
             .strip_prefix("0x")
             .or_else(|| value.strip_prefix("0X"))
@@ -50,10 +53,9 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     }
 
     fn scp11b_certificate_chain(public_point: &[u8], kvn: u8) -> Vec<Vec<u8>> {
-        let ca_secret = p256::SecretKey::from_sec1_pem(
-            std::str::from_utf8(SCP11B_TEST_CA_KEY).unwrap(),
-        )
-        .expect("invalid embedded SCP11B test CA key");
+        let ca_secret =
+            p256::SecretKey::from_sec1_pem(std::str::from_utf8(SCP11B_TEST_CA_KEY).unwrap())
+                .expect("invalid embedded SCP11B test CA key");
         let ca_key = SigningKey::from(ca_secret);
         let ca_name = "CN=pkcs11rs SCP11 test CA";
         let ca = crate::certificate_builder::p256_certificate(
@@ -88,9 +90,9 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                 connector.serial() == selector || connector.name() == *selector
             })
         });
-        let connector = matches.next().unwrap_or_else(|| {
-            panic!("no {kind} matched {selector_name}={selector:?}")
-        });
+        let connector = matches
+            .next()
+            .unwrap_or_else(|| panic!("no {kind} matched {selector_name}={selector:?}"));
         assert!(
             matches.next().is_none(),
             "multiple {kind} devices matched; set {selector_name} to a serial number or full device name"
@@ -133,7 +135,10 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(crate::C_Initialize(std::ptr::null_mut()), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
         let slot_id = select_yubihsm_slot();
         let admin_id = hex_u16(
             "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
@@ -145,7 +150,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         );
         let pin = format!("{admin_id:04x}{admin_password}");
         let result = generated_ec_private_rsa_wrap_round_trip(slot_id, pin.as_bytes());
-        let finalize = crate::C_Finalize(std::ptr::null_mut());
+        let finalize = crate::api::C_Finalize(std::ptr::null_mut());
         result.unwrap();
         assert_eq!(finalize, CKR_OK as CK_RV);
     }
@@ -250,9 +255,10 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             .discover(issuer_sd.as_ref())
             .expect("failed to rediscover the provisioned SCP11B key");
         assert!(after.keys.iter().any(|key| key.key_ref == key_ref));
-        assert!(after.certificate_bundles.iter().any(|bundle| {
-            bundle.key_ref == key_ref && bundle.certificates == certificates
-        }));
+        assert!(after
+            .certificate_bundles
+            .iter()
+            .any(|bundle| { bundle.key_ref == key_ref && bundle.certificates == certificates }));
 
         let keys = crate::Scp11KeySet::scp11b_from_certificates(
             kvn,
@@ -335,11 +341,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                 panic!("{} is required when provisioning", case.authkey_id_env)
             }),
         );
-        assert_ne!(
-            authkey_id, 0,
-            "{} must not be zero",
-            case.authkey_id_env
-        );
+        assert_ne!(authkey_id, 0, "{} must not be zero", case.authkey_id_env);
         let admin_id = hex_u16(
             "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
             &environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
@@ -351,7 +353,10 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         assert_ne!(domains, 0, "PKCS11RS_TEST_YUBIHSM_DOMAINS must not be zero");
 
         let label = environment(case.label_env, case.default_label);
-        assert!(!label.is_empty() && label.len() <= 40, "label must be 1..=40 bytes");
+        assert!(
+            !label.is_empty() && label.len() <= 40,
+            "label must be 1..=40 bytes"
+        );
         let credential_password = crate::Zeroizing::new(environment(
             "PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD",
             DEFAULT_CREDENTIAL_PASSWORD,
@@ -443,15 +448,16 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                 _ => Err(crate::CKR_DEVICE_ERROR.into()),
             }
         })();
-        let preflight_close = admin_session.send_command(
-            yubihsm.as_ref(),
-            &crate::YubiHsmCommand::close_session(),
-        );
+        let preflight_close =
+            admin_session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
         let existing_key = existing_key
             .expect("failed to query the target YubiHSM authentication-key ID and metadata");
         preflight_close.expect("failed to close the YubiHSM preflight session");
         if let Some(info) = &existing_key {
-            assert_eq!(info.label, label, "target YubiHSM object ID has another label");
+            assert_eq!(
+                info.label, label,
+                "target YubiHSM object ID has another label"
+            );
             assert_eq!(
                 info.algorithm,
                 crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
@@ -483,10 +489,8 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
                         Err(crate::CKR_DEVICE_ERROR.into())
                     }
                 });
-            let cleanup_close = admin_session.send_command(
-                yubihsm.as_ref(),
-                &crate::YubiHsmCommand::close_session(),
-            );
+            let cleanup_close = admin_session
+                .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
             deletion.expect("failed to delete the prior YubiHSM authentication key");
             cleanup_close.expect("failed to close the YubiHSM cleanup session");
             eprintln!("deleted prior YubiHSM authentication key {authkey_id:04x}");
@@ -544,12 +548,10 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         let installed_id = admin_session
             .send_command(yubihsm.as_ref(), &command)
             .and_then(|response| crate::parse_yubihsm_object_id(&response));
-        let provisioning_close = admin_session.send_command(
-            yubihsm.as_ref(),
-            &crate::YubiHsmCommand::close_session(),
-        );
-        let installed_id =
-            installed_id.expect("failed to install the asymmetric authentication key in the YubiHSM");
+        let provisioning_close =
+            admin_session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
+        let installed_id = installed_id
+            .expect("failed to install the asymmetric authentication key in the YubiHSM");
         provisioning_close.expect("failed to close the YubiHSM provisioning session");
         assert_eq!(installed_id, authkey_id);
 
@@ -568,11 +570,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             version: info.version,
             trust_prefix: None,
         }
-        .authenticate(
-            yubihsm.as_ref(),
-            authkey_id,
-            credential_password.as_bytes(),
-        )
+        .authenticate(yubihsm.as_ref(), authkey_id, credential_password.as_bytes())
         .expect("the provisioned asymmetric YubiHSM Auth pair could not authenticate");
         session
             .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())

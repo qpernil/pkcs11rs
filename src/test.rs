@@ -1,12 +1,6 @@
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::RsaPrivateKey;
+#[path = "tests/common.rs"]
+mod common;
 
-include!("tests/common.rs");
-include!("tests/wrap.rs");
-include!("tests/general.rs");
-include!("tests/crypto.rs");
-include!("tests/object.rs");
-include!("tests/key.rs");
-include!("tests/interfaces.rs");
-include!("tests/hardware.rs");
+#[cfg(unix)]
+pub(crate) use common::TestPinentry;
+pub(crate) use common::TEST_LOCK;

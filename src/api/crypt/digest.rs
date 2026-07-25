@@ -1,5 +1,7 @@
+use crate::*;
+
 #[derive(Clone, Debug)]
-struct DigestOperation {
+pub(crate) struct DigestOperation {
     algorithm: MessageDigest,
     buffer: Vec<u8>,
 }
@@ -24,12 +26,7 @@ fn digest_init(
             return Err(Error::from(CKR_OPERATION_ACTIVE as CK_RV));
         }
         let mechanism = _as_ref(mechanism)?;
-        require_slot_mechanism(
-            ctx,
-            slot_id,
-            mechanism.mechanism,
-            CKF_DIGEST as CK_FLAGS,
-        )?;
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DIGEST as CK_FLAGS)?;
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(Error::from(CKR_MECHANISM_PARAM_INVALID as CK_RV));
         }
@@ -78,7 +75,11 @@ pub extern "C" fn C_DigestInit(
     session_handle: CK_SESSION_HANDLE,
     mechanism: *mut CK_MECHANISM,
 ) -> CK_RV {
-    log!(2, "C_DigestInit called with {:?}", (session_handle, mechanism));
+    log!(
+        2,
+        "C_DigestInit called with {:?}",
+        (session_handle, mechanism)
+    );
     map(digest_init(session_handle, mechanism))
 }
 
@@ -119,14 +120,7 @@ pub extern "C" fn C_Digest(
                     return Err(error);
                 }
             };
-            copy_digest(
-                ctx,
-                session_handle,
-                &operation,
-                data,
-                digest,
-                digest_len,
-            )
+            copy_digest(ctx, session_handle, &operation, data, digest, digest_len)
         })
     })())
 }
@@ -161,10 +155,7 @@ pub extern "C" fn C_DigestUpdate(
 }
 
 #[no_mangle]
-pub extern "C" fn C_DigestKey(
-    session_handle: CK_SESSION_HANDLE,
-    key: CK_OBJECT_HANDLE,
-) -> CK_RV {
+pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
     log!(2, "C_DigestKey called with {:?}", (session_handle, key));
     map(with_context_mut(|ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
@@ -221,14 +212,7 @@ pub extern "C" fn C_DigestFinal(
                 .get(&session_handle)
                 .cloned()
                 .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
-            copy_digest(
-                ctx,
-                session_handle,
-                &operation,
-                &[],
-                digest,
-                digest_len,
-            )
+            copy_digest(ctx, session_handle, &operation, &[], digest, digest_len)
         })
     })())
 }
