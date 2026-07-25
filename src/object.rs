@@ -826,12 +826,9 @@ impl TokenObject {
                     || is_common_public_key_attribute(attribute_type)
                     || match self.key_type {
                         x if x == CKK_RSA as CK_KEY_TYPE => is_rsa_public_attribute(attribute_type),
-                        x if matches!(
-                            x,
-                            y if y == CKK_EC as CK_KEY_TYPE
-                                || y == CKK_EC_EDWARDS as CK_KEY_TYPE
-                                || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
-                        ) =>
+                        x if x == CKK_EC as CK_KEY_TYPE
+                            || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                            || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE =>
                         {
                             is_ec_public_attribute(attribute_type)
                         }
@@ -845,12 +842,9 @@ impl TokenObject {
                         x if x == CKK_RSA as CK_KEY_TYPE => {
                             is_rsa_private_attribute(attribute_type)
                         }
-                        x if matches!(
-                            x,
-                            y if y == CKK_EC as CK_KEY_TYPE
-                                || y == CKK_EC_EDWARDS as CK_KEY_TYPE
-                                || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
-                        ) =>
+                        x if x == CKK_EC as CK_KEY_TYPE
+                            || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                            || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE =>
                         {
                             is_ec_private_attribute(attribute_type)
                         }
@@ -910,12 +904,9 @@ impl TokenObject {
                     || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
                     || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
             ),
-            x if matches!(
-                x,
-                y if y == CKK_EC as CK_KEY_TYPE
-                    || y == CKK_EC_EDWARDS as CK_KEY_TYPE
-                    || y == CKK_EC_MONTGOMERY as CK_KEY_TYPE
-            ) =>
+            x if x == CKK_EC as CK_KEY_TYPE
+                || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE =>
             {
                 attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
             }

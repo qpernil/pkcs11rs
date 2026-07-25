@@ -1,34 +1,38 @@
 use super::*;
 use crate::{KeyMaterial, TokenObject};
 
-fn yubihsm_wrap_test_object(
-    slot_id: CK_SLOT_ID,
+struct YubiHsmWrapTestObject<'a> {
     id: u16,
     object_type: u8,
     algorithm: u8,
-    capabilities: &[usize],
-    delegated_capabilities: &[usize],
-    label: &str,
+    capabilities: &'a [usize],
+    delegated_capabilities: &'a [usize],
+    label: &'a str,
     public_key: Option<crate::YubiHsmPublicKey>,
+}
+
+fn yubihsm_wrap_test_object(
+    slot_id: CK_SLOT_ID,
+    definition: YubiHsmWrapTestObject<'_>,
 ) -> Vec<TokenObject> {
     crate::yubihsm_token_objects(
         slot_id,
         crate::YubiHsmObjectInfo {
-            capabilities: crate::yubihsm_capabilities(capabilities),
-            id,
-            length: match algorithm {
+            capabilities: crate::yubihsm_capabilities(definition.capabilities),
+            id: definition.id,
+            length: match definition.algorithm {
                 crate::YUBIHSM_ALGO_AES128 | crate::YUBIHSM_ALGO_AES128_CCM_WRAP => 16,
                 _ => 256,
             },
             domains: 0xffff,
-            object_type,
-            algorithm,
+            object_type: definition.object_type,
+            algorithm: definition.algorithm,
             sequence: 1,
             origin: 1,
-            label: label.to_owned(),
-            delegated_capabilities: crate::yubihsm_capabilities(delegated_capabilities),
+            label: definition.label.to_owned(),
+            delegated_capabilities: crate::yubihsm_capabilities(definition.delegated_capabilities),
         },
-        public_key,
+        definition.public_key,
     )
     .unwrap()
 }
@@ -74,43 +78,51 @@ fn install_yubihsm_wrap_test_objects(
     let definitions = [
         yubihsm_wrap_test_object(
             slot_id,
-            30,
-            crate::YUBIHSM_SYMMETRIC_KEY,
-            crate::YUBIHSM_ALGO_AES128,
-            &[0x10, 0x32, 0x33],
-            &[],
-            "exportable AES",
-            None,
+            YubiHsmWrapTestObject {
+                id: 30,
+                object_type: crate::YUBIHSM_SYMMETRIC_KEY,
+                algorithm: crate::YUBIHSM_ALGO_AES128,
+                capabilities: &[0x10, 0x32, 0x33],
+                delegated_capabilities: &[],
+                label: "exportable AES",
+                public_key: None,
+            },
         ),
         yubihsm_wrap_test_object(
             slot_id,
-            31,
-            crate::YUBIHSM_WRAP_KEY,
-            crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
-            &[],
-            &[],
-            "AES-CCM wrap",
-            None,
+            YubiHsmWrapTestObject {
+                id: 31,
+                object_type: crate::YUBIHSM_WRAP_KEY,
+                algorithm: crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+                capabilities: &[],
+                delegated_capabilities: &[],
+                label: "AES-CCM wrap",
+                public_key: None,
+            },
         ),
         yubihsm_wrap_test_object(
             slot_id,
-            32,
-            crate::YUBIHSM_WRAP_KEY,
-            crate::YUBIHSM_ALGO_RSA_2048,
-            &[0x10],
-            &[],
-            "RSA wrap",
-            Some(public_key.clone()),
+            YubiHsmWrapTestObject {
+                id: 32,
+                object_type: crate::YUBIHSM_WRAP_KEY,
+                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+                capabilities: &[0x10],
+                delegated_capabilities: &[],
+                label: "RSA wrap",
+                public_key: Some(public_key.clone()),
+            },
         ),
         yubihsm_wrap_test_object(
             slot_id,
-            33,
-            crate::YUBIHSM_PUBLIC_WRAP_KEY,
-            crate::YUBIHSM_ALGO_RSA_2048,
-            &[],
-            &[],
-            "RSA public wrap",
-            Some(public_key),
+            YubiHsmWrapTestObject {
+                id: 33,
+                object_type: crate::YUBIHSM_PUBLIC_WRAP_KEY,
+                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+                capabilities: &[],
+                delegated_capabilities: &[],
+                label: "RSA public wrap",
+                public_key: Some(public_key),
+            },
         ),
     ];
     let mut target = None;
@@ -199,17 +211,19 @@ fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u
             |(id, object_type, algorithm, label, extractable, has_delegated_capabilities)| {
                 let [object] = yubihsm_wrap_test_object(
                     slot_id,
-                    id,
-                    object_type,
-                    algorithm,
-                    if extractable { &[0x10] } else { &[] },
-                    if has_delegated_capabilities {
-                        &[0x04]
-                    } else {
-                        &[]
+                    YubiHsmWrapTestObject {
+                        id,
+                        object_type,
+                        algorithm,
+                        capabilities: if extractable { &[0x10] } else { &[] },
+                        delegated_capabilities: if has_delegated_capabilities {
+                            &[0x04]
+                        } else {
+                            &[]
+                        },
+                        label,
+                        public_key: None,
                     },
-                    label,
-                    None,
                 )
                 .try_into()
                 .unwrap();

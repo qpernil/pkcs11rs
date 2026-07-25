@@ -23,6 +23,7 @@ CKR_ARGUMENTS_BAD = 7
 CKR_ACTION_PROHIBITED = 0x1B
 CKR_ATTRIBUTE_READ_ONLY = 0x10
 CKR_ATTRIBUTE_SENSITIVE = 0x11
+CKR_ATTRIBUTE_TYPE_INVALID = 0x12
 CKR_DATA_LEN_RANGE = 0x21
 CKR_ENCRYPTED_DATA_INVALID = 0x40
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
@@ -1250,14 +1251,16 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_piv_related_objects_share_ykcs11_id(self) -> None:
+    def test_abi_piv_related_objects_use_class_appropriate_identifiers(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
         self.login_with_pin(session, b"123456")
 
-        def find_one(object_class: int) -> int:
+        def find_one(
+            object_class: int, identifier_type: int, identifier: bytes
+        ) -> int:
             encoded_class = CK_ULONG(object_class)
-            encoded_id = CK_BYTE(2)
+            encoded_identifier = (CK_BYTE * len(identifier))(*identifier)
             token = CK_BYTE(1)
             template = (CK_ATTRIBUTE * 3)(
                 CK_ATTRIBUTE(
@@ -1266,9 +1269,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ctypes.sizeof(encoded_class),
                 ),
                 CK_ATTRIBUTE(
-                    CKA_ID,
-                    ctypes.cast(ctypes.byref(encoded_id), CK_VOID_PTR),
-                    ctypes.sizeof(encoded_id),
+                    identifier_type,
+                    ctypes.cast(encoded_identifier, CK_VOID_PTR),
+                    len(identifier),
                 ),
                 CK_ATTRIBUTE(
                     CKA_TOKEN,
@@ -1308,16 +1311,26 @@ class Pkcs11AbiTests(unittest.TestCase):
             return bytes(value)
 
         handles = {
-            object_class: find_one(object_class)
-            for object_class in (
-                CKO_PUBLIC_KEY,
-                CKO_PRIVATE_KEY,
-                CKO_CERTIFICATE,
-                CKO_DATA,
-            )
+            object_class: find_one(object_class, CKA_ID, b"\x02")
+            for object_class in (CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_CERTIFICATE)
         }
-        for handle in handles.values():
+        handles[CKO_DATA] = find_one(
+            CKO_DATA,
+            CKA_OBJECT_ID,
+            bytes.fromhex("60864801650307020100"),
+        )
+        for object_class in (CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_CERTIFICATE):
+            handle = handles[object_class]
             self.assertEqual(bytes_attribute(handle, CKA_ID), b"\x02")
+
+        unsupported_id = CK_ATTRIBUTE(CKA_ID, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session, handles[CKO_DATA], ctypes.byref(unsupported_id), 1
+            ),
+            CKR_ATTRIBUTE_TYPE_INVALID,
+        )
+        self.assertEqual(unsupported_id.ulValueLen, CK_UNAVAILABLE_INFORMATION)
 
         certificate = bytes_attribute(handles[CKO_CERTIFICATE], CKA_VALUE)
         raw_data = bytes_attribute(handles[CKO_DATA], CKA_VALUE)
@@ -2726,11 +2739,17 @@ done
             CKR_OK,
         )
 
-        def find_one(object_id: int, object_class: int) -> int:
-            encoded_id = (CK_BYTE * 2)(*object_id.to_bytes(2, "big"))
+        def find_one(
+            identifier_type: int, identifier: bytes, object_class: int
+        ) -> int:
+            encoded_identifier = (CK_BYTE * len(identifier))(*identifier)
             encoded_class = CK_ULONG(object_class)
             template = (CK_ATTRIBUTE * 2)(
-                CK_ATTRIBUTE(CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), 2),
+                CK_ATTRIBUTE(
+                    identifier_type,
+                    ctypes.cast(encoded_identifier, CK_VOID_PTR),
+                    len(identifier),
+                ),
                 CK_ATTRIBUTE(
                     CKA_CLASS,
                     ctypes.cast(ctypes.byref(encoded_class), CK_VOID_PTR),
@@ -2774,8 +2793,10 @@ done
             )
             return tuple(value.value for value in values)
 
-        public_key = find_one(1, CKO_PUBLIC_KEY)
-        opaque_data = find_one(5, CKO_DATA)
+        public_key = find_one(CKA_ID, (1).to_bytes(2, "big"), CKO_PUBLIC_KEY)
+        opaque_data = find_one(
+            CKA_LABEL, b"Mozilla Builtin Roots", CKO_DATA
+        )
         self.assertEqual(policy(public_key), (1, 0, 0))
         self.assertEqual(policy(opaque_data), (1, 0, 1))
 
@@ -2904,14 +2925,26 @@ done
             scalars(
                 rsa_private,
                 CKA_KEY_TYPE,
-                CKA_ENCRYPT,
                 CKA_DECRYPT,
                 CKA_SIGN,
-                CKA_WRAP,
                 CKA_UNWRAP,
             ),
-            (CKK_RSA, 0, 0, 0, 1, 1),
+            (CKK_RSA, 0, 0, 1),
         )
+        unsupported_private_wrap = CK_ATTRIBUTE(CKA_WRAP, None, 0)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                rsa_private,
+                ctypes.byref(unsupported_private_wrap),
+                1,
+            ),
+            CKR_ATTRIBUTE_TYPE_INVALID,
+        )
+        self.assertEqual(
+            unsupported_private_wrap.ulValueLen, CK_UNAVAILABLE_INFORMATION
+        )
+
         rsa_public = find_one(9, CKO_PUBLIC_KEY)
         self.assertEqual(
             scalars(
@@ -2921,9 +2954,8 @@ done
                 CKA_ENCRYPT,
                 CKA_VERIFY,
                 CKA_WRAP,
-                CKA_UNWRAP,
             ),
-            (CKK_RSA, 2048, 0, 0, 1, 0),
+            (CKK_RSA, 2048, 0, 0, 0),
         )
 
         public_wrap = find_one(10, CKO_PUBLIC_KEY)
@@ -2935,9 +2967,8 @@ done
                 CKA_ENCRYPT,
                 CKA_VERIFY,
                 CKA_WRAP,
-                CKA_UNWRAP,
             ),
-            (CKK_RSA, 2048, 0, 0, 1, 0),
+            (CKK_RSA, 2048, 0, 0, 1),
         )
 
     def test_abi_yubihsm_wraps_and_unwraps_with_ccm_and_rsa(self) -> None:
@@ -3180,13 +3211,17 @@ done
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
 
-        def find_by_id(
-            object_id: int, object_class: int | None = None
+        def find_one(
+            identifier_type: int,
+            identifier: bytes,
+            object_class: int | None = None,
         ) -> int:
-            encoded_id = (CK_BYTE * 2)(0, object_id)
+            encoded_identifier = (CK_BYTE * len(identifier))(*identifier)
             attributes = [
                 CK_ATTRIBUTE(
-                    CKA_ID, ctypes.cast(encoded_id, CK_VOID_PTR), len(encoded_id)
+                    identifier_type,
+                    ctypes.cast(encoded_identifier, CK_VOID_PTR),
+                    len(identifier),
                 ),
             ]
             class_value = None
@@ -3249,15 +3284,23 @@ done
             )
             return bytes(value)
 
-        data = find_by_id(5)
+        data = find_one(CKA_LABEL, b"Mozilla Builtin Roots", CKO_DATA)
         self.assertEqual(scalar_attribute(data, CKA_CLASS, CK_ULONG()), CKO_DATA)
         self.assertEqual(bytes_attribute(data, CKA_APPLICATION), b"Opaque object")
         self.assertEqual(bytes_attribute(data, CKA_OBJECT_ID), b"")
         self.assertEqual(bytes_attribute(data, CKA_VALUE), b"ABI opaque data")
+        for attribute_type in (CKA_ID, CKA_SENSITIVE):
+            unsupported = CK_ATTRIBUTE(attribute_type, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    session, data, ctypes.byref(unsupported), 1
+                ),
+                CKR_ATTRIBUTE_TYPE_INVALID,
+            )
+            self.assertEqual(unsupported.ulValueLen, CK_UNAVAILABLE_INFORMATION)
         for attribute_type, expected in [
             (CKA_TOKEN, 1),
             (CKA_PRIVATE, 0),
-            (CKA_SENSITIVE, 0),
             (CKA_MODIFIABLE, 1),
             (CKA_COPYABLE, 0),
             (CKA_DESTROYABLE, 1),
@@ -3266,7 +3309,7 @@ done
                 scalar_attribute(data, attribute_type, CK_BYTE()), expected
             )
 
-        certificate = find_by_id(1, CKO_CERTIFICATE)
+        certificate = find_one(CKA_ID, (1).to_bytes(2, "big"), CKO_CERTIFICATE)
         self.assertEqual(
             scalar_attribute(certificate, CKA_CLASS, CK_ULONG()), CKO_CERTIFICATE
         )
@@ -4996,9 +5039,21 @@ done
                 ctypes.byref(value_attribute),
                 1,
             ),
-            CKR_ATTRIBUTE_SENSITIVE,
+            CKR_OK,
         )
-        self.assertEqual(value_attribute.ulValueLen, CK_UNAVAILABLE_INFORMATION)
+        self.assertEqual(value_attribute.ulValueLen, value_len.value)
+        value = (CK_BYTE * value_attribute.ulValueLen)()
+        value_attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(
+                session,
+                key.value,
+                ctypes.byref(value_attribute),
+                1,
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(len(bytes(value)), value_len.value)
 
         sensitive.value = 1
         extractable.value = 0
