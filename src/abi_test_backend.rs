@@ -557,6 +557,10 @@ impl Session for AbiYubiHsmSession {
             0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
             0x83, 0x08,
         ];
+        const RFC3394_AES_128_KEY: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ];
         let data = command.data();
         let id = data
             .get(..2)
@@ -568,6 +572,7 @@ impl Session for AbiYubiHsmSession {
             ABI_YUBIHSM_RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
             ABI_YUBIHSM_RFC3610_AES_KEY_ID => &RFC3610_AES_128_KEY,
             ABI_YUBIHSM_NIST_GMAC_AES_KEY_ID => &NIST_GMAC_AES_128_KEY,
+            ABI_YUBIHSM_RFC3394_AES_KEY_ID => &RFC3394_AES_128_KEY,
             _ => &[0; 16],
         };
         let (direction, iv, input) = match command.code() {
@@ -763,6 +768,7 @@ const ABI_YUBIHSM_HMAC_KEY_ID: u16 = 11;
 const ABI_YUBIHSM_RFC5649_AES_KEY_ID: u16 = 12;
 const ABI_YUBIHSM_RFC3610_AES_KEY_ID: u16 = 13;
 const ABI_YUBIHSM_NIST_GMAC_AES_KEY_ID: u16 = 14;
+const ABI_YUBIHSM_RFC3394_AES_KEY_ID: u16 = 15;
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_hmac_sha256(data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -1020,6 +1026,22 @@ fn abi_test_yubihsm_nist_gmac_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
     } = &mut object.material
     {
         *id = ABI_YUBIHSM_NIST_GMAC_AES_KEY_ID;
+        *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
+    }
+    object
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_rfc3394_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    let mut object = abi_test_yubihsm_aes_object(slot_id);
+    object.unique_id = "abi-yubihsm-aes-rfc3394".to_owned();
+    object.label = "ABI YubiHSM RFC 3394 AES key".to_owned();
+    object.id = ABI_YUBIHSM_RFC3394_AES_KEY_ID.to_be_bytes().to_vec();
+    if let KeyMaterial::YubiHsm {
+        id, capabilities, ..
+    } = &mut object.material
+    {
+        *id = ABI_YUBIHSM_RFC3394_AES_KEY_ID;
         *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
     }
     object
@@ -1293,6 +1315,7 @@ impl Slot for AbiYubiHsmSlot {
             abi_test_yubihsm_rfc5649_aes_object(slot_id),
             abi_test_yubihsm_rfc3610_aes_object(slot_id),
             abi_test_yubihsm_nist_gmac_aes_object(slot_id),
+            abi_test_yubihsm_rfc3394_aes_object(slot_id),
         ];
         objects.push(abi_test_yubihsm_hmac_object(slot_id)?);
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);

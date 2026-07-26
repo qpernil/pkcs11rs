@@ -117,7 +117,7 @@ pub(crate) const SOFTWARE_DIGEST_MECHANISMS: [MechanismDetails; 9] = [
     },
 ];
 
-pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 29] = [
+pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         min_key_size: 2048,
@@ -228,6 +228,12 @@ pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 29] = [
     },
     MechanismDetails {
         type_: CKM_AES_CCM as CK_MECHANISM_TYPE,
+        min_key_size: 16,
+        max_key_size: 32,
+        flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+    },
+    MechanismDetails {
+        type_: CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE,
         min_key_size: 16,
         max_key_size: 32,
         flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
@@ -398,6 +404,7 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                     || y == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE
                     || y == CKM_AES_CTR as CK_MECHANISM_TYPE
                     || y == CKM_AES_CCM as CK_MECHANISM_TYPE
+                    || y == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE
                     || y == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE
                     || y == CKM_AES_GCM as CK_MECHANISM_TYPE
                     || y == CKM_AES_GMAC as CK_MECHANISM_TYPE
@@ -486,7 +493,9 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                     algorithms.contains(&YUBIHSM_ALGO_AES_ECB)
                         && algorithms.contains(&YUBIHSM_ALGO_AES_CBC)
                 }
-                x if x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE => {
+                x if x == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE
+                    || x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE =>
+                {
                     algorithms.contains(&YUBIHSM_ALGO_AES_ECB)
                 }
                 x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
