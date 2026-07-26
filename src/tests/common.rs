@@ -3828,6 +3828,53 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
         )),
     );
 
+    // RFC 3610, section 8, packet vector #1.
+    let ccm_key =
+        insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::RFC3610_AES_KEY_ID);
+    let mut ccm_nonce = test_hex("00000003020100a0a1a2a3a4a5");
+    let mut ccm_aad = test_hex("0001020304050607");
+    let mut ccm_parameters = CK_CCM_PARAMS {
+        ulDataLen: 23,
+        pNonce: ccm_nonce.as_mut_ptr(),
+        ulNonceLen: ccm_nonce.len() as CK_ULONG,
+        pAAD: ccm_aad.as_mut_ptr(),
+        ulAADLen: ccm_aad.len() as CK_ULONG,
+        ulMACLen: 8,
+    };
+    let mut ccm_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CCM as CK_MECHANISM_TYPE,
+        pParameter: (&mut ccm_parameters as *mut CK_CCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_CCM_PARAMS>() as CK_ULONG,
+    };
+    let ccm_plaintext = test_hex("08090a0b0c0d0e0f101112131415161718191a1b1c1d1e");
+    let ccm_ciphertext = test_hex("588c979a61c663d2f066d0c2c0f989806d5f6b61dac38417e8d12cfdf926e0");
+    assert_pkcs11_aes_mechanism_vector(
+        session,
+        ccm_key,
+        &mut ccm_mechanism,
+        &ccm_plaintext,
+        &ccm_ciphertext,
+    );
+
+    let mut modified_ccm = ccm_ciphertext;
+    *modified_ccm.last_mut().unwrap() ^= 1;
+    let mut ccm_output = vec![0; ccm_plaintext.len()];
+    let mut ccm_output_length = ccm_output.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_DecryptInit(session, &mut ccm_mechanism, ccm_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Decrypt(
+            session,
+            modified_ccm.as_mut_ptr(),
+            modified_ccm.len() as CK_ULONG,
+            ccm_output.as_mut_ptr(),
+            &mut ccm_output_length,
+        ),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+
     let mut invalid_padding = cbc_padded_ciphertext.clone();
     invalid_padding[63] ^= 1;
     let mut invalid_output = vec![0; invalid_padding.len()];
@@ -5486,6 +5533,7 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         gcm.flags & (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
         (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
     );
+    assert!(mechanism(CKM_AES_CCM as CK_MECHANISM_TYPE).is_none());
     for cmac in [
         CKM_AES_CMAC as CK_MECHANISM_TYPE,
         CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE,
@@ -5582,6 +5630,12 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         .unwrap();
     assert_eq!((ctr.min_key_size, ctr.max_key_size), (16, 16));
     assert_eq!(ctr.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
+    let ccm = aes_block_modes
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_AES_CCM as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((ccm.min_key_size, ccm.max_key_size), (16, 16));
+    assert_eq!(ccm.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
     let kwp = aes_block_modes
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE)

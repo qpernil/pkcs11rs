@@ -353,6 +353,14 @@ pub(crate) struct CtrParameters {
     pub(crate) counter_block: [u8; 16],
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CcmParameters {
+    pub(crate) data_len: usize,
+    pub(crate) nonce: Vec<u8>,
+    pub(crate) aad: Vec<u8>,
+    pub(crate) mac_len: usize,
+}
+
 #[derive(Clone)]
 pub(crate) struct CryptOperation {
     pub(crate) key: KeyMaterial,
@@ -362,6 +370,7 @@ pub(crate) struct CryptOperation {
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) iv: Option<[u8; 16]>,
     pub(crate) ctr: Option<CtrParameters>,
+    pub(crate) ccm: Option<CcmParameters>,
     pub(crate) gcm: Option<GcmParameters>,
     pub(crate) oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
     pub(crate) piv_pin_policy: Option<u8>,
@@ -380,6 +389,7 @@ impl std::fmt::Debug for CryptOperation {
             .field("mechanism", &self.mechanism)
             .field("iv", &self.iv)
             .field("ctr", &self.ctr)
+            .field("ccm", &self.ccm)
             .field("gcm", &self.gcm)
             .field("oaep", &self.oaep)
             .field("piv_pin_policy", &self.piv_pin_policy)

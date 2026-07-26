@@ -87,6 +87,7 @@ CKM_AES_CBC = 0x00001082
 CKM_AES_CBC_PAD = 0x00001085
 CKM_AES_CTR = 0x00001086
 CKM_AES_GCM = 0x00001087
+CKM_AES_CCM = 0x00001088
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
 CKM_AES_KEY_WRAP_KWP = 0x0000210B
@@ -299,6 +300,17 @@ class CK_AES_CTR_PARAMS(ctypes.Structure):
     _fields_ = [
         ("ulCounterBits", CK_ULONG),
         ("cb", CK_BYTE * 16),
+    ]
+
+
+class CK_CCM_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ulDataLen", CK_ULONG),
+        ("pNonce", ctypes.POINTER(CK_BYTE)),
+        ("ulNonceLen", CK_ULONG),
+        ("pAAD", ctypes.POINTER(CK_BYTE)),
+        ("ulAADLen", CK_ULONG),
+        ("ulMACLen", CK_ULONG),
     ]
 
 
@@ -2414,6 +2426,7 @@ done
         )
         self.assertIn(CKM_AES_CBC_PAD, set(mechanisms))
         self.assertIn(CKM_AES_CTR, set(mechanisms))
+        self.assertIn(CKM_AES_CCM, set(mechanisms))
         self.assertIn(CKM_AES_KEY_WRAP_KWP, set(mechanisms))
 
         key_id = (CK_BYTE * 2)(0, 3)
@@ -2544,6 +2557,61 @@ done
                 "9806f66b7970fdff8617187bb9fffdff"
                 "5ae4df3edbd5d35e5b4f09020db03eab"
                 "1e031dda2fbe03d1792170a0f3009cee"
+            ),
+        )
+
+        rfc3610_key_id = (CK_BYTE * 2)(0, 13)
+        rfc3610_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_ID,
+                ctypes.cast(rfc3610_key_id, CK_VOID_PTR),
+                len(rfc3610_key_id),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                session, rfc3610_template, len(rfc3610_template)
+            ),
+            CKR_OK,
+        )
+        rfc3610_key = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session, ctypes.byref(rfc3610_key), 1, ctypes.byref(found)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        handle.value = rfc3610_key.value
+
+        # RFC 3610, section 8, packet vector #1.
+        plaintext_bytes = bytes.fromhex(
+            "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e"
+        )
+        ccm_nonce = (CK_BYTE * 13).from_buffer_copy(
+            bytes.fromhex("00000003020100a0a1a2a3a4a5")
+        )
+        ccm_aad = (CK_BYTE * 8).from_buffer_copy(bytes.fromhex("0001020304050607"))
+        ccm_parameters = CK_CCM_PARAMS(
+            len(plaintext_bytes),
+            ccm_nonce,
+            len(ccm_nonce),
+            ccm_aad,
+            len(ccm_aad),
+            8,
+        )
+        ccm_mechanism = CK_MECHANISM(
+            CKM_AES_CCM,
+            ctypes.cast(ctypes.pointer(ccm_parameters), CK_VOID_PTR),
+            ctypes.sizeof(ccm_parameters),
+        )
+        assert_vector(
+            ccm_mechanism,
+            bytes.fromhex(
+                "588c979a61c663d2f066d0c2c0f98980"
+                "6d5f6b61dac38417e8d12cfdf926e0"
             ),
         )
 

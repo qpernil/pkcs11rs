@@ -142,6 +142,41 @@ fn parse_ctr_parameters(mechanism: &CK_MECHANISM) -> Result<CtrParameters, Error
     })
 }
 
+fn parse_ccm_parameters(mechanism: &CK_MECHANISM) -> Result<CcmParameters, Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_CCM_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = _as_ref(mechanism.pParameter as CK_CCM_PARAMS_PTR)?;
+    let data_len = usize::try_from(parameters.ulDataLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let nonce_len = usize::try_from(parameters.ulNonceLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let aad_len = usize::try_from(parameters.ulAADLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let mac_len = usize::try_from(parameters.ulMACLen)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if !(7..=13).contains(&nonce_len)
+        || !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16)
+        || aad_len > u32::MAX as usize
+        || parameters.pNonce.is_null()
+        || (aad_len != 0 && parameters.pAAD.is_null())
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let length_bytes = 15 - nonce_len;
+    if length_bytes < 8 && data_len as u128 >= 1u128 << (length_bytes * 8) {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    Ok(CcmParameters {
+        data_len,
+        nonce: from_raw_parts(parameters.pNonce as *const u8, nonce_len)?.to_vec(),
+        aad: from_raw_parts(parameters.pAAD as *const u8, aad_len)?.to_vec(),
+        mac_len,
+    })
+}
+
 fn crypt_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -181,7 +216,7 @@ fn crypt_init(
                 CKF_DECRYPT as CK_FLAGS
             },
         )?;
-        let (iv, ctr, gcm, oaep) = match mechanism.mechanism {
+        let (iv, ctr, ccm, gcm, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                 || x == CKM_AES_ECB as CK_MECHANISM_TYPE
@@ -190,7 +225,7 @@ fn crypt_init(
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                (None, None, None, None)
+                (None, None, None, None, None)
             }
             x if x == CKM_AES_CBC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE =>
@@ -204,14 +239,30 @@ fn crypt_init(
                     None,
                     None,
                     None,
+                    None,
                 )
             }
-            x if x == CKM_AES_CTR as CK_MECHANISM_TYPE => {
-                (None, Some(parse_ctr_parameters(mechanism)?), None, None)
-            }
-            x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
-                (None, None, Some(parse_gcm_parameters(mechanism)?), None)
-            }
+            x if x == CKM_AES_CTR as CK_MECHANISM_TYPE => (
+                None,
+                Some(parse_ctr_parameters(mechanism)?),
+                None,
+                None,
+                None,
+            ),
+            x if x == CKM_AES_CCM as CK_MECHANISM_TYPE => (
+                None,
+                None,
+                Some(parse_ccm_parameters(mechanism)?),
+                None,
+                None,
+            ),
+            x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => (
+                None,
+                None,
+                None,
+                Some(parse_gcm_parameters(mechanism)?),
+                None,
+            ),
             x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
                 if mechanism.ulParameterLen as usize
                     != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
@@ -240,6 +291,7 @@ fn crypt_init(
                     parameters.ulSourceDataLen as usize,
                 )?;
                 (
+                    None,
                     None,
                     None,
                     None,
@@ -294,6 +346,7 @@ fn crypt_init(
             mechanism: mechanism.mechanism,
             iv,
             ctr,
+            ccm,
             gcm,
             oaep,
             piv_pin_policy: match &object.material {
@@ -324,6 +377,7 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
 
 pub(crate) const AES_BLOCK_LENGTH: usize = 16;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
+const YUBIHSM_CBC_CHUNK_LENGTH: usize = 2000;
 
 fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
     let aad_bits = u64::try_from(aad.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
@@ -501,6 +555,31 @@ pub(super) fn yubihsm_encrypt_ecb_blocks(
     yubihsm_crypt_ecb_blocks(ctx, session_handle, key_id, blocks, true)
 }
 
+fn yubihsm_cbc_mac(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    blocks: &[u8],
+) -> Result<[u8; AES_BLOCK_LENGTH], Error> {
+    if blocks.is_empty() || !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut iv = [0; AES_BLOCK_LENGTH];
+    for chunk in blocks.chunks(YUBIHSM_CBC_CHUNK_LENGTH) {
+        let command =
+            YubiHsmCommand::crypt_cbc(YubiHsmCommandCode::EncryptCbc, key_id, &iv, chunk)?;
+        let response = ctx
+            ._get_session(session_handle)?
+            .1
+            .yubihsm_command(&command)?;
+        if response.len() != chunk.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        iv.copy_from_slice(&response[response.len() - AES_BLOCK_LENGTH..]);
+    }
+    Ok(iv)
+}
+
 fn aes_ctr<F>(
     parameters: &CtrParameters,
     input: &[u8],
@@ -536,6 +615,125 @@ where
         .zip(key_stream)
         .map(|(input, key_stream)| input ^ key_stream)
         .collect())
+}
+
+#[derive(Clone, Copy)]
+enum CcmOperation {
+    EncryptBlocks,
+    CbcMac,
+}
+
+fn aes_ccm<F>(
+    parameters: &CcmParameters,
+    input: &[u8],
+    encrypting: bool,
+    mut crypt: F,
+) -> Result<Vec<u8>, Error>
+where
+    F: FnMut(CcmOperation, &[u8]) -> Result<Vec<u8>, Error>,
+{
+    let expected_input = if encrypting {
+        parameters.data_len
+    } else {
+        parameters
+            .data_len
+            .checked_add(parameters.mac_len)
+            .ok_or(CKR_ENCRYPTED_DATA_LEN_RANGE)?
+    };
+    if input.len() != expected_input {
+        return Err(if encrypting {
+            CKR_DATA_LEN_RANGE.into()
+        } else {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+        });
+    }
+    let (payload, supplied_tag) = if encrypting {
+        (input, None)
+    } else {
+        (
+            &input[..parameters.data_len],
+            Some(&input[parameters.data_len..]),
+        )
+    };
+
+    let length_bytes = 15 - parameters.nonce.len();
+    let block_count = parameters.data_len.div_ceil(AES_BLOCK_LENGTH);
+    let counter_capacity = block_count
+        .checked_add(1)
+        .and_then(|blocks| blocks.checked_mul(AES_BLOCK_LENGTH))
+        .ok_or(CKR_DATA_LEN_RANGE)?;
+    let mut counter_blocks = Vec::with_capacity(counter_capacity);
+    for counter in 0..=block_count {
+        let mut block = [0; AES_BLOCK_LENGTH];
+        block[0] = (length_bytes - 1) as u8;
+        block[1..1 + parameters.nonce.len()].copy_from_slice(&parameters.nonce);
+        let encoded = (counter as u64).to_be_bytes();
+        block[AES_BLOCK_LENGTH - length_bytes..]
+            .copy_from_slice(&encoded[encoded.len() - length_bytes..]);
+        counter_blocks.extend_from_slice(&block);
+    }
+    let key_stream = crypt(CcmOperation::EncryptBlocks, &counter_blocks)?;
+    if key_stream.len() != counter_blocks.len() {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    let mut transformed = Vec::with_capacity(payload.len());
+    for (block, key_stream) in payload
+        .chunks(AES_BLOCK_LENGTH)
+        .zip(key_stream[AES_BLOCK_LENGTH..].chunks(AES_BLOCK_LENGTH))
+    {
+        transformed.extend(
+            block
+                .iter()
+                .zip(key_stream)
+                .map(|(input, key_stream)| input ^ key_stream),
+        );
+    }
+    let plaintext = if encrypting {
+        payload
+    } else {
+        transformed.as_slice()
+    };
+
+    let mut mac_input = Vec::new();
+    let mut b0 = [0; AES_BLOCK_LENGTH];
+    b0[0] = u8::from(!parameters.aad.is_empty()) << 6
+        | (((parameters.mac_len - 2) / 2) as u8) << 3
+        | (length_bytes - 1) as u8;
+    b0[1..1 + parameters.nonce.len()].copy_from_slice(&parameters.nonce);
+    let encoded_length = (parameters.data_len as u64).to_be_bytes();
+    b0[AES_BLOCK_LENGTH - length_bytes..]
+        .copy_from_slice(&encoded_length[encoded_length.len() - length_bytes..]);
+    mac_input.extend_from_slice(&b0);
+    if !parameters.aad.is_empty() {
+        if parameters.aad.len() < 0xff00 {
+            mac_input.extend_from_slice(&(parameters.aad.len() as u16).to_be_bytes());
+        } else {
+            mac_input.extend_from_slice(&[0xff, 0xfe]);
+            mac_input.extend_from_slice(&(parameters.aad.len() as u32).to_be_bytes());
+        }
+        mac_input.extend_from_slice(&parameters.aad);
+        mac_input.resize(mac_input.len().next_multiple_of(AES_BLOCK_LENGTH), 0);
+    }
+    mac_input.extend_from_slice(plaintext);
+    mac_input.resize(mac_input.len().next_multiple_of(AES_BLOCK_LENGTH), 0);
+    let mac = crypt(CcmOperation::CbcMac, &mac_input)?;
+    let mac: [u8; AES_BLOCK_LENGTH] = mac.try_into().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let tag = mac[..parameters.mac_len]
+        .iter()
+        .zip(&key_stream[..parameters.mac_len])
+        .map(|(mac, mask)| mac ^ mask)
+        .collect::<Vec<_>>();
+
+    if let Some(supplied_tag) = supplied_tag {
+        if !bool::from(tag.ct_eq(supplied_tag)) {
+            transformed.fill(0);
+            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+        }
+        Ok(transformed)
+    } else {
+        transformed.extend_from_slice(&tag);
+        Ok(transformed)
+    }
 }
 
 fn aes_kwp_transform<F>(
@@ -756,7 +954,37 @@ fn crypt(
         let mut buffered_input = operation.buffer.clone();
         buffered_input.extend_from_slice(input);
         let input = buffered_input.as_slice();
-        let required = if operation.mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE {
+        let required = if operation.mechanism == CKM_AES_CCM as CK_MECHANISM_TYPE {
+            let Some(parameters) = operation.ccm.as_ref() else {
+                ctx.encrypt_operations.remove(&session_handle);
+                ctx.decrypt_operations.remove(&session_handle);
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            };
+            let expected_input = if encrypting {
+                parameters.data_len
+            } else {
+                parameters
+                    .data_len
+                    .checked_add(parameters.mac_len)
+                    .ok_or(CKR_ENCRYPTED_DATA_LEN_RANGE)?
+            };
+            if input.len() != expected_input {
+                ctx.encrypt_operations.remove(&session_handle);
+                ctx.decrypt_operations.remove(&session_handle);
+                return Err(if encrypting {
+                    CKR_DATA_LEN_RANGE.into()
+                } else {
+                    CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+                });
+            }
+            if encrypting {
+                expected_input
+                    .checked_add(parameters.mac_len)
+                    .ok_or(CKR_DATA_LEN_RANGE)?
+            } else {
+                parameters.data_len
+            }
+        } else if operation.mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE {
             let Some(parameters) = operation.gcm.as_ref() else {
                 ctx.encrypt_operations.remove(&session_handle);
                 ctx.decrypt_operations.remove(&session_handle);
@@ -965,6 +1193,25 @@ fn crypt(
                                     input,
                                     |blocks| {
                                         yubihsm_encrypt_ecb_blocks(ctx, session_handle, *id, blocks)
+                                    },
+                                );
+                            }
+                            x if x == CKM_AES_CCM as CK_MECHANISM_TYPE => {
+                                return aes_ccm(
+                                    operation.ccm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                    input,
+                                    encrypting,
+                                    |operation, blocks| match operation {
+                                        CcmOperation::EncryptBlocks => yubihsm_encrypt_ecb_blocks(
+                                            ctx,
+                                            session_handle,
+                                            *id,
+                                            blocks,
+                                        ),
+                                        CcmOperation::CbcMac => {
+                                            yubihsm_cbc_mac(ctx, session_handle, *id, blocks)
+                                                .map(|mac| mac.to_vec())
+                                        }
                                     },
                                 );
                             }
