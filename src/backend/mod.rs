@@ -1,5 +1,6 @@
 mod ccid;
 mod crypto;
+mod ctap;
 mod openpgp;
 mod piv;
 mod traits;
@@ -19,6 +20,7 @@ pub(crate) use crypto::{
     validate_ec_public_point, verify_ecdsa, verify_ed25519, verify_rsa_pss, yubihsm_ec_curve,
     EcCurve,
 };
+pub(crate) use ctap::Fido2Slot;
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
 pub(crate) use piv::{
     piv_algorithm_from_certificate, piv_ec_coordinate_length, piv_ec_parameters,
