@@ -5643,7 +5643,7 @@ done
             CKR_ATTRIBUTE_SENSITIVE,
         )
 
-    def test_session_objects_are_isolated_and_removed_on_close(self) -> None:
+    def test_session_objects_are_shared_on_slot_and_removed_with_creator(self) -> None:
         owner = self.initialize_and_open_session()
         other = CK_ULONG()
         self.assertEqual(
@@ -5656,6 +5656,7 @@ done
             ),
             CKR_OK,
         )
+        other_slot = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
 
         mechanism = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
         value_len = CK_ULONG(16)
@@ -5690,14 +5691,93 @@ done
         self.assertEqual(key_class.value, CKO_SECRET_KEY)
         self.assertEqual(
             self.lib.C_GetAttributeValue(other.value, key.value, ctypes.byref(attribute), 1),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_GetAttributeValue(other_slot, key.value, ctypes.byref(attribute), 1),
             CKR_OBJECT_HANDLE_INVALID,
         )
 
+        secret_class = CK_ULONG(CKO_SECRET_KEY)
+        find_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(secret_class), CK_VOID_PTR),
+                ctypes.sizeof(secret_class),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(other.value, find_template, len(find_template)),
+            CKR_OK,
+        )
         self.assertEqual(self.lib.C_CloseSession(owner), CKR_OK)
         self.assertEqual(
             self.lib.C_GetAttributeValue(other.value, key.value, ctypes.byref(attribute), 1),
             CKR_OBJECT_HANDLE_INVALID,
         )
+        found = CK_ULONG()
+        found_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                other.value,
+                ctypes.byref(found),
+                1,
+                ctypes.byref(found_count),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found_count.value, 0)
+        self.assertEqual(self.lib.C_FindObjectsFinal(other.value), CKR_OK)
+
+    def test_backend_session_objects_are_registered_once_per_slot(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        first = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
+        second = self.open_slot_session(ABI_TEST_PIV_SLOT_ID)
+
+        object_class = CK_ULONG(CKO_CERTIFICATE)
+        token = CK_BYTE(0)
+        label_value = b"Attestation certificate 9C"
+        label = (CK_BYTE * len(label_value)).from_buffer_copy(label_value)
+        template = (CK_ATTRIBUTE * 3)(
+            CK_ATTRIBUTE(
+                CKA_CLASS,
+                ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                ctypes.sizeof(object_class),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token), CK_VOID_PTR),
+                ctypes.sizeof(token),
+            ),
+            CK_ATTRIBUTE(
+                CKA_LABEL,
+                ctypes.cast(label, CK_VOID_PTR),
+                len(label),
+            ),
+        )
+
+        handles = []
+        for session in (first, second):
+            self.assertEqual(
+                self.lib.C_FindObjectsInit(session, template, len(template)),
+                CKR_OK,
+            )
+            found = (CK_ULONG * 2)()
+            found_count = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_FindObjects(
+                    session,
+                    found,
+                    len(found),
+                    ctypes.byref(found_count),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(found_count.value, 1)
+            self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+            handles.append(found[0])
+
+        self.assertEqual(handles[0], handles[1])
 
     def test_generate_key_requires_valid_value_length(self) -> None:
         session = self.initialize_and_open_session()

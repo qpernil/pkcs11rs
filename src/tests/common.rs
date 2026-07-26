@@ -524,16 +524,13 @@ impl crate::Connector for HsmAuthAdminConnector {
 
 fn install_hsmauth_admin_slot() -> (std::rc::Rc<HsmAuthAdminConnector>, CK_SESSION_HANDLE) {
     let connector = std::rc::Rc::new(HsmAuthAdminConnector::default());
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(
-            HSMAUTH_ADMIN_SLOT_ID,
-            Box::new(crate::HsmAuthSlot::new(
-                connector.clone(),
-                crate::hsmauth::AID.to_vec(),
-            )),
-        );
-    }
+    install_test_slot_with_backend(
+        HSMAUTH_ADMIN_SLOT_ID,
+        Box::new(crate::HsmAuthSlot::new(
+            connector.clone(),
+            crate::hsmauth::AID.to_vec(),
+        )),
+    );
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -846,10 +843,7 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -1004,10 +998,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, corrupt_response_mac, _trust) =
         crate::yubihsm::tests::make_yubihsm_keypair_collision_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = 0;
     assert_eq!(
@@ -1254,16 +1245,9 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(decrypted_len, b"plaintext".len() as CK_ULONG);
     assert_eq!(decrypt_commands(), decrypt_commands_before_retry_test + 1);
     {
-        let context = crate::lock_context().unwrap();
-        let debug = format!(
-            "{:?}",
-            context
-                .as_ref()
-                .unwrap()
-                .decrypt_operations
-                .get(&session)
-                .unwrap()
-        );
+        let debug = with_test_slot_context(SLOT_ID, |context| {
+            format!("{:?}", context.decrypt_operations.get(&session).unwrap())
+        });
         assert!(debug.contains("result_length"));
         assert!(!debug.contains("plaintext"));
     }
@@ -1518,10 +1502,7 @@ fn yubihsm_session_info_uses_the_retained_backend_session_role() {
     slot.token_objects(SLOT_ID).unwrap();
     assert!(slot.backend_session_is_active());
     assert!(!slot.login_is_active());
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = 0;
     assert_eq!(
@@ -1672,12 +1653,10 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, peer, commands) = crate::yubihsm::tests::make_yubihsm_metadata_cache_test_slot(true);
-    {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context.slots.insert(SLOT_ID, slot);
+    install_test_slot_with_backend(SLOT_ID, slot);
+    with_test_slot_context(SLOT_ID, |context| {
         context.refresh_slot_token_objects(SLOT_ID).unwrap();
-    }
+    });
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -1734,10 +1713,7 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = 0;
     assert_eq!(
@@ -2686,13 +2662,11 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
     if public_discovery {
         slot.token_objects(SLOT_ID).unwrap();
     }
-    {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context.slots.insert(SLOT_ID, slot);
-        if public_discovery {
+    install_test_slot_with_backend(SLOT_ID, slot);
+    if public_discovery {
+        with_test_slot_context(SLOT_ID, |context| {
             context.refresh_slot_token_objects(SLOT_ID).unwrap();
-        }
+        });
     }
 
     let mut session = 0;
@@ -3090,12 +3064,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
     );
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    crate::lock_context()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .slots
-        .insert(SLOT_ID, slot);
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = 0;
     assert_eq!(
@@ -3215,12 +3184,7 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
         0xffff,
         &[(1, b"duplicate-id"), (2, b"duplicate label")],
     );
-    crate::lock_context()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .slots
-        .insert(SLOT_ID, slot);
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = 0;
     assert_eq!(
@@ -3382,7 +3346,7 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
         never_extractable: true,
         local: true,
         key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::YubiHsm {
             id: key_id,
             object_type: crate::YUBIHSM_SYMMETRIC_KEY,
@@ -3395,8 +3359,7 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
     };
-    let mut context = crate::lock_context().unwrap();
-    context.as_mut().unwrap().insert_object(object)
+    with_test_slot_context(slot_id, |context| context.insert_object(object))
 }
 
 fn assert_pkcs11_aes_vector(
@@ -3717,10 +3680,7 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -4033,10 +3993,7 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -4301,10 +4258,7 @@ fn yubihsm_aes_gmac_matches_nist_vector() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -4421,10 +4375,7 @@ fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     const SLOT_ID: CK_SLOT_ID = 99;
     const KEY_ID: u16 = 0x1235;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -4570,10 +4521,7 @@ fn yubihsm_multipart_gcm_buffers_until_authenticated_final() {
     const SLOT_ID: CK_SLOT_ID = 99;
     const KEY_ID: u16 = 0x1235;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -5015,10 +4963,7 @@ fn yubihsm_x25519_two_way_derive(
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
 
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
@@ -5366,7 +5311,7 @@ fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
         never_extractable: false,
         local: true,
         key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::PivPublic {
             algorithm: crate::piv::Algorithm::EccP256,
             public_key: vec![0x11; 64],
@@ -5938,6 +5883,7 @@ struct TestSlot {
     remove_on_refresh: bool,
     login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     mechanisms: Vec<crate::MechanismDetails>,
+    session_objects: Vec<crate::TokenObject>,
 }
 
 #[derive(Debug)]
@@ -5953,6 +5899,7 @@ struct ConcurrentOperationState {
     max_active: std::sync::atomic::AtomicUsize,
     operations_by_slot: [std::sync::atomic::AtomicUsize; 2],
     same_slot_overlap: std::sync::atomic::AtomicBool,
+    rendezvous_claimed: std::sync::atomic::AtomicBool,
     changed: std::sync::Condvar,
     wait: std::sync::Mutex<()>,
 }
@@ -5975,13 +5922,19 @@ impl ConcurrentOperationState {
             .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
         self.changed.notify_all();
 
-        let guard = self.wait.lock().unwrap();
-        let _ = self
-            .changed
-            .wait_timeout_while(guard, std::time::Duration::from_millis(500), |_| {
-                self.max_active.load(std::sync::atomic::Ordering::SeqCst) < 2
-            })
-            .unwrap();
+        if active < 2
+            && !self
+                .rendezvous_claimed
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let guard = self.wait.lock().unwrap();
+            let _ = self
+                .changed
+                .wait_timeout_while(guard, std::time::Duration::from_millis(100), |_| {
+                    self.max_active.load(std::sync::atomic::Ordering::SeqCst) < 2
+                })
+                .unwrap();
+        }
         self.active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         self.active_by_slot[slot_index].fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -6506,6 +6459,13 @@ impl crate::Slot for TestSlot {
     fn backend_mechanisms(&self) -> Vec<crate::MechanismDetails> {
         self.mechanisms.clone()
     }
+
+    fn session_objects(
+        &self,
+        _slot_id: CK_SLOT_ID,
+    ) -> Result<Vec<crate::TokenObject>, crate::error::Error> {
+        Ok(self.session_objects.clone())
+    }
 }
 
 fn test_slot(present: bool) -> TestSlot {
@@ -6514,6 +6474,7 @@ fn test_slot(present: bool) -> TestSlot {
         remove_on_refresh: false,
         login_active: None,
         mechanisms: crate::MECHANISMS.to_vec(),
+        session_objects: Vec::new(),
     }
 }
 
@@ -6536,12 +6497,86 @@ fn test_slot_with_mechanisms(
 }
 
 fn install_test_slot(slot_id: CK_SLOT_ID) {
+    let existing_is_test_slot = crate::lock_context()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .slot_contexts
+        .get(&slot_id)
+        .cloned()
+        .and_then(|context| context.lock().ok().map(|context| context.slot.name()))
+        .is_some_and(|name| name == "Test Slot");
+    if existing_is_test_slot {
+        return;
+    }
+    install_test_slot_with_backend(slot_id, Box::new(test_slot(true)));
+}
+
+fn new_test_slot_context(slot_id: CK_SLOT_ID) -> crate::SlotContext {
+    let slot: Box<dyn crate::Slot> = Box::new(test_slot(true));
+    let mut context = crate::SlotContext::new(slot_id, slot, Vec::new()).unwrap();
+    for (_, object) in crate::default_objects().unwrap() {
+        context.insert_object(object);
+    }
+    context
+}
+
+fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot>) {
+    let mut child = crate::SlotContext::new(slot_id, slot, Vec::new()).unwrap();
+    if slot_id == TEST_SLOT_ID {
+        let existing_objects = crate::lock_context()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .slot_contexts
+            .get(&slot_id)
+            .cloned()
+            .and_then(|context| {
+                context
+                    .lock()
+                    .ok()
+                    .map(|context| context.memory_objects.clone())
+            });
+        if let Some(objects) = existing_objects.filter(|objects| !objects.is_empty()) {
+            child.memory_objects = objects;
+        } else {
+            let mut objects = crate::default_objects()
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>();
+            objects.sort_by_key(|(handle, _)| *handle);
+            for (_, mut object) in objects {
+                object.slot_id = Some(slot_id);
+                child.insert_object(object);
+            }
+        }
+    }
     let mut context = crate::lock_context().unwrap();
     context
         .as_mut()
         .unwrap()
-        .slots
-        .insert(slot_id, Box::new(test_slot(true)));
+        .slot_contexts
+        .insert(slot_id, std::sync::Arc::new(std::sync::Mutex::new(child)));
+}
+
+fn test_slot_context(slot_id: CK_SLOT_ID) -> std::sync::Arc<std::sync::Mutex<crate::SlotContext>> {
+    crate::lock_context()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .slot_contexts
+        .get(&slot_id)
+        .cloned()
+        .unwrap()
+}
+
+fn with_test_slot_context<T>(
+    slot_id: CK_SLOT_ID,
+    operation: impl FnOnce(&mut crate::SlotContext) -> T,
+) -> T {
+    let child = test_slot_context(slot_id);
+    let mut context = child.lock().unwrap();
+    operation(&mut context)
 }
 
 fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
@@ -6568,17 +6603,19 @@ fn install_test_session_with_state(
     flags: CK_FLAGS,
     logged_in: bool,
 ) {
-    let mut context = crate::lock_context().unwrap();
-    let context = context.as_mut().unwrap();
-    context.slots.insert(slot_id, Box::new(test_slot(true)));
+    install_test_slot(slot_id);
+    let child = test_slot_context(slot_id);
+    let mut context = child.lock().unwrap();
     context
         .sessions
         .insert(session_handle, Box::new(TestSession { slot_id, flags }));
     if logged_in {
-        context
-            .logged_in_slots
-            .insert(slot_id, crate::LoginRole::User);
+        context.login_role = Some(crate::LoginRole::User);
     }
+    crate::SESSION_CONTEXTS
+        .lock()
+        .unwrap()
+        .insert(session_handle, slot_id);
 }
 
 fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {

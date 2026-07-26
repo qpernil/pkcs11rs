@@ -99,7 +99,7 @@ fn aes_cmac_with_encryptor(
 }
 
 pub(crate) fn yubihsm_aes_cmac(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     data: &[u8],
@@ -110,7 +110,7 @@ pub(crate) fn yubihsm_aes_cmac(
 }
 
 pub(crate) fn yubihsm_aes_gmac(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     parameters: &GcmParameters,
@@ -231,7 +231,7 @@ fn sign_init(
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !object.is_visible_to(session_handle, slot_id, logged_in) {
+        if !object.is_visible_to(logged_in) {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
         if !object.sign {

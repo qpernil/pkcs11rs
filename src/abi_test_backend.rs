@@ -870,7 +870,7 @@ pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
         never_extractable: true,
         local: true,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::YubiHsm {
             id: 1,
             object_type: YUBIHSM_ASYMMETRIC_KEY,
@@ -908,7 +908,7 @@ fn abi_test_yubihsm_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
         never_extractable: false,
         local: true,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::YubiHsm {
             id: 1,
             object_type: YUBIHSM_PUBLIC_KEY,
@@ -945,7 +945,7 @@ pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
         never_extractable: false,
         local: true,
         key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::YubiHsm {
             id: 2,
             object_type: YUBIHSM_SYMMETRIC_KEY,

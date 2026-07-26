@@ -254,6 +254,75 @@ pub fn find_objects_validates_sessions_and_cleans_up_on_close() {
 }
 
 #[test]
+pub fn backend_session_objects_are_registered_once_per_slot() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let mut backend_object = crate::default_objects().unwrap().remove(&1).unwrap();
+    backend_object.unique_id = String::from("backend-session-object");
+    backend_object.label = String::from("Backend session object");
+    backend_object.token = false;
+    backend_object.creator_session = None;
+    let mut slot = test_slot(true);
+    slot.session_objects.push(backend_object);
+    install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE + 1);
+
+    let mut label = b"Backend session object".to_vec();
+    let mut template = [CK_ATTRIBUTE {
+        type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        pValue: label.as_mut_ptr().cast(),
+        ulValueLen: label.len() as CK_ULONG,
+    }];
+    let mut handles = Vec::new();
+    for session in [TEST_SESSION_HANDLE, TEST_SESSION_HANDLE + 1] {
+        assert_eq!(
+            crate::api::C_FindObjectsInit(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_FindObjects(session, &mut handle, 1, &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            crate::api::C_FindObjects(session, &mut handle, 1, &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(count, 0);
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        handles.push(handle);
+    }
+    assert_eq!(handles[0], handles[1]);
+    assert_eq!(
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            context
+                .memory_objects
+                .values()
+                .filter(|object| object.unique_id == "backend-session-object")
+                .count()
+        }),
+        1
+    );
+
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 pub fn destroy_object_removes_object_from_store_and_search() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -343,7 +412,7 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
                 never_extractable: false,
                 local: true,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: crate::KeyMaterial::YubiHsm {
                     id: object_type as u16,
                     object_type,
@@ -356,19 +425,14 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
                     value: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 },
             };
-            let mut context = crate::lock_context().unwrap();
-            context.as_mut().unwrap().insert_object(object)
+            with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object))
         })
         .collect();
 
     for handle in handles {
-        let object = crate::lock_context()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .resolve_object(handle)
-            .unwrap()
-            .unwrap();
+        let object = with_test_slot_context(TEST_SLOT_ID, |context| {
+            context.resolve_object(handle).unwrap().unwrap()
+        });
         assert_eq!(
             object.attribute_value(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE),
             Some(crate::bool_attribute(true))
@@ -482,7 +546,7 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::OpenPgpCertificate {
             value: vec![0x30, 0],
         },
@@ -509,26 +573,21 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         pin_policy: 0,
         touch_policy: 1,
     };
-    let handles = {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
+    let handles = with_test_slot_context(TEST_SLOT_ID, |context| {
         [base, public, private]
             .into_iter()
             .map(|object| context.insert_object(object))
             .collect::<Vec<_>>()
-    };
+    });
 
     for handle in handles {
         assert_eq!(
             crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),
             CKR_ACTION_PROHIBITED as CK_RV
         );
-        let context = crate::lock_context().unwrap();
-        assert!(context
-            .as_ref()
-            .unwrap()
-            .memory_objects
-            .contains_key(&handle));
+        assert!(with_test_slot_context(TEST_SLOT_ID, |context| {
+            context.memory_objects.contains_key(&handle)
+        }));
     }
 
     assert_eq!(
@@ -1375,14 +1434,10 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    let base = crate::lock_context()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .memory_objects
-        .get(&1)
-        .unwrap()
-        .clone();
+    install_test_slot(TEST_SLOT_ID);
+    let base = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.memory_objects.get(&1).unwrap().clone()
+    });
 
     let cases = [
         (
@@ -1753,16 +1808,15 @@ pub fn get_object_size_reports_attribute_storage_size() {
         CKR_OK as CK_RV
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-    let public_key_info_len = crate::lock_context()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .memory_objects
-        .get(&1)
-        .unwrap()
-        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
-        .unwrap()
-        .len();
+    let public_key_info_len = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .memory_objects
+            .get(&1)
+            .unwrap()
+            .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+            .unwrap()
+            .len()
+    });
 
     let mut size = 0;
     assert_eq!(
@@ -2050,15 +2104,13 @@ pub fn get_attribute_value_reads_certificate_values() {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::OpenPgpCertificate {
             value: certificate.clone(),
         },
     };
-    let object_handle = {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().insert_object(object)
-    };
+    let object_handle =
+        with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object));
 
     let mut value_attribute = CK_ATTRIBUTE {
         type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
@@ -2127,17 +2179,15 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::IssuerSecurityDomainData {
             value: value.clone(),
             application: "Issuer SD".to_owned(),
             object_id: Vec::new(),
         },
     };
-    let object_handle = {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().insert_object(object)
-    };
+    let object_handle =
+        with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object));
 
     let mut returned = [0u8; 2];
     let mut value_attribute = CK_ATTRIBUTE {

@@ -541,22 +541,22 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
     );
 
     let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(test_slot_with_mechanisms(
+            true,
+            &[
+                (
+                    CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+                    CKF_SIGN as CK_FLAGS,
+                ),
+                (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_SIGN as CK_FLAGS),
+            ],
+        )),
+    );
     {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context.slots.insert(
-            TEST_SLOT_ID,
-            Box::new(test_slot_with_mechanisms(
-                true,
-                &[
-                    (
-                        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
-                        CKF_SIGN as CK_FLAGS,
-                    ),
-                    (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_SIGN as CK_FLAGS),
-                ],
-            )),
-        );
+        let child = test_slot_context(TEST_SLOT_ID);
+        let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
             Box::new(PivSigningTestSession {
@@ -564,9 +564,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 captured: captured.clone(),
             }),
         );
-        context
-            .logged_in_slots
-            .insert(TEST_SLOT_ID, crate::LoginRole::User);
+        context.login_role = Some(crate::LoginRole::User);
         context.memory_objects.insert(
             42,
             crate::TokenObject {
@@ -589,7 +587,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 never_extractable: true,
                 local: true,
                 key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
-                owner_session: None,
+                creator_session: None,
                 material: crate::KeyMaterial::PivPrivate {
                     slot: crate::piv::Slot::Signature,
                     algorithm: crate::piv::Algorithm::Rsa1024,
@@ -602,6 +600,10 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
             },
         );
     }
+    crate::SESSION_CONTEXTS
+        .lock()
+        .unwrap()
+        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -689,39 +691,28 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(test_slot_with_mechanisms(
+            true,
+            &[
+                (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
+                (
+                    CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+                    CKF_VERIFY as CK_FLAGS,
+                ),
+            ],
+        )),
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(
-            TEST_SLOT_ID,
-            Box::new(test_slot_with_mechanisms(
-                true,
-                &[
-                    (CKM_RSA_X_509 as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
-                    (
-                        CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
-                        CKF_VERIFY as CK_FLAGS,
-                    ),
-                ],
-            )),
-        );
-    }
 
-    let private_key = {
-        let context = crate::lock_context().unwrap();
-        match &context
-            .as_ref()
-            .unwrap()
-            .memory_objects
-            .get(&2)
-            .unwrap()
-            .material
-        {
+    let private_key = with_test_slot_context(TEST_SLOT_ID, |context| {
+        match &context.memory_objects.get(&2).unwrap().material {
             crate::KeyMaterial::RsaPrivate(key) => key.clone(),
             _ => panic!("test private key is not RSA"),
         }
-    };
-    let key_size = private_key.size() as usize;
+    });
+    let key_size = private_key.size();
 
     let mut raw_data = b"raw RSA input".to_vec();
     let mut encoded = vec![0; key_size - raw_data.len()];
@@ -1092,14 +1083,8 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    {
-        let mut context = crate::lock_context().unwrap();
-        let object = context
-            .as_mut()
-            .unwrap()
-            .memory_objects
-            .get_mut(&1)
-            .unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.memory_objects.get_mut(&1).unwrap();
         let crate::KeyMaterial::RsaPublic(public_key) = &object.material else {
             panic!("test public key is not RSA");
         };
@@ -1114,7 +1099,7 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
             public_key: public_key.n().to_bytes_be(),
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         };
-    }
+    });
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -1166,23 +1151,20 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(test_slot_with_mechanisms(
+            true,
+            &[
+                (
+                    CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+                    CKF_VERIFY as CK_FLAGS,
+                ),
+                (CKM_EDDSA as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
+            ],
+        )),
+    );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(
-            TEST_SLOT_ID,
-            Box::new(test_slot_with_mechanisms(
-                true,
-                &[
-                    (
-                        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
-                        CKF_VERIFY as CK_FLAGS,
-                    ),
-                    (CKM_EDDSA as CK_MECHANISM_TYPE, CKF_VERIFY as CK_FLAGS),
-                ],
-            )),
-        );
-    }
 
     let signing_key = crate::certificate_builder::p256_key();
     let point = crate::certificate_builder::p256_public_point(signing_key.verifying_key());
@@ -1222,18 +1204,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             public_key,
         },
     ] {
-        {
-            let mut context = crate::lock_context().unwrap();
-            let object = context
-                .as_mut()
-                .unwrap()
-                .memory_objects
-                .get_mut(&1)
-                .unwrap();
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.memory_objects.get_mut(&1).unwrap();
             object.key_type = CKK_EC as CK_KEY_TYPE;
             object.verify = true;
             object.material = material;
-        }
+        });
         assert_eq!(
             crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
             CKR_OK as CK_RV
@@ -1281,18 +1257,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             public_key,
         },
     ] {
-        {
-            let mut context = crate::lock_context().unwrap();
-            let object = context
-                .as_mut()
-                .unwrap()
-                .memory_objects
-                .get_mut(&1)
-                .unwrap();
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.memory_objects.get_mut(&1).unwrap();
             object.key_type = CKK_EC_EDWARDS as CK_KEY_TYPE;
             object.verify = true;
             object.material = material;
-        }
+        });
         assert_eq!(
             crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, 1),
             CKR_OK as CK_RV
@@ -1415,7 +1385,7 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
         never_extractable: false,
         local: true,
         key_gen_mechanism: None,
-        owner_session: Some(2),
+        creator_session: Some(2),
         material: crate::KeyMaterial::PivAttestation {
             connector,
             slot: crate::piv::Slot::Signature,

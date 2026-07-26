@@ -315,7 +315,7 @@ fn hsmauth_validate_session_handle(session_handle: CK_SESSION_HANDLE) -> Result<
 }
 
 fn validate_hsmauth_session(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
 ) -> Result<CK_SLOT_ID, Error> {
     let (slot_id, flags, _) = ctx.session_details(session_handle)?;

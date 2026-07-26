@@ -1100,7 +1100,7 @@ impl Slot for PivSlot {
                 never_extractable: false,
                 local,
                 key_gen_mechanism,
-                owner_session: None,
+                creator_session: None,
                 material: public_material,
             });
             objects.push(TokenObject {
@@ -1126,7 +1126,7 @@ impl Slot for PivSlot {
                 never_extractable: true,
                 local,
                 key_gen_mechanism,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::PivPrivate {
                     slot: key.slot,
                     algorithm: key.algorithm,
@@ -1177,7 +1177,7 @@ impl Slot for PivSlot {
                 never_extractable: false,
                 local: false,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::PivCertificate {
                     algorithm: certificate.algorithm,
                     value: certificate.value.clone(),
@@ -1211,7 +1211,7 @@ impl Slot for PivSlot {
                 never_extractable: false,
                 local: true,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::PivAttestation {
                     connector: self.connector.clone(),
                     slot: key.slot,
@@ -1245,7 +1245,7 @@ impl Slot for PivSlot {
                 never_extractable: false,
                 local: false,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::PivData {
                     object_id: data.object_id,
                     value: data.value.clone(),

@@ -107,11 +107,12 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         let selector = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE").ok();
         crate::with_context_mut(|context| {
             context.init();
-            let mut matches = context.slots.iter().filter_map(|(slot_id, slot)| {
-                (slot.is_yubihsm()
-                    && slot.is_present()
+            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+                let child = child.lock().ok()?;
+                (child.slot.is_yubihsm()
+                    && child.slot.is_present()
                     && selector.as_ref().is_none_or(|selector| {
-                        slot.serial() == selector || slot.name() == *selector
+                        child.slot.serial() == selector || child.slot.name() == *selector
                     }))
                 .then_some(*slot_id)
             });
@@ -132,11 +133,12 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         let selector = std::env::var("PKCS11RS_TEST_PIV_SOURCE").ok();
         crate::with_context_mut(|context| {
             context.init();
-            let mut matches = context.slots.iter().filter_map(|(slot_id, slot)| {
-                (slot.is_piv()
-                    && slot.is_present()
+            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+                let child = child.lock().ok()?;
+                (child.slot.is_piv()
+                    && child.slot.is_present()
                     && selector.as_ref().is_none_or(|selector| {
-                        slot.serial() == selector || slot.name() == *selector
+                        child.slot.serial() == selector || child.slot.name() == *selector
                     }))
                 .then_some(*slot_id)
             });
@@ -711,13 +713,19 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             kvn,
         };
 
-        let mut context = crate::Context::new().expect("failed to create hardware context");
+        let mut context = crate::ModuleContext::new().expect("failed to create hardware context");
         context.init();
         let issuer_sd = select_connector(
             context
-                .slots
+                .slot_contexts
                 .values()
-                .filter_map(|slot| slot.security_domain_provisioning_connector())
+                .filter_map(|child| {
+                    child
+                        .lock()
+                        .ok()?
+                        .slot
+                        .security_domain_provisioning_connector()
+                })
                 .collect(),
             "PKCS11RS_TEST_ISSUER_SD_SOURCE",
             "Issuer SD applet",
@@ -879,22 +887,22 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             "YubiHSM admin password must be 8..=64 bytes"
         );
 
-        let mut context = crate::Context::new().expect("failed to create hardware context");
+        let mut context = crate::ModuleContext::new().expect("failed to create hardware context");
         context.init();
         let hsmauth = select_connector(
             context
-                .slots
+                .slot_contexts
                 .values()
-                .filter_map(|slot| slot.hsmauth_provisioning_connector())
+                .filter_map(|child| child.lock().ok()?.slot.hsmauth_provisioning_connector())
                 .collect(),
             "PKCS11RS_TEST_HSMAUTH_SOURCE",
             "YubiHSM Auth applet",
         );
         let yubihsm = select_connector(
             context
-                .slots
+                .slot_contexts
                 .values()
-                .filter_map(|slot| slot.yubihsm_provisioning_connector())
+                .filter_map(|child| child.lock().ok()?.slot.yubihsm_provisioning_connector())
                 .collect(),
             "PKCS11RS_TEST_YUBIHSM_SOURCE",
             "YubiHSM",

@@ -67,7 +67,7 @@ fn install_yubihsm_wrap_test_objects(
         &public_key.key,
     )
     .unwrap();
-    crate::with_context_mut(|ctx| {
+    crate::with_session_context_mut(session, |ctx| {
         ctx._get_session(session)?
             .1
             .yubihsm_command(&public_wrap_command)
@@ -130,27 +130,27 @@ fn install_yubihsm_wrap_test_objects(
     let mut rsa_private = None;
     let mut rsa_synthetic_public = None;
     let mut rsa_public_wrap = None;
-    let mut context = crate::lock_context().unwrap();
-    let context = context.as_mut().unwrap();
-    for objects in definitions {
-        for object in objects {
-            let (id, material_type) = match object.material {
-                KeyMaterial::YubiHsm {
-                    id, object_type, ..
-                } => (id, object_type),
-                _ => unreachable!(),
-            };
-            let handle = context.insert_object(object);
-            match (id, material_type) {
-                (30, crate::YUBIHSM_SYMMETRIC_KEY) => target = Some(handle),
-                (31, crate::YUBIHSM_WRAP_KEY) => ccm = Some(handle),
-                (32, crate::YUBIHSM_WRAP_KEY) => rsa_private = Some(handle),
-                (32, crate::YUBIHSM_WRAP_KEY_PUBLIC) => rsa_synthetic_public = Some(handle),
-                (33, crate::YUBIHSM_PUBLIC_WRAP_KEY) => rsa_public_wrap = Some(handle),
-                _ => {}
+    with_test_slot_context(slot_id, |context| {
+        for objects in definitions {
+            for object in objects {
+                let (id, material_type) = match object.material {
+                    KeyMaterial::YubiHsm {
+                        id, object_type, ..
+                    } => (id, object_type),
+                    _ => unreachable!(),
+                };
+                let handle = context.insert_object(object);
+                match (id, material_type) {
+                    (30, crate::YUBIHSM_SYMMETRIC_KEY) => target = Some(handle),
+                    (31, crate::YUBIHSM_WRAP_KEY) => ccm = Some(handle),
+                    (32, crate::YUBIHSM_WRAP_KEY) => rsa_private = Some(handle),
+                    (32, crate::YUBIHSM_WRAP_KEY_PUBLIC) => rsa_synthetic_public = Some(handle),
+                    (33, crate::YUBIHSM_PUBLIC_WRAP_KEY) => rsa_public_wrap = Some(handle),
+                    _ => {}
+                }
             }
         }
-    }
+    });
     (
         target.unwrap(),
         ccm.unwrap(),
@@ -203,47 +203,47 @@ fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u
             true,
         ),
     ];
-    let mut context = crate::lock_context().unwrap();
-    let context = context.as_mut().unwrap();
-    definitions
-        .into_iter()
-        .map(
-            |(id, object_type, algorithm, label, extractable, has_delegated_capabilities)| {
-                let [object] = yubihsm_wrap_test_object(
-                    slot_id,
-                    YubiHsmWrapTestObject {
-                        id,
-                        object_type,
-                        algorithm,
-                        capabilities: if extractable { &[0x10] } else { &[] },
-                        delegated_capabilities: if has_delegated_capabilities {
-                            &[0x04]
-                        } else {
-                            &[]
+    with_test_slot_context(slot_id, |context| {
+        definitions
+            .into_iter()
+            .map(
+                |(id, object_type, algorithm, label, extractable, has_delegated_capabilities)| {
+                    let [object] = yubihsm_wrap_test_object(
+                        slot_id,
+                        YubiHsmWrapTestObject {
+                            id,
+                            object_type,
+                            algorithm,
+                            capabilities: if extractable { &[0x10] } else { &[] },
+                            delegated_capabilities: if has_delegated_capabilities {
+                                &[0x04]
+                            } else {
+                                &[]
+                            },
+                            label,
+                            public_key: None,
                         },
-                        label,
-                        public_key: None,
-                    },
-                )
-                .try_into()
-                .unwrap();
-                assert_eq!(object.extractable, extractable);
-                if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                    || object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
-                {
-                    assert_eq!(
-                        object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
-                        Some(crate::bool_attribute(extractable))
-                    );
-                } else {
-                    assert!(object
-                        .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
-                        .is_none());
-                }
-                (context.insert_object(object), object_type, id)
-            },
-        )
-        .collect()
+                    )
+                    .try_into()
+                    .unwrap();
+                    assert_eq!(object.extractable, extractable);
+                    if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                        || object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
+                    {
+                        assert_eq!(
+                            object.attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE),
+                            Some(crate::bool_attribute(extractable))
+                        );
+                    } else {
+                        assert!(object
+                            .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
+                            .is_none());
+                    }
+                    (context.insert_object(object), object_type, id)
+                },
+            )
+            .collect()
+    })
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn provision_rsa_public_wrap_key(
     )
     .map_err(|error| format!("failed to encode public wrap key: {error:?}"))?;
 
-    crate::with_context_mut(|ctx| {
+    crate::with_session_context_mut(session, |ctx| {
         let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
         let id = crate::parse_yubihsm_object_id(&response)?;
         ctx.refresh_slot_token_objects(slot_id)?;
@@ -668,10 +668,7 @@ fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     generated_ec_private_rsa_wrap_round_trip(SLOT_ID, b"0001password").unwrap();
 
     let commands = commands.borrow();
@@ -704,10 +701,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
 
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
-    }
+    install_test_slot_with_backend(SLOT_ID, slot);
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -824,7 +818,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    let imported_object = crate::with_context(|ctx| {
+    let imported_object = crate::with_session_context(session, |ctx| {
         ctx.resolve_object(imported)?
             .ok_or(CKR_OBJECT_HANDLE_INVALID.into())
     })
@@ -990,7 +984,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    let imported_object = crate::with_context(|ctx| {
+    let imported_object = crate::with_session_context(session, |ctx| {
         ctx.resolve_object(imported)?
             .ok_or(CKR_OBJECT_HANDLE_INVALID.into())
     })

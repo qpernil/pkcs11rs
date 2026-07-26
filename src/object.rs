@@ -44,7 +44,7 @@ pub(crate) struct TokenObject {
     pub(crate) never_extractable: bool,
     pub(crate) local: bool,
     pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
-    pub(crate) owner_session: Option<CK_SESSION_HANDLE>,
+    pub(crate) creator_session: Option<CK_SESSION_HANDLE>,
     pub(crate) material: KeyMaterial,
 }
 
@@ -1067,23 +1067,13 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
     }
 
-    pub(crate) fn is_visible_to(
-        &self,
-        session_handle: CK_SESSION_HANDLE,
-        slot_id: CK_SLOT_ID,
-        logged_in: bool,
-    ) -> bool {
-        self.slot_id == Some(slot_id)
-            && (!self.private || logged_in)
-            && self
-                .owner_session
-                .map(|owner| owner == session_handle)
-                .unwrap_or(true)
+    pub(crate) fn is_visible_to(&self, logged_in: bool) -> bool {
+        !self.private || logged_in
     }
 
-    pub(crate) fn set_owner(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
+    pub(crate) fn set_creator(&mut self, session_handle: CK_SESSION_HANDLE, slot_id: CK_SLOT_ID) {
         self.slot_id = Some(slot_id);
-        self.owner_session = (!self.token).then_some(session_handle);
+        self.creator_session = (!self.token).then_some(session_handle);
     }
 
     pub(crate) fn size(&self) -> CK_ULONG {
@@ -1852,7 +1842,7 @@ impl TokenObjectTemplate {
             never_extractable: !extractable || nonextractable_key,
             local: false,
             key_gen_mechanism: None,
-            owner_session: None,
+            creator_session: None,
             material: KeyMaterial::None,
         })
     }
