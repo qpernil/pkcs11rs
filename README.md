@@ -289,6 +289,23 @@ Override them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
 `PKCS11RS_TEST_YUBIHSM_SOURCE` to a serial number or full slot name when more
 than one YubiHSM is present.
 
+An X25519 interoperability test generates one persistent key in an empty PIV
+slot and one auto-allocated persistent YubiHSM key, derives the shared secret in
+both directions, and intentionally leaves both keys provisioned:
+
+```sh
+PKCS11RS_TEST_X25519_INTEROP=1 \
+cargo test piv_and_yubihsm_x25519_hardware_keys_derive_the_same_secret \
+  -- --ignored --nocapture
+```
+
+The test defaults to PIV `CKA_ID=24` (retired slot 20), the factory PIV
+management key and PIN, and YubiHSM authentication key `0001` with password
+`password`. It refuses to overwrite an occupied PIV slot. Select devices with
+`PKCS11RS_TEST_PIV_SOURCE` and `PKCS11RS_TEST_YUBIHSM_SOURCE`; override the PIV
+slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
+`PKCS11RS_TEST_PIV_MANAGEMENT_KEY`, and `PKCS11RS_TEST_PIV_PIN`.
+
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 

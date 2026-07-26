@@ -14,7 +14,10 @@ mod hardware_provisioning {
     const SCP11B_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_SCP11B";
     const SCP11B_KVN_ENV: &str = "PKCS11RS_TEST_SCP11B_KVN";
     const RSA_WRAP_ENABLE_ENV: &str = "PKCS11RS_TEST_YUBIHSM_RSA_WRAP";
+    const X25519_INTEROP_ENABLE_ENV: &str = "PKCS11RS_TEST_X25519_INTEROP";
     const DEFAULT_MANAGEMENT_KEY: &str = "00000000000000000000000000000000";
+    const DEFAULT_PIV_MANAGEMENT_KEY: &str = "010203040506070801020304050607080102030405060708";
+    const DEFAULT_PIV_PIN: &str = "123456";
     const DEFAULT_LABEL: &str = "pkcs11rs-asymmetric";
     const DEFAULT_TOUCH_LABEL: &str = "pkcs11rs-asymmetric-touch";
     const DEFAULT_CREDENTIAL_PASSWORD: &str = "password";
@@ -121,6 +124,31 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         .unwrap_or_else(|error| {
             panic!(
                 "expected exactly one present YubiHSM matching PKCS11RS_TEST_YUBIHSM_SOURCE={selector:?}: {error:?}"
+            )
+        })
+    }
+
+    fn select_piv_slot() -> CK_SLOT_ID {
+        let selector = std::env::var("PKCS11RS_TEST_PIV_SOURCE").ok();
+        crate::with_context_mut(|context| {
+            context.init();
+            let mut matches = context.slots.iter().filter_map(|(slot_id, slot)| {
+                (slot.is_piv()
+                    && slot.is_present()
+                    && selector.as_ref().is_none_or(|selector| {
+                        slot.serial() == selector || slot.name() == *selector
+                    }))
+                .then_some(*slot_id)
+            });
+            let slot_id = matches.next().ok_or(CKR_SLOT_ID_INVALID)?;
+            if matches.next().is_some() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            Ok(slot_id)
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "expected exactly one present PIV slot matching PKCS11RS_TEST_PIV_SOURCE={selector:?}: {error:?}"
             )
         })
     }
@@ -314,6 +342,320 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         let finalize = crate::api::C_Finalize(std::ptr::null_mut());
         result.unwrap();
         assert_eq!(finalize, CKR_OK as CK_RV);
+    }
+
+    #[test]
+    #[ignore = "generates and retains persistent X25519 keys on a live YubiKey PIV applet and YubiHSM"]
+    fn piv_and_yubihsm_x25519_hardware_keys_derive_the_same_secret() {
+        if std::env::var(X25519_INTEROP_ENABLE_ENV).as_deref() != Ok("1") {
+            eprintln!(
+                "skipped X25519 interoperability test; set {X25519_INTEROP_ENABLE_ENV}=1 to enable it"
+            );
+            return;
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+
+        let piv_slot_id = select_piv_slot();
+        let yubihsm_slot_id = select_yubihsm_slot();
+        let piv_session = open_hardware_session(piv_slot_id);
+        let yubihsm_session = open_hardware_session(yubihsm_slot_id);
+
+        let piv_key_id_text = environment("PKCS11RS_TEST_PIV_X25519_CKA_ID", "24");
+        let piv_key_id = piv_key_id_text
+            .strip_prefix("0x")
+            .or_else(|| piv_key_id_text.strip_prefix("0X"))
+            .map_or_else(
+                || piv_key_id_text.parse::<u8>(),
+                |value| u8::from_str_radix(value, 16),
+            )
+            .expect("PKCS11RS_TEST_PIV_X25519_CKA_ID must be a decimal or 0x-prefixed byte");
+        assert!(
+            crate::piv::Slot::from_cka_id(piv_key_id).is_some(),
+            "PKCS11RS_TEST_PIV_X25519_CKA_ID does not identify a PIV key slot"
+        );
+
+        let existing = find_hardware_object(
+            piv_session,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            &[piv_key_id],
+        );
+        assert!(
+            existing.is_none(),
+            "PIV CKA_ID {piv_key_id} is occupied; choose an empty PKCS11RS_TEST_PIV_X25519_CKA_ID"
+        );
+
+        let yubihsm_pin = format!(
+            "{}{}",
+            environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
+            environment(
+                "PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD",
+                DEFAULT_ADMIN_PASSWORD
+            )
+        );
+        login_hardware_session(yubihsm_session, CKU_USER as CK_USER_TYPE, &yubihsm_pin);
+
+        let piv_management_key = environment(
+            "PKCS11RS_TEST_PIV_MANAGEMENT_KEY",
+            DEFAULT_PIV_MANAGEMENT_KEY,
+        );
+        login_hardware_session(piv_session, CKU_SO as CK_USER_TYPE, &piv_management_key);
+
+        let _ = generate_hardware_x25519_key_pair(piv_session, &[piv_key_id], "PIV X25519 interop");
+        assert_eq!(crate::api::C_Logout(piv_session), CKR_OK as CK_RV);
+
+        let (yubihsm_public, yubihsm_private) =
+            generate_hardware_x25519_key_pair(yubihsm_session, &[0, 0], "PIV X25519 interop");
+        let yubihsm_key_id = read_hardware_attribute(
+            yubihsm_session,
+            yubihsm_private,
+            CKA_ID as CK_ATTRIBUTE_TYPE,
+        );
+        assert_eq!(
+            yubihsm_key_id.len(),
+            2,
+            "YubiHSM returned a noncanonical X25519 CKA_ID"
+        );
+        assert_ne!(
+            yubihsm_key_id,
+            [0, 0],
+            "YubiHSM did not auto-allocate the X25519 key ID"
+        );
+        let yubihsm_object_id = u16::from_be_bytes(yubihsm_key_id.as_slice().try_into().unwrap());
+
+        let piv_pin = environment("PKCS11RS_TEST_PIV_PIN", DEFAULT_PIV_PIN);
+        login_hardware_session(piv_session, CKU_USER as CK_USER_TYPE, &piv_pin);
+        let piv_private = find_hardware_object(
+            piv_session,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            &[piv_key_id],
+        )
+        .expect("generated PIV X25519 private key disappeared after login");
+        let piv_public = find_hardware_object(
+            piv_session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            &[piv_key_id],
+        )
+        .expect("generated PIV X25519 public key disappeared after login");
+
+        let piv_point =
+            read_hardware_attribute(piv_session, piv_public, CKA_EC_POINT as CK_ATTRIBUTE_TYPE);
+        let yubihsm_point = read_hardware_attribute(
+            yubihsm_session,
+            yubihsm_public,
+            CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+        );
+        let from_piv = derive_hardware_x25519(piv_session, piv_private, &yubihsm_point);
+        let from_yubihsm = derive_hardware_x25519(yubihsm_session, yubihsm_private, &piv_point);
+        assert_eq!(from_piv.len(), 32);
+        assert_eq!(from_piv, from_yubihsm);
+
+        assert_eq!(crate::api::C_Logout(piv_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_Logout(yubihsm_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(piv_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(yubihsm_session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+
+        eprintln!(
+            "retained X25519 keys at PIV CKA_ID {piv_key_id} and YubiHSM CKA_ID {yubihsm_object_id:04x}"
+        );
+    }
+
+    fn login_hardware_session(
+        session: CK_SESSION_HANDLE,
+        user_type: CK_USER_TYPE,
+        credential: &str,
+    ) {
+        let mut credential = credential.as_bytes().to_vec();
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                user_type,
+                credential.as_mut_ptr(),
+                credential.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+
+    fn find_hardware_object(
+        session: CK_SESSION_HANDLE,
+        class: CK_OBJECT_CLASS,
+        id: &[u8],
+    ) -> Option<CK_OBJECT_HANDLE> {
+        let mut class = class;
+        let mut id = id.to_vec();
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut class as *mut CK_OBJECT_CLASS).cast(),
+                ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: id.as_mut_ptr().cast(),
+                ulValueLen: id.len() as CK_ULONG,
+            },
+        ];
+        assert_eq!(
+            crate::api::C_FindObjectsInit(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_FindObjects(session, &mut object, 1, &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        (count == 1).then_some(object)
+    }
+
+    fn generate_hardware_x25519_key_pair(
+        session: CK_SESSION_HANDLE,
+        id: &[u8],
+        label: &str,
+    ) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+        let mut parameters = crate::openpgp::Curve::X25519.oid().to_vec();
+        let mut id = id.to_vec();
+        let mut label = label.as_bytes().to_vec();
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut derive = CK_TRUE as CK_BBOOL;
+        let mut public_template = [
+            CK_ATTRIBUTE {
+                type_: CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+                pValue: parameters.as_mut_ptr().cast(),
+                ulValueLen: parameters.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: id.as_mut_ptr().cast(),
+                ulValueLen: id.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+                pValue: label.as_mut_ptr().cast(),
+                ulValueLen: label.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut token as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        let mut private_template = [
+            CK_ATTRIBUTE {
+                type_: CKA_ID as CK_ATTRIBUTE_TYPE,
+                pValue: id.as_mut_ptr().cast(),
+                ulValueLen: id.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+                pValue: label.as_mut_ptr().cast(),
+                ulValueLen: label.len() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut token as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut derive as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut public,
+                &mut private,
+            ),
+            CKR_OK as CK_RV
+        );
+        (public, private)
+    }
+
+    fn read_hardware_attribute(
+        session: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        attribute_type: CK_ATTRIBUTE_TYPE,
+    ) -> Vec<u8> {
+        let mut attribute = CK_ATTRIBUTE {
+            type_: attribute_type,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(attribute.ulValueLen, CK_UNAVAILABLE_INFORMATION as CK_ULONG);
+        let mut value = vec![0; attribute.ulValueLen as usize];
+        attribute.pValue = value.as_mut_ptr().cast();
+        assert_eq!(
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        value.truncate(attribute.ulValueLen as usize);
+        value
+    }
+
+    fn derive_hardware_x25519(
+        session: CK_SESSION_HANDLE,
+        private: CK_OBJECT_HANDLE,
+        peer_point: &[u8],
+    ) -> Vec<u8> {
+        let mut peer_point = peer_point.to_vec();
+        let mut parameters = CK_ECDH1_DERIVE_PARAMS {
+            kdf: CKD_NULL as CK_EC_KDF_TYPE,
+            pSharedData: std::ptr::null_mut(),
+            ulSharedDataLen: 0,
+            pPublicData: peer_point.as_mut_ptr(),
+            ulPublicDataLen: peer_point.len() as CK_ULONG,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+        };
+        let mut derived = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DeriveKey(
+                session,
+                &mut mechanism,
+                private,
+                std::ptr::null_mut(),
+                0,
+                &mut derived,
+            ),
+            CKR_OK as CK_RV
+        );
+        read_hardware_attribute(session, derived, CKA_VALUE as CK_ATTRIBUTE_TYPE)
     }
 
     #[test]
