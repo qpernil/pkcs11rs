@@ -85,6 +85,7 @@ CKM_ECDSA = 0x00001041
 CKM_AES_ECB = 0x00001081
 CKM_AES_CBC = 0x00001082
 CKM_AES_CBC_PAD = 0x00001085
+CKM_AES_CTR = 0x00001086
 CKM_AES_GCM = 0x00001087
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
@@ -291,6 +292,13 @@ class CK_GCM_PARAMS(ctypes.Structure):
         ("pAAD", ctypes.POINTER(CK_BYTE)),
         ("ulAADLen", CK_ULONG),
         ("ulTagBits", CK_ULONG),
+    ]
+
+
+class CK_AES_CTR_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("ulCounterBits", CK_ULONG),
+        ("cb", CK_BYTE * 16),
     ]
 
 
@@ -2405,6 +2413,7 @@ done
             CKR_OK,
         )
         self.assertIn(CKM_AES_CBC_PAD, set(mechanisms))
+        self.assertIn(CKM_AES_CTR, set(mechanisms))
         self.assertIn(CKM_AES_KEY_WRAP_KWP, set(mechanisms))
 
         key_id = (CK_BYTE * 2)(0, 3)
@@ -2514,6 +2523,27 @@ done
                 "73bed6b8e3c1743b7116e69e22229516"
                 "3ff1caa1681fac09120eca307586e1a7"
                 "8cb82807230e1321d3fae00d18cc2012"
+            ),
+        )
+
+        # NIST SP 800-38A, Appendix F.5.1.
+        ctr_parameters = CK_AES_CTR_PARAMS(
+            128,
+            (CK_BYTE * 16).from_buffer_copy(
+                bytes.fromhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            ),
+        )
+        assert_vector(
+            CK_MECHANISM(
+                CKM_AES_CTR,
+                ctypes.cast(ctypes.pointer(ctr_parameters), CK_VOID_PTR),
+                ctypes.sizeof(ctr_parameters),
+            ),
+            bytes.fromhex(
+                "874d6191b620e3261bef6864990db6ce"
+                "9806f66b7970fdff8617187bb9fffdff"
+                "5ae4df3edbd5d35e5b4f09020db03eab"
+                "1e031dda2fbe03d1792170a0f3009cee"
             ),
         )
 
