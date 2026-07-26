@@ -3689,6 +3689,7 @@ done
 
         self.assertEqual(info.cryptokiVersion.major, 3)
         self.assertEqual(info.cryptokiVersion.minor, 2)
+        self.assertEqual(info.flags, 0)
 
     def test_initialize_and_finalize_reject_reserved_args(self) -> None:
         init_args = CK_C_INITIALIZE_ARGS()

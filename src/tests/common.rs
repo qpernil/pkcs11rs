@@ -5567,13 +5567,14 @@ impl ConcurrentOperationState {
 }
 
 #[derive(Debug)]
-struct ConcurrentYubiHsmSlot {
+struct ConcurrentSlot {
     state: std::sync::Arc<ConcurrentOperationState>,
     slot_index: usize,
+    yubihsm: bool,
 }
 
 #[derive(Debug)]
-struct ConcurrentYubiHsmSession {
+struct ConcurrentSession {
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     state: std::sync::Arc<ConcurrentOperationState>,
@@ -5826,7 +5827,7 @@ impl crate::Session for TestSession {
     }
 }
 
-impl crate::Session for ConcurrentYubiHsmSession {
+impl crate::Session for ConcurrentSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -5850,7 +5851,7 @@ impl crate::Session for ConcurrentYubiHsmSession {
     }
 }
 
-impl crate::Slot for ConcurrentYubiHsmSlot {
+impl crate::Slot for ConcurrentSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -5884,7 +5885,7 @@ impl crate::Slot for ConcurrentYubiHsmSlot {
     }
 
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
-        Box::new(ConcurrentYubiHsmSession {
+        Box::new(ConcurrentSession {
             slot_id: slotID,
             flags,
             state: self.state.clone(),
@@ -5915,7 +5916,7 @@ impl crate::Slot for ConcurrentYubiHsmSlot {
     }
 
     fn is_yubihsm(&self) -> bool {
-        true
+        self.yubihsm
     }
 }
 

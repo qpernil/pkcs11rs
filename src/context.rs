@@ -57,13 +57,11 @@ pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Resul
 
 pub(crate) struct Context {
     pub(crate) libusb: Option<rusb::Context>,
-    pub(crate) pcsc: Option<Rc<pcsc::Context>>,
+    pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
     pub(crate) slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
-    pub(crate) yubihsm_contexts: HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>,
-    pub(crate) dynamic_slots: HashSet<CK_SLOT_ID>,
-    pub(crate) slots_discovered: bool,
+    pub(crate) slot_contexts: SlotContextRegistry,
     pub(crate) sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
     pub(crate) logged_in_slots: HashMap<CK_SLOT_ID, LoginRole>,
     pub(crate) memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
@@ -74,6 +72,48 @@ pub(crate) struct Context {
     pub(crate) decrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
     pub(crate) sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
     pub(crate) verify_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
+}
+
+pub(crate) enum SlotContextRegistry {
+    Undiscovered(HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>),
+    Discovered(HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>),
+}
+
+impl SlotContextRegistry {
+    fn map(&self) -> &HashMap<CK_SLOT_ID, Arc<Mutex<Context>>> {
+        match self {
+            Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
+        }
+    }
+
+    fn map_mut(&mut self) -> &mut HashMap<CK_SLOT_ID, Arc<Mutex<Context>>> {
+        match self {
+            Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
+        }
+    }
+
+    fn begin_discovery(&mut self) -> bool {
+        let Self::Undiscovered(contexts) = self else {
+            return false;
+        };
+        let contexts = std::mem::take(contexts);
+        *self = Self::Discovered(contexts);
+        true
+    }
+}
+
+impl std::ops::Deref for SlotContextRegistry {
+    type Target = HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>;
+
+    fn deref(&self) -> &Self::Target {
+        self.map()
+    }
+}
+
+impl std::ops::DerefMut for SlotContextRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.map_mut()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,8 +171,8 @@ impl std::fmt::Debug for Context {
             )
             .field("slots", &self.slots)
             .field(
-                "yubihsm_contexts",
-                &self.yubihsm_contexts.keys().collect::<Vec<_>>(),
+                "slot_contexts",
+                &self.slot_contexts.keys().collect::<Vec<_>>(),
             )
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
@@ -201,7 +241,7 @@ impl Context {
             pcsc: None,
             #[cfg(not(feature = "abi-tests"))]
             pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
-                Ok(context) => Some(Rc::new(context)),
+                Ok(context) => Some(context),
                 Err(e) => {
                     log!(1, "pcsc::Context::establish: {}", e);
                     None
@@ -210,9 +250,7 @@ impl Context {
             yubihsm_urls,
             yubihsm_public_discovery_credential,
             slots,
-            yubihsm_contexts: HashMap::new(),
-            dynamic_slots: HashSet::new(),
-            slots_discovered: false,
+            slot_contexts: SlotContextRegistry::Undiscovered(HashMap::new()),
             sessions: HashMap::new(),
             logged_in_slots: HashMap::new(),
             memory_objects: HashMap::new(),
@@ -260,15 +298,19 @@ impl Context {
         } else {
             Vec::new()
         };
+        Self::new_child_context(vec![(slot_id, slot, token_objects)])
+    }
+
+    fn new_child_context(
+        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
+    ) -> Result<Context, Error> {
         let mut context = Context {
             libusb: None,
             pcsc: None,
             yubihsm_urls: Vec::new(),
             yubihsm_public_discovery_credential: None,
-            slots: HashMap::from([(slot_id, slot)]),
-            yubihsm_contexts: HashMap::new(),
-            dynamic_slots: HashSet::new(),
-            slots_discovered: true,
+            slots: HashMap::new(),
+            slot_contexts: SlotContextRegistry::Discovered(HashMap::new()),
             sessions: HashMap::new(),
             logged_in_slots: HashMap::new(),
             memory_objects: HashMap::new(),
@@ -280,7 +322,10 @@ impl Context {
             sign_operations: HashMap::new(),
             verify_operations: HashMap::new(),
         };
-        context.reconcile_slot_token_objects(slot_id, token_objects)?;
+        for (slot_id, slot, token_objects) in slots {
+            context.slots.insert(slot_id, slot);
+            context.reconcile_slot_token_objects(slot_id, token_objects)?;
+        }
         Ok(context)
     }
 
@@ -299,15 +344,62 @@ impl Context {
         discover_objects: bool,
     ) -> Result<(), Error> {
         let context = Self::new_yubihsm_slot_context(slot_id, slot, discover_objects)?;
-        self.yubihsm_contexts
+        self.slot_contexts
             .insert(slot_id, Arc::new(Mutex::new(context)));
         Ok(())
+    }
+
+    fn insert_pcsc_slot_contexts(
+        &mut self,
+        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
+    ) -> Result<Vec<CK_SLOT_ID>, Error> {
+        // Each applet is a separate PKCS token with its own logical state.
+        // Their connectors share PcscReaderState for physical reader access.
+        let slot_ids = slots
+            .iter()
+            .map(|(slot_id, _, _)| *slot_id)
+            .collect::<Vec<_>>();
+        let distinct_slot_ids = slot_ids.iter().copied().collect::<HashSet<_>>();
+        if slot_ids.is_empty()
+            || distinct_slot_ids.len() != slot_ids.len()
+            || slot_ids.iter().any(|slot_id| {
+                self.slots.contains_key(slot_id) || self.slot_contexts.contains_key(slot_id)
+            })
+        {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let contexts = slots
+            .into_iter()
+            .map(|(slot_id, slot, token_objects)| {
+                let context = Self::new_child_context(vec![(slot_id, slot, token_objects)])?;
+                Ok((slot_id, Arc::new(Mutex::new(context))))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (slot_id, context) in contexts {
+            self.slot_contexts.insert(slot_id, context);
+        }
+        Ok(slot_ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_pcsc_slots(
+        &mut self,
+        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>)>,
+    ) -> Result<(), Error> {
+        let slots = slots
+            .into_iter()
+            .map(|(slot_id, slot)| {
+                let token_objects = slot.token_objects(slot_id)?;
+                Ok((slot_id, slot, token_objects))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        self.insert_pcsc_slot_contexts(slots).map(|_| ())
     }
 
     fn next_slot_id(&self) -> CK_SLOT_ID {
         self.slots
             .keys()
-            .chain(self.yubihsm_contexts.keys())
+            .chain(self.slot_contexts.keys())
             .max()
             .copied()
             .map_or(0, |slot_id| slot_id + 1)
@@ -674,15 +766,13 @@ impl Context {
 
     #[allow(unreachable_code)]
     pub(crate) fn init(&mut self) {
-        if self.slots_discovered {
+        if !self.slot_contexts.begin_discovery() {
             return;
         }
-        self.slots_discovered = true;
         #[cfg(feature = "abi-tests")]
         {
             return;
         }
-        let mut seen_dynamic_slots = HashSet::new();
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
@@ -721,20 +811,18 @@ impl Context {
                                     };
                                     let name = connector.name();
                                     log!(2, "{}", name);
-                                    if let Some(slot_id) = self.yubihsm_contexts.iter().find_map(
-                                        |(slot_id, context)| {
-                                            context.lock().ok().and_then(|context| {
+                                    if self.slot_contexts.iter().any(|(slot_id, context)| {
+                                        context
+                                            .lock()
+                                            .ok()
+                                            .map(|context| {
                                                 context
                                                     .slots
                                                     .get(slot_id)
                                                     .is_some_and(|slot| slot.name() == name)
-                                                    .then_some(*slot_id)
                                             })
-                                        },
-                                    ) {
-                                        if self.dynamic_slots.contains(&slot_id) {
-                                            seen_dynamic_slots.insert(slot_id);
-                                        }
+                                            .unwrap_or(false)
+                                    }) {
                                         continue;
                                     }
                                     if let Err(error) = connector.connect() {
@@ -759,8 +847,6 @@ impl Context {
                                         log!(1, "YubiHSM slot registration: {:?}", error);
                                         continue;
                                     }
-                                    self.dynamic_slots.insert(slot_id);
-                                    seen_dynamic_slots.insert(slot_id);
                                 }
                                 Err(e) => {
                                     log!(1, "libusb.open: {}", e);
@@ -811,8 +897,6 @@ impl Context {
                 );
                 continue;
             }
-            self.dynamic_slots.insert(slot_id);
-            seen_dynamic_slots.insert(slot_id);
         }
         if let Some(context) = self.pcsc.clone() {
             if let Ok(readers) = context.list_readers_owned() {
@@ -832,9 +916,6 @@ impl Context {
                         .iter()
                         .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
                     {
-                        if self.dynamic_slots.contains(&slot_id) {
-                            seen_dynamic_slots.insert(slot_id);
-                        }
                         let (was_present, is_present) = {
                             let slot = self.slots.get(&slot_id).unwrap();
                             let was_present = slot.is_present();
@@ -875,29 +956,6 @@ impl Context {
                     }
                     if let Err(error) = connector.refresh() {
                         log!(1, "PCSC reader has no usable card: {:?}", error);
-                        let reader_prefix = format!("{} ", name);
-                        let known_slot_ids: Vec<CK_SLOT_ID> = self
-                            .slots
-                            .iter()
-                            .filter(|(slot_id, slot)| {
-                                self.dynamic_slots.contains(slot_id)
-                                    && slot.name().starts_with(&reader_prefix)
-                            })
-                            .map(|(slot_id, _)| *slot_id)
-                            .collect();
-                        for slot_id in known_slot_ids {
-                            seen_dynamic_slots.insert(slot_id);
-                            let was_present = self
-                                .slots
-                                .get(&slot_id)
-                                .is_some_and(|slot| slot.is_present());
-                            if let Some(slot) = self.slots.get(&slot_id) {
-                                map(slot.refresh());
-                                if was_present && !slot.is_present() {
-                                    self.close_slot_state(slot_id, false);
-                                }
-                            }
-                        }
                         continue;
                     }
                     match YubiKeyClient.discover(&connector) {
@@ -916,8 +974,10 @@ impl Context {
                             continue;
                         }
                     };
-                    let shared_state = connector.state.clone();
+                    let reader_state = connector.state.clone();
                     let base_connector: Rc<dyn Connector> = Rc::new(connector);
+                    let mut reader_slots = Vec::new();
+                    let mut next_reader_slot_id = self.next_slot_id();
                     for configuration in configurations {
                         let application_label = ccid_application_label(configuration.application);
                         let name = format!("{} {}", base_connector.name(), application_label);
@@ -926,9 +986,6 @@ impl Context {
                             .iter()
                             .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
                         {
-                            if self.dynamic_slots.contains(&slot_id) {
-                                seen_dynamic_slots.insert(slot_id);
-                            }
                             let (was_present, is_present) = {
                                 let slot = self.slots.get(&slot_id).unwrap();
                                 let was_present = slot.is_present();
@@ -968,7 +1025,10 @@ impl Context {
                             continue;
                         }
 
-                        let slot_id = self.next_slot_id();
+                        let slot_id = next_reader_slot_id;
+                        next_reader_slot_id = next_reader_slot_id
+                            .checked_add(1)
+                            .expect("slot ID space exhausted");
                         let application_aid = match ccid_application_aid(
                             configuration.application,
                             configuration.secure_channel,
@@ -990,7 +1050,7 @@ impl Context {
                             );
                             continue;
                         }
-                        if let Err(error) = shared_state.set_selected_application(&application_aid)
+                        if let Err(error) = reader_state.set_selected_application(&application_aid)
                         {
                             log!(
                                 1,
@@ -1005,7 +1065,7 @@ impl Context {
                                 base_connector.clone(),
                                 &application_aid,
                                 configuration.secure_channel,
-                                shared_state.clone(),
+                                reader_state.clone(),
                             ));
                         let mut slot: Box<dyn Slot> = match configuration.application {
                             CcidApplication::Piv => Box::new(PivSlot::new(
@@ -1068,28 +1128,30 @@ impl Context {
                         } else {
                             Vec::new()
                         };
-                        self.slots.insert(slot_id, slot);
-                        if let Err(error) =
-                            self.reconcile_slot_token_objects(slot_id, token_objects)
-                        {
-                            log!(2, "CCID object registration: {:?}", error);
+                        reader_slots.push((slot_id, slot, token_objects));
+                    }
+                    if !reader_slots.is_empty() {
+                        if let Err(error) = self.insert_pcsc_slot_contexts(reader_slots) {
+                            log!(1, "PCSC slot context registration: {:?}", error);
                         }
-                        self.dynamic_slots.insert(slot_id);
-                        seen_dynamic_slots.insert(slot_id);
                     }
                 }
             }
         }
         let yubihsm_slot_ids = self
-            .yubihsm_contexts
+            .slot_contexts
             .keys()
             .filter(|slot_id| {
-                !self.dynamic_slots.contains(slot_id) || seen_dynamic_slots.contains(slot_id)
+                self.slot_contexts
+                    .get(slot_id)
+                    .and_then(|context| context.lock().ok())
+                    .and_then(|context| context.slots.get(slot_id).map(|slot| slot.is_yubihsm()))
+                    .unwrap_or(false)
             })
             .copied()
             .collect::<Vec<_>>();
         for slot_id in yubihsm_slot_ids {
-            if let Some(context) = self.yubihsm_contexts.get(&slot_id) {
+            if let Some(context) = self.slot_contexts.get(&slot_id) {
                 match context.lock() {
                     Ok(mut context) => {
                         if let Err(error) = context.refresh_slot_token_objects(slot_id) {
@@ -1099,22 +1161,6 @@ impl Context {
                     Err(_) => log!(1, "YubiHSM slot state lock is poisoned"),
                 }
             }
-        }
-        let removed_slots: Vec<CK_SLOT_ID> = self
-            .dynamic_slots
-            .difference(&seen_dynamic_slots)
-            .copied()
-            .collect();
-        for slot_id in removed_slots {
-            if let Some(context) = self.yubihsm_contexts.remove(&slot_id) {
-                if let Ok(mut context) = context.lock() {
-                    context.close_slot_state(slot_id, true);
-                }
-            } else {
-                self.close_slot_state(slot_id, true);
-                self.slots.remove(&slot_id);
-            }
-            self.dynamic_slots.remove(&slot_id);
         }
         log!(2, "Context.init {:?}", self);
     }
@@ -1203,7 +1249,7 @@ pub(crate) fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), 
         ABI_TEST_SCP11_SLOT_ID,
         ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
     ] {
-        if let Some(child) = context.yubihsm_contexts.get(&slot_id).cloned() {
+        if let Some(child) = context.slot_contexts.get(&slot_id).cloned() {
             child
                 .lock()
                 .map_err(|_| Error::from(CKR_MUTEX_BAD))?
@@ -1215,12 +1261,19 @@ pub(crate) fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), 
     Ok(())
 }
 
-// A Context is always protected by either G_CONTEXT or a per-YubiHSM mutex.
+// A Context is always protected by either RUNTIME.module or a slot-context mutex.
 // Connector handles that are not marked Send by their dependency crates never
 // escape their owning context guard.
 unsafe impl Send for Context {}
 
-pub(crate) static G_CONTEXT: Mutex<Option<Context>> = Mutex::new(None);
-pub(crate) static G_LIFECYCLE: RwLock<()> = RwLock::new(());
+pub(crate) struct Runtime {
+    pub(crate) lifecycle: RwLock<()>,
+    pub(crate) module: Mutex<Option<Context>>,
+}
+
+pub(crate) static RUNTIME: Runtime = Runtime {
+    lifecycle: RwLock::new(()),
+    module: Mutex::new(None),
+};
 pub(crate) static SESSION_CONTEXTS: LazyLock<Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));

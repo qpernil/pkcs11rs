@@ -146,13 +146,15 @@ impl Default for PcscTransportState {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct PcscDeviceState {
+pub(crate) struct PcscReaderState {
+    // This is the physical-reader gate. PKCS slot state is protected separately
+    // by the slot's child Context.
     operation: Mutex<()>,
     transport: Mutex<PcscTransportState>,
     secure_channel: Mutex<SecureChannelState>,
 }
 
-impl PcscDeviceState {
+impl PcscReaderState {
     fn with_operation<T>(&self, operation: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
         let _guard = self.operation.lock().map_err(|_| CKR_MUTEX_BAD)?;
         operation()
@@ -190,7 +192,7 @@ pub(crate) struct PcscAppletConnector {
     pub(crate) base: Rc<dyn Connector>,
     pub(crate) application_aid: Vec<u8>,
     pub(crate) protocol: Option<SecureChannelProtocol>,
-    pub(crate) state: Arc<PcscDeviceState>,
+    pub(crate) state: Arc<PcscReaderState>,
     pub(crate) enabled: Cell<bool>,
     pub(crate) applet_present: Cell<bool>,
     pub(crate) discovery_error: RefCell<Option<String>>,
@@ -201,7 +203,7 @@ impl PcscAppletConnector {
         base: Rc<dyn Connector>,
         application_aid: &[u8],
         protocol: Option<SecureChannelProtocol>,
-        state: Arc<PcscDeviceState>,
+        state: Arc<PcscReaderState>,
     ) -> Self {
         let applet_present = base.is_present();
         Self {
@@ -717,11 +719,11 @@ impl UsbConnector {
 
 pub(crate) struct PcscConnector {
     pub(crate) reader: std::ffi::CString,
-    pub(crate) context: Rc<pcsc::Context>,
+    pub(crate) context: pcsc::Context,
     pub(crate) yubikey_device_info: OnceLock<YubiKeyDeviceInfo>,
     pub(crate) firmware_version: Cell<Option<(u8, u8, u8)>>,
     pub(crate) serial_number: OnceLock<String>,
-    pub(crate) state: Arc<PcscDeviceState>,
+    pub(crate) state: Arc<PcscReaderState>,
 }
 
 impl std::fmt::Debug for PcscConnector {
@@ -1186,8 +1188,8 @@ mod tests {
     use std::io::Write;
 
     fn assert_pcsc_operation_concurrency(
-        first: Arc<PcscDeviceState>,
-        second: Arc<PcscDeviceState>,
+        first: Arc<PcscReaderState>,
+        second: Arc<PcscReaderState>,
         concurrent: bool,
     ) {
         use std::sync::mpsc::{sync_channel, RecvTimeoutError};
@@ -1245,14 +1247,14 @@ mod tests {
 
     #[test]
     fn pcsc_applets_on_one_reader_do_not_execute_concurrently() {
-        let reader = Arc::new(PcscDeviceState::default());
+        let reader = Arc::new(PcscReaderState::default());
         assert_pcsc_operation_concurrency(reader.clone(), reader, false);
     }
 
     #[test]
     fn pcsc_applets_on_different_readers_execute_concurrently() {
-        let first_reader = Arc::new(PcscDeviceState::default());
-        let second_reader = Arc::new(PcscDeviceState::default());
+        let first_reader = Arc::new(PcscReaderState::default());
+        let second_reader = Arc::new(PcscReaderState::default());
         assert_pcsc_operation_concurrency(first_reader, second_reader, true);
     }
 

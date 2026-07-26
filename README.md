@@ -55,6 +55,25 @@ vendor-backed wrapping adaptations. The profile describes the slot
 implementation and does not depend on which key algorithms are currently
 provisioned.
 
+## Threading
+
+The module uses its own synchronization when `C_Initialize` permits native
+locking through `CKF_OS_LOCKING_OK`. Application-provided mutex callbacks are
+not used; when both callbacks and `CKF_OS_LOCKING_OK` are supplied, native
+locking is selected. Each PKCS #11 slot has an independently locked child
+context containing its sessions, login state, objects, searches, and
+cryptographic operation state.
+
+Initialization and finalization are nonblocking lifecycle transitions. They
+return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
+calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
+
+Applet connectors on a reader share one `PcscReaderState`, which owns the card
+connection, selected AID, APDU capabilities, SCP state, and complete APDU
+exchange lock. Local operations on different applet slots can execute
+concurrently; actual card exchanges on one reader are serialized. Different
+YubiHSMs and different PC/SC readers can also execute concurrently.
+
 ## Compatibility and Validation
 
 | Area | Status |

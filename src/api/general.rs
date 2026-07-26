@@ -17,9 +17,9 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
     }
-    let _lifecycle = match G_LIFECYCLE.write() {
+    let _lifecycle = match lock_lifecycle_write() {
         Ok(guard) => guard,
-        Err(_) => return CKR_MUTEX_BAD as CK_RV,
+        Err(error) => return error.into(),
     };
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
@@ -76,9 +76,9 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     if !pReserved.is_null() {
         return CKR_ARGUMENTS_BAD.into();
     }
-    let _lifecycle = match G_LIFECYCLE.write() {
+    let _lifecycle = match lock_lifecycle_write() {
         Ok(guard) => guard,
-        Err(_) => return CKR_MUTEX_BAD as CK_RV,
+        Err(error) => return error.into(),
     };
     match lock_context() {
         Ok(mut guard) => match guard.as_mut() {
@@ -92,7 +92,11 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
                         logout_failed = true;
                     }
                 }
-                for child in ctx.yubihsm_contexts.values() {
+                let mut finalized_children = HashSet::new();
+                for child in ctx.slot_contexts.values() {
+                    if !finalized_children.insert(Arc::as_ptr(child) as usize) {
+                        continue;
+                    }
                     let Ok(mut child) = child.lock() else {
                         logout_failed = true;
                         continue;
@@ -179,7 +183,7 @@ pub extern "C" fn C_GetSlotList(
             let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
                 ctx.slots
                     .keys()
-                    .chain(ctx.yubihsm_contexts.keys())
+                    .chain(ctx.slot_contexts.keys())
                     .copied()
                     .collect()
             } else {
@@ -189,7 +193,7 @@ pub extern "C" fn C_GetSlotList(
                     .filter(|s| s.1.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0)
                     .map(|s| *s.0)
                     .collect();
-                for (slot_id, child) in &ctx.yubihsm_contexts {
+                for (slot_id, child) in ctx.slot_contexts.iter() {
                     let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
                     if child
                         .slots
@@ -241,7 +245,7 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO)
 
 fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
+    with_slot_context_mut(slotID, |ctx, _uses_slot_context| {
         ctx.get_present_slot(slotID)?.get_token_info(info)?;
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = ctx

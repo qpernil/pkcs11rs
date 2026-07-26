@@ -618,18 +618,34 @@ fn str_pad(src: &str, dst: &mut [u8]) {
 }
 
 fn lock_context() -> Result<MutexGuard<'static, Option<Context>>, Error> {
-    G_CONTEXT.lock().map_err(|_| CKR_MUTEX_BAD.into())
+    RUNTIME.module.lock().map_err(|_| CKR_MUTEX_BAD.into())
+}
+
+fn lock_lifecycle_read() -> Result<std::sync::RwLockReadGuard<'static, ()>, Error> {
+    match RUNTIME.lifecycle.try_read() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::WouldBlock) => Err(CKR_CRYPTOKI_NOT_INITIALIZED.into()),
+        Err(std::sync::TryLockError::Poisoned(_)) => Err(CKR_MUTEX_BAD.into()),
+    }
+}
+
+fn lock_lifecycle_write() -> Result<std::sync::RwLockWriteGuard<'static, ()>, Error> {
+    match RUNTIME.lifecycle.try_write() {
+        Ok(guard) => Ok(guard),
+        Err(std::sync::TryLockError::WouldBlock) => Err(CKR_FUNCTION_FAILED.into()),
+        Err(std::sync::TryLockError::Poisoned(_)) => Err(CKR_MUTEX_BAD.into()),
+    }
 }
 
 fn with_context<T>(f: impl FnOnce(&Context) -> Result<T, Error>) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let guard = lock_context()?;
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
 }
 
 fn with_context_mut<T>(f: impl FnOnce(&mut Context) -> Result<T, Error>) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let mut guard = lock_context()?;
     let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
@@ -639,11 +655,11 @@ fn with_slot_context<T>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&Context) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let child = {
         let guard = lock_context()?;
         let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        match ctx.yubihsm_contexts.get(&slot_id) {
+        match ctx.slot_contexts.get(&slot_id) {
             Some(child) => child.clone(),
             None => return f(ctx),
         }
@@ -656,11 +672,11 @@ fn with_slot_context_mut<T>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&mut Context, bool) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let child = {
         let mut guard = lock_context()?;
         let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        match ctx.yubihsm_contexts.get(&slot_id) {
+        match ctx.slot_contexts.get(&slot_id) {
             Some(child) => child.clone(),
             None => return f(ctx, false),
         }
@@ -673,7 +689,7 @@ fn with_session_context<T>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&Context) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let slot_id = SESSION_CONTEXTS
         .lock()
         .map_err(|_| Error::from(CKR_MUTEX_BAD))?
@@ -685,7 +701,7 @@ fn with_session_context<T>(
         let Some(slot_id) = slot_id else {
             return f(ctx);
         };
-        ctx.yubihsm_contexts
+        ctx.slot_contexts
             .get(&slot_id)
             .cloned()
             .ok_or(CKR_SESSION_HANDLE_INVALID)?
@@ -698,7 +714,7 @@ fn with_session_context_mut<T>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&mut Context) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = G_LIFECYCLE.read().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let _lifecycle = lock_lifecycle_read()?;
     let slot_id = SESSION_CONTEXTS
         .lock()
         .map_err(|_| Error::from(CKR_MUTEX_BAD))?
@@ -710,7 +726,7 @@ fn with_session_context_mut<T>(
         let Some(slot_id) = slot_id else {
             return f(ctx);
         };
-        ctx.yubihsm_contexts
+        ctx.slot_contexts
             .get(&slot_id)
             .cloned()
             .ok_or(CKR_SESSION_HANDLE_INVALID)?
@@ -779,7 +795,7 @@ pub(crate) use connector::{
     UsbConnector,
 };
 #[cfg(test)]
-pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscDeviceState};
+pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscReaderState};
 
 mod context;
 pub(crate) use context::*;
