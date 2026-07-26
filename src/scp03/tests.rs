@@ -244,7 +244,7 @@ fn secure_channel_connector_wraps_encoded_apdus() {
         base,
         application_aid: application_aid.clone(),
         protocol: Some(crate::SecureChannelProtocol::Scp03),
-        state: std::sync::Arc::new(crate::PcscDeviceState::with_secure_channel(
+        state: std::sync::Arc::new(crate::PcscReaderState::with_secure_channel(
             application_aid,
             test_session(0x01),
         )),

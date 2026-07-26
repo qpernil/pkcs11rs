@@ -517,7 +517,7 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
 }
 
 #[test]
-pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
+pub fn removing_a_slot_clears_its_runtime_state() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -528,7 +528,6 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
     {
         let mut context = crate::lock_context().unwrap();
         let context = context.as_mut().unwrap();
-        context.dynamic_slots.insert(TEST_SLOT_ID);
         let mut session_object = context.memory_objects.get(&1).unwrap().clone();
         session_object.unique_id.clear();
         session_object.token = false;
@@ -544,7 +543,6 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
 
         context.close_slot_state(TEST_SLOT_ID, true);
         context.slots.remove(&TEST_SLOT_ID);
-        context.dynamic_slots.remove(&TEST_SLOT_ID);
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
         assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
         assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
@@ -560,7 +558,7 @@ pub fn removing_a_dynamic_slot_clears_its_runtime_state() {
 }
 
 #[test]
-pub fn slot_info_does_not_rescan_dynamic_slots() {
+pub fn slot_info_does_not_trigger_slot_discovery() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -573,7 +571,6 @@ pub fn slot_info_does_not_rescan_dynamic_slots() {
         context
             .slots
             .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
-        context.dynamic_slots.insert(TEST_SLOT_ID);
     }
 
     let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };

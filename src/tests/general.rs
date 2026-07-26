@@ -141,6 +141,7 @@ pub fn get_info_reports_cryptoki_3_2() {
     assert_eq!(crate::api::C_GetInfo(&mut info), CKR_OK as CK_RV);
     assert_eq!(info.cryptokiVersion.major, 3);
     assert_eq!(info.cryptokiVersion.minor, 2);
+    assert_eq!(info.flags, 0);
 
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
@@ -168,6 +169,83 @@ pub fn initialize_and_finalize_reject_reserved_args() {
     assert_eq!(
         crate::api::C_Finalize(1 as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
+#[test]
+fn lifecycle_transitions_fail_while_an_api_call_is_active() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let active_call = crate::RUNTIME.lifecycle.read().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let initialize = std::thread::spawn({
+        let sender = sender.clone();
+        move || {
+            sender
+                .send(crate::api::C_Initialize(::std::ptr::null_mut()))
+                .unwrap();
+        }
+    });
+    let finalize = std::thread::spawn(move || {
+        sender
+            .send(crate::api::C_Finalize(::std::ptr::null_mut()))
+            .unwrap();
+    });
+    let results = [
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap(),
+    ];
+    drop(active_call);
+    initialize.join().unwrap();
+    finalize.join().unwrap();
+
+    assert_eq!(results, [CKR_FUNCTION_FAILED as CK_RV; 2]);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn ordinary_calls_fail_while_a_lifecycle_transition_is_active() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let transition = crate::RUNTIME.lifecycle.write().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let call = std::thread::spawn(move || {
+        let mut info = CK_INFO {
+            cryptokiVersion: CK_VERSION { major: 0, minor: 0 },
+            manufacturerID: [0; 32],
+            flags: 0,
+            libraryDescription: [0; 32],
+            libraryVersion: CK_VERSION { major: 0, minor: 0 },
+        };
+        sender.send(crate::api::C_GetInfo(&mut info)).unwrap();
+    });
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    drop(transition);
+    call.join().unwrap();
+
+    assert_eq!(result, CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
     );
 }
 
@@ -289,7 +367,7 @@ pub fn yubikey_login_preserves_connector_errors() {
             base,
             &application_aid,
             Some(crate::SecureChannelProtocol::Scp03),
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         )),
         application_aid,
     );
@@ -362,7 +440,7 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
         base.clone(),
         &aid,
         None,
-        std::sync::Arc::new(crate::PcscDeviceState::default()),
+        std::sync::Arc::new(crate::PcscReaderState::default()),
     );
 
     assert_eq!(
@@ -397,7 +475,7 @@ fn pcsc_applet_connector_reuses_selected_aid() {
         base.clone(),
         &aid,
         None,
-        std::sync::Arc::new(crate::PcscDeviceState::default()),
+        std::sync::Arc::new(crate::PcscReaderState::default()),
     );
     let mut receive = [0; 16];
 
@@ -424,7 +502,7 @@ fn pcsc_applet_connectors_share_selected_aid_state() {
     let base = std::rc::Rc::new(RecordingConnector {
         commands: commands.clone(),
     });
-    let state = std::sync::Arc::new(crate::PcscDeviceState::default());
+    let state = std::sync::Arc::new(crate::PcscReaderState::default());
     let first_aid = vec![1, 2, 3, 4, 5];
     let second_aid = vec![6, 7, 8, 9, 10];
     let first = crate::PcscAppletConnector::new(base.clone(), &first_aid, None, state.clone());
@@ -487,7 +565,7 @@ fn openpgp_slot_info_reports_application_version_and_serial() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let mut slot = crate::OpenPgpSlot::new(connector, aid);
     slot.version = (3, 4);
@@ -525,7 +603,7 @@ fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -545,7 +623,7 @@ fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -786,7 +864,7 @@ fn openpgp_metadata_failure_does_not_hide_selected_applet() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let mut slot = crate::OpenPgpSlot::new(connector, aid);
 
@@ -904,7 +982,7 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let slot = crate::PivSlot::new(connector, aid);
 
@@ -933,7 +1011,7 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
             base,
             &aid,
             None,
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     let mut slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
 
@@ -1148,7 +1226,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
             base,
             &application_aid,
             Some(crate::SecureChannelProtocol::Scp03),
-            std::sync::Arc::new(crate::PcscDeviceState::default()),
+            std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
     {
         let mut context = crate::lock_context().unwrap();
@@ -2608,18 +2686,20 @@ pub fn different_yubihsm_slots_execute_concurrently() {
         context
             .insert_yubihsm_slot(
                 FIRST_SLOT_ID,
-                Box::new(ConcurrentYubiHsmSlot {
+                Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 0,
+                    yubihsm: true,
                 }),
             )
             .unwrap();
         context
             .insert_yubihsm_slot(
                 SECOND_SLOT_ID,
-                Box::new(ConcurrentYubiHsmSlot {
+                Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 1,
+                    yubihsm: true,
                 }),
             )
             .unwrap();
@@ -2690,6 +2770,97 @@ pub fn different_yubihsm_slots_execute_concurrently() {
     );
 }
 
+fn assert_pcsc_slot_context_concurrency(same_slot: bool) {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const FIRST_SLOT_ID: CK_SLOT_ID = 220;
+    const SECOND_SLOT_ID: CK_SLOT_ID = 221;
+    let state = std::sync::Arc::new(ConcurrentOperationState::default());
+    let slot = |slot_id, slot_index| {
+        (
+            slot_id,
+            Box::new(ConcurrentSlot {
+                state: state.clone(),
+                slot_index,
+                yubihsm: false,
+            }) as Box<dyn crate::Slot>,
+        )
+    };
+    {
+        let mut context = crate::lock_context().unwrap();
+        let context = context.as_mut().unwrap();
+        context
+            .insert_pcsc_slots(vec![slot(FIRST_SLOT_ID, 0), slot(SECOND_SLOT_ID, 1)])
+            .unwrap();
+    }
+
+    let open = |slot_id| {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                ::std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        session
+    };
+    let first_session = open(FIRST_SLOT_ID);
+    let second_session = open(if same_slot {
+        FIRST_SLOT_ID
+    } else {
+        SECOND_SLOT_ID
+    });
+
+    std::thread::scope(|scope| {
+        let workers = [first_session, second_session].map(|session| {
+            scope.spawn(move || {
+                let mut output = [0u8; 8];
+                assert_eq!(
+                    crate::api::C_GenerateRandom(
+                        session,
+                        output.as_mut_ptr(),
+                        output.len() as CK_ULONG,
+                    ),
+                    CKR_OK as CK_RV
+                );
+                assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+            })
+        });
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    assert_eq!(
+        state.max_active.load(std::sync::atomic::Ordering::SeqCst),
+        if same_slot { 1 } else { 2 },
+        "logical state must serialize per PKCS slot, not per reader"
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn pcsc_applets_use_independent_slot_contexts() {
+    assert_pcsc_slot_context_concurrency(false);
+}
+
+#[test]
+fn pcsc_sessions_on_one_slot_share_a_slot_context() {
+    assert_pcsc_slot_context_concurrency(true);
+}
+
 #[test]
 pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2711,18 +2882,20 @@ pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
         context
             .insert_yubihsm_slot(
                 FIRST_SLOT_ID,
-                Box::new(ConcurrentYubiHsmSlot {
+                Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 0,
+                    yubihsm: true,
                 }),
             )
             .unwrap();
         context
             .insert_yubihsm_slot(
                 SECOND_SLOT_ID,
-                Box::new(ConcurrentYubiHsmSlot {
+                Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 1,
+                    yubihsm: true,
                 }),
             )
             .unwrap();

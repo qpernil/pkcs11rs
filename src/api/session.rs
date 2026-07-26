@@ -106,7 +106,7 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_slot_context_mut(slotID, |ctx, is_yubihsm| {
+        match with_slot_context_mut(slotID, |ctx, uses_slot_context| {
             if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
                 return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
@@ -128,7 +128,7 @@ pub extern "C" fn C_OpenSession(
                         let k = allocate_session_handle();
                         log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
                         ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                        if is_yubihsm {
+                        if uses_slot_context {
                             if let Err(_error) = SESSION_CONTEXTS
                                 .lock()
                                 .map_err(|_| Error::from(CKR_MUTEX_BAD))
@@ -211,7 +211,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    match with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
+    match with_slot_context_mut(slotID, |ctx, _uses_slot_context| {
         if !ctx.slots.contains_key(&slotID) {
             return Ok(CKR_SLOT_ID_INVALID as CK_RV);
         }

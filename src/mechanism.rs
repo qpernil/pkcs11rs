@@ -534,7 +534,7 @@ pub(crate) fn get_mechanism_list(
     count: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     let count = as_mut(count)?;
-    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
+    with_slot_context_mut(slotID, |ctx, _uses_slot_context| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 
         let required = mechanisms.len() as CK_ULONG;
@@ -578,7 +578,7 @@ pub(crate) fn get_mechanism_info(
     info_ptr: CK_MECHANISM_INFO_PTR,
 ) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
-    with_slot_context_mut(slotID, |ctx, _is_yubihsm| {
+    with_slot_context_mut(slotID, |ctx, _uses_slot_context| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 
         let mechanism = mechanism_details(&mechanisms, type_)?;
