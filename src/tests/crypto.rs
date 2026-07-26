@@ -1286,7 +1286,9 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
 }
 
 #[test]
-fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
+fn ecdsa_verifier_supports_every_advertised_prime_curve() {
+    use num_bigint_dig::traits::ModInverse;
+
     fn padded(value: &rsa::BigUint, length: usize) -> Vec<u8> {
         let encoded = value.to_bytes_be();
         let mut output = vec![0; length - encoded.len()];
@@ -1315,13 +1317,20 @@ fn native_ecdsa_verifier_supports_every_advertised_prime_curve() {
         let nonce_point = crate::ec_multiply(&nonce, &generator, &parameters);
         let inverse = nonce_point
             .z
-            .modpow(&(&parameters.p - rsa::BigUint::from(2u8)), &parameters.p);
+            .mod_inverse(&parameters.p)
+            .unwrap()
+            .to_biguint()
+            .unwrap();
         let r = (&nonce_point.x * &inverse * &inverse) % &parameters.p % &parameters.n;
         let mut z = rsa::BigUint::from_bytes_be(&digest);
         if digest.len() * 8 > parameters.n.bits() {
             z >>= digest.len() * 8 - parameters.n.bits();
         }
-        let nonce_inverse = nonce.modpow(&(&parameters.n - rsa::BigUint::from(2u8)), &parameters.n);
+        let nonce_inverse = nonce
+            .mod_inverse(&parameters.n)
+            .unwrap()
+            .to_biguint()
+            .unwrap();
         let s = ((z + &r) * nonce_inverse) % &parameters.n;
         let mut public_key = padded(&parameters.gx, parameters.coordinate_length);
         public_key.extend_from_slice(&padded(&parameters.gy, parameters.coordinate_length));
