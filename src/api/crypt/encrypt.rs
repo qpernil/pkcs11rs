@@ -124,6 +124,24 @@ pub(crate) fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParame
     })
 }
 
+fn parse_ctr_parameters(mechanism: &CK_MECHANISM) -> Result<CtrParameters, Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_AES_CTR_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = _as_ref(mechanism.pParameter as CK_AES_CTR_PARAMS_PTR)?;
+    let counter_bits = usize::try_from(parameters.ulCounterBits)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if !(1..=128).contains(&counter_bits) {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    Ok(CtrParameters {
+        counter_bits,
+        counter_block: parameters.cb,
+    })
+}
+
 fn crypt_init(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -163,7 +181,7 @@ fn crypt_init(
                 CKF_DECRYPT as CK_FLAGS
             },
         )?;
-        let (iv, gcm, oaep) = match mechanism.mechanism {
+        let (iv, ctr, gcm, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
                 || x == CKM_AES_ECB as CK_MECHANISM_TYPE
@@ -172,7 +190,7 @@ fn crypt_init(
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                (None, None, None)
+                (None, None, None, None)
             }
             x if x == CKM_AES_CBC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE =>
@@ -185,10 +203,14 @@ fn crypt_init(
                     Some(bytes.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?),
                     None,
                     None,
+                    None,
                 )
             }
+            x if x == CKM_AES_CTR as CK_MECHANISM_TYPE => {
+                (None, Some(parse_ctr_parameters(mechanism)?), None, None)
+            }
             x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
-                (None, Some(parse_gcm_parameters(mechanism)?), None)
+                (None, None, Some(parse_gcm_parameters(mechanism)?), None)
             }
             x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
                 if mechanism.ulParameterLen as usize
@@ -218,6 +240,7 @@ fn crypt_init(
                     parameters.ulSourceDataLen as usize,
                 )?;
                 (
+                    None,
                     None,
                     None,
                     Some((mgf, parameters.hashAlg, hash(digest, label)?.to_vec())),
@@ -270,6 +293,7 @@ fn crypt_init(
             ),
             mechanism: mechanism.mechanism,
             iv,
+            ctr,
             gcm,
             oaep,
             piv_pin_policy: match &object.material {
@@ -475,6 +499,43 @@ pub(super) fn yubihsm_encrypt_ecb_blocks(
     blocks: &[u8],
 ) -> Result<Vec<u8>, Error> {
     yubihsm_crypt_ecb_blocks(ctx, session_handle, key_id, blocks, true)
+}
+
+fn aes_ctr<F>(
+    parameters: &CtrParameters,
+    input: &[u8],
+    mut encrypt_blocks: F,
+) -> Result<Vec<u8>, Error>
+where
+    F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+{
+    let block_count = input.len().div_ceil(AES_BLOCK_LENGTH);
+    let counter_capacity = block_count
+        .checked_mul(AES_BLOCK_LENGTH)
+        .ok_or(CKR_DATA_LEN_RANGE)?;
+    let mut counter_blocks = Vec::with_capacity(counter_capacity);
+    let initial = u128::from_be_bytes(parameters.counter_block);
+    let mask = if parameters.counter_bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << parameters.counter_bits) - 1
+    };
+    let fixed = initial & !mask;
+    let initial_counter = initial & mask;
+    for offset in 0..block_count {
+        let offset = offset as u128;
+        let counter = fixed | initial_counter.wrapping_add(offset) & mask;
+        counter_blocks.extend_from_slice(&counter.to_be_bytes());
+    }
+    let key_stream = encrypt_blocks(&counter_blocks)?;
+    if key_stream.len() != counter_blocks.len() {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    Ok(input
+        .iter()
+        .zip(key_stream)
+        .map(|(input, key_stream)| input ^ key_stream)
+        .collect())
 }
 
 fn aes_kwp_transform<F>(
@@ -895,6 +956,15 @@ fn crypt(
                                             block,
                                             encrypting,
                                         )
+                                    },
+                                );
+                            }
+                            x if x == CKM_AES_CTR as CK_MECHANISM_TYPE => {
+                                return aes_ctr(
+                                    operation.ctr.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                    input,
+                                    |blocks| {
+                                        yubihsm_encrypt_ecb_blocks(ctx, session_handle, *id, blocks)
                                     },
                                 );
                             }

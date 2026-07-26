@@ -3416,11 +3416,21 @@ fn assert_pkcs11_aes_vector(
         pParameter: parameter,
         ulParameterLen: parameter_len,
     };
+    assert_pkcs11_aes_mechanism_vector(session, key, &mut mechanism, plaintext, ciphertext);
+}
+
+fn assert_pkcs11_aes_mechanism_vector(
+    session: CK_SESSION_HANDLE,
+    key: CK_OBJECT_HANDLE,
+    mechanism: &mut CK_MECHANISM,
+    plaintext: &[u8],
+    ciphertext: &[u8],
+) {
     let mut input = plaintext.to_vec();
     let mut output = vec![0; ciphertext.len()];
     let mut output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::api::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -3436,7 +3446,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(&output[..output_len as usize], ciphertext);
 
     assert_eq!(
-        crate::api::C_EncryptInit(session, &mut mechanism, key),
+        crate::api::C_EncryptInit(session, mechanism, key),
         CKR_OK as CK_RV
     );
     let split = plaintext.len().min(17);
@@ -3475,7 +3485,7 @@ fn assert_pkcs11_aes_vector(
     let mut output = vec![0; plaintext.len()];
     let mut output_len = output.len() as CK_ULONG;
     assert_eq!(
-        crate::api::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, mechanism, key),
         CKR_OK as CK_RV
     );
     assert_eq!(
@@ -3491,7 +3501,7 @@ fn assert_pkcs11_aes_vector(
     assert_eq!(&output[..output_len as usize], plaintext);
 
     assert_eq!(
-        crate::api::C_DecryptInit(session, &mut mechanism, key),
+        crate::api::C_DecryptInit(session, mechanism, key),
         CKR_OK as CK_RV
     );
     let split = input.len().min(19);
@@ -3792,6 +3802,32 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
         &plaintext,
         &cbc_padded_ciphertext,
     );
+
+    // NIST SP 800-38A, Appendix F.5.1.
+    let mut ctr_parameters = CK_AES_CTR_PARAMS {
+        ulCounterBits: 128,
+        cb: test_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+            .try_into()
+            .unwrap(),
+    };
+    let mut ctr_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_CTR as CK_MECHANISM_TYPE,
+        pParameter: (&mut ctr_parameters as *mut CK_AES_CTR_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_AES_CTR_PARAMS>() as CK_ULONG,
+    };
+    assert_pkcs11_aes_mechanism_vector(
+        session,
+        key,
+        &mut ctr_mechanism,
+        &plaintext,
+        &test_hex(concat!(
+            "874d6191b620e3261bef6864990db6ce",
+            "9806f66b7970fdff8617187bb9fffdff",
+            "5ae4df3edbd5d35e5b4f09020db03eab",
+            "1e031dda2fbe03d1792170a0f3009cee"
+        )),
+    );
+
     let mut invalid_padding = cbc_padded_ciphertext.clone();
     invalid_padding[63] ^= 1;
     let mut invalid_output = vec![0; invalid_padding.len()];
@@ -5540,6 +5576,12 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         cbc_pad.flags,
         (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
     );
+    let ctr = aes_block_modes
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_AES_CTR as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((ctr.min_key_size, ctr.max_key_size), (16, 16));
+    assert_eq!(ctr.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
     let kwp = aes_block_modes
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE)
