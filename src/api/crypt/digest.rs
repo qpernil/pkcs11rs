@@ -42,7 +42,7 @@ fn digest_init(
 }
 
 fn copy_digest(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     operation: &DigestOperation,
     data: &[u8],
@@ -158,14 +158,14 @@ pub extern "C" fn C_DigestUpdate(
 pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
     log!(2, "C_DigestKey called with {:?}", (session_handle, key));
     map(with_session_context_mut(session_handle, |ctx| {
-        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         if !ctx.digest_operations.contains_key(&session_handle) {
             return Err(Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV));
         }
         let object = ctx
             .resolve_object(key)?
             .ok_or_else(|| Error::from(CKR_KEY_HANDLE_INVALID as CK_RV))?;
-        if !object.is_visible_to(session_handle, slot_id, logged_in) {
+        if !object.is_visible_to(logged_in) {
             return Err(Error::from(CKR_KEY_HANDLE_INVALID as CK_RV));
         }
         if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {

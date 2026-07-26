@@ -2,12 +2,11 @@ use crate::pkcs11::*;
 #[cfg(feature = "abi-tests")]
 use crate::{
     abi_test_piv_slot, abi_test_yubihsm_slots, AbiScp03Slot, AbiTestSlot, ABI_TEST_PIV_SLOT_ID,
-    ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID, ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
-    ABI_TEST_YUBIHSM_SLOT_ID,
+    ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID,
 };
 use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
-    configured_ccid_configurations, map, pinentry, select_application, str_pad, CcidApplication,
+    configured_ccid_configurations, pinentry, select_application, str_pad, CcidApplication,
     Connector, CryptOperation, DigestOperation, Error, FindOperation, HsmAuthProviderRegistry,
     HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector,
     PcscConnector, PivSlot, Session, SignatureOperation, Slot, TokenObject, UsbConnector,
@@ -55,15 +54,21 @@ pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Resul
     }
 }
 
-pub(crate) struct Context {
+// Process-wide discovery resources and the registry of independently locked slots.
+pub(crate) struct ModuleContext {
     pub(crate) libusb: Option<rusb::Context>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
-    pub(crate) slots: HashMap<CK_SLOT_ID, Box<dyn Slot>>,
     pub(crate) slot_contexts: SlotContextRegistry,
+}
+
+// Mutable token state shared by every PKCS #11 session opened on this slot.
+pub(crate) struct SlotContext {
+    pub(crate) slot_id: CK_SLOT_ID,
+    pub(crate) slot: Box<dyn Slot>,
     pub(crate) sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
-    pub(crate) logged_in_slots: HashMap<CK_SLOT_ID, LoginRole>,
+    pub(crate) login_role: Option<LoginRole>,
     pub(crate) memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     pub(crate) token_object_handles: HashMap<CK_OBJECT_HANDLE, TokenObjectLocator>,
     pub(crate) find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
@@ -75,18 +80,18 @@ pub(crate) struct Context {
 }
 
 pub(crate) enum SlotContextRegistry {
-    Undiscovered(HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>),
-    Discovered(HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>),
+    Undiscovered(HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>),
+    Discovered(HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>),
 }
 
 impl SlotContextRegistry {
-    fn map(&self) -> &HashMap<CK_SLOT_ID, Arc<Mutex<Context>>> {
+    fn map(&self) -> &HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>> {
         match self {
             Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
         }
     }
 
-    fn map_mut(&mut self) -> &mut HashMap<CK_SLOT_ID, Arc<Mutex<Context>>> {
+    fn map_mut(&mut self) -> &mut HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>> {
         match self {
             Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
         }
@@ -103,7 +108,7 @@ impl SlotContextRegistry {
 }
 
 impl std::ops::Deref for SlotContextRegistry {
-    type Target = HashMap<CK_SLOT_ID, Arc<Mutex<Context>>>;
+    type Target = HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>;
 
     fn deref(&self) -> &Self::Target {
         self.map()
@@ -118,7 +123,6 @@ impl std::ops::DerefMut for SlotContextRegistry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TokenObjectLocator {
-    pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) unique_id: String,
 }
 
@@ -159,9 +163,9 @@ pub(crate) enum LoginRole {
     So,
 }
 
-impl std::fmt::Debug for Context {
+impl std::fmt::Debug for ModuleContext {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        fmt.debug_struct("Context")
+        fmt.debug_struct("ModuleContext")
             .field("libusb", &self.libusb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
@@ -169,11 +173,19 @@ impl std::fmt::Debug for Context {
                 "yubihsm_public_discovery_credential",
                 &self.yubihsm_public_discovery_credential,
             )
-            .field("slots", &self.slots)
             .field(
                 "slot_contexts",
                 &self.slot_contexts.keys().collect::<Vec<_>>(),
             )
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SlotContext {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("SlotContext")
+            .field("slot_id", &self.slot_id)
+            .field("slot", &self.slot)
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
             .field("token_object_handles", &self.token_object_handles)
@@ -187,9 +199,9 @@ impl std::fmt::Debug for Context {
     }
 }
 
-impl Context {
+impl ModuleContext {
     #[allow(unused_mut)]
-    pub(crate) fn new() -> Result<Context, Error> {
+    pub(crate) fn new() -> Result<ModuleContext, Error> {
         pinentry::configure_from_environment()?;
         #[cfg(feature = "abi-tests")]
         let mut slots = HashMap::from([
@@ -209,10 +221,6 @@ impl Context {
         ]);
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots());
-        #[cfg(not(feature = "abi-tests"))]
-        let slots = HashMap::new();
-
-        let objects = default_objects()?;
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_credential = configured_yubihsm_public_discovery_credential(
@@ -222,7 +230,7 @@ impl Context {
         let yubihsm_public_discovery_credential = None;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
-        let mut context = Context {
+        let mut context = ModuleContext {
             #[cfg(feature = "abi-tests")]
             libusb: None,
             #[cfg(not(feature = "abi-tests"))]
@@ -249,36 +257,39 @@ impl Context {
             },
             yubihsm_urls,
             yubihsm_public_discovery_credential,
-            slots,
             slot_contexts: SlotContextRegistry::Undiscovered(HashMap::new()),
-            sessions: HashMap::new(),
-            logged_in_slots: HashMap::new(),
-            memory_objects: HashMap::new(),
-            token_object_handles: HashMap::new(),
-            find_operations: HashMap::new(),
-            digest_operations: HashMap::new(),
-            encrypt_operations: HashMap::new(),
-            decrypt_operations: HashMap::new(),
-            sign_operations: HashMap::new(),
-            verify_operations: HashMap::new(),
         };
-        let mut objects = objects.into_iter().collect::<Vec<_>>();
-        objects.sort_by_key(|(handle, _)| *handle);
-        for (_, object) in objects {
-            context.insert_object(object);
+        #[cfg(feature = "abi-tests")]
+        for (slot_id, slot) in {
+            let mut slots = slots.into_iter().collect::<Vec<_>>();
+            slots.sort_by_key(|(slot_id, _)| *slot_id);
+            slots
+        } {
+            let discover_objects = !cfg!(test);
+            let mut token_objects = if discover_objects {
+                slot.token_objects(slot_id)?
+            } else {
+                Vec::new()
+            };
+            let initial_token_objects = if slot_id == ABI_TEST_SLOT_ID {
+                Vec::new()
+            } else {
+                std::mem::take(&mut token_objects)
+            };
+            let mut child = SlotContext::new(slot_id, slot, initial_token_objects)?;
+            if slot_id == ABI_TEST_SLOT_ID {
+                let mut objects = default_objects()?.into_iter().collect::<Vec<_>>();
+                objects.sort_by_key(|(handle, _)| *handle);
+                for (_, object) in objects {
+                    child.insert_object(object);
+                }
+                child.reconcile_slot_token_objects(slot_id, token_objects)?;
+            }
+            context
+                .slot_contexts
+                .insert(slot_id, Arc::new(Mutex::new(child)));
         }
-        let yubihsm_slot_ids = context
-            .slots
-            .iter()
-            .filter_map(|(slot_id, slot)| slot.is_yubihsm().then_some(*slot_id))
-            .collect::<Vec<_>>();
-        for slot_id in yubihsm_slot_ids {
-            let slot = context.slots.remove(&slot_id).unwrap();
-            context.insert_yubihsm_slot_with_discovery(slot_id, slot, !cfg!(test))?;
-        }
-        #[cfg(all(feature = "abi-tests", not(test)))]
-        add_abi_test_backend_objects(&mut context)?;
-        log!(2, "Context.new {:?}", context);
+        log!(2, "ModuleContext.new {:?}", context);
         Ok(context)
     }
 
@@ -286,7 +297,7 @@ impl Context {
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
         discover_objects: bool,
-    ) -> Result<Context, Error> {
+    ) -> Result<SlotContext, Error> {
         let token_objects = if discover_objects && slot.is_present() {
             match slot.token_objects(slot_id) {
                 Ok(objects) => objects,
@@ -298,35 +309,7 @@ impl Context {
         } else {
             Vec::new()
         };
-        Self::new_child_context(vec![(slot_id, slot, token_objects)])
-    }
-
-    fn new_child_context(
-        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
-    ) -> Result<Context, Error> {
-        let mut context = Context {
-            libusb: None,
-            pcsc: None,
-            yubihsm_urls: Vec::new(),
-            yubihsm_public_discovery_credential: None,
-            slots: HashMap::new(),
-            slot_contexts: SlotContextRegistry::Discovered(HashMap::new()),
-            sessions: HashMap::new(),
-            logged_in_slots: HashMap::new(),
-            memory_objects: HashMap::new(),
-            token_object_handles: HashMap::new(),
-            find_operations: HashMap::new(),
-            digest_operations: HashMap::new(),
-            encrypt_operations: HashMap::new(),
-            decrypt_operations: HashMap::new(),
-            sign_operations: HashMap::new(),
-            verify_operations: HashMap::new(),
-        };
-        for (slot_id, slot, token_objects) in slots {
-            context.slots.insert(slot_id, slot);
-            context.reconcile_slot_token_objects(slot_id, token_objects)?;
-        }
-        Ok(context)
+        SlotContext::new(slot_id, slot, token_objects)
     }
 
     pub(crate) fn insert_yubihsm_slot(
@@ -362,16 +345,16 @@ impl Context {
         let distinct_slot_ids = slot_ids.iter().copied().collect::<HashSet<_>>();
         if slot_ids.is_empty()
             || distinct_slot_ids.len() != slot_ids.len()
-            || slot_ids.iter().any(|slot_id| {
-                self.slots.contains_key(slot_id) || self.slot_contexts.contains_key(slot_id)
-            })
+            || slot_ids
+                .iter()
+                .any(|slot_id| self.slot_contexts.contains_key(slot_id))
         {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         let contexts = slots
             .into_iter()
             .map(|(slot_id, slot, token_objects)| {
-                let context = Self::new_child_context(vec![(slot_id, slot, token_objects)])?;
+                let context = SlotContext::new(slot_id, slot, token_objects)?;
                 Ok((slot_id, Arc::new(Mutex::new(context))))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -397,9 +380,8 @@ impl Context {
     }
 
     fn next_slot_id(&self) -> CK_SLOT_ID {
-        self.slots
+        self.slot_contexts
             .keys()
-            .chain(self.slot_contexts.keys())
             .max()
             .copied()
             .map_or(0, |slot_id| slot_id + 1)
@@ -417,11 +399,43 @@ impl Context {
         str_pad("Yubico", &mut info.manufacturerID);
         Ok(())
     }
-    pub(crate) fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
-        match self.slots.get(&slot_id) {
-            Some(slot) => Ok(slot.as_ref()),
-            None => Err(CKR_SLOT_ID_INVALID.into()),
+}
+
+impl SlotContext {
+    pub(crate) fn new(
+        slot_id: CK_SLOT_ID,
+        slot: Box<dyn Slot>,
+        token_objects: Vec<TokenObject>,
+    ) -> Result<Self, Error> {
+        let mut context = Self {
+            slot_id,
+            slot,
+            sessions: HashMap::new(),
+            login_role: None,
+            memory_objects: HashMap::new(),
+            token_object_handles: HashMap::new(),
+            find_operations: HashMap::new(),
+            digest_operations: HashMap::new(),
+            encrypt_operations: HashMap::new(),
+            decrypt_operations: HashMap::new(),
+            sign_operations: HashMap::new(),
+            verify_operations: HashMap::new(),
+        };
+        context.reconcile_slot_token_objects(slot_id, token_objects)?;
+        Ok(context)
+    }
+
+    fn require_slot_id(&self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
+        if slot_id == self.slot_id {
+            Ok(())
+        } else {
+            Err(CKR_SLOT_ID_INVALID.into())
         }
+    }
+
+    pub(crate) fn get_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
+        self.require_slot_id(slot_id)?;
+        Ok(self.slot.as_ref())
     }
     pub(crate) fn get_present_slot(&self, slot_id: CK_SLOT_ID) -> Result<&(dyn Slot + '_), Error> {
         let slot = self.get_slot(slot_id)?;
@@ -435,18 +449,15 @@ impl Context {
         &mut self,
         slot_id: CK_SLOT_ID,
     ) -> Result<&mut (dyn Slot + '_), Error> {
-        match self.slots.get_mut(&slot_id) {
-            Some(slot) => Ok(slot.as_mut()),
-            None => Err(CKR_SLOT_ID_INVALID.into()),
-        }
+        self.require_slot_id(slot_id)?;
+        Ok(self.slot.as_mut())
     }
     pub(crate) fn get_session_(
         &self,
         session_handle: CK_SESSION_HANDLE,
     ) -> Option<(&(dyn Slot + '_), &(dyn Session + '_))> {
         let session = self.sessions.get(&session_handle)?;
-        let slot = self.slots.get(&session.slotID())?;
-        Some((slot.as_ref(), session.as_ref()))
+        (session.slotID() == self.slot_id).then_some((self.slot.as_ref(), session.as_ref()))
     }
     pub(crate) fn _get_session(
         &self,
@@ -471,11 +482,9 @@ impl Context {
     }
 
     pub(crate) fn login_role(&self, slot_id: CK_SLOT_ID) -> Option<LoginRole> {
-        self.logged_in_slots.get(&slot_id).copied().filter(|_| {
-            self.slots
-                .get(&slot_id)
-                .is_some_and(|slot| slot.login_is_active())
-        })
+        (slot_id == self.slot_id && self.slot.login_is_active())
+            .then_some(self.login_role)
+            .flatten()
     }
 
     pub(crate) fn is_slot_logged_in(&self, slot_id: CK_SLOT_ID) -> bool {
@@ -487,7 +496,7 @@ impl Context {
     }
 
     pub(crate) fn reconcile_login_state(&mut self, slot_id: CK_SLOT_ID) {
-        if self.logged_in_slots.contains_key(&slot_id) && !self.is_slot_logged_in(slot_id) {
+        if self.login_role.is_some() && !self.is_slot_logged_in(slot_id) {
             self.clear_login_state(slot_id);
         }
     }
@@ -511,11 +520,7 @@ impl Context {
         let Some(locator) = self.token_object_handles.get(&handle) else {
             return Ok(None);
         };
-        let slot = self
-            .slots
-            .get(&locator.slot_id)
-            .ok_or(CKR_SLOT_ID_INVALID)?;
-        slot.token_object(locator.slot_id, &locator.unique_id)
+        self.slot.token_object(self.slot_id, &locator.unique_id)
     }
 
     pub(crate) fn resolved_objects(&self) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
@@ -524,28 +529,15 @@ impl Context {
             .iter()
             .map(|(handle, object)| (*handle, object.clone()))
             .collect::<Vec<_>>();
-        let mut by_slot: HashMap<CK_SLOT_ID, HashMap<String, TokenObject>> = HashMap::new();
-        for locator in self.token_object_handles.values() {
-            if by_slot.contains_key(&locator.slot_id) {
-                continue;
-            }
-            let slot = self
-                .slots
-                .get(&locator.slot_id)
-                .ok_or(CKR_SLOT_ID_INVALID)?;
-            let slot_objects = slot
-                .token_objects(locator.slot_id)?
-                .into_iter()
-                .filter(|object| object.token)
-                .map(|object| (object.unique_id.clone(), object))
-                .collect();
-            by_slot.insert(locator.slot_id, slot_objects);
-        }
+        let token_objects = self
+            .slot
+            .token_objects(self.slot_id)?
+            .into_iter()
+            .filter(|object| object.token)
+            .map(|object| (object.unique_id.clone(), object))
+            .collect::<HashMap<_, _>>();
         for (handle, locator) in &self.token_object_handles {
-            if let Some(object) = by_slot
-                .get(&locator.slot_id)
-                .and_then(|objects| objects.get(&locator.unique_id))
-            {
+            if let Some(object) = token_objects.get(&locator.unique_id) {
                 objects.push((*handle, object.clone()));
             }
         }
@@ -580,6 +572,7 @@ impl Context {
         objects: Vec<TokenObject>,
         rebindings: &[(CK_OBJECT_HANDLE, String)],
     ) -> Result<(), Error> {
+        self.require_slot_id(slot_id)?;
         let mut objects_by_id = HashMap::new();
         for object in objects.into_iter().filter(|object| object.token) {
             if object.unique_id.is_empty()
@@ -600,12 +593,10 @@ impl Context {
             .map(|(_, unique_id)| unique_id.as_str())
             .collect::<HashSet<_>>();
         for (handle, unique_id) in rebindings {
-            let locator = self
-                .token_object_handles
-                .get(handle)
-                .filter(|locator| locator.slot_id == slot_id)
-                .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
-            if !objects_by_id.contains_key(unique_id) || locator.slot_id != slot_id {
+            if !self.token_object_handles.contains_key(handle) {
+                return Err(CKR_OBJECT_HANDLE_INVALID.into());
+            }
+            if !objects_by_id.contains_key(unique_id) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
         }
@@ -613,8 +604,7 @@ impl Context {
             .token_object_handles
             .iter()
             .filter_map(|(handle, locator)| {
-                (locator.slot_id == slot_id
-                    && rebound_ids.contains(locator.unique_id.as_str())
+                (rebound_ids.contains(locator.unique_id.as_str())
                     && !rebound_handles.contains(handle))
                 .then_some(*handle)
             })
@@ -633,8 +623,7 @@ impl Context {
             .token_object_handles
             .iter()
             .filter_map(|(handle, locator)| {
-                (locator.slot_id == slot_id && !objects_by_id.contains_key(&locator.unique_id))
-                    .then_some(*handle)
+                (!objects_by_id.contains_key(&locator.unique_id)).then_some(*handle)
             })
             .collect::<Vec<_>>();
         for handle in removed {
@@ -643,7 +632,6 @@ impl Context {
         let existing = self
             .token_object_handles
             .values()
-            .filter(|locator| locator.slot_id == slot_id)
             .map(|locator| locator.unique_id.clone())
             .collect::<HashSet<_>>();
         let mut new_unique_ids = objects_by_id
@@ -653,20 +641,15 @@ impl Context {
             .collect::<Vec<_>>();
         new_unique_ids.sort();
         for unique_id in new_unique_ids {
-            self.token_object_handles.insert(
-                allocate_object_handle(),
-                TokenObjectLocator { slot_id, unique_id },
-            );
+            self.token_object_handles
+                .insert(allocate_object_handle(), TokenObjectLocator { unique_id });
         }
         Ok(())
     }
 
     pub(crate) fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
-        let objects = self
-            .slots
-            .get(&slot_id)
-            .ok_or(CKR_SLOT_ID_INVALID)?
-            .token_objects(slot_id)?;
+        self.require_slot_id(slot_id)?;
+        let objects = self.slot.token_objects(slot_id)?;
         self.reconcile_slot_token_objects(slot_id, objects)
     }
 
@@ -675,48 +658,36 @@ impl Context {
         slot_id: CK_SLOT_ID,
         session_handle: CK_SESSION_HANDLE,
     ) -> Result<(), Error> {
-        let objects = self
-            .slots
-            .get(&slot_id)
-            .ok_or(CKR_SLOT_ID_INVALID)?
-            .session_objects(slot_id)?;
+        self.require_slot_id(slot_id)?;
+        let objects = self.slot.session_objects(slot_id)?;
         for mut object in objects.into_iter().filter(|object| !object.token) {
-            if self.memory_objects.values().any(|existing| {
-                existing.owner_session == Some(session_handle)
-                    && existing.slot_id == Some(slot_id)
-                    && existing.unique_id == object.unique_id
-            }) {
+            if !object.unique_id.is_empty()
+                && self
+                    .memory_objects
+                    .values()
+                    .any(|existing| !existing.token && existing.unique_id == object.unique_id)
+            {
                 continue;
             }
-            object.set_owner(session_handle, slot_id);
+            object.set_creator(session_handle, slot_id);
             self.insert_object(object);
         }
         Ok(())
     }
 
     pub(crate) fn clear_login_state(&mut self, slot_id: CK_SLOT_ID) {
-        self.logged_in_slots.remove(&slot_id);
-        let slot_sessions: HashSet<CK_SESSION_HANDLE> = self
-            .sessions
-            .iter()
-            .filter(|(_handle, session)| session.slotID() == slot_id)
-            .map(|(handle, _session)| *handle)
-            .collect();
-        self.find_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-        self.digest_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-        self.encrypt_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-        self.decrypt_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-        self.sign_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-        self.verify_operations
-            .retain(|session, _operation| !slot_sessions.contains(session));
-
+        if self.require_slot_id(slot_id).is_err() {
+            return;
+        }
+        self.login_role = None;
+        self.find_operations.clear();
+        self.digest_operations.clear();
+        self.encrypt_operations.clear();
+        self.decrypt_operations.clear();
+        self.sign_operations.clear();
+        self.verify_operations.clear();
         self.memory_objects
-            .retain(|_, object| object.slot_id != Some(slot_id) || object.token || !object.private);
+            .retain(|_, object| object.token || !object.private);
     }
 
     pub(crate) fn logout_slot(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
@@ -725,45 +696,36 @@ impl Context {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn close_slot_state(&mut self, slot_id: CK_SLOT_ID, remove_token_objects: bool) {
-        self.logged_in_slots.remove(&slot_id);
-        if let Some(slot) = self.slots.get_mut(&slot_id) {
-            slot.clear_session();
+        if self.require_slot_id(slot_id).is_err() {
+            return;
         }
-        let sessions: HashSet<CK_SESSION_HANDLE> = self
-            .sessions
-            .iter()
-            .filter(|(_, session)| session.slotID() == slot_id)
-            .map(|(handle, _)| *handle)
-            .collect();
-        self.sessions.retain(|handle, _| !sessions.contains(handle));
-        self.find_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.digest_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.encrypt_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.decrypt_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.sign_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.verify_operations
-            .retain(|handle, _| !sessions.contains(handle));
-        self.memory_objects.retain(|_, object| {
-            object.slot_id != Some(slot_id) || (!remove_token_objects && object.token)
-        });
+        self.login_role = None;
+        self.slot.clear_session();
+        self.sessions.clear();
+        self.find_operations.clear();
+        self.digest_operations.clear();
+        self.encrypt_operations.clear();
+        self.decrypt_operations.clear();
+        self.sign_operations.clear();
+        self.verify_operations.clear();
+        self.memory_objects
+            .retain(|_, object| !remove_token_objects && object.token);
         if remove_token_objects {
             let handles = self
                 .token_object_handles
-                .iter()
-                .filter_map(|(handle, locator)| (locator.slot_id == slot_id).then_some(*handle))
+                .keys()
+                .copied()
                 .collect::<Vec<_>>();
             for handle in handles {
                 self.remove_object_handle(handle);
             }
         }
     }
+}
 
+impl ModuleContext {
     #[allow(unreachable_code)]
     pub(crate) fn init(&mut self) {
         if !self.slot_contexts.begin_discovery() {
@@ -811,16 +773,11 @@ impl Context {
                                     };
                                     let name = connector.name();
                                     log!(2, "{}", name);
-                                    if self.slot_contexts.iter().any(|(slot_id, context)| {
+                                    if self.slot_contexts.values().any(|context| {
                                         context
                                             .lock()
                                             .ok()
-                                            .map(|context| {
-                                                context
-                                                    .slots
-                                                    .get(slot_id)
-                                                    .is_some_and(|slot| slot.name() == name)
-                                            })
+                                            .map(|context| context.slot.name() == name)
                                             .unwrap_or(false)
                                     }) {
                                         continue;
@@ -911,49 +868,6 @@ impl Context {
                     };
                     let name = connector.name();
                     log!(2, "{}", name);
-                    if let Some(slot_id) = self
-                        .slots
-                        .iter()
-                        .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
-                    {
-                        let (was_present, is_present) = {
-                            let slot = self.slots.get(&slot_id).unwrap();
-                            let was_present = slot.is_present();
-                            map(slot.refresh());
-                            (was_present, slot.is_present())
-                        };
-                        if was_present && !is_present {
-                            self.close_slot_state(slot_id, false);
-                        } else if !was_present && is_present {
-                            let initialized = self
-                                .slots
-                                .get_mut(&slot_id)
-                                .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
-                                .and_then(|slot| slot.init_slot());
-                            if let Err(error) = initialized {
-                                log!(
-                                    1,
-                                    "CCID application initialization failed for {}: {:?}",
-                                    name,
-                                    error
-                                );
-                                if let Some(slot) = self.slots.get(&slot_id) {
-                                    slot.set_discovery_error(&error);
-                                }
-                            } else {
-                                if let Some(slot) = self.slots.get(&slot_id) {
-                                    slot.clear_discovery_error();
-                                }
-                                if let Err(error) = self.refresh_slot_token_objects(slot_id) {
-                                    log!(2, "CCID object discovery: {:?}", error);
-                                    if let Some(slot) = self.slots.get(&slot_id) {
-                                        slot.set_discovery_error(&error);
-                                    }
-                                }
-                            }
-                        }
-                        continue;
-                    }
                     if let Err(error) = connector.refresh() {
                         log!(1, "PCSC reader has no usable card: {:?}", error);
                         continue;
@@ -980,51 +894,6 @@ impl Context {
                     let mut next_reader_slot_id = self.next_slot_id();
                     for configuration in configurations {
                         let application_label = ccid_application_label(configuration.application);
-                        let name = format!("{} {}", base_connector.name(), application_label);
-                        if let Some(slot_id) = self
-                            .slots
-                            .iter()
-                            .find_map(|(slot_id, slot)| (slot.name() == name).then_some(*slot_id))
-                        {
-                            let (was_present, is_present) = {
-                                let slot = self.slots.get(&slot_id).unwrap();
-                                let was_present = slot.is_present();
-                                map(slot.refresh());
-                                (was_present, slot.is_present())
-                            };
-                            if was_present && !is_present {
-                                self.close_slot_state(slot_id, false);
-                            } else if !was_present && is_present {
-                                let initialized = self
-                                    .slots
-                                    .get_mut(&slot_id)
-                                    .ok_or_else(|| Error::from(CKR_SLOT_ID_INVALID))
-                                    .and_then(|slot| slot.init_slot());
-                                if let Err(error) = initialized {
-                                    log!(
-                                        1,
-                                        "CCID application initialization failed for {}: {:?}",
-                                        application_label,
-                                        error
-                                    );
-                                    if let Some(slot) = self.slots.get(&slot_id) {
-                                        slot.set_discovery_error(&error);
-                                    }
-                                } else {
-                                    if let Some(slot) = self.slots.get(&slot_id) {
-                                        slot.clear_discovery_error();
-                                    }
-                                    if let Err(error) = self.refresh_slot_token_objects(slot_id) {
-                                        log!(2, "CCID object discovery: {:?}", error);
-                                        if let Some(slot) = self.slots.get(&slot_id) {
-                                            slot.set_discovery_error(&error);
-                                        }
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
                         let slot_id = next_reader_slot_id;
                         next_reader_slot_id = next_reader_slot_id
                             .checked_add(1)
@@ -1145,8 +1014,7 @@ impl Context {
                 self.slot_contexts
                     .get(slot_id)
                     .and_then(|context| context.lock().ok())
-                    .and_then(|context| context.slots.get(slot_id).map(|slot| slot.is_yubihsm()))
-                    .unwrap_or(false)
+                    .is_some_and(|context| context.slot.is_yubihsm())
             })
             .copied()
             .collect::<Vec<_>>();
@@ -1162,13 +1030,8 @@ impl Context {
                 }
             }
         }
-        log!(2, "Context.init {:?}", self);
+        log!(2, "ModuleContext.init {:?}", self);
     }
-}
-
-#[cfg(not(any(test, feature = "abi-tests")))]
-pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>, Error> {
-    Ok(HashMap::new())
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -1198,7 +1061,7 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
                 never_extractable: false,
                 local: true,
                 key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::RsaPublic(public_key),
             },
         ),
@@ -1224,7 +1087,7 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
                 never_extractable: true,
                 local: true,
                 key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::RsaPrivate(Box::new(private_key)),
             },
         ),
@@ -1233,42 +1096,18 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
     Ok(objects)
 }
 
-#[cfg(feature = "abi-tests")]
-#[allow(dead_code)]
-pub(crate) fn add_abi_test_backend_objects(context: &mut Context) -> Result<(), Error> {
-    let profiles = context
-        .slots
-        .get(&ABI_TEST_SLOT_ID)
-        .ok_or(CKR_SLOT_ID_INVALID)?
-        .profile_objects(ABI_TEST_SLOT_ID);
-    context.reconcile_slot_token_objects(ABI_TEST_SLOT_ID, profiles)?;
-    for slot_id in [
-        ABI_TEST_PIV_SLOT_ID,
-        ABI_TEST_SCP03_SLOT_ID,
-        ABI_TEST_YUBIHSM_SLOT_ID,
-        ABI_TEST_SCP11_SLOT_ID,
-        ABI_TEST_SECOND_YUBIHSM_SLOT_ID,
-    ] {
-        if let Some(child) = context.slot_contexts.get(&slot_id).cloned() {
-            child
-                .lock()
-                .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-                .refresh_slot_token_objects(slot_id)?;
-        } else if context.slots.contains_key(&slot_id) {
-            context.refresh_slot_token_objects(slot_id)?;
-        }
-    }
-    Ok(())
-}
+// A SlotContext is always protected by its slot-context mutex. Connector handles
+// that are not marked Send by their dependency crates never escape that guard.
+unsafe impl Send for SlotContext {}
 
-// A Context is always protected by either RUNTIME.module or a slot-context mutex.
+// ModuleContext is always protected by RUNTIME.module.
 // Connector handles that are not marked Send by their dependency crates never
 // escape their owning context guard.
-unsafe impl Send for Context {}
+unsafe impl Send for ModuleContext {}
 
 pub(crate) struct Runtime {
     pub(crate) lifecycle: RwLock<()>,
-    pub(crate) module: Mutex<Option<Context>>,
+    pub(crate) module: Mutex<Option<ModuleContext>>,
 }
 
 pub(crate) static RUNTIME: Runtime = Runtime {

@@ -148,7 +148,7 @@ impl Default for PcscTransportState {
 #[derive(Debug, Default)]
 pub(crate) struct PcscReaderState {
     // This is the physical-reader gate. PKCS slot state is protected separately
-    // by the slot's child Context.
+    // by the applet's SlotContext.
     operation: Mutex<()>,
     transport: Mutex<PcscTransportState>,
     secure_channel: Mutex<SecureChannelState>,

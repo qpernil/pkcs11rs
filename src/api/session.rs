@@ -106,7 +106,7 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_slot_context_mut(slotID, |ctx, uses_slot_context| {
+        match with_slot_context_mut(slotID, |ctx| {
             if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
                 return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
@@ -120,33 +120,27 @@ pub extern "C" fn C_OpenSession(
                 return Ok(CKR_SESSION_READ_WRITE_SO_EXISTS as CK_RV);
             }
 
-            match ctx.slots.get_mut(&slotID) {
-                Some(slot) => {
-                    let _ = slot.refresh();
-                    log!(2, "{:?}", slot);
-                    if slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                        let k = allocate_session_handle();
-                        log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
-                        ctx.sessions.insert(k, slot.open_session(slotID, flags));
-                        if uses_slot_context {
-                            if let Err(_error) = SESSION_CONTEXTS
-                                .lock()
-                                .map_err(|_| Error::from(CKR_MUTEX_BAD))
-                                .map(|mut contexts| contexts.insert(k, slotID))
-                            {
-                                ctx.sessions.remove(&k);
-                                return Err(CKR_MUTEX_BAD.into());
-                            }
-                        }
-                        log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
-                        log!(2, "C_OpenSession returning {:?}", k);
-                        *session = k;
-                        Ok(CKR_OK as CK_RV)
-                    } else {
-                        Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
-                    }
+            let _ = ctx.slot.refresh();
+            log!(2, "{:?}", ctx.slot);
+            if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                let k = allocate_session_handle();
+                log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
+                ctx.sessions.insert(k, ctx.slot.open_session(slotID, flags));
+                if SESSION_CONTEXTS
+                    .lock()
+                    .map_err(|_| Error::from(CKR_MUTEX_BAD))
+                    .map(|mut contexts| contexts.insert(k, slotID))
+                    .is_err()
+                {
+                    ctx.sessions.remove(&k);
+                    return Err(CKR_MUTEX_BAD.into());
                 }
-                None => Ok(CKR_SLOT_ID_INVALID as CK_RV),
+                log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
+                log!(2, "C_OpenSession returning {:?}", k);
+                *session = k;
+                Ok(CKR_OK as CK_RV)
+            } else {
+                Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
             }
         }) {
             Ok(rv) => rv,
@@ -174,9 +168,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
                 Ok(()) => None,
                 Err(error) => {
                     ctx.clear_login_state(slot_id);
-                    if let Some(slot) = ctx.slots.get_mut(&slot_id) {
-                        slot.clear_session();
-                    }
+                    ctx.slot.clear_session();
                     Some(error)
                 }
             }
@@ -190,8 +182,16 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         ctx.decrypt_operations.remove(&session_handle);
         ctx.sign_operations.remove(&session_handle);
         ctx.verify_operations.remove(&session_handle);
-        ctx.memory_objects
-            .retain(|_, object| object.owner_session != Some(session_handle));
+        let creator_objects = ctx
+            .memory_objects
+            .iter()
+            .filter_map(|(handle, object)| {
+                (object.creator_session == Some(session_handle)).then_some(*handle)
+            })
+            .collect::<Vec<_>>();
+        for handle in creator_objects {
+            ctx.remove_object_handle(handle);
+        }
         SESSION_CONTEXTS
             .lock()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?
@@ -211,10 +211,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    match with_slot_context_mut(slotID, |ctx, _uses_slot_context| {
-        if !ctx.slots.contains_key(&slotID) {
-            return Ok(CKR_SLOT_ID_INVALID as CK_RV);
-        }
+    match with_slot_context_mut(slotID, |ctx| {
         log!(2, "C_CloseAllSessions sessions before {:?}", ctx.sessions);
         let closed_sessions: HashSet<CK_SESSION_HANDLE> = ctx
             .sessions
@@ -228,9 +225,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
                 Ok(()) => None,
                 Err(error) => {
                     ctx.clear_login_state(slotID);
-                    if let Some(slot) = ctx.slots.get_mut(&slotID) {
-                        slot.clear_session();
-                    }
+                    ctx.slot.clear_session();
                     Some(error)
                 }
             }
@@ -252,7 +247,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             .retain(|session, _operation| !closed_sessions.contains(session));
         ctx.memory_objects.retain(|_, object| {
             object
-                .owner_session
+                .creator_session
                 .map(|owner| !closed_sessions.contains(&owner))
                 .unwrap_or(true)
         });
@@ -331,7 +326,7 @@ pub extern "C" fn C_SetOperationState(
 }
 
 fn login_role(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     slot_id: CK_SLOT_ID,
     role: LoginRole,
@@ -357,7 +352,7 @@ fn login_role(
         }
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
-    ctx.logged_in_slots.insert(slot_id, role);
+    ctx.login_role = Some(role);
     if role == LoginRole::User && ctx.get_slot(slot_id)?.is_yubihsm() {
         if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
             let _ = ctx._get_slot_mut(slot_id)?.logout();

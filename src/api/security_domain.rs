@@ -351,7 +351,7 @@ fn security_domain_mutation(
 }
 
 fn validate_security_domain_session(
-    ctx: &Context,
+    ctx: &SlotContext,
     session_handle: CK_SESSION_HANDLE,
 ) -> Result<CK_SLOT_ID, Error> {
     let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -360,7 +360,7 @@ fn validate_security_domain_session(
 }
 
 fn validate_security_domain_administration(
-    ctx: &Context,
+    ctx: &SlotContext,
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     logged_in: bool,
@@ -378,7 +378,7 @@ fn validate_security_domain_administration(
 }
 
 fn finish_security_domain_mutation<T>(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     slot_id: CK_SLOT_ID,
     result: Result<T, Error>,
 ) -> Result<T, Error> {

@@ -671,7 +671,7 @@ impl Slot for OpenPgpSlot {
                 never_extractable: false,
                 local: key.local,
                 key_gen_mechanism,
-                owner_session: None,
+                creator_session: None,
                 material: public_material,
             });
             objects.push(TokenObject {
@@ -695,7 +695,7 @@ impl Slot for OpenPgpSlot {
                 never_extractable: true,
                 local: key.local,
                 key_gen_mechanism,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::OpenPgpPrivate {
                     key_ref: key.key_ref,
                     algorithm: key.algorithm,
@@ -728,7 +728,7 @@ impl Slot for OpenPgpSlot {
                 never_extractable: false,
                 local: false,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::OpenPgpCertificate {
                     value: certificate.value.clone(),
                 },
@@ -755,7 +755,7 @@ impl Slot for OpenPgpSlot {
                 never_extractable: false,
                 local: false,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::OpenPgpData {
                     tag: data_object.tag,
                     connector: self.connector.clone(),

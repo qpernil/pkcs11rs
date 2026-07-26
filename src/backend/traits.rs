@@ -28,7 +28,7 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         never_extractable: false,
         local: true,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::Profile { profile_id },
     }
 }

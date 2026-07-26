@@ -197,7 +197,7 @@ fn create_object(
             *object_handle = handle;
             return Ok(());
         }
-        object.set_owner(session_handle, slot_id);
+        object.set_creator(session_handle, slot_id);
         let handle = ctx.insert_object(object);
         *object_handle = handle;
         Ok(())
@@ -298,7 +298,7 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
 }
 
 pub(super) fn piv_key_object_handles(
-    ctx: &Context,
+    ctx: &SlotContext,
     slot_id: CK_SLOT_ID,
     piv_slot: piv::Slot,
 ) -> Result<Vec<(CK_OBJECT_HANDLE, CK_OBJECT_CLASS, bool)>, Error> {
@@ -614,7 +614,7 @@ fn piv_certificate_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::PivCertificate {
             algorithm,
             value: certificate.clone(),
@@ -730,7 +730,7 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::PivData {
             object_id,
             value: value.clone(),
@@ -1085,7 +1085,7 @@ fn copy_object(
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let mut copied_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if matches!(
             copied_object.material,
@@ -1111,7 +1111,7 @@ fn copy_object(
             return Err(rv.into());
         }
         validate_new_object_access(&copied_object, flags, logged_in)?;
-        copied_object.set_owner(session_handle, slot_id);
+        copied_object.set_creator(session_handle, slot_id);
         copied_object.unique_id.clear();
 
         let handle = ctx.insert_object(copied_object);
@@ -1141,7 +1141,7 @@ fn destroy_object(
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
@@ -1287,10 +1287,10 @@ fn get_object_size(
 ) -> Result<(), Error> {
     let size = as_mut(size)?;
     with_session_context(session_handle, |ctx| {
-        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         *size = object.size();
         Ok(())
@@ -1323,10 +1323,10 @@ fn get_attribute_value(
 ) -> Result<(), Error> {
     let templ = _from_raw_parts_mut(templ, count as usize)?;
     with_session_context(session_handle, |ctx| {
-        let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
 
         let mut rv = CKR_OK as CK_RV;
@@ -1363,7 +1363,7 @@ fn get_attribute_value(
 }
 
 fn yubihsm_object_value(
-    ctx: &Context,
+    ctx: &SlotContext,
     session_handle: CK_SESSION_HANDLE,
     id: u16,
     object_type: u8,
@@ -1388,7 +1388,7 @@ fn yubihsm_object_value(
 }
 
 fn object_attribute_value(
-    ctx: &Context,
+    ctx: &SlotContext,
     session_handle: CK_SESSION_HANDLE,
     object: &TokenObject,
     attribute_type: CK_ATTRIBUTE_TYPE,
@@ -1498,7 +1498,7 @@ fn set_attribute_value(
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let stored_object = ctx
             .resolve_object(object)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
         if stored_object.token && flags & CKF_RW_SESSION as CK_FLAGS == 0 {
             return Err(CKR_SESSION_READ_ONLY.into());
@@ -1670,7 +1670,7 @@ fn find_objects_init(
         log!(2, "C_FindObjectsInit template {:?}", templ);
         let mut objects = Vec::new();
         for (handle, object) in ctx.resolved_objects()? {
-            if !object.is_visible_to(session_handle, slot_id, logged_in) {
+            if !object.is_visible_to(logged_in) {
                 continue;
             }
             let mut matches = true;

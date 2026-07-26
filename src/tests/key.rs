@@ -225,9 +225,8 @@ pub fn generate_key_creates_secret_key_object() {
         read_key_gen_mechanism,
         CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
     );
-    {
-        let context = crate::lock_context().unwrap();
-        let object = context.as_ref().unwrap().memory_objects.get(&key).unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.memory_objects.get(&key).unwrap();
         match &object.material {
             crate::KeyMaterial::Secret(value) => {
                 assert_eq!(value.len(), value_len as usize);
@@ -235,7 +234,7 @@ pub fn generate_key_creates_secret_key_object() {
             }
             material => panic!("expected generated secret material, got {material:?}"),
         }
-    }
+    });
 
     let mut value_attribute = CK_ATTRIBUTE {
         type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
@@ -454,7 +453,7 @@ pub fn generated_secret_key_enforces_sensitivity_policy() {
 }
 
 #[test]
-pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
+pub fn session_objects_are_shared_on_the_slot_and_removed_with_the_creator() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -463,6 +462,7 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE + 1);
+    install_test_session(TEST_SLOT_ID + 1, TEST_SESSION_HANDLE + 2);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
@@ -499,16 +499,50 @@ pub fn session_objects_are_private_to_their_owner_and_removed_on_close() {
     );
     assert_eq!(
         crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE + 1, key, &mut class_attribute, 1),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE + 2, key, &mut class_attribute, 1),
         CKR_OBJECT_HANDLE_INVALID as CK_RV
     );
 
+    let mut secret_class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut find_template = [CK_ATTRIBUTE {
+        type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+        pValue: &mut secret_class as *mut CK_OBJECT_CLASS as CK_VOID_PTR,
+        ulValueLen: ::std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
+    }];
+    assert_eq!(
+        crate::api::C_FindObjectsInit(
+            TEST_SESSION_HANDLE + 1,
+            find_template.as_mut_ptr(),
+            find_template.len() as CK_ULONG
+        ),
+        CKR_OK as CK_RV
+    );
     assert_eq!(
         crate::api::C_CloseSession(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
     );
-    let context = crate::lock_context().unwrap();
-    assert!(!context.as_ref().unwrap().memory_objects.contains_key(&key));
-    drop(context);
+    assert!(!with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.memory_objects.contains_key(&key)
+    }));
+    let mut found = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 1];
+    let mut found_count = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(
+            TEST_SESSION_HANDLE + 1,
+            found.as_mut_ptr(),
+            found.len() as CK_ULONG,
+            &mut found_count
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(found_count, 0);
+    assert_eq!(
+        crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE + 1),
+        CKR_OK as CK_RV
+    );
 
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
@@ -526,12 +560,12 @@ pub fn removing_a_slot_clears_its_runtime_state() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
+        let child = test_slot_context(TEST_SLOT_ID);
+        let mut context = child.lock().unwrap();
         let mut session_object = context.memory_objects.get(&1).unwrap().clone();
         session_object.unique_id.clear();
         session_object.token = false;
-        session_object.owner_session = Some(TEST_SESSION_HANDLE);
+        session_object.creator_session = Some(TEST_SESSION_HANDLE);
         let object_handle = context.insert_object(session_object);
         context.find_operations.insert(
             TEST_SESSION_HANDLE,
@@ -542,15 +576,17 @@ pub fn removing_a_slot_clears_its_runtime_state() {
         );
 
         context.close_slot_state(TEST_SLOT_ID, true);
-        context.slots.remove(&TEST_SLOT_ID);
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
         assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
-        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
-        assert!(context
-            .memory_objects
-            .values()
-            .all(|object| object.slot_id != Some(TEST_SLOT_ID)));
+        assert!(context.login_role.is_none());
+        assert!(context.memory_objects.is_empty());
     }
+    crate::lock_context()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .slot_contexts
+        .remove(&TEST_SLOT_ID);
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
@@ -565,13 +601,7 @@ pub fn slot_info_does_not_trigger_slot_discovery() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context
-            .slots
-            .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
-    }
+    install_test_slot_with_backend(TEST_SLOT_ID, Box::new(test_slot(false)));
 
     let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
     assert_eq!(

@@ -97,7 +97,7 @@ fn verify_init(
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        if !object.is_visible_to(session_handle, slot_id, logged_in) {
+        if !object.is_visible_to(logged_in) {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
         if !object.verify {

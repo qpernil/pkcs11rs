@@ -332,7 +332,7 @@ fn crypt_init(
         };
         let object = ctx
             .resolve_object(key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
@@ -545,7 +545,7 @@ where
 }
 
 fn yubihsm_crypt_ecb_blocks(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     blocks: &[u8],
@@ -578,7 +578,7 @@ fn yubihsm_crypt_ecb_blocks(
 }
 
 pub(super) fn yubihsm_encrypt_ecb_blocks(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     blocks: &[u8],
@@ -587,7 +587,7 @@ pub(super) fn yubihsm_encrypt_ecb_blocks(
 }
 
 fn yubihsm_cbc_mac(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     blocks: &[u8],
@@ -961,7 +961,7 @@ fn remove_pkcs7_padding(mut plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
 }
 
 pub(crate) fn yubihsm_aes_cbc_pad(
-    ctx: &mut Context,
+    ctx: &mut SlotContext,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     iv: &[u8; AES_BLOCK_LENGTH],

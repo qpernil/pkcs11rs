@@ -232,7 +232,7 @@ fn wrap_key(
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_WRAP as CK_FLAGS)?;
         let target = ctx
             .resolve_object(key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         let (target_id, target_type, _algorithm) =
             yubihsm_material(&target).map_err(|_| Error::from(CKR_KEY_HANDLE_INVALID))?;
@@ -241,7 +241,7 @@ fn wrap_key(
         }
         let wrapper = ctx
             .resolve_object(wrapping_key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
         let (wrapping_key_id, _wrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, false)?;
@@ -349,7 +349,7 @@ fn unwrap_key(
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
         let wrapper = ctx
             .resolve_object(unwrapping_key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
         let (unwrapping_key_id, _unwrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, true)?;

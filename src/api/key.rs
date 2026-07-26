@@ -73,7 +73,7 @@ fn generate_key(
         }
         let mut key = generate_key_object(mechanism, templ)?;
         validate_new_object_access(&key, flags, logged_in)?;
-        key.set_owner(session_handle, slot_id);
+        key.set_creator(session_handle, slot_id);
         let handle = ctx.insert_object(key);
         *key_handle = handle;
         Ok(())
@@ -547,7 +547,7 @@ pub(super) fn openpgp_curve(parameters: &[u8]) -> Result<openpgp::Curve, Error> 
 }
 
 pub(super) fn find_openpgp_key_handle(
-    ctx: &Context,
+    ctx: &SlotContext,
     slot_id: CK_SLOT_ID,
     key_ref: OpenPgpKeyRef,
     class: CK_OBJECT_CLASS,
@@ -707,7 +707,7 @@ fn piv_generation_25519_algorithm(
 }
 
 pub(super) fn find_piv_key_handle(
-    ctx: &Context,
+    ctx: &SlotContext,
     slot_id: CK_SLOT_ID,
     piv_slot: piv::Slot,
     class: CK_OBJECT_CLASS,
@@ -1044,7 +1044,7 @@ fn derive_key(
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
         let object = ctx
             .resolve_object(base_key)?
-            .filter(|object| object.is_visible_to(session_handle, slot_id, logged_in))
+            .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
         if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -1180,7 +1180,7 @@ fn derive_key(
         derived_object.material =
             KeyMaterial::DerivedSecret(Zeroizing::new(derived[..requested_length].to_vec()));
         derived_object.local = false;
-        derived_object.set_owner(session_handle, slot_id);
+        derived_object.set_creator(session_handle, slot_id);
         *key_handle = ctx.insert_object(derived_object);
         Ok(())
     })

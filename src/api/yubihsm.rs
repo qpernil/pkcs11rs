@@ -134,7 +134,7 @@ pub(crate) fn yubihsm_enroll_device(
 }
 
 fn validate_yubihsm_enrollment(
-    ctx: &Context,
+    ctx: &SlotContext,
     slot_id: CK_SLOT_ID,
     flags: CK_FLAGS,
     logged_in: bool,

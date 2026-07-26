@@ -804,7 +804,7 @@ fn openpgp_data_objects_expose_application_tag_and_lazy_value() {
         never_extractable: false,
         local: false,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::OpenPgpData {
             tag: 0x005b,
             connector,
@@ -908,7 +908,7 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
         never_extractable: true,
         local: true,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: crate::KeyMaterial::OpenPgpPrivate {
             key_ref: crate::openpgp::KeyRef::Signature,
             algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
@@ -1228,16 +1228,16 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
             Some(crate::SecureChannelProtocol::Scp03),
             std::sync::Arc::new(crate::PcscReaderState::default()),
         ));
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(crate::IssuerSecurityDomainSlot::new(
+            connector.clone(),
+            application_aid,
+        )),
+    );
     {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context.slots.insert(
-            TEST_SLOT_ID,
-            Box::new(crate::IssuerSecurityDomainSlot::new(
-                connector.clone(),
-                application_aid,
-            )),
-        );
+        let child = test_slot_context(TEST_SLOT_ID);
+        let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
             Box::new(crate::PcscAppletSession {
@@ -1246,10 +1246,12 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
                 connector,
             }),
         );
-        context
-            .logged_in_slots
-            .insert(TEST_SLOT_ID, crate::LoginRole::User);
+        context.login_role = Some(crate::LoginRole::User);
     }
+    crate::SESSION_CONTEXTS
+        .lock()
+        .unwrap()
+        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
 
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
     assert_eq!(
@@ -1268,13 +1270,9 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         ),
         CKR_DEVICE_ERROR as CK_RV
     );
-    let context = crate::lock_context().unwrap();
-    assert!(!context
-        .as_ref()
-        .unwrap()
-        .logged_in_slots
-        .contains_key(&TEST_SLOT_ID));
-    drop(context);
+    assert!(with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.login_role.is_none()
+    }));
 
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
@@ -1292,18 +1290,19 @@ pub fn authentication_loss_cancels_active_private_signing() {
     );
 
     let login_active = std::rc::Rc::new(std::cell::Cell::new(true));
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(TestSlot {
+            present: std::cell::Cell::new(true),
+            remove_on_refresh: false,
+            login_active: Some(login_active.clone()),
+            mechanisms: crate::MECHANISMS.to_vec(),
+            session_objects: Vec::new(),
+        }),
+    );
     {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context.slots.insert(
-            TEST_SLOT_ID,
-            Box::new(TestSlot {
-                present: std::cell::Cell::new(true),
-                remove_on_refresh: false,
-                login_active: Some(login_active.clone()),
-                mechanisms: crate::MECHANISMS.to_vec(),
-            }),
-        );
+        let child = test_slot_context(TEST_SLOT_ID);
+        let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
             Box::new(TestSession {
@@ -1311,10 +1310,12 @@ pub fn authentication_loss_cancels_active_private_signing() {
                 flags: CKF_SERIAL_SESSION as CK_FLAGS,
             }),
         );
-        context
-            .logged_in_slots
-            .insert(TEST_SLOT_ID, crate::LoginRole::User);
+        context.login_role = Some(crate::LoginRole::User);
     }
+    crate::SESSION_CONTEXTS
+        .lock()
+        .unwrap()
+        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -1543,14 +1544,8 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    {
-        let mut context = crate::lock_context().unwrap();
-        let object = context
-            .as_mut()
-            .unwrap()
-            .memory_objects
-            .get_mut(&2)
-            .unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.memory_objects.get_mut(&2).unwrap();
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
@@ -1569,7 +1564,7 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
             object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
             Some(vec![CK_TRUE as CK_BBOOL])
         );
-    }
+    });
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -1613,14 +1608,8 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    {
-        let mut context = crate::lock_context().unwrap();
-        let object = context
-            .as_mut()
-            .unwrap()
-            .memory_objects
-            .get_mut(&2)
-            .unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.memory_objects.get_mut(&2).unwrap();
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
@@ -1639,7 +1628,7 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
             object.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
             Some(vec![CK_FALSE as CK_BBOOL])
         );
-    }
+    });
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -1682,16 +1671,10 @@ fn context_specific_login_requires_user_login() {
     );
     install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
-    {
-        let mut context = crate::lock_context().unwrap();
-        let object = context
-            .as_mut()
-            .unwrap()
-            .memory_objects
-            .get_mut(&2)
-            .unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.memory_objects.get_mut(&2).unwrap();
         object.private = false;
-    }
+    });
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -2188,13 +2171,7 @@ pub fn token_and_mechanism_queries_require_a_present_token() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    {
-        let mut context = crate::lock_context().unwrap();
-        let context = context.as_mut().unwrap();
-        context
-            .slots
-            .insert(TEST_SLOT_ID, Box::new(test_slot(false)));
-    }
+    install_test_slot_with_backend(TEST_SLOT_ID, Box::new(test_slot(false)));
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
@@ -2636,18 +2613,16 @@ pub fn open_session_refreshes_token_presence() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    {
-        let mut context = crate::lock_context().unwrap();
-        context.as_mut().unwrap().slots.insert(
-            TEST_SLOT_ID,
-            Box::new(TestSlot {
-                present: std::cell::Cell::new(true),
-                remove_on_refresh: true,
-                login_active: None,
-                mechanisms: crate::MECHANISMS.to_vec(),
-            }),
-        );
-    }
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(TestSlot {
+            present: std::cell::Cell::new(true),
+            remove_on_refresh: true,
+            login_active: None,
+            mechanisms: crate::MECHANISMS.to_vec(),
+            session_objects: Vec::new(),
+        }),
+    );
 
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     assert_eq!(
@@ -2996,12 +2971,10 @@ pub fn close_cleans_local_state_after_logout_failure() {
         crate::api::C_CloseSession(TEST_SESSION_HANDLE),
         CKR_SESSION_HANDLE_INVALID as CK_RV
     );
-    {
-        let context = crate::lock_context().unwrap();
-        let context = context.as_ref().unwrap();
-        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert!(context.login_role.is_none());
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
-    }
+    });
 
     TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
@@ -3020,15 +2993,10 @@ pub fn close_cleans_local_state_after_logout_failure() {
         crate::api::C_CloseAllSessions(TEST_SLOT_ID),
         CKR_DEVICE_ERROR as CK_RV
     );
-    {
-        let context = crate::lock_context().unwrap();
-        let context = context.as_ref().unwrap();
-        assert!(!context.logged_in_slots.contains_key(&TEST_SLOT_ID));
-        assert!(context
-            .sessions
-            .values()
-            .all(|session| session.slotID() != TEST_SLOT_ID));
-    }
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert!(context.login_role.is_none());
+        assert!(context.sessions.is_empty());
+    });
 
     TEST_SLOT_FAIL_LOGOUT.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
@@ -3225,7 +3193,7 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    let mut first = crate::Context::new().unwrap();
+    let mut first = new_test_slot_context(100);
     let mut first_slot_object = first.memory_objects.values().next().unwrap().clone();
     first_slot_object.slot_id = Some(100);
     first_slot_object.unique_id = "slot-100-object".to_owned();
@@ -3234,10 +3202,11 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
         .reconcile_slot_token_objects(100, vec![first_slot_object.clone()])
         .unwrap();
 
+    let mut second = new_test_slot_context(101);
     let mut second_slot_object = first_slot_object;
     second_slot_object.slot_id = Some(101);
     second_slot_object.unique_id = "slot-101-object".to_owned();
-    first
+    second
         .reconcile_slot_token_objects(101, vec![second_slot_object])
         .unwrap();
 
@@ -3245,11 +3214,16 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
         .memory_objects
         .keys()
         .chain(first.token_object_handles.keys())
+        .chain(second.memory_objects.keys())
+        .chain(second.token_object_handles.keys())
         .copied()
         .collect::<std::collections::HashSet<_>>();
     assert_eq!(
         handles.len(),
-        first.memory_objects.len() + first.token_object_handles.len()
+        first.memory_objects.len()
+            + first.token_object_handles.len()
+            + second.memory_objects.len()
+            + second.token_object_handles.len()
     );
     finalize_for_test();
 }
@@ -3259,7 +3233,7 @@ fn token_object_handles_are_allocated_in_stable_identity_order() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    fn reconcile_order(context: &mut crate::Context, unique_ids: &[&str]) -> Vec<String> {
+    fn reconcile_order(context: &mut crate::SlotContext, unique_ids: &[&str]) -> Vec<String> {
         let template = context.memory_objects.values().next().unwrap().clone();
         let objects = unique_ids
             .iter()
@@ -3275,7 +3249,6 @@ fn token_object_handles_are_allocated_in_stable_identity_order() {
         let mut handles = context
             .token_object_handles
             .iter()
-            .filter(|(_, locator)| locator.slot_id == 100)
             .map(|(handle, locator)| (*handle, locator.unique_id.clone()))
             .collect::<Vec<_>>();
         handles.sort_by_key(|(handle, _)| *handle);
@@ -3286,12 +3259,12 @@ fn token_object_handles_are_allocated_in_stable_identity_order() {
     }
 
     crate::reset_object_handles();
-    let mut first = crate::Context::new().unwrap();
+    let mut first = new_test_slot_context(100);
     let first_order = reconcile_order(&mut first, &["object-c", "object-a", "object-b"]);
     drop(first);
 
     crate::reset_object_handles();
-    let mut second = crate::Context::new().unwrap();
+    let mut second = new_test_slot_context(100);
     let second_order = reconcile_order(&mut second, &["object-b", "object-c", "object-a"]);
 
     assert_eq!(first_order, ["object-a", "object-b", "object-c"]);
@@ -3304,7 +3277,7 @@ fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    let mut context = crate::Context::new().unwrap();
+    let mut context = new_test_slot_context(100);
     let mut object = context.memory_objects.values().next().unwrap().clone();
     object.slot_id = Some(100);
     object.unique_id = "native-object-v1".to_owned();

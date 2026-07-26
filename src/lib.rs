@@ -617,7 +617,7 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn lock_context() -> Result<MutexGuard<'static, Option<Context>>, Error> {
+fn lock_context() -> Result<MutexGuard<'static, Option<ModuleContext>>, Error> {
     RUNTIME.module.lock().map_err(|_| CKR_MUTEX_BAD.into())
 }
 
@@ -637,14 +637,14 @@ fn lock_lifecycle_write() -> Result<std::sync::RwLockWriteGuard<'static, ()>, Er
     }
 }
 
-fn with_context<T>(f: impl FnOnce(&Context) -> Result<T, Error>) -> Result<T, Error> {
+fn with_context<T>(f: impl FnOnce(&ModuleContext) -> Result<T, Error>) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let guard = lock_context()?;
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
 }
 
-fn with_context_mut<T>(f: impl FnOnce(&mut Context) -> Result<T, Error>) -> Result<T, Error> {
+fn with_context_mut<T>(f: impl FnOnce(&mut ModuleContext) -> Result<T, Error>) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let mut guard = lock_context()?;
     let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
@@ -653,16 +653,16 @@ fn with_context_mut<T>(f: impl FnOnce(&mut Context) -> Result<T, Error>) -> Resu
 
 fn with_slot_context<T>(
     slot_id: CK_SLOT_ID,
-    f: impl FnOnce(&Context) -> Result<T, Error>,
+    f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let child = {
         let guard = lock_context()?;
         let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        match ctx.slot_contexts.get(&slot_id) {
-            Some(child) => child.clone(),
-            None => return f(ctx),
-        }
+        ctx.slot_contexts
+            .get(&slot_id)
+            .cloned()
+            .ok_or(CKR_SLOT_ID_INVALID)?
     };
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     f(&child)
@@ -670,24 +670,24 @@ fn with_slot_context<T>(
 
 fn with_slot_context_mut<T>(
     slot_id: CK_SLOT_ID,
-    f: impl FnOnce(&mut Context, bool) -> Result<T, Error>,
+    f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let child = {
         let mut guard = lock_context()?;
         let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        match ctx.slot_contexts.get(&slot_id) {
-            Some(child) => child.clone(),
-            None => return f(ctx, false),
-        }
+        ctx.slot_contexts
+            .get(&slot_id)
+            .cloned()
+            .ok_or(CKR_SLOT_ID_INVALID)?
     };
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-    f(&mut child, true)
+    f(&mut child)
 }
 
 fn with_session_context<T>(
     session_handle: CK_SESSION_HANDLE,
-    f: impl FnOnce(&Context) -> Result<T, Error>,
+    f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let slot_id = SESSION_CONTEXTS
@@ -698,9 +698,7 @@ fn with_session_context<T>(
     let child = {
         let guard = lock_context()?;
         let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        let Some(slot_id) = slot_id else {
-            return f(ctx);
-        };
+        let slot_id = slot_id.ok_or(CKR_SESSION_HANDLE_INVALID)?;
         ctx.slot_contexts
             .get(&slot_id)
             .cloned()
@@ -712,7 +710,7 @@ fn with_session_context<T>(
 
 fn with_session_context_mut<T>(
     session_handle: CK_SESSION_HANDLE,
-    f: impl FnOnce(&mut Context) -> Result<T, Error>,
+    f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
     let _lifecycle = lock_lifecycle_read()?;
     let slot_id = SESSION_CONTEXTS
@@ -723,9 +721,7 @@ fn with_session_context_mut<T>(
     let child = {
         let mut guard = lock_context()?;
         let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        let Some(slot_id) = slot_id else {
-            return f(ctx);
-        };
+        let slot_id = slot_id.ok_or(CKR_SESSION_HANDLE_INVALID)?;
         ctx.slot_contexts
             .get(&slot_id)
             .cloned()

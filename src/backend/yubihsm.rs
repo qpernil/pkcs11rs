@@ -1960,7 +1960,7 @@ pub(crate) fn yubihsm_device_public_key_object(
         never_extractable: false,
         local: true,
         key_gen_mechanism: None,
-        owner_session: None,
+        creator_session: None,
         material: KeyMaterial::YubiHsmDevicePublic {
             public_key: public_key.to_vec(),
             public_key_info,
@@ -2147,7 +2147,7 @@ pub(crate) fn yubihsm_token_objects_with_generation(
         key_gen_mechanism: generated
             .then(|| yubihsm_key_generation_mechanism(info.algorithm))
             .flatten(),
-        owner_session: None,
+        creator_session: None,
         material,
     }];
 
@@ -2200,7 +2200,7 @@ pub(crate) fn yubihsm_token_objects_with_generation(
             never_extractable: false,
             local: generated,
             key_gen_mechanism: objects[0].key_gen_mechanism,
-            owner_session: None,
+            creator_session: None,
             material: public_material,
         });
     }
@@ -2589,7 +2589,7 @@ impl Slot for YubiHsmSlot {
                 never_extractable: false,
                 local: true,
                 key_gen_mechanism: None,
-                owner_session: None,
+                creator_session: None,
                 material: KeyMaterial::YubiHsmAttestation {
                     connector: self.connector.clone(),
                     session: self.session.clone(),
