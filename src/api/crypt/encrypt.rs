@@ -1,6 +1,7 @@
 use super::shared::{rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad};
 use crate::*;
 use ghash::{universal_hash::UniversalHash, GHash};
+use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
 
 #[no_mangle]
 pub extern "C" fn C_EncryptInit(
@@ -165,14 +166,17 @@ fn crypt_init(
         let (iv, gcm, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                || x == CKM_AES_ECB as CK_MECHANISM_TYPE =>
+                || x == CKM_AES_ECB as CK_MECHANISM_TYPE
+                || x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE =>
             {
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
                 (None, None, None)
             }
-            x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => {
+            x if x == CKM_AES_CBC as CK_MECHANISM_TYPE
+                || x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE =>
+            {
                 if mechanism.ulParameterLen != 16 || mechanism.pParameter.is_null() {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
@@ -431,18 +435,27 @@ where
     }
 }
 
-pub(super) fn yubihsm_encrypt_ecb_blocks(
+fn yubihsm_crypt_ecb_blocks(
     ctx: &mut Context,
     session_handle: CK_SESSION_HANDLE,
     key_id: u16,
     blocks: &[u8],
+    encrypting: bool,
 ) -> Result<Vec<u8>, Error> {
     if !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
         return Err(CKR_DATA_LEN_RANGE.into());
     }
-    let mut encrypted = Vec::with_capacity(blocks.len());
+    let mut output = Vec::with_capacity(blocks.len());
     for chunk in blocks.chunks(YUBIHSM_ECB_CHUNK_LENGTH) {
-        let command = YubiHsmCommand::key_data(YubiHsmCommandCode::EncryptEcb, key_id, chunk)?;
+        let command = YubiHsmCommand::key_data(
+            if encrypting {
+                YubiHsmCommandCode::EncryptEcb
+            } else {
+                YubiHsmCommandCode::DecryptEcb
+            },
+            key_id,
+            chunk,
+        )?;
         let response = ctx
             ._get_session(session_handle)?
             .1
@@ -450,9 +463,189 @@ pub(super) fn yubihsm_encrypt_ecb_blocks(
         if response.len() != chunk.len() {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        encrypted.extend_from_slice(&response);
+        output.extend_from_slice(&response);
     }
-    Ok(encrypted)
+    Ok(output)
+}
+
+pub(super) fn yubihsm_encrypt_ecb_blocks(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    blocks: &[u8],
+) -> Result<Vec<u8>, Error> {
+    yubihsm_crypt_ecb_blocks(ctx, session_handle, key_id, blocks, true)
+}
+
+fn aes_kwp_transform<F>(
+    input: &[u8],
+    encrypting: bool,
+    mut crypt_block: F,
+) -> Result<Vec<u8>, Error>
+where
+    F: FnMut(&[u8], bool) -> Result<Vec<u8>, Error>,
+{
+    const AIV_PREFIX: [u8; 4] = [0xa6, 0x59, 0x59, 0xa6];
+    const SEMIBLOCK_LENGTH: usize = 8;
+
+    if encrypting {
+        if input.is_empty() || input.len() > u32::MAX as usize {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let semiblocks = input.len().div_ceil(SEMIBLOCK_LENGTH);
+        let mut a = [0; SEMIBLOCK_LENGTH];
+        a[..4].copy_from_slice(&AIV_PREFIX);
+        a[4..].copy_from_slice(&(input.len() as u32).to_be_bytes());
+        let mut r = input.to_vec();
+        r.resize(semiblocks * SEMIBLOCK_LENGTH, 0);
+        if semiblocks == 1 {
+            let mut block = a.to_vec();
+            block.extend_from_slice(&r);
+            return crypt_block(&block, true);
+        }
+        for round in 0..6 {
+            for index in 0..semiblocks {
+                let mut block = a.to_vec();
+                block.extend_from_slice(
+                    &r[index * SEMIBLOCK_LENGTH..(index + 1) * SEMIBLOCK_LENGTH],
+                );
+                let transformed = crypt_block(&block, true)?;
+                let transformed: [u8; AES_BLOCK_LENGTH] = transformed
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+                let counter = semiblocks as u64 * round as u64 + index as u64 + 1;
+                a.copy_from_slice(&transformed[..SEMIBLOCK_LENGTH]);
+                for (byte, counter) in a.iter_mut().zip(counter.to_be_bytes()) {
+                    *byte ^= counter;
+                }
+                r[index * SEMIBLOCK_LENGTH..(index + 1) * SEMIBLOCK_LENGTH]
+                    .copy_from_slice(&transformed[SEMIBLOCK_LENGTH..]);
+            }
+        }
+        let mut output = a.to_vec();
+        output.extend_from_slice(&r);
+        return Ok(output);
+    }
+
+    if input.len() < AES_BLOCK_LENGTH || !crate::is_multiple_of(input.len(), SEMIBLOCK_LENGTH) {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+    }
+    let semiblocks = input.len() / SEMIBLOCK_LENGTH - 1;
+    let mut a: [u8; SEMIBLOCK_LENGTH] = input[..SEMIBLOCK_LENGTH]
+        .try_into()
+        .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_INVALID))?;
+    let mut r = input[SEMIBLOCK_LENGTH..].to_vec();
+    if semiblocks == 1 {
+        let transformed = crypt_block(input, false)?;
+        let transformed: [u8; AES_BLOCK_LENGTH] = transformed
+            .try_into()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        a.copy_from_slice(&transformed[..SEMIBLOCK_LENGTH]);
+        r.copy_from_slice(&transformed[SEMIBLOCK_LENGTH..]);
+    } else {
+        for round in (0..6).rev() {
+            for index in (0..semiblocks).rev() {
+                let counter = semiblocks as u64 * round as u64 + index as u64 + 1;
+                let mut block = a;
+                for (byte, counter) in block.iter_mut().zip(counter.to_be_bytes()) {
+                    *byte ^= counter;
+                }
+                let mut block = block.to_vec();
+                block.extend_from_slice(
+                    &r[index * SEMIBLOCK_LENGTH..(index + 1) * SEMIBLOCK_LENGTH],
+                );
+                let transformed = crypt_block(&block, false)?;
+                let transformed: [u8; AES_BLOCK_LENGTH] = transformed
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+                a.copy_from_slice(&transformed[..SEMIBLOCK_LENGTH]);
+                r[index * SEMIBLOCK_LENGTH..(index + 1) * SEMIBLOCK_LENGTH]
+                    .copy_from_slice(&transformed[SEMIBLOCK_LENGTH..]);
+            }
+        }
+    }
+
+    let message_length = u32::from_be_bytes(
+        a[4..]
+            .try_into()
+            .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_INVALID))?,
+    ) as usize;
+    let minimum_length = (semiblocks - 1) * SEMIBLOCK_LENGTH;
+    let maximum_length = semiblocks * SEMIBLOCK_LENGTH;
+    let mut invalid = !a[..4].ct_eq(&AIV_PREFIX);
+    invalid |= !(message_length as u64).ct_gt(&(minimum_length as u64));
+    invalid |= (message_length as u64).ct_gt(&(maximum_length as u64));
+    for (index, byte) in r.iter().enumerate() {
+        invalid |= !(index as u64).ct_lt(&(message_length as u64)) & !byte.ct_eq(&0);
+    }
+    if bool::from(invalid) {
+        r.fill(0);
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    r.truncate(message_length);
+    Ok(r)
+}
+
+fn remove_pkcs7_padding(mut plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
+    let padding = plaintext.last().copied().unwrap_or_default();
+    let mut invalid = padding.ct_eq(&0) | padding.ct_gt(&(AES_BLOCK_LENGTH as u8));
+    for (index, byte) in plaintext.iter().rev().take(AES_BLOCK_LENGTH).enumerate() {
+        invalid |= (index as u8).ct_lt(&padding) & !byte.ct_eq(&padding);
+    }
+    if bool::from(invalid) {
+        plaintext.fill(0);
+        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+    }
+    plaintext.truncate(plaintext.len() - padding as usize);
+    Ok(plaintext)
+}
+
+pub(crate) fn yubihsm_aes_cbc_pad(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    iv: &[u8; AES_BLOCK_LENGTH],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    let prepared = if encrypting {
+        let padding_length = AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH;
+        let padded_length = input
+            .len()
+            .checked_add(padding_length)
+            .ok_or(CKR_DATA_LEN_RANGE)?;
+        let mut padded = Vec::with_capacity(padded_length);
+        padded.extend_from_slice(input);
+        padded.resize(padded_length, padding_length as u8);
+        padded
+    } else {
+        if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+        }
+        input.to_vec()
+    };
+    let command = YubiHsmCommand::crypt_cbc(
+        if encrypting {
+            YubiHsmCommandCode::EncryptCbc
+        } else {
+            YubiHsmCommandCode::DecryptCbc
+        },
+        key_id,
+        iv,
+        &prepared,
+    )?;
+    let output = ctx
+        ._get_session(session_handle)?
+        .1
+        .yubihsm_command(&command)?;
+    if output.len() != prepared.len() {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    if encrypting {
+        Ok(output)
+    } else {
+        remove_pkcs7_padding(output)
+    }
 }
 
 fn crypt(
@@ -524,6 +717,44 @@ fn crypt(
                 });
             };
             required
+        } else if operation.mechanism == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE {
+            if encrypting {
+                let Some(required) = input
+                    .len()
+                    .checked_add(AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH)
+                else {
+                    ctx.encrypt_operations.remove(&session_handle);
+                    ctx.decrypt_operations.remove(&session_handle);
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                };
+                required
+            } else {
+                if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+                    ctx.encrypt_operations.remove(&session_handle);
+                    ctx.decrypt_operations.remove(&session_handle);
+                    return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+                }
+                input.len()
+            }
+        } else if operation.mechanism == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE {
+            if encrypting {
+                if input.is_empty() || input.len() > u32::MAX as usize {
+                    ctx.encrypt_operations.remove(&session_handle);
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                }
+                input
+                    .len()
+                    .div_ceil(8)
+                    .checked_add(1)
+                    .and_then(|semiblocks| semiblocks.checked_mul(8))
+                    .ok_or(CKR_DATA_LEN_RANGE)?
+            } else {
+                if input.len() < AES_BLOCK_LENGTH || !crate::is_multiple_of(input.len(), 8) {
+                    ctx.decrypt_operations.remove(&session_handle);
+                    return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+                }
+                input.len() - 8
+            }
         } else {
             match &operation.key {
                 KeyMaterial::RsaPublic(key) => key.size(),
@@ -641,6 +872,31 @@ fn crypt(
                                     operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
                                     input,
                                 )?
+                            }
+                            x if x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE => {
+                                return yubihsm_aes_cbc_pad(
+                                    ctx,
+                                    session_handle,
+                                    *id,
+                                    operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                                    input,
+                                    encrypting,
+                                );
+                            }
+                            x if x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE => {
+                                return aes_kwp_transform(
+                                    input,
+                                    encrypting,
+                                    |block, encrypting| {
+                                        yubihsm_crypt_ecb_blocks(
+                                            ctx,
+                                            session_handle,
+                                            *id,
+                                            block,
+                                            encrypting,
+                                        )
+                                    },
+                                );
                             }
                             x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => {
                                 return aes_gcm(
