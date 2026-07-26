@@ -1,5 +1,5 @@
 use super::{
-    encrypt::yubihsm_encrypt_ecb_blocks,
+    encrypt::{aes_gcm, parse_gcm_parameters, yubihsm_encrypt_ecb_blocks},
     shared::{
         encode_pkcs1_v1_5_signature_input, yubihsm_ec_coordinate_length, yubihsm_ecdsa_signature,
     },
@@ -31,6 +31,17 @@ pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>,
         }
         _ => Ok(None),
     }
+}
+
+pub(crate) fn aes_gmac_parameters(
+    mechanism: &CK_MECHANISM,
+) -> Result<Option<GcmParameters>, Error> {
+    if mechanism.mechanism != CKM_AES_GMAC as CK_MECHANISM_TYPE {
+        return Ok(None);
+    }
+    let mut parameters = parse_gcm_parameters(mechanism)?;
+    parameters.aad.clear();
+    Ok(Some(parameters))
 }
 
 fn aes_cmac_double(mut block: [u8; AES_CMAC_LENGTH]) -> [u8; AES_CMAC_LENGTH] {
@@ -98,6 +109,20 @@ pub(crate) fn yubihsm_aes_cmac(
     })
 }
 
+pub(crate) fn yubihsm_aes_gmac(
+    ctx: &mut Context,
+    session_handle: CK_SESSION_HANDLE,
+    key_id: u16,
+    parameters: &GcmParameters,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut parameters = parameters.clone();
+    parameters.aad = data.to_vec();
+    aes_gcm(&parameters, &[], true, |blocks| {
+        yubihsm_encrypt_ecb_blocks(ctx, session_handle, key_id, blocks)
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn C_SignInit(
     session_handle: CK_SESSION_HANDLE,
@@ -126,7 +151,11 @@ fn sign_init(
 
         let mechanism = _as_ref(mechanism)?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_SIGN as CK_FLAGS)?;
-        let mac_length = aes_cmac_length(mechanism)?;
+        let gmac = aes_gmac_parameters(mechanism)?;
+        let mac_length = match &gmac {
+            Some(parameters) => Some(parameters.tag_bits.div_ceil(8)),
+            None => aes_cmac_length(mechanism)?,
+        };
         let pss = if mac_length.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
@@ -188,6 +217,7 @@ fn sign_init(
                     || x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                     || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
+                    || x == CKM_AES_GMAC as CK_MECHANISM_TYPE
             ) {
                 return Err(CKR_MECHANISM_INVALID.into());
             }
@@ -217,7 +247,8 @@ fn sign_init(
             x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => CKK_SHA384_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => CKK_SHA512_HMAC as CK_KEY_TYPE,
             x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
-                || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE =>
+                || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
+                || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
             {
                 CKK_AES as CK_KEY_TYPE
             }
@@ -281,6 +312,7 @@ fn sign_init(
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 mac_length,
+                gmac,
                 pss,
                 piv_pin_policy: match &object.material {
                     KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
@@ -515,6 +547,9 @@ fn sign(
                     }
                 }
                 KeyMaterial::YubiHsm { id, algorithm, .. } => {
+                    if let Some(parameters) = &operation.gmac {
+                        return yubihsm_aes_gmac(ctx, session_handle, *id, parameters, data);
+                    }
                     if operation.mac_length.is_some() {
                         let mut mac = yubihsm_aes_cmac(ctx, session_handle, *id, data)?;
                         mac.truncate(required);

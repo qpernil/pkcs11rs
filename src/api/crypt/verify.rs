@@ -1,5 +1,5 @@
 use super::shared::yubihsm_ec_coordinate_length;
-use super::sign::{aes_cmac_length, yubihsm_aes_cmac};
+use super::sign::{aes_cmac_length, aes_gmac_parameters, yubihsm_aes_cmac, yubihsm_aes_gmac};
 use crate::api::general::session_function_not_supported;
 use crate::*;
 
@@ -31,7 +31,11 @@ fn verify_init(
 
         let mechanism = _as_ref(mechanism)?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_VERIFY as CK_FLAGS)?;
-        let mac_length = aes_cmac_length(mechanism)?;
+        let gmac = aes_gmac_parameters(mechanism)?;
+        let mac_length = match &gmac {
+            Some(parameters) => Some(parameters.tag_bits.div_ceil(8)),
+            None => aes_cmac_length(mechanism)?,
+        };
         let pss = if mac_length.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
@@ -155,6 +159,7 @@ fn verify_init(
                 context_specific_extended: false,
                 mechanism: mechanism.mechanism,
                 mac_length,
+                gmac,
                 pss,
                 piv_pin_policy: None,
                 buffer: Vec::new(),
@@ -215,7 +220,10 @@ fn verify(
             let KeyMaterial::YubiHsm { id, .. } = &operation.key else {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             };
-            let mut expected = yubihsm_aes_cmac(ctx, session_handle, *id, data)?;
+            let mut expected = match &operation.gmac {
+                Some(parameters) => yubihsm_aes_gmac(ctx, session_handle, *id, parameters, data)?,
+                None => yubihsm_aes_cmac(ctx, session_handle, *id, data)?,
+            };
             expected.truncate(mac_length);
             if !bool::from(subtle::ConstantTimeEq::ct_eq(
                 expected.as_slice(),
