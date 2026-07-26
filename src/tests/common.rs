@@ -3357,6 +3357,11 @@ fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error
 }
 
 fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {
+    let (algorithm, length) = if key_id == crate::yubihsm::tests::RFC5649_AES_KEY_ID {
+        (crate::YUBIHSM_ALGO_AES192, 24)
+    } else {
+        (crate::YUBIHSM_ALGO_AES128, 16)
+    };
     let object = crate::TokenObject {
         slot_id: Some(slot_id),
         unique_id: format!("test-aes-{key_id}"),
@@ -3381,8 +3386,8 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
         material: crate::KeyMaterial::YubiHsm {
             id: key_id,
             object_type: crate::YUBIHSM_SYMMETRIC_KEY,
-            algorithm: crate::YUBIHSM_ALGO_AES128,
-            length: 16,
+            algorithm,
+            length,
             domains: 0xffff,
             capabilities: crate::yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]),
             delegated_capabilities: [0; 8],
@@ -3692,7 +3697,7 @@ fn aes_gcm_parameters_are_validated_and_copied_at_init() {
 }
 
 #[test]
-fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
+fn yubihsm_aes_block_modes_match_standard_vectors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -3751,7 +3756,7 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
         &ecb_ciphertext,
     );
 
-    let mut iv = test_hex("000102030405060708090a0b0c0d0e0f")
+    let mut iv: [u8; 16] = test_hex("000102030405060708090a0b0c0d0e0f")
         .try_into()
         .unwrap();
     let cbc_ciphertext = test_hex(concat!(
@@ -3767,6 +3772,73 @@ fn yubihsm_aes_ecb_and_cbc_match_nist_sp800_38a_vectors() {
         Some(&mut iv),
         &plaintext,
         &cbc_ciphertext,
+    );
+
+    let mut iv: [u8; 16] = test_hex("000102030405060708090a0b0c0d0e0f")
+        .try_into()
+        .unwrap();
+    let cbc_padded_ciphertext = test_hex(concat!(
+        "7649abac8119b246cee98e9b12e9197d",
+        "5086cb9b507219ee95db113a917678b2",
+        "73bed6b8e3c1743b7116e69e22229516",
+        "3ff1caa1681fac09120eca307586e1a7",
+        "8cb82807230e1321d3fae00d18cc2012"
+    ));
+    assert_pkcs11_aes_vector(
+        session,
+        key,
+        CKM_AES_CBC_PAD as CK_MECHANISM_TYPE,
+        Some(&mut iv),
+        &plaintext,
+        &cbc_padded_ciphertext,
+    );
+    let mut invalid_padding = cbc_padded_ciphertext.clone();
+    invalid_padding[63] ^= 1;
+    let mut invalid_output = vec![0; invalid_padding.len()];
+    let mut invalid_output_length = invalid_output.len() as CK_ULONG;
+    let mut invalid_input = invalid_padding;
+    let mut iv: [u8; 16] = test_hex("000102030405060708090a0b0c0d0e0f")
+        .try_into()
+        .unwrap();
+    let mut cbc_pad = CK_MECHANISM {
+        mechanism: CKM_AES_CBC_PAD as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_DecryptInit(session, &mut cbc_pad, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Decrypt(
+            session,
+            invalid_input.as_mut_ptr(),
+            invalid_input.len() as CK_ULONG,
+            invalid_output.as_mut_ptr(),
+            &mut invalid_output_length,
+        ),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+
+    // RFC 5649, section 6, first example.
+    let kwp_key =
+        insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::RFC5649_AES_KEY_ID);
+    assert_pkcs11_aes_vector(
+        session,
+        kwp_key,
+        CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE,
+        None,
+        &test_hex("c37b7e6492584340bed12207808941155068f738"),
+        &test_hex("138bdeaa9b8fa7fc61f97742e72248ee5ae6ae5360d1ae6a5f54f373fa543b6a"),
+    );
+    // RFC 5649, section 6, second example exercises the single-block case.
+    assert_pkcs11_aes_vector(
+        session,
+        kwp_key,
+        CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE,
+        None,
+        &test_hex("466f7250617369"),
+        &test_hex("afbeb0f07dfbf5419200f2ccb50bb24f"),
     );
 
     assert_eq!(
@@ -5417,6 +5489,10 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     let eddsa = mechanism(CKM_EDDSA as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((eddsa.min_key_size, eddsa.max_key_size), (255, 255));
     assert!(mechanism(CKM_AES_CBC as CK_MECHANISM_TYPE).is_none());
+    assert!(mechanism(CKM_AES_CBC_PAD as CK_MECHANISM_TYPE).is_none());
+    let kwp = mechanism(CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((kwp.min_key_size, kwp.max_key_size), (16, 16));
+    assert_eq!(kwp.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
     assert!(mechanism(CKM_ECDSA as CK_MECHANISM_TYPE).is_none());
     assert!(mechanism(crate::CKM_YUBICO_AES_CCM_WRAP).is_none());
     assert!(mechanism(crate::CKM_YUBICO_RSA_WRAP).is_none());
@@ -5446,6 +5522,30 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         .unwrap();
     assert_eq!((ccm.min_key_size, ccm.max_key_size), (16, 32));
     assert_eq!(ccm.flags, (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS);
+    assert!(!wrapping
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE));
+
+    let aes_block_modes = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_AES128,
+        crate::YUBIHSM_ALGO_AES_ECB,
+        crate::YUBIHSM_ALGO_AES_CBC,
+    ]);
+    let cbc_pad = aes_block_modes
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((cbc_pad.min_key_size, cbc_pad.max_key_size), (16, 16));
+    assert_eq!(
+        cbc_pad.flags,
+        (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
+    let kwp = aes_block_modes
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((kwp.min_key_size, kwp.max_key_size), (16, 16));
+    assert_eq!(kwp.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
 
     let incomplete_rsa_wrap = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_2048,

@@ -84,9 +84,11 @@ CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
 CKM_AES_ECB = 0x00001081
 CKM_AES_CBC = 0x00001082
+CKM_AES_CBC_PAD = 0x00001085
 CKM_AES_GCM = 0x00001087
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
+CKM_AES_KEY_WRAP_KWP = 0x0000210B
 CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
 CKG_MGF1_SHA256 = 2
@@ -2381,10 +2383,29 @@ done
             CKR_ENCRYPTED_DATA_INVALID,
         )
 
-    def test_abi_yubihsm_aes_ecb_and_cbc_match_nist_vectors(self) -> None:
+    def test_abi_yubihsm_aes_block_modes_match_vectors(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertIn(CKM_AES_CBC_PAD, set(mechanisms))
+        self.assertIn(CKM_AES_KEY_WRAP_KWP, set(mechanisms))
 
         key_id = (CK_BYTE * 2)(0, 3)
         template = (CK_ATTRIBUTE * 1)(
@@ -2482,6 +2503,60 @@ done
                 "73bed6b8e3c1743b7116e69e22229516"
                 "3ff1caa1681fac09120eca307586e1a7"
             ),
+        )
+
+        # PKCS #7 padding applied to the same NIST CBC vector.
+        assert_vector(
+            CK_MECHANISM(CKM_AES_CBC_PAD, ctypes.cast(iv, CK_VOID_PTR), len(iv)),
+            bytes.fromhex(
+                "7649abac8119b246cee98e9b12e9197d"
+                "5086cb9b507219ee95db113a917678b2"
+                "73bed6b8e3c1743b7116e69e22229516"
+                "3ff1caa1681fac09120eca307586e1a7"
+                "8cb82807230e1321d3fae00d18cc2012"
+            ),
+        )
+
+        rfc5649_key_id = (CK_BYTE * 2)(0, 12)
+        rfc5649_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_ID,
+                ctypes.cast(rfc5649_key_id, CK_VOID_PTR),
+                len(rfc5649_key_id),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                session, rfc5649_template, len(rfc5649_template)
+            ),
+            CKR_OK,
+        )
+        rfc5649_key = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session, ctypes.byref(rfc5649_key), 1, ctypes.byref(found)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        handle.value = rfc5649_key.value
+
+        # RFC 5649, section 6, first example.
+        plaintext_bytes = bytes.fromhex("c37b7e6492584340bed12207808941155068f738")
+        assert_vector(
+            CK_MECHANISM(CKM_AES_KEY_WRAP_KWP, None, 0),
+            bytes.fromhex(
+                "138bdeaa9b8fa7fc61f97742e72248ee"
+                "5ae6ae5360d1ae6a5f54f373fa543b6a"
+            ),
+        )
+        # RFC 5649, section 6, second example.
+        plaintext_bytes = bytes.fromhex("466f7250617369")
+        assert_vector(
+            CK_MECHANISM(CKM_AES_KEY_WRAP_KWP, None, 0),
+            bytes.fromhex("afbeb0f07dfbf5419200f2ccb50bb24f"),
         )
 
     def test_abi_yubihsm_aes_cmac_variants_match_nist_vector(self) -> None:

@@ -36,6 +36,11 @@ pub(crate) const NIST_AES_KEY_ID: u16 = 3;
 const NIST_AES_128_KEY: [u8; 16] = [
     0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
 ];
+pub(crate) const RFC5649_AES_KEY_ID: u16 = 4;
+const RFC5649_AES_192_KEY: [u8; 24] = [
+    0x58, 0x40, 0xdf, 0x6e, 0x29, 0xb0, 0x2a, 0xf1, 0xab, 0x49, 0x3b, 0x70, 0x5b, 0xf1, 0x6e, 0xa1,
+    0xae, 0x83, 0x38, 0xf4, 0xdc, 0xc1, 0x76, 0xa8,
+];
 
 fn test_private_key(encoded: &[u8]) -> Result<P256SecretKey, Error> {
     P256SecretKey::from_slice(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
@@ -374,11 +379,11 @@ impl ProtocolPeer {
         Ok(private_key.diffie_hellman(&public_key).as_bytes().to_vec())
     }
 
-    fn aes_key(id: u16) -> &'static [u8; 16] {
-        if id == NIST_AES_KEY_ID {
-            &NIST_AES_128_KEY
-        } else {
-            &TEST_AES_KEY
+    fn aes_key(id: u16) -> &'static [u8] {
+        match id {
+            NIST_AES_KEY_ID => &NIST_AES_128_KEY,
+            RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
+            _ => &TEST_AES_KEY,
         }
     }
 

@@ -545,16 +545,20 @@ impl Session for AbiYubiHsmSession {
             0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
             0x4f, 0x3c,
         ];
+        const RFC5649_AES_192_KEY: [u8; 24] = [
+            0x58, 0x40, 0xdf, 0x6e, 0x29, 0xb0, 0x2a, 0xf1, 0xab, 0x49, 0x3b, 0x70, 0x5b, 0xf1,
+            0x6e, 0xa1, 0xae, 0x83, 0x38, 0xf4, 0xdc, 0xc1, 0x76, 0xa8,
+        ];
         let data = command.data();
         let id = data
             .get(..2)
             .and_then(|value| value.try_into().ok())
             .map(u16::from_be_bytes)
             .ok_or(CKR_DATA_LEN_RANGE)?;
-        let key = if id == NIST_AES_KEY_ID {
-            &NIST_AES_128_KEY
-        } else {
-            &[0; 16]
+        let key: &[u8] = match id {
+            NIST_AES_KEY_ID => &NIST_AES_128_KEY,
+            ABI_YUBIHSM_RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
+            _ => &[0; 16],
         };
         let (direction, iv, input) = match command.code() {
             YubiHsmCommandCode::GetOpaque => {
@@ -746,6 +750,7 @@ const ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID: u16 = 6;
 const ABI_YUBIHSM_OPAQUE_DATA: &[u8] = b"ABI opaque data";
 #[cfg(feature = "abi-tests")]
 const ABI_YUBIHSM_HMAC_KEY_ID: u16 = 11;
+const ABI_YUBIHSM_RFC5649_AES_KEY_ID: u16 = 12;
 
 #[cfg(feature = "abi-tests")]
 fn abi_yubihsm_hmac_sha256(data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -949,6 +954,28 @@ pub(super) fn abi_test_yubihsm_nist_aes_object(slot_id: CK_SLOT_ID) -> TokenObje
     } = &mut object.material
     {
         *id = NIST_AES_KEY_ID;
+        *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
+    }
+    object
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_rfc5649_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    let mut object = abi_test_yubihsm_aes_object(slot_id);
+    object.unique_id = "abi-yubihsm-aes-rfc5649".to_owned();
+    object.label = "ABI YubiHSM RFC 5649 AES key".to_owned();
+    object.id = ABI_YUBIHSM_RFC5649_AES_KEY_ID.to_be_bytes().to_vec();
+    if let KeyMaterial::YubiHsm {
+        id,
+        algorithm,
+        length,
+        capabilities,
+        ..
+    } = &mut object.material
+    {
+        *id = ABI_YUBIHSM_RFC5649_AES_KEY_ID;
+        *algorithm = YUBIHSM_ALGO_AES192;
+        *length = 24;
         *capabilities = yubihsm_capabilities(&[0x32, 0x33, 0x34, 0x35]);
     }
     object
@@ -1219,6 +1246,7 @@ impl Slot for AbiYubiHsmSlot {
             abi_test_yubihsm_public_object(slot_id),
             abi_test_yubihsm_aes_object(slot_id),
             abi_test_yubihsm_nist_aes_object(slot_id),
+            abi_test_yubihsm_rfc5649_aes_object(slot_id),
         ];
         objects.push(abi_test_yubihsm_hmac_object(slot_id)?);
         objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
