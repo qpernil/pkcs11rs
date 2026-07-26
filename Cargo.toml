@@ -26,6 +26,7 @@ des = "0.8.1"
 getrandom = "0.4.3"
 ghash = "0.6.0"
 hmac = "0.13.0"
+minicbor = { version = "2.3.0", features = ["alloc"] }
 pbkdf2 = "0.13.0"
 rusb = "0.9.4"
 pcsc = "2.9.0"

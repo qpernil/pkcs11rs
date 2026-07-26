@@ -8,6 +8,7 @@ The PC/SC transport automatically probes these CCID applets by default:
 | OpenPGP | `D2 76 00 01 24 01` | `PKCS11RS_OPENPGP_AID` |
 | YubiHSM Auth | `A0 00 00 05 27 21 07 01` | `PKCS11RS_HSMAUTH_AID` |
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
+| FIDO2 | `A0 00 00 06 47 2F 00 01` | `PKCS11RS_FIDO2_AID` |
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
 can be selected successfully. Reader and applet discovery is a snapshot taken
@@ -18,7 +19,7 @@ object-discovery failures do not remove an already selected applet slot.
 
 ## Allowlist
 
-Without configuration, all four applets above are probed. Set
+Without configuration, all five applets above are probed. Set
 `PKCS11RS_CCID_APPLICATIONS` to a comma-separated allowlist when only specific
 applets should be exposed:
 
@@ -26,7 +27,7 @@ applets should be exposed:
 PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-Accepted names are `piv`, `openpgp`, `hsmauth`, and `issuer-sd`. Names are
+Accepted names are `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`. Names are
 case-insensitive and duplicates are ignored.
 
 The YubiKey Management applet is probed once per PC/SC device before applet
@@ -47,6 +48,31 @@ sending the next protected command.
 The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,
 OpenPGP, or YubiHSM Auth.
+
+## FIDO2 compatibility probe
+
+YubiKey firmware 5.8 and later exposes FIDO2 through the USB CCID smart-card
+interface. Earlier YubiKey firmware exposes FIDO2 over the separate USB FIDO
+interface and therefore does not produce a FIDO2 slot in this module. FIDO over
+NFC also uses the smart-card binding, but NFC hardware behavior has not yet
+been validated by this project.
+
+The module follows the CTAP ISO 7816 binding: it explicitly selects the FIDO2
+AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
+`04`, and follows `91 00` status updates with `80 11 00 00` GET RESPONSE
+commands. A successfully selected applet is exposed as a mechanism-free,
+read-only PKCS #11 slot even if `authenticatorGetInfo` later fails, consistent
+with the other CCID applets. This preserves the selected slot for diagnostics;
+token-information calls continue to report the discovery failure. When GetInfo
+succeeds, the primary CTAP version is included in the PKCS #11 slot description
+and token label. The device manufacturer, model, serial number, hardware
+version, and firmware version use the shared YubiKey metadata. Set
+`PKCS11RS_CCID_APPLICATIONS=fido2` to probe only FIDO2 and `PKCS11RS_DEBUG=2`
+to print the complete reported versions, extensions, AAGUID, options, maximum
+message size, PIN/UV protocols, and transports.
+
+Credential enumeration and cryptographic operations are not part of this
+compatibility probe.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those
 credentials are also available as authentication providers to each ordinary

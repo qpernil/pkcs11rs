@@ -6,6 +6,7 @@ pub(crate) enum CcidApplication {
     OpenPgp,
     HsmAuth,
     IssuerSecurityDomain,
+    Fido2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +38,8 @@ pub(crate) fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>,
                 CcidApplication::Piv
                 | CcidApplication::OpenPgp
                 | CcidApplication::HsmAuth
-                | CcidApplication::IssuerSecurityDomain => secure_channel,
+                | CcidApplication::IssuerSecurityDomain
+                | CcidApplication::Fido2 => secure_channel,
             };
             Ok(CcidConfiguration {
                 application,
@@ -71,6 +73,7 @@ pub(crate) fn default_ccid_applications() -> Vec<CcidApplication> {
         CcidApplication::OpenPgp,
         CcidApplication::HsmAuth,
         CcidApplication::IssuerSecurityDomain,
+        CcidApplication::Fido2,
     ]
 }
 
@@ -80,6 +83,7 @@ pub(crate) fn parse_ccid_application(value: &str) -> Result<CcidApplication, Err
         "openpgp" => Ok(CcidApplication::OpenPgp),
         "hsmauth" => Ok(CcidApplication::HsmAuth),
         "issuer-sd" => Ok(CcidApplication::IssuerSecurityDomain),
+        "fido2" => Ok(CcidApplication::Fido2),
         _ => Err(CKR_ARGUMENTS_BAD.into()),
     }
 }
@@ -90,6 +94,7 @@ pub(crate) fn ccid_application_label(application: CcidApplication) -> &'static s
         CcidApplication::OpenPgp => "OpenPGP",
         CcidApplication::HsmAuth => "YubiHSM Auth",
         CcidApplication::IssuerSecurityDomain => "Issuer SD",
+        CcidApplication::Fido2 => "FIDO2",
     }
 }
 
@@ -105,6 +110,7 @@ pub(crate) fn ccid_application_aid(
             "PKCS11RS_ISSUER_SD_AID",
             &DEFAULT_ISSUER_SECURITY_DOMAIN_AID[..],
         ),
+        CcidApplication::Fido2 => ("PKCS11RS_FIDO2_AID", &FIDO2_AID[..]),
     };
     configured_ccid_aid(name, default)
 }

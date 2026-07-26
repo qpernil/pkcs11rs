@@ -7,10 +7,10 @@ use crate::{
 use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
     configured_ccid_configurations, pinentry, select_application, str_pad, CcidApplication,
-    Connector, CryptOperation, DigestOperation, Error, FindOperation, HsmAuthProviderRegistry,
-    HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector,
-    PcscConnector, PivSlot, Session, SignatureOperation, Slot, TokenObject, UsbConnector,
-    YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
+    Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
+    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
+    PcscAppletConnector, PcscConnector, PivSlot, Session, SignatureOperation, Slot, TokenObject,
+    UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential, YUBIHSM_DISCOVERY_ENV};
@@ -969,6 +969,9 @@ impl ModuleContext {
                                     application_connector,
                                     application_aid,
                                 ))
+                            }
+                            CcidApplication::Fido2 => {
+                                Box::new(Fido2Slot::new(application_connector))
                             }
                         };
                         if slot.is_present() {

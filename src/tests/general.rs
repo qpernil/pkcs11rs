@@ -382,6 +382,10 @@ fn applet_configuration_accepts_only_canonical_names() {
         crate::parse_ccid_application("issuer-sd").unwrap(),
         crate::CcidApplication::IssuerSecurityDomain
     );
+    assert_eq!(
+        crate::parse_ccid_application("fido2").unwrap(),
+        crate::CcidApplication::Fido2
+    );
     for invalid in [
         "pgp",
         "yubihsm-auth",
@@ -424,6 +428,7 @@ fn ccid_application_discovery_defaults_to_supported_applets() {
             crate::CcidApplication::OpenPgp,
             crate::CcidApplication::HsmAuth,
             crate::CcidApplication::IssuerSecurityDomain,
+            crate::CcidApplication::Fido2,
         ]
     );
 }

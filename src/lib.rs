@@ -162,6 +162,9 @@ use hsmauth::{
     Client as HsmAuthClient, Credential as HsmAuthCredential, Info as HsmAuthInfo,
 };
 
+mod ctap;
+use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport, FIDO2_AID};
+
 mod piv;
 use piv::{Client as PivClient, DeviceInfo as PivDeviceInfo, MetadataPublicKey};
 
