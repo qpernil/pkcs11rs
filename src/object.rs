@@ -335,6 +335,7 @@ pub(crate) struct SignatureOperation {
     pub(crate) context_specific_extended: bool,
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) mac_length: Option<usize>,
+    pub(crate) gmac: Option<GcmParameters>,
     pub(crate) pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
     pub(crate) piv_pin_policy: Option<u8>,
     pub(crate) buffer: Vec<u8>,

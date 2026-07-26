@@ -90,6 +90,7 @@ CKM_AES_GCM = 0x00001087
 CKM_AES_CCM = 0x00001088
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
+CKM_AES_GMAC = 0x0000108E
 CKM_AES_KEY_WRAP_KWP = 0x0000210B
 CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
@@ -2812,6 +2813,83 @@ done
         self.assertEqual(
             self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
             CKR_MECHANISM_PARAM_INVALID,
+        )
+
+    def test_abi_yubihsm_aes_gmac_matches_nist_vector(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        self.login_session(session)
+
+        mechanism_count = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID, None, ctypes.byref(mechanism_count)
+            ),
+            CKR_OK,
+        )
+        mechanisms = (CK_ULONG * mechanism_count.value)()
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_OK,
+        )
+        self.assertIn(CKM_AES_GMAC, mechanisms)
+
+        key_id = (CK_BYTE * 2)(0, 14)
+        template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(key_id, CK_VOID_PTR), len(key_id))
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(session, template, len(template)), CKR_OK
+        )
+        handle = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(session, ctypes.byref(handle), 1, ctypes.byref(found)),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+
+        iv = (CK_BYTE * 12).from_buffer_copy(
+            bytes.fromhex("cafebabefacedbaddecaf888")
+        )
+        parameters = CK_GCM_PARAMS(iv, len(iv), len(iv) * 8, None, 0, 128)
+        mechanism = CK_MECHANISM(
+            CKM_AES_GMAC,
+            ctypes.cast(ctypes.pointer(parameters), CK_VOID_PTR),
+            ctypes.sizeof(parameters),
+        )
+        data_bytes = bytes.fromhex(
+            "3ad77bb40d7a3660a89ecaf32466ef97"
+            "f5d3d58503b9699de785895a96fdbaaf"
+            "43b1cd7f598ece23881b00e3ed030688"
+            "7b0c785e27e8ad3f8223207104725dd4"
+        )
+        data = (CK_BYTE * len(data_bytes)).from_buffer_copy(data_bytes)
+        tag = (CK_BYTE * 16)()
+        tag_length = CK_ULONG(len(tag))
+        self.assertEqual(
+            self.lib.C_SignInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Sign(session, data, len(data), tag, ctypes.byref(tag_length)),
+            CKR_OK,
+        )
+        self.assertEqual(
+            bytes(tag), bytes.fromhex("5f91d77123ef5eb9997913849b8dc1e9")
+        )
+        self.assertEqual(
+            self.lib.C_VerifyInit(session, ctypes.byref(mechanism), handle.value),
+            CKR_OK,
+        )
+        self.assertEqual(
+            self.lib.C_Verify(session, data, len(data), tag, len(tag)),
+            CKR_OK,
         )
 
     def test_abi_yubihsm_hmac_sign_and_verify_match_rfc_4231(self) -> None:

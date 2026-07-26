@@ -4199,6 +4199,125 @@ fn yubihsm_aes_cmac_variants_match_nist_vectors() {
 }
 
 #[test]
+fn yubihsm_aes_gmac_matches_nist_vector() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, _, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().slots.insert(SLOT_ID, slot);
+    }
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let key = insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::NIST_GMAC_AES_KEY_ID);
+    let mut iv = test_hex("cafebabefacedbaddecaf888");
+    let mut parameters = CK_GCM_PARAMS {
+        pIv: iv.as_mut_ptr(),
+        ulIvLen: iv.len() as CK_ULONG,
+        ulIvBits: (iv.len() * 8) as CK_ULONG,
+        pAAD: std::ptr::null_mut(),
+        ulAADLen: 0,
+        ulTagBits: 128,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_GMAC as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_GCM_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_GCM_PARAMS>() as CK_ULONG,
+    };
+    // NIST AES-GCM examples, AES-128 example #3: no plaintext, A is GMAC input.
+    let mut data = test_hex(concat!(
+        "3ad77bb40d7a3660a89ecaf32466ef97",
+        "f5d3d58503b9699de785895a96fdbaaf",
+        "43b1cd7f598ece23881b00e3ed030688",
+        "7b0c785e27e8ad3f8223207104725dd4"
+    ));
+    let expected = test_hex("5f91d77123ef5eb9997913849b8dc1e9");
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignUpdate(session, data.as_mut_ptr(), 17),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignUpdate(
+            session,
+            data[17..].as_mut_ptr(),
+            (data.len() - 17) as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut tag = [0; 16];
+    let mut tag_length = tag.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_SignFinal(session, tag.as_mut_ptr(), &mut tag_length),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(tag.as_slice(), expected);
+
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            tag.as_mut_ptr(),
+            tag.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    tag[0] ^= 1;
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            data.as_mut_ptr(),
+            data.len() as CK_ULONG,
+            tag.as_mut_ptr(),
+            tag.len() as CK_ULONG,
+        ),
+        CKR_SIGNATURE_INVALID as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 fn yubihsm_aes_gcm_round_trip_uses_hardware_ecb() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -5532,6 +5651,12 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert_eq!(
         gcm.flags & (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
         (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
+    let gmac = mechanism(CKM_AES_GMAC as CK_MECHANISM_TYPE).unwrap();
+    assert_eq!((gmac.min_key_size, gmac.max_key_size), (16, 16));
+    assert_eq!(
+        gmac.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
     );
     assert!(mechanism(CKM_AES_CCM as CK_MECHANISM_TYPE).is_none());
     for cmac in [

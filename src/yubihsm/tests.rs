@@ -45,6 +45,10 @@ pub(crate) const RFC3610_AES_KEY_ID: u16 = 5;
 const RFC3610_AES_128_KEY: [u8; 16] = [
     0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
 ];
+pub(crate) const NIST_GMAC_AES_KEY_ID: u16 = 6;
+const NIST_GMAC_AES_128_KEY: [u8; 16] = [
+    0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83, 0x08,
+];
 
 fn test_private_key(encoded: &[u8]) -> Result<P256SecretKey, Error> {
     P256SecretKey::from_slice(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
@@ -388,6 +392,7 @@ impl ProtocolPeer {
             NIST_AES_KEY_ID => &NIST_AES_128_KEY,
             RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
             RFC3610_AES_KEY_ID => &RFC3610_AES_128_KEY,
+            NIST_GMAC_AES_KEY_ID => &NIST_GMAC_AES_128_KEY,
             _ => &TEST_AES_KEY,
         }
     }
