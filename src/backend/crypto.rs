@@ -1,4 +1,5 @@
 use crate::*;
+use num_bigint_dig::traits::ModInverse;
 
 pub(crate) fn openpgp_sign_mechanism_supported(
     algorithm: OpenPgpAlgorithm,
@@ -521,6 +522,7 @@ pub(crate) fn ec_add(
     EcPointValue { x, y, z }
 }
 
+#[cfg(test)]
 pub(crate) fn ec_multiply(
     scalar: &BigUint,
     point: &EcPointValue,
@@ -538,20 +540,53 @@ pub(crate) fn ec_multiply(
     result
 }
 
-pub(crate) fn verify_ecdsa(
-    curve: EcCurve,
+fn ec_multiply_sum(
+    left_scalar: &BigUint,
+    left_point: &EcPointValue,
+    right_scalar: &BigUint,
+    right_point: &EcPointValue,
+    parameters: &EcParameters,
+) -> EcPointValue {
+    let left = left_scalar.to_bytes_be();
+    let right = right_scalar.to_bytes_be();
+    let length = left.len().max(right.len());
+    let left_offset = length - left.len();
+    let right_offset = length - right.len();
+    let combined_point = ec_add(left_point, right_point, parameters);
+    let mut result = ec_infinity();
+    for index in 0..length {
+        let left_byte = if index < left_offset {
+            0
+        } else {
+            left[index - left_offset]
+        };
+        let right_byte = if index < right_offset {
+            0
+        } else {
+            right[index - right_offset]
+        };
+        for bit in (0..8).rev() {
+            result = ec_double(&result, parameters);
+            let left_set = left_byte & (1 << bit) != 0;
+            let right_set = right_byte & (1 << bit) != 0;
+            result = match (left_set, right_set) {
+                (false, false) => result,
+                (true, false) => ec_add(&result, left_point, parameters),
+                (false, true) => ec_add(&result, right_point, parameters),
+                (true, true) => ec_add(&result, &combined_point, parameters),
+            };
+        }
+    }
+    result
+}
+
+fn verify_generic_ecdsa(
+    parameters: EcParameters,
     public_key: &[u8],
     digest: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    let parameters = ec_parameters(curve);
     let coordinate_length = parameters.coordinate_length;
-    if public_key.len() != coordinate_length * 2 {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-    }
-    if signature.len() != coordinate_length * 2 {
-        return Err(CKR_SIGNATURE_LEN_RANGE.into());
-    }
     let q = EcPointValue {
         x: BigUint::from_bytes_be(&public_key[..coordinate_length]),
         y: BigUint::from_bytes_be(&public_key[coordinate_length..]),
@@ -576,7 +611,10 @@ pub(crate) fn verify_ecdsa(
     if digest.len() * 8 > n_bits {
         z >>= digest.len() * 8 - n_bits;
     }
-    let w = s.modpow(&(&parameters.n - BigUint::from(2u8)), &parameters.n);
+    let w = s
+        .mod_inverse(&parameters.n)
+        .and_then(|inverse| inverse.to_biguint())
+        .ok_or(CKR_SIGNATURE_INVALID)?;
     let u1 = (z * &w) % &parameters.n;
     let u2 = (&r * &w) % &parameters.n;
     let generator = EcPointValue {
@@ -584,22 +622,73 @@ pub(crate) fn verify_ecdsa(
         y: parameters.gy.clone(),
         z: BigUint::from(1u8),
     };
-    let point = ec_add(
-        &ec_multiply(&u1, &generator, &parameters),
-        &ec_multiply(&u2, &q, &parameters),
-        &parameters,
-    );
+    let point = ec_multiply_sum(&u1, &generator, &u2, &q, &parameters);
     if point.z == zero {
         return Err(CKR_SIGNATURE_INVALID.into());
     }
     let inverse = point
         .z
-        .modpow(&(&parameters.p - BigUint::from(2u8)), &parameters.p);
+        .mod_inverse(&parameters.p)
+        .and_then(|inverse| inverse.to_biguint())
+        .ok_or(CKR_SIGNATURE_INVALID)?;
     let x = (&point.x * &inverse * &inverse) % &parameters.p;
     if x % &parameters.n == r {
         Ok(())
     } else {
         Err(CKR_SIGNATURE_INVALID.into())
+    }
+}
+
+macro_rules! verify_rustcrypto_ecdsa {
+    ($curve:ty, $public_key:expr, $digest:expr, $signature:expr) => {{
+        let mut encoded_public_key = Vec::with_capacity(1 + $public_key.len());
+        encoded_public_key.push(0x04);
+        encoded_public_key.extend_from_slice($public_key);
+        let verifying_key = ecdsa::VerifyingKey::<$curve>::from_sec1_bytes(&encoded_public_key)
+            .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
+        let signature = ecdsa::Signature::<$curve>::from_slice($signature)
+            .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
+        signature::hazmat::PrehashVerifier::verify_prehash(&verifying_key, $digest, &signature)
+            .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))
+    }};
+}
+
+pub(crate) fn verify_ecdsa(
+    curve: EcCurve,
+    public_key: &[u8],
+    digest: &[u8],
+    signature: &[u8],
+) -> Result<(), Error> {
+    let parameters = ec_parameters(curve);
+    if public_key.len() != parameters.coordinate_length * 2 {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    if signature.len() != parameters.coordinate_length * 2 {
+        return Err(CKR_SIGNATURE_LEN_RANGE.into());
+    }
+    match curve {
+        EcCurve::P224 => {
+            verify_rustcrypto_ecdsa!(p224::NistP224, public_key, digest, signature)
+        }
+        EcCurve::P256 => {
+            verify_rustcrypto_ecdsa!(p256::NistP256, public_key, digest, signature)
+        }
+        EcCurve::P384 => {
+            verify_rustcrypto_ecdsa!(p384::NistP384, public_key, digest, signature)
+        }
+        EcCurve::P521 => {
+            verify_rustcrypto_ecdsa!(p521::NistP521, public_key, digest, signature)
+        }
+        EcCurve::K256 => {
+            verify_rustcrypto_ecdsa!(k256::Secp256k1, public_key, digest, signature)
+        }
+        EcCurve::BrainpoolP256 => {
+            verify_rustcrypto_ecdsa!(bp256::BrainpoolP256r1, public_key, digest, signature)
+        }
+        EcCurve::BrainpoolP384 => {
+            verify_rustcrypto_ecdsa!(bp384::BrainpoolP384r1, public_key, digest, signature)
+        }
+        EcCurve::BrainpoolP512 => verify_generic_ecdsa(parameters, public_key, digest, signature),
     }
 }
 

@@ -34,9 +34,16 @@ flate2 = "1.1.9"
 zeroize = "1.9.0"
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "pem", "std"] }
+ecdsa = "0.17.0"
 ed25519-dalek = "3.0.0"
+p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["ecdsa", "std"] }
 p256 = { version = "0.14.0", features = ["ecdh", "ecdsa", "pem", "pkcs8"] }
 p384 = { version = "0.14.0", features = ["ecdsa", "pem", "pkcs8"] }
+p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+num-bigint-dig = "0.8.6"
 pkcs8 = { version = "0.11.0", features = ["alloc", "pem", "std"] }
 rsa = { version = "0.9.10", features = ["pem", "sha2"] }
 rustls-pki-types = "1.15.1"
