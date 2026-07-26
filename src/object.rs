@@ -373,6 +373,7 @@ pub(crate) struct CryptOperation {
     pub(crate) ctr: Option<CtrParameters>,
     pub(crate) ccm: Option<CcmParameters>,
     pub(crate) gcm: Option<GcmParameters>,
+    pub(crate) key_wrap_iv: Option<Vec<u8>>,
     pub(crate) oaep: Option<(u8, CK_MECHANISM_TYPE, Vec<u8>)>,
     pub(crate) piv_pin_policy: Option<u8>,
     pub(crate) buffer: Zeroizing<Vec<u8>>,
@@ -392,6 +393,7 @@ impl std::fmt::Debug for CryptOperation {
             .field("ctr", &self.ctr)
             .field("ccm", &self.ccm)
             .field("gcm", &self.gcm)
+            .field("key_wrap_iv", &self.key_wrap_iv)
             .field("oaep", &self.oaep)
             .field("piv_pin_policy", &self.piv_pin_policy)
             .field("buffer_length", &self.buffer.len())

@@ -91,6 +91,7 @@ CKM_AES_CCM = 0x00001088
 CKM_AES_CMAC = 0x0000108A
 CKM_AES_CMAC_GENERAL = 0x0000108B
 CKM_AES_GMAC = 0x0000108E
+CKM_AES_KEY_WRAP = 0x00002109
 CKM_AES_KEY_WRAP_KWP = 0x0000210B
 CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
@@ -2428,6 +2429,7 @@ done
         self.assertIn(CKM_AES_CBC_PAD, set(mechanisms))
         self.assertIn(CKM_AES_CTR, set(mechanisms))
         self.assertIn(CKM_AES_CCM, set(mechanisms))
+        self.assertIn(CKM_AES_KEY_WRAP, set(mechanisms))
         self.assertIn(CKM_AES_KEY_WRAP_KWP, set(mechanisms))
 
         key_id = (CK_BYTE * 2)(0, 3)
@@ -2561,6 +2563,42 @@ done
             ),
         )
 
+        rfc3394_key_id = (CK_BYTE * 2)(0, 15)
+        rfc3394_template = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_ID,
+                ctypes.cast(rfc3394_key_id, CK_VOID_PTR),
+                len(rfc3394_key_id),
+            )
+        )
+        self.assertEqual(
+            self.lib.C_FindObjectsInit(
+                session, rfc3394_template, len(rfc3394_template)
+            ),
+            CKR_OK,
+        )
+        rfc3394_key = CK_ULONG()
+        found = CK_ULONG()
+        self.assertEqual(
+            self.lib.C_FindObjects(
+                session, ctypes.byref(rfc3394_key), 1, ctypes.byref(found)
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(found.value, 1)
+        self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+        handle.value = rfc3394_key.value
+
+        # RFC 3394, section 4.1: 128-bit key data with a 128-bit KEK.
+        plaintext_bytes = bytes.fromhex("00112233445566778899aabbccddeeff")
+        assert_vector(
+            CK_MECHANISM(CKM_AES_KEY_WRAP, None, 0),
+            bytes.fromhex(
+                "1fa68b0a8112b447aef34bd8fb5a7b82"
+                "9d3e862371d2cfe5"
+            ),
+        )
+
         rfc3610_key_id = (CK_BYTE * 2)(0, 13)
         rfc3610_template = (CK_ATTRIBUTE * 1)(
             CK_ATTRIBUTE(
@@ -2656,6 +2694,69 @@ done
         assert_vector(
             CK_MECHANISM(CKM_AES_KEY_WRAP_KWP, None, 0),
             bytes.fromhex("afbeb0f07dfbf5419200f2ccb50bb24f"),
+        )
+
+        def assert_round_trip(
+            mechanism: CK_MECHANISM, key: int, plaintext_value: bytes
+        ) -> None:
+            plaintext = (CK_BYTE * len(plaintext_value)).from_buffer_copy(
+                plaintext_value
+            )
+            encrypted = (CK_BYTE * (len(plaintext_value) + 16))()
+            encrypted_length = CK_ULONG(len(encrypted))
+            self.assertEqual(
+                self.lib.C_EncryptInit(session, ctypes.byref(mechanism), key),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Encrypt(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    encrypted,
+                    ctypes.byref(encrypted_length),
+                ),
+                CKR_OK,
+            )
+            decrypted = (CK_BYTE * len(plaintext_value))()
+            decrypted_length = CK_ULONG(len(decrypted))
+            self.assertEqual(
+                self.lib.C_DecryptInit(session, ctypes.byref(mechanism), key),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Decrypt(
+                    session,
+                    encrypted,
+                    encrypted_length.value,
+                    decrypted,
+                    ctypes.byref(decrypted_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                bytes(decrypted[: decrypted_length.value]), plaintext_value
+            )
+
+        key_wrap_iv = (CK_BYTE * 8)(1, 2, 3, 4, 5, 6, 7, 8)
+        assert_round_trip(
+            CK_MECHANISM(
+                CKM_AES_KEY_WRAP,
+                ctypes.cast(key_wrap_iv, CK_VOID_PTR),
+                len(key_wrap_iv),
+            ),
+            rfc3394_key.value,
+            bytes.fromhex("00112233445566778899aabbccddeeff"),
+        )
+        kwp_iv = (CK_BYTE * 4)(1, 2, 3, 4)
+        assert_round_trip(
+            CK_MECHANISM(
+                CKM_AES_KEY_WRAP_KWP,
+                ctypes.cast(kwp_iv, CK_VOID_PTR),
+                len(kwp_iv),
+            ),
+            rfc5649_key.value,
+            bytes.fromhex("466f7250617369"),
         )
 
     def test_abi_yubihsm_aes_cmac_variants_match_nist_vector(self) -> None:

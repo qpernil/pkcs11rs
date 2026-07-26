@@ -3903,6 +3903,43 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
         CKR_ENCRYPTED_DATA_INVALID as CK_RV
     );
 
+    // RFC 3394, section 4.1: 128-bit key data with a 128-bit KEK.
+    let key_wrap_key =
+        insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::RFC3394_AES_KEY_ID);
+    let key_wrap_plaintext = test_hex("00112233445566778899aabbccddeeff");
+    let key_wrap_ciphertext = test_hex("1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5");
+    assert_pkcs11_aes_vector(
+        session,
+        key_wrap_key,
+        CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        None,
+        &key_wrap_plaintext,
+        &key_wrap_ciphertext,
+    );
+    let mut modified_key_wrap = key_wrap_ciphertext;
+    *modified_key_wrap.last_mut().unwrap() ^= 1;
+    let mut key_wrap_output = [0; 16];
+    let mut key_wrap_output_length = key_wrap_output.len() as CK_ULONG;
+    let mut key_wrap_mechanism = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_DecryptInit(session, &mut key_wrap_mechanism, key_wrap_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Decrypt(
+            session,
+            modified_key_wrap.as_mut_ptr(),
+            modified_key_wrap.len() as CK_ULONG,
+            key_wrap_output.as_mut_ptr(),
+            &mut key_wrap_output_length,
+        ),
+        CKR_ENCRYPTED_DATA_INVALID as CK_RV
+    );
+
     // RFC 5649, section 6, first example.
     let kwp_key =
         insert_yubihsm_aes_test_object(SLOT_ID, crate::yubihsm::tests::RFC5649_AES_KEY_ID);
@@ -3923,6 +3960,61 @@ fn yubihsm_aes_block_modes_match_standard_vectors() {
         &test_hex("466f7250617369"),
         &test_hex("afbeb0f07dfbf5419200f2ccb50bb24f"),
     );
+
+    for (key, mechanism_type, mut initial_value, mut plaintext) in [
+        (
+            key_wrap_key,
+            CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+            test_hex("0102030405060708"),
+            test_hex("00112233445566778899aabbccddeeff"),
+        ),
+        (
+            kwp_key,
+            CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE,
+            test_hex("01020304"),
+            test_hex("466f7250617369"),
+        ),
+    ] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: initial_value.as_mut_ptr().cast(),
+            ulParameterLen: initial_value.len() as CK_ULONG,
+        };
+        let mut encrypted = vec![0; plaintext.len().div_ceil(8) * 8 + 8];
+        let mut encrypted_length = encrypted.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_EncryptInit(session, &mut mechanism, key),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Encrypt(
+                session,
+                plaintext.as_mut_ptr(),
+                plaintext.len() as CK_ULONG,
+                encrypted.as_mut_ptr(),
+                &mut encrypted_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        encrypted.truncate(encrypted_length as usize);
+        let mut decrypted = vec![0; plaintext.len()];
+        let mut decrypted_length = decrypted.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_DecryptInit(session, &mut mechanism, key),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Decrypt(
+                session,
+                encrypted.as_mut_ptr(),
+                encrypted.len() as CK_ULONG,
+                decrypted.as_mut_ptr(),
+                &mut decrypted_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(&decrypted[..decrypted_length as usize], plaintext);
+    }
 
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
@@ -5767,6 +5859,15 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         .unwrap();
     assert_eq!((kwp.min_key_size, kwp.max_key_size), (16, 16));
     assert_eq!(kwp.flags, (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS);
+    let key_wrap = aes_block_modes
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((key_wrap.min_key_size, key_wrap.max_key_size), (16, 16));
+    assert_eq!(
+        key_wrap.flags,
+        (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
 
     let incomplete_rsa_wrap = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_2048,
