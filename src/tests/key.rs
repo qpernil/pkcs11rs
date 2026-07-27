@@ -586,6 +586,8 @@ pub fn removing_a_slot_clears_its_runtime_state() {
         .as_mut()
         .unwrap()
         .slot_contexts
+        .get_mut()
+        .unwrap()
         .remove(&TEST_SLOT_ID);
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),

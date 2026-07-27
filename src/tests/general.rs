@@ -181,7 +181,7 @@ fn lifecycle_transitions_fail_while_an_api_call_is_active() {
         CKR_OK as CK_RV
     );
 
-    let active_call = crate::RUNTIME.lifecycle.read().unwrap();
+    let active_call = crate::MODULE_CONTEXT.read().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let initialize = std::thread::spawn({
         let sender = sender.clone();
@@ -224,7 +224,7 @@ fn ordinary_calls_fail_while_a_lifecycle_transition_is_active() {
         CKR_OK as CK_RV
     );
 
-    let transition = crate::RUNTIME.lifecycle.write().unwrap();
+    let transition = crate::MODULE_CONTEXT.write().unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let call = std::thread::spawn(move || {
         let mut info = CK_INFO {

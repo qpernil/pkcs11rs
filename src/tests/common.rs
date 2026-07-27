@@ -6801,6 +6801,8 @@ fn install_test_slot(slot_id: CK_SLOT_ID) {
         .as_ref()
         .unwrap()
         .slot_contexts
+        .read()
+        .unwrap()
         .get(&slot_id)
         .cloned()
         .and_then(|context| context.lock().ok().map(|context| context.slot.name()))
@@ -6828,6 +6830,8 @@ fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot
             .as_ref()
             .unwrap()
             .slot_contexts
+            .read()
+            .unwrap()
             .get(&slot_id)
             .cloned()
             .and_then(|context| {
@@ -6855,6 +6859,8 @@ fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot
         .as_mut()
         .unwrap()
         .slot_contexts
+        .get_mut()
+        .unwrap()
         .insert(slot_id, std::sync::Arc::new(std::sync::Mutex::new(child)));
 }
 
@@ -6864,6 +6870,8 @@ fn test_slot_context(slot_id: CK_SLOT_ID) -> std::sync::Arc<std::sync::Mutex<cra
         .as_ref()
         .unwrap()
         .slot_contexts
+        .read()
+        .unwrap()
         .get(&slot_id)
         .cloned()
         .unwrap()

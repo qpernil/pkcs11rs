@@ -634,78 +634,118 @@ fn str_pad(src: &str, dst: &mut [u8]) {
     }
 }
 
-fn lock_context() -> Result<MutexGuard<'static, Option<ModuleContext>>, Error> {
-    RUNTIME.module.lock().map_err(|_| CKR_MUTEX_BAD.into())
-}
-
-fn lock_lifecycle_read() -> Result<std::sync::RwLockReadGuard<'static, ()>, Error> {
-    match RUNTIME.lifecycle.try_read() {
+fn lock_context_read() -> Result<std::sync::RwLockReadGuard<'static, Option<ModuleContext>>, Error>
+{
+    match MODULE_CONTEXT.try_read() {
         Ok(guard) => Ok(guard),
         Err(std::sync::TryLockError::WouldBlock) => Err(CKR_CRYPTOKI_NOT_INITIALIZED.into()),
         Err(std::sync::TryLockError::Poisoned(_)) => Err(CKR_MUTEX_BAD.into()),
     }
 }
 
-fn lock_lifecycle_write() -> Result<std::sync::RwLockWriteGuard<'static, ()>, Error> {
-    match RUNTIME.lifecycle.try_write() {
+fn lock_context_write() -> Result<std::sync::RwLockWriteGuard<'static, Option<ModuleContext>>, Error>
+{
+    match MODULE_CONTEXT.try_write() {
         Ok(guard) => Ok(guard),
         Err(std::sync::TryLockError::WouldBlock) => Err(CKR_FUNCTION_FAILED.into()),
         Err(std::sync::TryLockError::Poisoned(_)) => Err(CKR_MUTEX_BAD.into()),
     }
 }
 
+#[cfg(test)]
+fn lock_context() -> Result<std::sync::RwLockWriteGuard<'static, Option<ModuleContext>>, Error> {
+    MODULE_CONTEXT
+        .write()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))
+}
+
 fn with_context<T>(f: impl FnOnce(&ModuleContext) -> Result<T, Error>) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    let guard = lock_context()?;
+    let guard = lock_context_read()?;
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     f(ctx)
 }
 
-fn with_context_mut<T>(f: impl FnOnce(&mut ModuleContext) -> Result<T, Error>) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    let mut guard = lock_context()?;
-    let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-    f(ctx)
+fn register_session_slot_in_context(
+    ctx: &ModuleContext,
+    session_handle: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+) -> Result<(), Error> {
+    ctx.slot_contexts
+        .write()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+        .register_session(session_handle, slot_id)
 }
 
+#[cfg(test)]
 fn register_session_slot(
     session_handle: CK_SESSION_HANDLE,
     slot_id: CK_SLOT_ID,
 ) -> Result<(), Error> {
-    let mut guard = lock_context()?;
-    let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-    ctx.slot_contexts.register_session(session_handle, slot_id)
+    with_context(|ctx| register_session_slot_in_context(ctx, session_handle, slot_id))
 }
 
-fn unregister_session_slot(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
-    let mut guard = lock_context()?;
-    let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-    ctx.slot_contexts.unregister_session(session_handle);
+fn unregister_session_slot_in_context(
+    ctx: &ModuleContext,
+    session_handle: CK_SESSION_HANDLE,
+) -> Result<(), Error> {
+    ctx.slot_contexts
+        .write()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+        .unregister_session(session_handle);
     Ok(())
 }
 
-fn unregister_session_slots(session_handles: &HashSet<CK_SESSION_HANDLE>) -> Result<(), Error> {
-    let mut guard = lock_context()?;
-    let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+fn unregister_session_slots_in_context(
+    ctx: &ModuleContext,
+    session_handles: &HashSet<CK_SESSION_HANDLE>,
+) -> Result<(), Error> {
+    let mut slot_contexts = ctx
+        .slot_contexts
+        .write()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     for session_handle in session_handles {
-        ctx.slot_contexts.unregister_session(*session_handle);
+        slot_contexts.unregister_session(*session_handle);
     }
     Ok(())
+}
+
+fn slot_context(
+    ctx: &ModuleContext,
+    slot_id: CK_SLOT_ID,
+    missing: CK_RV,
+) -> Result<Arc<Mutex<SlotContext>>, Error> {
+    ctx.slot_contexts
+        .read()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+        .get(&slot_id)
+        .cloned()
+        .ok_or_else(|| Error::from(missing))
+}
+
+fn session_slot_context(
+    ctx: &ModuleContext,
+    session_handle: CK_SESSION_HANDLE,
+) -> Result<Arc<Mutex<SlotContext>>, Error> {
+    let slot_contexts = ctx
+        .slot_contexts
+        .read()
+        .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let slot_id = slot_contexts
+        .session_slot(session_handle)
+        .ok_or(CKR_SESSION_HANDLE_INVALID)?;
+    slot_contexts
+        .get(&slot_id)
+        .cloned()
+        .ok_or(CKR_SESSION_HANDLE_INVALID.into())
 }
 
 fn with_slot_context<T>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    let child = {
-        let guard = lock_context()?;
-        let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        ctx.slot_contexts
-            .get(&slot_id)
-            .cloned()
-            .ok_or(CKR_SLOT_ID_INVALID)?
-    };
+    let guard = lock_context_read()?;
+    let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     f(&child)
 }
@@ -714,22 +754,17 @@ fn with_slot_context_mut<T>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    with_slot_context_mut_with_lifecycle_held(slot_id, f)
+    let guard = lock_context_read()?;
+    let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    with_slot_context_mut_in_context(ctx, slot_id, f)
 }
 
-fn with_slot_context_mut_with_lifecycle_held<T>(
+fn with_slot_context_mut_in_context<T>(
+    ctx: &ModuleContext,
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let child = {
-        let mut guard = lock_context()?;
-        let ctx = guard.as_mut().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        ctx.slot_contexts
-            .get(&slot_id)
-            .cloned()
-            .ok_or(CKR_SLOT_ID_INVALID)?
-    };
+    let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     f(&mut child)
 }
@@ -738,19 +773,9 @@ fn with_session_context<T>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    let child = {
-        let guard = lock_context()?;
-        let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        let slot_id = ctx
-            .slot_contexts
-            .session_slot(session_handle)
-            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
-        ctx.slot_contexts
-            .get(&slot_id)
-            .cloned()
-            .ok_or(CKR_SESSION_HANDLE_INVALID)?
-    };
+    let guard = lock_context_read()?;
+    let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    let child = session_slot_context(ctx, session_handle)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     f(&child)
 }
@@ -759,26 +784,17 @@ fn with_session_context_mut<T>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let _lifecycle = lock_lifecycle_read()?;
-    with_session_context_mut_with_lifecycle_held(session_handle, f)
+    let guard = lock_context_read()?;
+    let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
+    with_session_context_mut_in_context(ctx, session_handle, f)
 }
 
-fn with_session_context_mut_with_lifecycle_held<T>(
+fn with_session_context_mut_in_context<T>(
+    ctx: &ModuleContext,
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let child = {
-        let guard = lock_context()?;
-        let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
-        let slot_id = ctx
-            .slot_contexts
-            .session_slot(session_handle)
-            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
-        ctx.slot_contexts
-            .get(&slot_id)
-            .cloned()
-            .ok_or(CKR_SESSION_HANDLE_INVALID)?
-    };
+    let child = session_slot_context(ctx, session_handle)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     f(&mut child)
 }

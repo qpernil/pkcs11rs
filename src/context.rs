@@ -54,13 +54,15 @@ pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Resul
     }
 }
 
-// Process-wide discovery resources and the registry of independently locked slots.
+// Initialized module resources and the registry of independently locked slots.
+// The registry lock protects lazy discovery and session-handle routing; slot
+// operations release it before taking an individual SlotContext lock.
 pub(crate) struct ModuleContext {
     pub(crate) libusb: Option<rusb::Context>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
-    pub(crate) slot_contexts: SlotContextRegistry,
+    pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
 // Mutable token state shared by every PKCS #11 session opened on this slot.
@@ -133,6 +135,50 @@ impl SlotContextRegistry {
     pub(crate) fn session_slot(&self, session_handle: CK_SESSION_HANDLE) -> Option<CK_SLOT_ID> {
         self.session_slots.get(&session_handle).copied()
     }
+
+    fn insert_yubihsm_slot_context(&mut self, slot_id: CK_SLOT_ID, context: SlotContext) {
+        self.slots.insert(slot_id, Arc::new(Mutex::new(context)));
+    }
+
+    fn insert_pcsc_slot_contexts(
+        &mut self,
+        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
+    ) -> Result<Vec<CK_SLOT_ID>, Error> {
+        // Each applet is a separate PKCS token with its own logical state.
+        // Their connectors share PcscReaderState for physical reader access.
+        let slot_ids = slots
+            .iter()
+            .map(|(slot_id, _, _)| *slot_id)
+            .collect::<Vec<_>>();
+        let distinct_slot_ids = slot_ids.iter().copied().collect::<HashSet<_>>();
+        if slot_ids.is_empty()
+            || distinct_slot_ids.len() != slot_ids.len()
+            || slot_ids
+                .iter()
+                .any(|slot_id| self.slots.contains_key(slot_id))
+        {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let contexts = slots
+            .into_iter()
+            .map(|(slot_id, slot, token_objects)| {
+                let context = SlotContext::new(slot_id, slot, token_objects)?;
+                Ok((slot_id, Arc::new(Mutex::new(context))))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (slot_id, context) in contexts {
+            self.slots.insert(slot_id, context);
+        }
+        Ok(slot_ids)
+    }
+
+    fn next_slot_id(&self) -> Option<CK_SLOT_ID> {
+        self.slots
+            .keys()
+            .max()
+            .copied()
+            .map_or(Some(0), |slot_id| slot_id.checked_add(1))
+    }
 }
 
 impl std::ops::Deref for SlotContextRegistry {
@@ -198,6 +244,11 @@ pub(crate) enum LoginRole {
 
 impl std::fmt::Debug for ModuleContext {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let slot_ids = self
+            .slot_contexts
+            .try_read()
+            .ok()
+            .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
         fmt.debug_struct("ModuleContext")
             .field("libusb", &self.libusb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
@@ -206,10 +257,7 @@ impl std::fmt::Debug for ModuleContext {
                 "yubihsm_public_discovery_credential",
                 &self.yubihsm_public_discovery_credential,
             )
-            .field(
-                "slot_contexts",
-                &self.slot_contexts.keys().collect::<Vec<_>>(),
-            )
+            .field("slot_contexts", &slot_ids)
             .finish()
     }
 }
@@ -368,7 +416,7 @@ impl ModuleContext {
             },
             yubihsm_urls,
             yubihsm_public_discovery_credential,
-            slot_contexts: SlotContextRegistry::new(),
+            slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
         #[cfg(feature = "abi-tests")]
         for (slot_id, slot) in {
@@ -398,6 +446,8 @@ impl ModuleContext {
             }
             context
                 .slot_contexts
+                .get_mut()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?
                 .insert(slot_id, Arc::new(Mutex::new(child)));
         }
         log!(2, "ModuleContext.new {:?}", context);
@@ -423,61 +473,33 @@ impl ModuleContext {
         SlotContext::new(slot_id, slot, token_objects)
     }
 
+    #[cfg(test)]
     pub(crate) fn insert_yubihsm_slot(
-        &mut self,
+        &self,
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
     ) -> Result<(), Error> {
-        self.insert_yubihsm_slot_with_discovery(slot_id, slot, true)
+        let mut slot_contexts = self
+            .slot_contexts
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        Self::insert_yubihsm_slot_with_discovery(&mut slot_contexts, slot_id, slot, true)
     }
 
     fn insert_yubihsm_slot_with_discovery(
-        &mut self,
+        slot_contexts: &mut SlotContextRegistry,
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
         discover_objects: bool,
     ) -> Result<(), Error> {
         let context = Self::new_yubihsm_slot_context(slot_id, slot, discover_objects)?;
-        self.slot_contexts
-            .insert(slot_id, Arc::new(Mutex::new(context)));
+        slot_contexts.insert_yubihsm_slot_context(slot_id, context);
         Ok(())
-    }
-
-    fn insert_pcsc_slot_contexts(
-        &mut self,
-        slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
-    ) -> Result<Vec<CK_SLOT_ID>, Error> {
-        // Each applet is a separate PKCS token with its own logical state.
-        // Their connectors share PcscReaderState for physical reader access.
-        let slot_ids = slots
-            .iter()
-            .map(|(slot_id, _, _)| *slot_id)
-            .collect::<Vec<_>>();
-        let distinct_slot_ids = slot_ids.iter().copied().collect::<HashSet<_>>();
-        if slot_ids.is_empty()
-            || distinct_slot_ids.len() != slot_ids.len()
-            || slot_ids
-                .iter()
-                .any(|slot_id| self.slot_contexts.contains_key(slot_id))
-        {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let contexts = slots
-            .into_iter()
-            .map(|(slot_id, slot, token_objects)| {
-                let context = SlotContext::new(slot_id, slot, token_objects)?;
-                Ok((slot_id, Arc::new(Mutex::new(context))))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        for (slot_id, context) in contexts {
-            self.slot_contexts.insert(slot_id, context);
-        }
-        Ok(slot_ids)
     }
 
     #[cfg(test)]
     pub(crate) fn insert_pcsc_slots(
-        &mut self,
+        &self,
         slots: Vec<(CK_SLOT_ID, Box<dyn Slot>)>,
     ) -> Result<(), Error> {
         let slots = slots
@@ -487,15 +509,11 @@ impl ModuleContext {
                 Ok((slot_id, slot, token_objects))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        self.insert_pcsc_slot_contexts(slots).map(|_| ())
-    }
-
-    fn next_slot_id(&self) -> Option<CK_SLOT_ID> {
         self.slot_contexts
-            .keys()
-            .max()
-            .copied()
-            .map_or(Some(0), |slot_id| slot_id.checked_add(1))
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .insert_pcsc_slot_contexts(slots)
+            .map(|_| ())
     }
     pub(crate) fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
         info.cryptokiVersion.major = 3;
@@ -855,13 +873,17 @@ impl SlotContext {
 
 impl ModuleContext {
     #[allow(unreachable_code)]
-    pub(crate) fn init(&mut self) {
-        if !self.slot_contexts.begin_discovery() {
-            return;
+    pub(crate) fn init(&self) -> Result<(), Error> {
+        let mut slot_contexts = self
+            .slot_contexts
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        if !slot_contexts.begin_discovery() {
+            return Ok(());
         }
         #[cfg(feature = "abi-tests")]
         {
-            return;
+            return Ok(());
         }
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         if let Some(context) = self.libusb.as_ref() {
@@ -901,7 +923,7 @@ impl ModuleContext {
                                     };
                                     let name = connector.name();
                                     log!(2, "{}", name);
-                                    if self.slot_contexts.values().any(|context| {
+                                    if slot_contexts.values().any(|context| {
                                         context
                                             .lock()
                                             .ok()
@@ -914,7 +936,7 @@ impl ModuleContext {
                                         log!(1, "libusb.claim_interface: {:?}", error);
                                         continue;
                                     }
-                                    let Some(slot_id) = self.next_slot_id() else {
+                                    let Some(slot_id) = slot_contexts.next_slot_id() else {
                                         log!(1, "YubiHSM slot ID space exhausted");
                                         continue;
                                     };
@@ -931,7 +953,12 @@ impl ModuleContext {
                                         log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
                                     }
-                                    if let Err(error) = self.insert_yubihsm_slot(slot_id, slot) {
+                                    if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
+                                        &mut slot_contexts,
+                                        slot_id,
+                                        slot,
+                                        true,
+                                    ) {
                                         log!(1, "YubiHSM slot registration: {:?}", error);
                                         continue;
                                     }
@@ -962,7 +989,7 @@ impl ModuleContext {
             };
             let name = connector.name();
             log!(2, "{} at {}", name, url);
-            let Some(slot_id) = self.next_slot_id() else {
+            let Some(slot_id) = slot_contexts.next_slot_id() else {
                 log!(1, "YubiHSM connector slot ID space exhausted");
                 continue;
             };
@@ -980,7 +1007,9 @@ impl ModuleContext {
                     connector.set_unavailable();
                 }
             }
-            if let Err(error) = self.insert_yubihsm_slot(slot_id, slot) {
+            if let Err(error) =
+                Self::insert_yubihsm_slot_with_discovery(&mut slot_contexts, slot_id, slot, true)
+            {
                 log!(
                     1,
                     "YubiHSM connector slot registration for {url}: {:?}",
@@ -1025,7 +1054,7 @@ impl ModuleContext {
                     let reader_state = connector.state.clone();
                     let base_connector: Rc<dyn Connector> = Rc::new(connector);
                     let mut reader_slots = Vec::new();
-                    let Some(mut next_reader_slot_id) = self.next_slot_id() else {
+                    let Some(mut next_reader_slot_id) = slot_contexts.next_slot_id() else {
                         log!(1, "PCSC slot ID space exhausted");
                         break;
                     };
@@ -1142,18 +1171,17 @@ impl ModuleContext {
                         reader_slots.push((slot_id, slot, token_objects));
                     }
                     if !reader_slots.is_empty() {
-                        if let Err(error) = self.insert_pcsc_slot_contexts(reader_slots) {
+                        if let Err(error) = slot_contexts.insert_pcsc_slot_contexts(reader_slots) {
                             log!(1, "PCSC slot context registration: {:?}", error);
                         }
                     }
                 }
             }
         }
-        let yubihsm_slot_ids = self
-            .slot_contexts
+        let yubihsm_slot_ids = slot_contexts
             .keys()
             .filter(|slot_id| {
-                self.slot_contexts
+                slot_contexts
                     .get(slot_id)
                     .and_then(|context| context.lock().ok())
                     .is_some_and(|context| context.slot.kind() == SlotKind::YubiHsm)
@@ -1161,7 +1189,7 @@ impl ModuleContext {
             .copied()
             .collect::<Vec<_>>();
         for slot_id in yubihsm_slot_ids {
-            if let Some(context) = self.slot_contexts.get(&slot_id) {
+            if let Some(context) = slot_contexts.get(&slot_id) {
                 match context.lock() {
                     Ok(mut context) => {
                         if let Err(error) = context.refresh_slot_token_objects(slot_id) {
@@ -1172,7 +1200,9 @@ impl ModuleContext {
                 }
             }
         }
+        drop(slot_contexts);
         log!(2, "ModuleContext.init {:?}", self);
+        Ok(())
     }
 }
 
@@ -1242,17 +1272,11 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
 // that are not marked Send by their dependency crates never escape that guard.
 unsafe impl Send for SlotContext {}
 
-// ModuleContext is always protected by RUNTIME.module.
+// ModuleContext is always protected by MODULE_CONTEXT.
 // Connector handles that are not marked Send by their dependency crates never
 // escape their owning context guard.
 unsafe impl Send for ModuleContext {}
 
-pub(crate) struct Runtime {
-    pub(crate) lifecycle: RwLock<()>,
-    pub(crate) module: Mutex<Option<ModuleContext>>,
-}
-
-pub(crate) static RUNTIME: Runtime = Runtime {
-    lifecycle: RwLock::new(()),
-    module: Mutex::new(None),
-};
+// Presence is the module lifecycle state. Ordinary calls retain a shared guard
+// for their complete duration; C_Initialize and C_Finalize require exclusivity.
+pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(None);
