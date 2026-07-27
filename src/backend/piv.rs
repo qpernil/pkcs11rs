@@ -231,7 +231,7 @@ pub(crate) fn piv_public_key_from_certificate(
                 piv::Algorithm::EccP384 => p384::PublicKey::from_sec1_bytes(&point)
                     .map(|_| ())
                     .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                _ => unreachable!(),
+                _ => return Err(CKR_DATA_INVALID.into()),
             }
             if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
                 return Err(CKR_DEVICE_ERROR.into());
@@ -242,7 +242,7 @@ pub(crate) fn piv_public_key_from_certificate(
             let expected_oid = match algorithm {
                 piv::Algorithm::Ed25519 => "1.3.101.112",
                 piv::Algorithm::X25519 => "1.3.101.110",
-                _ => unreachable!(),
+                _ => return Err(CKR_DATA_INVALID.into()),
             };
             if key_algorithm.to_string() != expected_oid {
                 return Err(CKR_DATA_INVALID.into());

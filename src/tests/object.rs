@@ -425,7 +425,9 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
                     value: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 },
             };
-            with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object))
+            with_test_slot_context(TEST_SLOT_ID, |context| {
+                context.insert_object(object).unwrap()
+            })
         })
         .collect();
 
@@ -576,7 +578,7 @@ pub fn destroy_openpgp_objects_is_prohibited() {
     let handles = with_test_slot_context(TEST_SLOT_ID, |context| {
         [base, public, private]
             .into_iter()
-            .map(|object| context.insert_object(object))
+            .map(|object| context.insert_object(object).unwrap())
             .collect::<Vec<_>>()
     });
 
@@ -2109,8 +2111,9 @@ pub fn get_attribute_value_reads_certificate_values() {
             value: certificate.clone(),
         },
     };
-    let object_handle =
-        with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object));
+    let object_handle = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.insert_object(object).unwrap()
+    });
 
     let mut value_attribute = CK_ATTRIBUTE {
         type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
@@ -2186,8 +2189,9 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
             object_id: Vec::new(),
         },
     };
-    let object_handle =
-        with_test_slot_context(TEST_SLOT_ID, |context| context.insert_object(object));
+    let object_handle = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.insert_object(object).unwrap()
+    });
 
     let mut returned = [0u8; 2];
     let mut value_attribute = CK_ATTRIBUTE {

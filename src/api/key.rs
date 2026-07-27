@@ -74,7 +74,7 @@ fn generate_key(
         let mut key = generate_key_object(mechanism, templ)?;
         validate_new_object_access(&key, flags, logged_in)?;
         key.set_creator(session_handle, slot_id);
-        let handle = ctx.insert_object(key);
+        let handle = ctx.insert_object(key)?;
         *key_handle = handle;
         Ok(())
     })
@@ -1181,7 +1181,7 @@ fn derive_key(
             KeyMaterial::DerivedSecret(Zeroizing::new(derived[..requested_length].to_vec()));
         derived_object.local = false;
         derived_object.set_creator(session_handle, slot_id);
-        *key_handle = ctx.insert_object(derived_object);
+        *key_handle = ctx.insert_object(derived_object)?;
         Ok(())
     })
 }

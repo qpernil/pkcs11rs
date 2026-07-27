@@ -538,11 +538,15 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
         (YUBIHSM_ALGO_RSA_PKCS1_SHA384, CKM_SHA384_RSA_PKCS),
         (YUBIHSM_ALGO_RSA_PKCS1_SHA512, CKM_SHA512_RSA_PKCS),
     ] {
-        if has_rsa && algorithms.contains(&algorithm) {
+        if let (true, Some(min_key_size), Some(max_key_size)) = (
+            has_rsa && algorithms.contains(&algorithm),
+            rsa_sizes.iter().min(),
+            rsa_sizes.iter().max(),
+        ) {
             mechanisms.push(MechanismDetails {
                 type_: type_ as CK_MECHANISM_TYPE,
-                min_key_size: *rsa_sizes.iter().min().unwrap(),
-                max_key_size: *rsa_sizes.iter().max().unwrap(),
+                min_key_size: *min_key_size,
+                max_key_size: *max_key_size,
                 flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
             });
         }

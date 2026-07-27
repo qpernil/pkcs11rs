@@ -519,21 +519,19 @@ fn maps_all_ykcs11_piv_data_identifiers_and_oids() {
         assert_eq!(mapping.cka_id as usize, index + 1);
         assert_eq!(data_object_mapping(mapping.object_id), Some(mapping));
         assert_eq!(data_object_mapping_by_cka_id(mapping.cka_id), Some(mapping));
-        assert_eq!(
-            data_object_mapping_by_oid(&data_object_oid(mapping)),
-            Some(mapping)
-        );
+        let oid = data_object_oid(mapping).unwrap();
+        assert_eq!(data_object_mapping_by_oid(&oid), Some(mapping));
         if let Some(slot) = mapping.slot {
             assert_eq!(slot.cka_id(), mapping.cka_id);
             assert_eq!(slot.certificate_object(), mapping.object_id);
         }
     }
     assert_eq!(
-        data_object_oid(data_object_mapping(0x5f_c105).unwrap()),
+        data_object_oid(data_object_mapping(0x5f_c105).unwrap()).unwrap(),
         [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x01]
     );
     assert_eq!(
-        data_object_oid(data_object_mapping(0x5f_c102).unwrap()),
+        data_object_oid(data_object_mapping(0x5f_c102).unwrap()).unwrap(),
         [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x30, 0x00]
     );
 }

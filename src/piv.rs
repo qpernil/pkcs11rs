@@ -514,8 +514,8 @@ pub(crate) fn data_object_mapping_by_cka_id(cka_id: u8) -> Option<&'static DataO
     DATA_OBJECTS.iter().find(|mapping| mapping.cka_id == cka_id)
 }
 
-pub(crate) fn data_object_oid(mapping: &DataObjectMapping) -> Vec<u8> {
-    match mapping.cka_id {
+pub(crate) fn data_object_oid(mapping: &DataObjectMapping) -> Option<Vec<u8>> {
+    Some(match mapping.cka_id {
         1 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x01],
         2 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x00],
         3 => vec![0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x07, 0x02, 0x01, 0x02],
@@ -557,14 +557,14 @@ pub(crate) fn data_object_oid(mapping: &DataObjectMapping) -> Vec<u8> {
             0x10,
             mapping.cka_id - 13,
         ],
-        _ => unreachable!("PIV data object mapping has an invalid CKA_ID"),
-    }
+        _ => return None,
+    })
 }
 
 pub(crate) fn data_object_mapping_by_oid(oid: &[u8]) -> Option<&'static DataObjectMapping> {
     DATA_OBJECTS
         .iter()
-        .find(|mapping| data_object_oid(mapping) == oid)
+        .find(|mapping| data_object_oid(mapping).as_deref() == Some(oid))
 }
 
 pub(crate) fn data_object_allowed(object_id: u32) -> bool {

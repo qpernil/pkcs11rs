@@ -349,11 +349,11 @@ pub(crate) struct EcPointValue {
     pub(crate) z: BigUint,
 }
 
-pub(crate) fn biguint_hex(value: &str) -> BigUint {
-    BigUint::parse_bytes(value.as_bytes(), 16).expect("valid embedded EC parameter")
+pub(crate) fn biguint_hex(value: &str) -> Result<BigUint, Error> {
+    BigUint::parse_bytes(value.as_bytes(), 16).ok_or_else(|| CKR_FUNCTION_FAILED.into())
 }
 
-pub(crate) fn ec_parameters(curve: EcCurve) -> EcParameters {
+pub(crate) fn ec_parameters(curve: EcCurve) -> Result<EcParameters, Error> {
     let values = match curve {
         EcCurve::P224 => (
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF000000000000000000000001",
@@ -428,15 +428,15 @@ pub(crate) fn ec_parameters(curve: EcCurve) -> EcParameters {
             64,
         ),
     };
-    EcParameters {
-        p: biguint_hex(values.0),
-        a: biguint_hex(values.1),
-        b: biguint_hex(values.2),
-        gx: biguint_hex(values.3),
-        gy: biguint_hex(values.4),
-        n: biguint_hex(values.5),
+    Ok(EcParameters {
+        p: biguint_hex(values.0)?,
+        a: biguint_hex(values.1)?,
+        b: biguint_hex(values.2)?,
+        gx: biguint_hex(values.3)?,
+        gy: biguint_hex(values.4)?,
+        n: biguint_hex(values.5)?,
         coordinate_length: values.6,
-    }
+    })
 }
 
 pub(crate) fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
@@ -659,7 +659,7 @@ pub(crate) fn verify_ecdsa(
     digest: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    let parameters = ec_parameters(curve);
+    let parameters = ec_parameters(curve)?;
     if public_key.len() != parameters.coordinate_length * 2 {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
@@ -693,7 +693,7 @@ pub(crate) fn verify_ecdsa(
 }
 
 pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
-    let parameters = ec_parameters(curve);
+    let parameters = ec_parameters(curve)?;
     if point.len() != 1 + parameters.coordinate_length * 2 || point[0] != 0x04 {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }

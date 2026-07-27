@@ -123,7 +123,7 @@ pub extern "C" fn C_OpenSession(
             let _ = ctx.slot.refresh();
             log!(2, "{:?}", ctx.slot);
             if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                let k = allocate_session_handle();
+                let k = allocate_session_handle()?;
                 log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
                 ctx.sessions.insert(k, ctx.slot.open_session(slotID, flags));
                 if SESSION_CONTEXTS
@@ -175,7 +175,10 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         } else {
             None
         };
-        let session = ctx.sessions.remove(&session_handle).unwrap();
+        let session = ctx
+            .sessions
+            .remove(&session_handle)
+            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
         ctx.find_operations.remove(&session_handle);
         ctx.digest_operations.remove(&session_handle);
         ctx.encrypt_operations.remove(&session_handle);

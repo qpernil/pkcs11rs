@@ -425,9 +425,16 @@ fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[
     Ok(hash.finalize().into())
 }
 
-fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) {
-    let value = u32::from_be_bytes(counter[12..].try_into().unwrap()).wrapping_add(1);
+fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) -> Result<(), Error> {
+    let value = u32::from_be_bytes(
+        counter
+            .get(12..)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+            .ok_or(CKR_FUNCTION_FAILED)?,
+    )
+    .wrapping_add(1);
     counter[12..].copy_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 fn gcm_tag(full_tag: [u8; AES_BLOCK_LENGTH], tag_bits: usize) -> Vec<u8> {
@@ -499,7 +506,7 @@ where
     let mut counter_blocks = Vec::with_capacity(counter_capacity);
     counter_blocks.extend_from_slice(&initial_counter);
     for _ in 0..block_count {
-        increment_gcm_counter(&mut initial_counter);
+        increment_gcm_counter(&mut initial_counter)?;
         counter_blocks.extend_from_slice(&initial_counter);
     }
     let encrypted_counters = encrypt_blocks(&counter_blocks)?;
@@ -844,7 +851,9 @@ where
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let a = initial_value.try_into().unwrap();
+        let a = initial_value
+            .try_into()
+            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
         let (a, r) = aes_key_wrap_rounds(a, input.to_vec(), true, &mut crypt_block)?;
         let mut output = a.to_vec();
         output.extend_from_slice(&r);

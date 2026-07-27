@@ -404,7 +404,9 @@ fn sign(
                 algorithm, modulus, ..
             } => match algorithm {
                 OpenPgpAlgorithm::Rsa { .. } => modulus.len(),
-                OpenPgpAlgorithm::Ecdsa(_) => openpgp_ec_coordinate_length(*algorithm).unwrap() * 2,
+                OpenPgpAlgorithm::Ecdsa(_) => {
+                    openpgp_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)? * 2
+                }
                 OpenPgpAlgorithm::Ed25519 => 64,
                 OpenPgpAlgorithm::Ecdh(_) => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
@@ -424,7 +426,7 @@ fn sign(
                 ..
             } => 64,
             KeyMaterial::YubiHsm { .. } if operation.mac_length.is_some() => {
-                operation.mac_length.unwrap()
+                operation.mac_length.ok_or(CKR_KEY_TYPE_INCONSISTENT)?
             }
             KeyMaterial::YubiHsm { algorithm, .. } => match *algorithm {
                 YUBIHSM_ALGO_HMAC_SHA1 => 20,
@@ -540,9 +542,10 @@ fn sign(
                         *pin_policy,
                     )?;
                     match algorithm {
-                        OpenPgpAlgorithm::Ecdsa(curve) => {
-                            openpgp_signature(&response, curve.coordinate_length().unwrap())
-                        }
+                        OpenPgpAlgorithm::Ecdsa(curve) => openpgp_signature(
+                            &response,
+                            curve.coordinate_length().ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                        ),
                         _ => Ok(response),
                     }
                 }

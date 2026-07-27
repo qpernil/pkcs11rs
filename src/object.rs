@@ -1270,7 +1270,7 @@ impl TokenObject {
                 KeyMaterial::YubiHsm { .. } => Some(Vec::new()),
                 KeyMaterial::IssuerSecurityDomainData { object_id, .. } => Some(object_id.clone()),
                 KeyMaterial::PivData { object_id, .. } => {
-                    piv::data_object_mapping(*object_id).map(piv::data_object_oid)
+                    piv::data_object_mapping(*object_id).and_then(piv::data_object_oid)
                 }
                 KeyMaterial::OpenPgpData { tag, .. } => Some(tag.to_be_bytes().to_vec()),
                 KeyMaterial::FidoCredential { rp_id_hash, .. } => Some(rp_id_hash.to_vec()),

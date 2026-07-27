@@ -517,7 +517,7 @@ impl Scp11Curve {
     }
 
     fn public_point_length(self) -> Result<usize, Error> {
-        Ok(1 + 2 * crate::ec_parameters(self.ec_curve()).coordinate_length)
+        Ok(1 + 2 * crate::ec_parameters(self.ec_curve())?.coordinate_length)
     }
 }
 
@@ -615,7 +615,7 @@ fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>),
             .ok_or(CKR_ARGUMENTS_BAD)?;
         (Scp11Curve::from_oid(oid)?, key.private_key)
     };
-    let parameters = crate::ec_parameters(curve.ec_curve());
+    let parameters = crate::ec_parameters(curve.ec_curve())?;
     let scalar = rsa::BigUint::from_bytes_be(scalar);
     if scalar == rsa::BigUint::from(0u8) || scalar >= parameters.n {
         return Err(CKR_ARGUMENTS_BAD.into());

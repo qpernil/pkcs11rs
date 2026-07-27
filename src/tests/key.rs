@@ -566,7 +566,7 @@ pub fn removing_a_slot_clears_its_runtime_state() {
         session_object.unique_id.clear();
         session_object.token = false;
         session_object.creator_session = Some(TEST_SESSION_HANDLE);
-        let object_handle = context.insert_object(session_object);
+        let object_handle = context.insert_object(session_object).unwrap();
         context.find_operations.insert(
             TEST_SESSION_HANDLE,
             crate::FindOperation {
