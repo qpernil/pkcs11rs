@@ -25,6 +25,8 @@ The minimum supported Rust version is 1.85.
   authenticate sessions on local or remote YubiHSM slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
+- **FIDO2** discovery over the YubiKey 5.8+ USB CCID smart-card binding, with
+  read-only resident-credential metadata after PIN login.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
@@ -199,8 +201,8 @@ Auth `C_Login` selectors may omit their password separator instead. See
 
 ## CCID Configuration
 
-The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, and the
-Issuer SD. Each selectable applet is exposed as its own PKCS #11
+The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
+and FIDO2. Each selectable applet is exposed as its own PKCS #11
 slot.
 
 Limit discovery to selected applets with:
@@ -208,6 +210,9 @@ Limit discovery to selected applets with:
 ```sh
 export PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
+
+See [FIDO2 over CCID](docs/fido2.md) for the firmware boundary, read-only
+credential mapping, and compatibility-test commands.
 
 Enable secure messaging for selected applets with one of:
 
