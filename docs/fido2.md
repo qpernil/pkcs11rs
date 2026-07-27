@@ -225,9 +225,11 @@ field checks, and response bounds explicit.
 
 The initial implementation was completed without hardware. The compatibility
 probe has since succeeded against pre-release hardware and a pre-release
-YubiKey reporting `FIDO_2_3` over macOS PC/SC. The latter reported
-`clientPin=false`, so resident-credential enumeration and PKCS #11 PIN
-provisioning, change, and login remain deferred. Validation remains necessary
+YubiKey reporting `FIDO_2_3` over macOS PC/SC. On the latter, the exported
+`C_SetPIN` entry point successfully provisioned the initial PIN from a non-null
+zero-length old-PIN buffer, `C_Login(CKU_USER)` verified it, and read-only
+resident-credential enumeration returned an empty store. Existing-PIN
+`changePIN` hardware validation remains deferred. Validation remains necessary
 for:
 
 - USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8+
