@@ -165,6 +165,7 @@ pub(crate) struct DiscoverableCredential {
     pub(crate) public_key_cose: Vec<u8>,
     pub(crate) cred_protect: Option<u64>,
     pub(crate) third_party_payment: Option<bool>,
+    pub(crate) response_cbor: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -1141,6 +1142,7 @@ fn parse_credential_response(
                 .ok_or(CtapError::Malformed("missing credential public key"))?,
             cred_protect,
             third_party_payment,
+            response_cbor: data.to_vec(),
         },
         total,
     ))
@@ -1440,7 +1442,7 @@ mod tests {
         let mut output = vec![0];
         let mut encoder = Encoder::new(&mut output);
         encoder
-            .map(6)
+            .map(7)
             .unwrap()
             .u8(6)
             .unwrap()
@@ -1501,6 +1503,10 @@ mod tests {
             .u8(10)
             .unwrap()
             .u8(3)
+            .unwrap()
+            .u8(11)
+            .unwrap()
+            .bytes(&[0x66; 32])
             .unwrap()
             .u8(12)
             .unwrap()
@@ -1872,10 +1878,9 @@ mod tests {
 
     #[test]
     fn mock_transport_enumerates_read_only_credentials() {
-        let transport = Rc::new(MockTransport::new(vec![
-            rp_response(),
-            credential_response(),
-        ]));
+        let credential_response = credential_response();
+        let expected_response_cbor = credential_response[1..].to_vec();
+        let transport = Rc::new(MockTransport::new(vec![rp_response(), credential_response]));
         let client = Client::new(transport.clone());
         let authorization = CredentialAuthorization {
             protocol: 2,
@@ -1894,6 +1899,7 @@ mod tests {
         assert_eq!(credential.credential_id, [0x22; 32]);
         assert_eq!(credential.cred_protect, Some(3));
         assert_eq!(credential.third_party_payment, Some(true));
+        assert_eq!(credential.response_cbor, expected_response_cbor);
 
         let requests = transport.requests.borrow();
         assert_eq!(requests.len(), 2);

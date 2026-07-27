@@ -1,6 +1,7 @@
 use super::ccid::PcscAppletSession;
 use crate::ctap::DiscoverableCredential;
 use crate::*;
+#[cfg(test)]
 use minicbor::Encoder;
 use std::time::Duration;
 
@@ -99,54 +100,6 @@ impl Fido2Slot {
     }
 }
 
-fn append_optional_text(
-    encoder: &mut Encoder<&mut Vec<u8>>,
-    key: u8,
-    value: Option<&str>,
-) -> Result<(), CtapError> {
-    if let Some(value) = value {
-        encoder.u8(key)?.str(value)?;
-    }
-    Ok(())
-}
-
-fn credential_metadata(credential: &DiscoverableCredential) -> Result<Vec<u8>, CtapError> {
-    let optional_count = [
-        credential.relying_party.id.as_ref().map(|_| ()),
-        credential.relying_party.name.as_ref().map(|_| ()),
-        credential.user_name.as_ref().map(|_| ()),
-        credential.user_display_name.as_ref().map(|_| ()),
-        credential.cred_protect.map(|_| ()),
-        credential.third_party_payment.map(|_| ()),
-    ]
-    .into_iter()
-    .flatten()
-    .count();
-    let mut output = Vec::new();
-    let mut encoder = Encoder::new(&mut output);
-    encoder
-        .map((4 + optional_count) as u64)?
-        .u8(1)?
-        .bytes(&credential.relying_party.id_hash)?;
-    append_optional_text(&mut encoder, 2, credential.relying_party.id.as_deref())?;
-    append_optional_text(&mut encoder, 3, credential.relying_party.name.as_deref())?;
-    encoder.u8(4)?.bytes(&credential.user_id)?;
-    append_optional_text(&mut encoder, 5, credential.user_name.as_deref())?;
-    append_optional_text(&mut encoder, 6, credential.user_display_name.as_deref())?;
-    encoder
-        .u8(7)?
-        .bytes(&credential.credential_id)?
-        .u8(8)?
-        .bytes(&credential.public_key_cose)?;
-    if let Some(value) = credential.cred_protect {
-        encoder.u8(9)?.u64(value)?;
-    }
-    if let Some(value) = credential.third_party_payment {
-        encoder.u8(10)?.bool(value)?;
-    }
-    Ok(output)
-}
-
 fn hex(value: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(value.len() * 2);
@@ -157,35 +110,155 @@ fn hex(value: &[u8]) -> String {
     output
 }
 
+struct ProjectedFidoKey {
+    key_type: CK_KEY_TYPE,
+    public_key: FidoPublicKey,
+}
+
+fn decode_cbor_u64(value: &[u8]) -> Option<u64> {
+    let mut decoder = minicbor::Decoder::new(value);
+    let decoded = decoder.u64().ok()?;
+    (decoder.position() == value.len()).then_some(decoded)
+}
+
+fn decode_cbor_bytes(value: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = minicbor::Decoder::new(value);
+    let decoded = decoder.bytes().ok()?.to_vec();
+    (decoder.position() == value.len()).then_some(decoded)
+}
+
+fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey> {
+    let mut decoder = minicbor::Decoder::new(encoded);
+    let count = decoder.map().ok()??;
+    let mut kty = None;
+    let mut minus_one = None;
+    let mut minus_two = None;
+    let mut minus_three = None;
+    for _ in 0..count {
+        let label = decoder.i64().ok()?;
+        let target = match label {
+            1 => &mut kty,
+            -1 => &mut minus_one,
+            -2 => &mut minus_two,
+            -3 => &mut minus_three,
+            _ => {
+                decoder.skip().ok()?;
+                continue;
+            }
+        };
+        if target.is_some() {
+            return None;
+        }
+        let start = decoder.position();
+        decoder.skip().ok()?;
+        *target = Some(&encoded[start..decoder.position()]);
+    }
+    if decoder.position() != encoded.len() {
+        return None;
+    }
+
+    match decode_cbor_u64(kty?)? {
+        1 => {
+            let curve = decode_cbor_u64(minus_one?)?;
+            let public_key = decode_cbor_bytes(minus_two?)?;
+            if curve != 6 || public_key.len() != 32 {
+                return None;
+            }
+            Some(ProjectedFidoKey {
+                key_type: CKK_EC_EDWARDS as CK_KEY_TYPE,
+                public_key: FidoPublicKey::Ec {
+                    parameters: piv_ec_parameters(piv::Algorithm::Ed25519)?.to_vec(),
+                    public_key,
+                    prefix_uncompressed: false,
+                },
+            })
+        }
+        2 => {
+            let curve = decode_cbor_u64(minus_one?)?;
+            let x = decode_cbor_bytes(minus_two?)?;
+            let y = decode_cbor_bytes(minus_three?)?;
+            let (coordinate_length, parameters): (usize, &[u8]) = match curve {
+                1 => (
+                    32,
+                    &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+                ),
+                2 => (48, &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
+                3 => (66, &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23]),
+                _ => return None,
+            };
+            if x.len() != coordinate_length || y.len() != coordinate_length {
+                return None;
+            }
+            let mut public_key = Vec::with_capacity(coordinate_length * 2);
+            public_key.extend(x);
+            public_key.extend(y);
+            Some(ProjectedFidoKey {
+                key_type: CKK_EC as CK_KEY_TYPE,
+                public_key: FidoPublicKey::Ec {
+                    parameters: parameters.to_vec(),
+                    public_key,
+                    prefix_uncompressed: true,
+                },
+            })
+        }
+        3 => {
+            let modulus = decode_cbor_bytes(minus_one?)?;
+            let public_exponent = decode_cbor_bytes(minus_two?)?;
+            if modulus.is_empty() || public_exponent.is_empty() {
+                return None;
+            }
+            Some(ProjectedFidoKey {
+                key_type: CKK_RSA as CK_KEY_TYPE,
+                public_key: FidoPublicKey::Rsa {
+                    modulus,
+                    public_exponent,
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
 fn credential_label(credential: &DiscoverableCredential) -> String {
-    credential
+    let user = credential
         .user_display_name
         .as_ref()
         .or(credential.user_name.as_ref())
-        .or(credential.relying_party.name.as_ref())
+        .map(String::as_str);
+    let relying_party = credential
+        .relying_party
+        .name
+        .as_ref()
         .or(credential.relying_party.id.as_ref())
-        .cloned()
-        .unwrap_or_else(|| {
+        .map(String::as_str);
+    match (relying_party, user) {
+        (Some(relying_party), Some(user)) => format!("{relying_party}: {user}"),
+        (Some(relying_party), None) => relying_party.to_owned(),
+        (None, Some(user)) => user.to_owned(),
+        (None, None) => {
             let id = hex(&credential.credential_id);
             format!("FIDO2 credential {}", &id[..id.len().min(16)])
-        })
+        }
+    }
 }
 
 fn fido2_token_objects(
     slot_id: CK_SLOT_ID,
     credentials: &[DiscoverableCredential],
 ) -> Result<Vec<TokenObject>, Error> {
-    credentials
-        .iter()
-        .map(|credential| {
-            let rp_id_hash = hex(&credential.relying_party.id_hash);
-            let credential_id = hex(&credential.credential_id);
-            Ok(TokenObject {
+    let mut objects = Vec::new();
+    for credential in credentials {
+        let rp_id_hash = hex(&credential.relying_party.id_hash);
+        let credential_id = hex(&credential.credential_id);
+        let unique_id = format!("fido2-credential:{rp_id_hash}:{credential_id}");
+        let label = credential_label(credential);
+        if let Some(projected) = project_cose_public_key(&credential.public_key_cose) {
+            objects.push(TokenObject {
                 slot_id: Some(slot_id),
-                unique_id: format!("fido2-credential:{rp_id_hash}:{credential_id}"),
-                class: CKO_DATA as CK_OBJECT_CLASS,
-                key_type: 0,
-                label: credential_label(credential),
+                unique_id: format!("{unique_id}:public"),
+                class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                key_type: projected.key_type,
+                label: format!("{label} public key"),
                 id: credential.credential_id.clone(),
                 token: true,
                 private: true,
@@ -195,19 +268,70 @@ fn fido2_token_objects(
                 verify: false,
                 derive: false,
                 sensitive: false,
-                extractable: false,
+                extractable: true,
                 always_sensitive: false,
                 never_extractable: false,
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
-                material: KeyMaterial::FidoCredential {
-                    rp_id_hash: credential.relying_party.id_hash,
-                    metadata: credential_metadata(credential).map_err(CtapError::into_pkcs11)?,
+                material: KeyMaterial::FidoKey {
+                    public_key: projected.public_key.clone(),
                 },
-            })
-        })
-        .collect()
+            });
+            objects.push(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("{unique_id}:private"),
+                class: CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                key_type: projected.key_type,
+                label: format!("{label} private key"),
+                id: credential.credential_id.clone(),
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: true,
+                extractable: false,
+                always_sensitive: true,
+                never_extractable: true,
+                local: false,
+                key_gen_mechanism: None,
+                creator_session: None,
+                material: KeyMaterial::FidoKey {
+                    public_key: projected.public_key,
+                },
+            });
+        }
+        objects.push(TokenObject {
+            slot_id: Some(slot_id),
+            unique_id,
+            class: CKO_DATA as CK_OBJECT_CLASS,
+            key_type: 0,
+            label,
+            id: credential.credential_id.clone(),
+            token: true,
+            private: true,
+            encrypt: false,
+            decrypt: false,
+            sign: false,
+            verify: false,
+            derive: false,
+            sensitive: false,
+            extractable: false,
+            always_sensitive: false,
+            never_extractable: false,
+            local: false,
+            key_gen_mechanism: None,
+            creator_session: None,
+            material: KeyMaterial::FidoCredential {
+                rp_id_hash: credential.relying_party.id_hash,
+                response_cbor: credential.response_cbor.clone(),
+            },
+        });
+    }
+    Ok(objects)
 }
 
 impl Slot for Fido2Slot {
@@ -763,7 +887,13 @@ mod tests {
     }
 
     #[test]
-    fn discoverable_credentials_are_private_immutable_data_objects() {
+    fn discoverable_credentials_project_key_pair_and_preserve_response_data() {
+        let mut public_key_cose = vec![0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20];
+        public_key_cose.extend([0x33; 32]);
+        public_key_cose.extend([0x22, 0x58, 0x20]);
+        public_key_cose.extend([0x44; 32]);
+        let mut response_cbor = vec![0xa1, 0x08];
+        response_cbor.extend(&public_key_cose);
         let credential = DiscoverableCredential {
             relying_party: crate::ctap::RelyingParty {
                 id: Some("example.com".to_owned()),
@@ -774,34 +904,133 @@ mod tests {
             user_name: Some("alice".to_owned()),
             user_display_name: Some("Alice".to_owned()),
             credential_id: vec![0x22; 32],
-            public_key_cose: vec![0xa1, 0x01, 0x02],
+            public_key_cose,
             cred_protect: Some(3),
             third_party_payment: Some(true),
+            response_cbor: response_cbor.clone(),
         };
         let objects = fido2_token_objects(7, &[credential]).unwrap();
-        let object = &objects[0];
-        assert_eq!(object.slot_id, Some(7));
-        assert_eq!(object.class, CKO_DATA as CK_OBJECT_CLASS);
-        assert_eq!(object.label, "Alice");
-        assert_eq!(object.id, [0x22; 32]);
-        assert!(object.private);
-        assert!(!object.sign);
-        assert!(object.is_immutable_object());
+        assert_eq!(objects.len(), 3);
+        assert!(objects.iter().all(|object| object.slot_id == Some(7)));
+        assert!(objects.iter().all(|object| object.id == [0x22; 32]));
+        assert!(objects.iter().all(|object| object.private));
+        assert!(objects.iter().all(TokenObject::is_immutable_object));
+
+        let public = objects
+            .iter()
+            .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+            .unwrap();
+        assert_eq!(public.label, "Example: Alice public key");
+        assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
+        assert!(!public.encrypt);
+        assert!(!public.verify);
+        assert!(!public.derive);
         assert_eq!(
-            object.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+            public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
+            Some(vec![
+                0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
+            ])
+        );
+        let mut point = vec![0x04];
+        point.extend([0x33; 32]);
+        point.extend([0x44; 32]);
+        assert_eq!(
+            public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+            der_octet_string(&point)
+        );
+        assert!(!public
+            .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+            .unwrap()
+            .is_empty());
+
+        let private = objects
+            .iter()
+            .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            .unwrap();
+        assert_eq!(private.label, "Example: Alice private key");
+        assert_eq!(private.key_type, CKK_EC as CK_KEY_TYPE);
+        assert!(private.sensitive);
+        assert!(!private.extractable);
+        assert!(private.always_sensitive);
+        assert!(private.never_extractable);
+        assert!(!private.decrypt);
+        assert!(!private.sign);
+        assert!(!private.derive);
+
+        let data = objects
+            .iter()
+            .find(|object| object.class == CKO_DATA as CK_OBJECT_CLASS)
+            .unwrap();
+        assert_eq!(data.label, "Example: Alice");
+        assert_eq!(
+            data.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
             Some(b"FIDO2 discoverable credential".to_vec())
         );
         assert_eq!(
-            object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+            data.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
             Some(vec![0x11; 32])
         );
+        assert_eq!(
+            data.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            Some(response_cbor)
+        );
+    }
 
-        let metadata = object
-            .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
-            .unwrap();
-        let mut decoder = minicbor::Decoder::new(&metadata);
-        assert_eq!(decoder.map().unwrap(), Some(10));
-        assert_eq!(decoder.u8().unwrap(), 1);
-        assert_eq!(decoder.bytes().unwrap(), &[0x11; 32]);
+    #[test]
+    fn unsupported_cose_keys_still_produce_a_data_object() {
+        let response_cbor = vec![0xa1, 0x08, 0xa1, 0x01, 0x18, 0x63];
+        let credential = DiscoverableCredential {
+            relying_party: crate::ctap::RelyingParty {
+                id: Some("example.com".to_owned()),
+                name: None,
+                id_hash: [0x11; 32],
+            },
+            user_id: b"user-id".to_vec(),
+            user_name: Some("alice".to_owned()),
+            user_display_name: None,
+            credential_id: vec![0x22; 32],
+            public_key_cose: vec![0xa1, 0x01, 0x18, 0x63],
+            cred_protect: None,
+            third_party_payment: None,
+            response_cbor: response_cbor.clone(),
+        };
+        let objects = fido2_token_objects(7, &[credential]).unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].class, CKO_DATA as CK_OBJECT_CLASS);
+        assert_eq!(
+            objects[0].attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+            Some(response_cbor)
+        );
+    }
+
+    #[test]
+    fn ed25519_and_rsa_cose_keys_have_lossless_projections() {
+        let mut ed25519 = vec![0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20];
+        ed25519.extend([0x55; 32]);
+        let projected = project_cose_public_key(&ed25519).unwrap();
+        assert_eq!(projected.key_type, CKK_EC_EDWARDS as CK_KEY_TYPE);
+        assert!(matches!(
+            projected.public_key,
+            FidoPublicKey::Ec {
+                public_key,
+                prefix_uncompressed: false,
+                ..
+            } if public_key == [0x55; 32]
+        ));
+
+        let mut rsa = vec![0xa3, 0x01, 0x03, 0x20, 0x58, 0x20];
+        rsa.extend([0x66; 32]);
+        rsa.extend([0x21, 0x43, 0x01, 0x00, 0x01]);
+        let projected = project_cose_public_key(&rsa).unwrap();
+        assert_eq!(projected.key_type, CKK_RSA as CK_KEY_TYPE);
+        assert!(matches!(
+            projected.public_key,
+            FidoPublicKey::Rsa {
+                modulus,
+                public_exponent
+            } if modulus == [0x66; 32] && public_exponent == [0x01, 0x00, 0x01]
+        ));
+
+        assert!(project_cose_public_key(&[0xa2, 0x01, 0x02, 0x01, 0x02]).is_none());
     }
 }

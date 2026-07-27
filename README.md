@@ -27,7 +27,7 @@ The minimum supported Rust version is 1.85.
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
 - **FIDO2** discovery over the YubiKey 5.8+ USB CCID smart-card binding, with
   PIN provisioning and changes plus read-only resident-credential metadata
-  after PIN login.
+  and non-operational key projections after PIN login.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 

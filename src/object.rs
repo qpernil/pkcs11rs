@@ -48,6 +48,19 @@ pub(crate) struct TokenObject {
     pub(crate) material: KeyMaterial,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) enum FidoPublicKey {
+    Ec {
+        parameters: Vec<u8>,
+        public_key: Vec<u8>,
+        prefix_uncompressed: bool,
+    },
+    Rsa {
+        modulus: Vec<u8>,
+        public_exponent: Vec<u8>,
+    },
+}
+
 #[derive(Clone)]
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
 pub(crate) enum KeyMaterial {
@@ -119,7 +132,10 @@ pub(crate) enum KeyMaterial {
     },
     FidoCredential {
         rp_id_hash: [u8; 32],
-        metadata: Vec<u8>,
+        response_cbor: Vec<u8>,
+    },
+    FidoKey {
+        public_key: FidoPublicKey,
     },
     HsmAuthCredential {
         algorithm: HsmAuthAlgorithm,
@@ -292,11 +308,15 @@ impl std::fmt::Debug for KeyMaterial {
                 .finish(),
             Self::FidoCredential {
                 rp_id_hash,
-                metadata,
+                response_cbor,
             } => fmt
                 .debug_struct("FidoCredential")
                 .field("rp_id_hash", rp_id_hash)
-                .field("metadata_size", &metadata.len())
+                .field("response_size", &response_cbor.len())
+                .finish(),
+            Self::FidoKey { public_key } => fmt
+                .debug_struct("FidoKey")
+                .field("public_key", public_key)
                 .finish(),
             Self::HsmAuthCredential {
                 algorithm,
@@ -1070,6 +1090,26 @@ impl TokenObject {
             KeyMaterial::YubiHsmDevicePublic {
                 public_key_info, ..
             } => Some(public_key_info.clone()),
+            KeyMaterial::FidoKey {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters,
+                        public_key,
+                        prefix_uncompressed,
+                    },
+            } => ec_public_key_info(
+                self.key_type,
+                Some(parameters),
+                public_key,
+                *prefix_uncompressed,
+            ),
+            KeyMaterial::FidoKey {
+                public_key:
+                    FidoPublicKey::Rsa {
+                        modulus,
+                        public_exponent,
+                    },
+            } => rsa_public_key_info(modulus, public_exponent),
             _ => None,
         }
     }
@@ -1321,6 +1361,9 @@ impl TokenObject {
                 } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
                     Some(public_key.clone())
                 }
+                KeyMaterial::FidoKey {
+                    public_key: FidoPublicKey::Rsa { modulus, .. },
+                } => Some(modulus.clone()),
                 _ => None,
             },
             x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -1335,6 +1378,12 @@ impl TokenObject {
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                     Some(vec![0x01, 0x00, 0x01])
                 }
+                KeyMaterial::FidoKey {
+                    public_key:
+                        FidoPublicKey::Rsa {
+                            public_exponent, ..
+                        },
+                } => Some(public_exponent.clone()),
                 _ => None,
             },
             x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -1377,6 +1426,9 @@ impl TokenObject {
                 } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
                     Some(ulong_attribute((public_key.len() * 8) as CK_ULONG))
                 }
+                KeyMaterial::FidoKey {
+                    public_key: FidoPublicKey::Rsa { modulus, .. },
+                } => Some(ulong_attribute((modulus.len() * 8) as CK_ULONG)),
                 _ => None,
             },
             x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -1395,6 +1447,9 @@ impl TokenObject {
                 KeyMaterial::HsmAuthPublic { .. } => {
                     piv_ec_parameters(piv::Algorithm::EccP256).map(<[u8]>::to_vec)
                 }
+                KeyMaterial::FidoKey {
+                    public_key: FidoPublicKey::Ec { parameters, .. },
+                } => Some(parameters.clone()),
                 _ => None,
             },
             x if x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
@@ -1463,6 +1518,23 @@ impl TokenObject {
                     }
                     KeyMaterial::YubiHsmDevicePublic { public_key, .. } => {
                         der_octet_string(public_key)
+                    }
+                    KeyMaterial::FidoKey {
+                        public_key:
+                            FidoPublicKey::Ec {
+                                public_key,
+                                prefix_uncompressed,
+                                ..
+                            },
+                    } if !public_key.is_empty() => {
+                        let mut point = Vec::with_capacity(
+                            public_key.len() + usize::from(*prefix_uncompressed),
+                        );
+                        if *prefix_uncompressed {
+                            point.push(0x04);
+                        }
+                        point.extend_from_slice(public_key);
+                        der_octet_string(&point)
                     }
                     _ => None,
                 }
@@ -1535,10 +1607,10 @@ impl TokenObject {
                     KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         Some(value.clone())
                     }
-                    KeyMaterial::FidoCredential { metadata, .. }
+                    KeyMaterial::FidoCredential { response_cbor, .. }
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
-                        Some(metadata.clone())
+                        Some(response_cbor.clone())
                     }
                     KeyMaterial::OpenPgpData {
                         connector,
@@ -1674,6 +1746,7 @@ impl TokenObject {
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::FidoCredential { .. }
+                | KeyMaterial::FidoKey { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsmDevicePublic { .. }
