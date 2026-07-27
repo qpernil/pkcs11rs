@@ -16,7 +16,9 @@ Yubico's current documentation and implementation confirm that YubiKey
 firmware 5.8 and later exposes this binding over the USB CCID interface.
 Earlier YubiKey firmware uses the USB FIDO/HID interface for FIDO2 and cannot
 produce this module's FIDO2 CCID slot. FIDO over NFC also uses the smart-card
-binding, but this phase has not been validated over NFC.
+binding. Applet selection, `authenticatorGetInfo`, legacy PIN-token login, and
+read-only resident-credential enumeration have been validated over NFC on an
+earlier YubiKey.
 
 Primary references:
 
@@ -101,10 +103,13 @@ The production backend issues only:
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
 - `authenticatorClientPIN/setPIN` and `changePIN`;
+- `authenticatorClientPIN/getPINToken` on the legacy CTAP 2.0 path;
 - `authenticatorClientPIN/getPinUvAuthTokenUsingPinWithPermissions`;
-- `authenticatorCredentialManagement/enumerateRPsBegin` and
+- `authenticatorCredentialManagement` or
+  `authenticatorCredentialManagementPreview`, using only `enumerateRPsBegin` and
   `enumerateRPsGetNextRP`;
-- `authenticatorCredentialManagement/enumerateCredentialsBegin` and
+- the same read-only credential-management command, using only
+  `enumerateCredentialsBegin` and
   `enumerateCredentialsGetNextCredential`.
 
 It never sends make-credential, get-assertion, update-user-information,
@@ -330,7 +335,10 @@ not production cryptographic guidance. pkcs11rs does not parse, advertise, or
 invoke `previewSign`; it creates no signing objects or signing mechanisms.
 Any future work must first establish a stable standardized security and key
 model suitable for PKCS #11 rather than treating the preview as an ordinary
-hardware private key.
+hardware private key. The existing
+[content-addressed CBOR storage boundary](storage.md) is only persistence
+infrastructure: it is not connected to FIDO objects, make-credential,
+derivation, or signing.
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

@@ -17,6 +17,15 @@ readers or applets requires `C_Finalize` followed by `C_Initialize`. Existing
 slots still refresh token presence when a session is opened. Initialization and
 object-discovery failures do not remove an already selected applet slot.
 
+An empty PC/SC reader contributes no slots to that snapshot. If a card is
+later inserted, no applet slots are synthesized for it until the module is
+reinitialized. Conversely, once an applet slot exists, a card removal or
+replacement does not change the slot list. Opening a session makes that slot
+refresh the reader connection and reselect its own AID. If the replacement
+card lacks the applet, the slot remains registered but reports no usable token
+and rejects communication. It does not morph into slots for other applets on
+the replacement card.
+
 ## Allowlist
 
 Without configuration, all five applets above are probed. Set
@@ -55,25 +64,28 @@ YubiKey firmware 5.8 and later exposes FIDO2 through the USB CCID smart-card
 interface. Earlier YubiKey firmware exposes FIDO2 over the separate USB FIDO
 interface and therefore does not produce a FIDO2 slot over USB in this module.
 FIDO over NFC also uses the smart-card binding. Applet selection,
-`authenticatorGetInfo`, and legacy PIN-token login have been validated with an
-earlier YubiKey over NFC on macOS.
+`authenticatorGetInfo`, legacy PIN-token login, and read-only credential
+enumeration have been validated with an earlier YubiKey over NFC on macOS.
 
 The module follows the CTAP ISO 7816 binding: it explicitly selects the FIDO2
 AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
 `04`, and follows `91 00` status updates with `80 11 00 00` GET RESPONSE
-commands. A successfully selected applet is exposed as a mechanism-free,
-read-only PKCS #11 slot even if `authenticatorGetInfo` later fails, consistent
-with the other CCID applets. This preserves the selected slot for diagnostics;
-token-information calls continue to report the discovery failure. When GetInfo
-succeeds, the primary CTAP version is included in the PKCS #11 slot description
-and token label. The device manufacturer, model, serial number, hardware
-version, and firmware version use the shared YubiKey metadata. Set
+commands. A successfully selected applet is exposed as a mechanism-free PKCS
+#11 slot even if `authenticatorGetInfo` later fails, consistent with the other
+CCID applets. Its credential objects remain read-only; `C_SetPIN` separately
+supports PIN initialization and changes when GetInfo succeeds. Preserving the
+selected slot makes discovery failures visible to diagnostics, and
+token-information calls continue to report the failure. When GetInfo succeeds,
+the primary CTAP version is included in the PKCS #11 slot description and
+token label. The device manufacturer, model, serial number, hardware version,
+and firmware version use the shared YubiKey metadata. Set
 `PKCS11RS_CCID_APPLICATIONS=fido2` to probe only FIDO2 and `PKCS11RS_DEBUG=2`
 to print the complete reported versions, extensions, AAGUID, options, maximum
 message size, PIN/UV protocols, and transports.
 
 Read-only resident-credential enumeration is available after FIDO2 PIN login.
-It creates only private, immutable data objects and does not expose signing or
+It creates private, immutable data objects and, where lossless, linked
+non-operational public/private key projections. It does not expose signing or
 credential mutation. See [`fido2.md`](fido2.md) for the object mapping, local
 hardware probes, and deferred firmware questions.
 
@@ -98,8 +110,10 @@ certificate-chain entries are exposed as immutable `CKO_CERTIFICATE` objects
 in the card's issuer-to-leaf order. The leaf certificate shares the key
 record's KID/KVN `CKA_ID`; preceding certificates use indexed IDs.
 
-The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
-supports random generation through the applet's `GET CHALLENGE` command and
+The slot advertises no key, signing, encryption, or derivation mechanisms.
+The module-wide software digest mechanisms are still available because they
+do not require backend key operations. The slot supports random generation
+through the applet's `GET CHALLENGE` command and
 uses `C_Login` with a zero-length PIN to establish the configured secure
 channel. Both a null pointer and a nonnull pointer are accepted when the length
 is zero; nonempty input is rejected because no caller-supplied PIN is verified.
