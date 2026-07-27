@@ -3,9 +3,10 @@
 `previewSign` is an experimental WebAuthn/CTAP extension for registering a
 signing seed with an ordinary FIDO credential and later asking the
 authenticator to sign with a key derived from that seed. The implementation in
-this repository is intentionally limited to protocol encoding, structural
-response validation, and canonical persistence records. It does not expose a
-PKCS #11 slot, object, derivation mechanism, or signing mechanism.
+this repository includes protocol encoding, structural response validation,
+canonical persistence records, and offline ARKG-P256 public-key derivation. It
+does not yet expose a PKCS #11 slot, object, derivation mechanism, or signing
+mechanism.
 
 The protocol design is based on Yubico's
 [previewSign extension specification](https://yubicolabs.github.io/webauthn-sign-extension/4/)
@@ -93,6 +94,40 @@ context needed by a later assertion. The storage provider treats both wrapper
 types as opaque immutable CBOR blobs; it does not interpret or traverse their
 reference.
 
+## Offline ARKG-P256 derivation
+
+`ArkgP256PublicSeed::from_cose` parses the generated seed COSE_Key and requires
+the experimental ARKG public-key type, the preview ARKG-P256 algorithm, two
+complete EC2 P-256 public points, and no trailing CBOR. The optional derived-key
+algorithm is accepted only when it selects ESP256.
+
+`PreviewSignRegistration::derive_arkg_p256` uses 32 bytes from the operating
+system random source and accepts a public application context of at most 64
+bytes. The deterministic `derive_arkg_p256_with_ikm` variant exists for test
+vectors and callers that already manage confidential random input; it requires
+at least 32 bytes. Neither API retains the input keying material.
+
+The derivation returns:
+
+- a normal uncompressed P-256 public point;
+- an EC2 COSE_Key whose verification algorithm is ESP256 (`-9`);
+- the 81-byte ARKG ticket (a 16-byte HMAC tag followed by an ephemeral
+  uncompressed P-256 public point); and
+- canonical COSE_Sign_Args containing the experimental split-ARKG signing
+  algorithm (`-65539`), ticket, and context.
+
+`ArkgP256DerivedKey::into_record` places the verification key and signing
+arguments directly in a `PreviewSignDerivedKeyRecord`. The input keying material
+does not need to be persisted: the ticket lets the authenticator reconstruct
+the corresponding private-key contribution.
+
+The implementation uses RustCrypto's native Rust P-256, SHA-256, HMAC, and HKDF
+implementations. Its deterministic tests reproduce Yubico's ARKG-P256
+regression vectors for the baseline derivation, independent input keying
+material, and independent contexts. They also reproduce the COSE_Sign_Args
+vector published in the current
+[ARKG Internet-Draft](https://datatracker.ietf.org/doc/draft-bradleylundberg-cfrg-arkg/).
+
 ## Hardware status
 
 Positive hardware validation is deferred. The connected pre-release YubiKey
@@ -116,6 +151,6 @@ PKCS11RS_FIDO2_TEST_PIN='' \
 
 Open hardware questions include positive registration vectors from a
 compatible pre-release device, attestation verification and trust policy,
-offline ARKG derivation interoperability, ticket lifetime and replay
+end-to-end ARKG derivation interoperability, ticket lifetime and replay
 properties, whether token serial is sufficient routing metadata, and the
 eventual PKCS #11 mechanism and object model.

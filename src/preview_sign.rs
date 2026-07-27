@@ -1,14 +1,21 @@
 //! Canonical persistence records for the experimental FIDO `previewSign`
 //! extension.
 //!
-//! This module models protocol material only. It does not register a PKCS #11
-//! slot, advertise a mechanism, derive an ARKG key, or invoke a signing
-//! operation.
+//! This module models protocol material and performs offline ARKG-P256 public
+//! key derivation. It does not register a PKCS #11 slot, advertise a
+//! mechanism, derive an ARKG private key, or invoke a signing operation.
 
 use crate::storage::{ContentReference, StorageError};
 use minicbor::{data::Type, Decoder, Encoder};
 use sha2::{Digest, Sha256};
 use std::fmt;
+
+mod arkg;
+
+pub use arkg::{
+    ArkgP256DerivedKey, ArkgP256PublicSeed, ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM,
+    ARKG_PUBLIC_KEY_TYPE, ESP256_ALGORITHM,
+};
 
 const REGISTRATION_SCHEMA: &str = "pkcs11rs.preview-sign.registration";
 const DERIVED_KEY_SCHEMA: &str = "pkcs11rs.preview-sign.derived-key";
@@ -27,6 +34,8 @@ const AUTHENTICATOR_FLAG_ED: u8 = 0x80;
 pub enum PreviewSignError {
     /// A record or embedded protocol value was malformed.
     Malformed(&'static str),
+    /// The operating system could not provide random derivation input.
+    RandomnessUnavailable,
     /// The record uses a schema version this implementation does not support.
     UnsupportedSchemaVersion(u64),
     /// An embedded content reference was invalid.
@@ -37,6 +46,9 @@ impl fmt::Display for PreviewSignError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(reason) => write!(formatter, "malformed previewSign data: {reason}"),
+            Self::RandomnessUnavailable => {
+                formatter.write_str("randomness unavailable for previewSign derivation")
+            }
             Self::UnsupportedSchemaVersion(version) => {
                 write!(
                     formatter,
@@ -973,6 +985,28 @@ mod tests {
     const ARKG_P256_ESP256: i64 = -65_539;
     const ARKG_PUBLIC_KEY_TYPE: i64 = -65_537;
     const ARKG_P256_ALGORITHM: i64 = -65_700;
+    const ARKG_VECTOR_IKM: &str =
+        "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f";
+    const ARKG_VECTOR_CONTEXT: &[u8] = b"ARKG-P256.test vectors";
+    const ARKG_VECTOR_PUBLIC_KEY: &str =
+        "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107\
+         dac2a1b197cc10d2376559ad6df6bc107318d5cfb90def9f4a1f5347e086c2cd";
+
+    fn decode_hex(input: &str) -> Vec<u8> {
+        let compact: String = input
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        compact
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap();
+                let low = (pair[1] as char).to_digit(16).unwrap();
+                u8::try_from((high << 4) | low).unwrap()
+            })
+            .collect()
+    }
 
     fn ec2_key(seed: u8, algorithm: i64) -> Vec<u8> {
         let mut encoded = Vec::new();
@@ -1003,8 +1037,16 @@ mod tests {
     }
 
     fn arkg_seed_key() -> Vec<u8> {
-        let blinding_key = ec2_key(0x41, -9);
-        let kem_key = ec2_key(0x61, -25);
+        let blinding_point = decode_hex(
+            "046d3bdf31d0db48988f16d47048fdd24123cd286e42d0512daa9f726b4ecf18df\
+             65ed42169c69675f936ff7de5f9bd93adbc8ea73036b16e8d90adbfabdaddba7",
+        );
+        let kem_point = decode_hex(
+            "04c38bbdd7286196733fa177e43b73cfd3d6d72cd11cc0bb2c9236cf85a42dcff5\
+             dfa339c1e07dfcdfda8d7be2a5a3c7382991f387dfe332b1dd8da6e0622cfb35",
+        );
+        let blinding_key = ec2_key_from_point(&blinding_point, -9);
+        let kem_key = ec2_key_from_point(&kem_point, -25);
         let mut encoded = Vec::new();
         let mut encoder = Encoder::new(&mut encoded);
         encoder
@@ -1023,6 +1065,34 @@ mod tests {
         encoder.writer_mut().extend_from_slice(&blinding_key);
         encoder.i8(-2).unwrap();
         encoder.writer_mut().extend_from_slice(&kem_key);
+        encoded
+    }
+
+    fn ec2_key_from_point(point: &[u8], algorithm: i64) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        Encoder::new(&mut encoded)
+            .map(5)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .i64(algorithm)
+            .unwrap()
+            .i8(-1)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .i8(-2)
+            .unwrap()
+            .bytes(&point[1..33])
+            .unwrap()
+            .i8(-3)
+            .unwrap()
+            .bytes(&point[33..])
+            .unwrap();
         encoded
     }
 
@@ -1198,6 +1268,13 @@ mod tests {
         );
         assert_eq!(registration.aaguid(), &[0x33; 16]);
         assert_eq!(registration.token_serial_hint(), Some("1656992924"));
+        let derived = registration
+            .derive_arkg_p256_with_ikm(&decode_hex(ARKG_VECTOR_IKM), ARKG_VECTOR_CONTEXT)
+            .unwrap();
+        assert_eq!(
+            derived.public_key_sec1().as_slice(),
+            decode_hex(ARKG_VECTOR_PUBLIC_KEY)
+        );
         assert_eq!(
             PreviewSignRegistration::from_cbor(&registration.to_cbor().unwrap()).unwrap(),
             registration
@@ -1213,9 +1290,9 @@ mod tests {
         assert_eq!(
             crate::storage::ContentReference::for_object(&encoded).digest(),
             [
-                0x12, 0x67, 0x03, 0x56, 0xd2, 0xac, 0xf0, 0xfb, 0x81, 0xeb, 0x38, 0x02, 0x87, 0xe9,
-                0x4e, 0x84, 0x3a, 0xa1, 0x69, 0x3c, 0x8b, 0x6d, 0x9b, 0x90, 0x40, 0xca, 0x33, 0x42,
-                0xd2, 0x2b, 0x2c, 0x45,
+                0x9d, 0x77, 0x49, 0x3f, 0x69, 0xf1, 0xd7, 0xbe, 0x32, 0x8d, 0xc6, 0x0f, 0xc4, 0x5a,
+                0x1f, 0x99, 0x34, 0xa5, 0x4a, 0xdb, 0x9b, 0x96, 0x1e, 0x2e, 0xa9, 0x0a, 0x39, 0x32,
+                0x9b, 0x1c, 0x11, 0xee,
             ]
         );
         assert_eq!(encoded[0], 0xa5);
