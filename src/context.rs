@@ -23,7 +23,7 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::{Arc, LazyLock, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 pub(crate) fn configured_yubihsm_urls(
@@ -84,31 +84,54 @@ pub(crate) struct SessionContext {
     pub(crate) verify_operation: Option<SignatureOperation>,
 }
 
-pub(crate) enum SlotContextRegistry {
-    Undiscovered(HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>),
-    Discovered(HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>),
+pub(crate) struct SlotContextRegistry {
+    slots: HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>,
+    session_slots: HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>,
+    discovered: bool,
 }
 
 impl SlotContextRegistry {
-    fn map(&self) -> &HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>> {
-        match self {
-            Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
-        }
-    }
-
-    fn map_mut(&mut self) -> &mut HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>> {
-        match self {
-            Self::Undiscovered(contexts) | Self::Discovered(contexts) => contexts,
+    fn new() -> Self {
+        Self {
+            slots: HashMap::new(),
+            session_slots: HashMap::new(),
+            discovered: false,
         }
     }
 
     fn begin_discovery(&mut self) -> bool {
-        let Self::Undiscovered(contexts) = self else {
+        if self.discovered {
             return false;
-        };
-        let contexts = std::mem::take(contexts);
-        *self = Self::Discovered(contexts);
+        }
+        self.discovered = true;
         true
+    }
+
+    pub(crate) fn register_session(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+        slot_id: CK_SLOT_ID,
+    ) -> Result<(), Error> {
+        if !self.slots.contains_key(&slot_id) {
+            return Err(CKR_SESSION_HANDLE_INVALID.into());
+        }
+        match self.session_slots.entry(session_handle) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(slot_id);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(CKR_SESSION_HANDLE_INVALID.into());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn unregister_session(&mut self, session_handle: CK_SESSION_HANDLE) {
+        self.session_slots.remove(&session_handle);
+    }
+
+    pub(crate) fn session_slot(&self, session_handle: CK_SESSION_HANDLE) -> Option<CK_SLOT_ID> {
+        self.session_slots.get(&session_handle).copied()
     }
 }
 
@@ -116,13 +139,13 @@ impl std::ops::Deref for SlotContextRegistry {
     type Target = HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>;
 
     fn deref(&self) -> &Self::Target {
-        self.map()
+        &self.slots
     }
 }
 
 impl std::ops::DerefMut for SlotContextRegistry {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.map_mut()
+        &mut self.slots
     }
 }
 
@@ -345,7 +368,7 @@ impl ModuleContext {
             },
             yubihsm_urls,
             yubihsm_public_discovery_credential,
-            slot_contexts: SlotContextRegistry::Undiscovered(HashMap::new()),
+            slot_contexts: SlotContextRegistry::new(),
         };
         #[cfg(feature = "abi-tests")]
         for (slot_id, slot) in {
@@ -1233,5 +1256,3 @@ pub(crate) static RUNTIME: Runtime = Runtime {
     lifecycle: RwLock::new(()),
     module: Mutex::new(None),
 };
-pub(crate) static SESSION_CONTEXTS: LazyLock<Mutex<HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));

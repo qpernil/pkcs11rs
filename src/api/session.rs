@@ -106,7 +106,12 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_slot_context_mut(slotID, |ctx| {
+        let _lifecycle = match lock_lifecycle_read() {
+            Ok(guard) => guard,
+            Err(error) => return error.into(),
+        };
+        let mut opened_handle = None;
+        let result = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
             if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
                 return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
@@ -127,25 +132,30 @@ pub extern "C" fn C_OpenSession(
                 log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
                 ctx.sessions
                     .insert(k, SessionContext::new(ctx.slot.open_session(slotID, flags)));
-                if SESSION_CONTEXTS
-                    .lock()
-                    .map_err(|_| Error::from(CKR_MUTEX_BAD))
-                    .map(|mut contexts| contexts.insert(k, slotID))
-                    .is_err()
-                {
-                    ctx.sessions.remove(&k);
-                    return Err(CKR_MUTEX_BAD.into());
-                }
                 log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
                 log!(2, "C_OpenSession returning {:?}", k);
-                *session = k;
+                opened_handle = Some(k);
                 Ok(CKR_OK as CK_RV)
             } else {
                 Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
             }
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
+        });
+        match (result, opened_handle) {
+            (Ok(rv), None) => rv,
+            (Ok(_), Some(handle)) => match register_session_slot(handle, slotID) {
+                Ok(()) => {
+                    *session = handle;
+                    CKR_OK as CK_RV
+                }
+                Err(error) => {
+                    let _ = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
+                        ctx.sessions.remove(&handle);
+                        Ok(())
+                    });
+                    error.into()
+                }
+            },
+            (Err(error), _) => error.into(),
         }
     }
 }
@@ -153,7 +163,12 @@ pub extern "C" fn C_OpenSession(
 #[no_mangle]
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     log!(2, "C_CloseSession called with {:?}", session_handle);
-    match with_session_context_mut(session_handle, |ctx| {
+    let _lifecycle = match lock_lifecycle_read() {
+        Ok(guard) => guard,
+        Err(error) => return error.into(),
+    };
+    let mut removed = false;
+    let result = with_session_context_mut_with_lifecycle_held(session_handle, |ctx| {
         log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
         let slot_id = match ctx.sessions.get(&session_handle) {
             Some(session) => session.backend().slotID(),
@@ -179,6 +194,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             .sessions
             .remove(&session_handle)
             .ok_or(CKR_SESSION_HANDLE_INVALID)?;
+        removed = true;
         let creator_objects = ctx
             .memory_objects
             .iter()
@@ -189,33 +205,40 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         for handle in creator_objects {
             ctx.remove_object_handle(handle);
         }
-        SESSION_CONTEXTS
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .remove(&session_handle);
         log!(2, "C_CloseSession removed {:?}", (session_handle, session));
         log!(2, "C_CloseSession sessions after {:?}", ctx.sessions);
         match logout_error {
             Some(error) => Err(error),
             None => Ok(CKR_OK as CK_RV),
         }
-    }) {
+    });
+    if removed {
+        if let Err(error) = unregister_session_slot(session_handle) {
+            return error.into();
+        }
+    }
+    match result {
         Ok(rv) => rv,
-        Err(e) => e.into(),
+        Err(error) => error.into(),
     }
 }
 
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    match with_slot_context_mut(slotID, |ctx| {
+    let _lifecycle = match lock_lifecycle_read() {
+        Ok(guard) => guard,
+        Err(error) => return error.into(),
+    };
+    let mut closed_sessions = HashSet::new();
+    let result = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
         log!(2, "C_CloseAllSessions sessions before {:?}", ctx.sessions);
-        let closed_sessions: HashSet<CK_SESSION_HANDLE> = ctx
-            .sessions
-            .iter()
-            .filter(|(_k, v)| v.backend().slotID() == slotID)
-            .map(|(k, _v)| *k)
-            .collect();
+        closed_sessions.extend(
+            ctx.sessions
+                .iter()
+                .filter(|(_k, v)| v.backend().slotID() == slotID)
+                .map(|(k, _v)| *k),
+        );
         ctx.reconcile_login_state(slotID);
         let logout_error = if ctx.is_slot_logged_in(slotID) {
             match ctx.logout_slot(slotID) {
@@ -236,20 +259,18 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
                 .map(|owner| !closed_sessions.contains(&owner))
                 .unwrap_or(true)
         });
-        SESSION_CONTEXTS
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .retain(|session, route_slot_id| {
-                *route_slot_id != slotID || !closed_sessions.contains(session)
-            });
         log!(2, "C_CloseAllSessions sessions after {:?}", ctx.sessions);
         match logout_error {
             Some(error) => Err(error),
             None => Ok(CKR_OK as CK_RV),
         }
-    }) {
+    });
+    if let Err(error) = unregister_session_slots(&closed_sessions) {
+        return error.into();
+    }
+    match result {
         Ok(rv) => rv,
-        Err(e) => e.into(),
+        Err(error) => error.into(),
     }
 }
 

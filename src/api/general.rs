@@ -98,11 +98,6 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
                     }
                 }
                 *guard = None;
-                if let Ok(mut session_contexts) = SESSION_CONTEXTS.lock() {
-                    session_contexts.clear();
-                } else {
-                    logout_failed = true;
-                }
                 reset_object_handles();
                 reset_session_handles();
                 if logout_failed {
