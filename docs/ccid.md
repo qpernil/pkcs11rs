@@ -71,8 +71,10 @@ version, and firmware version use the shared YubiKey metadata. Set
 to print the complete reported versions, extensions, AAGUID, options, maximum
 message size, PIN/UV protocols, and transports.
 
-Credential enumeration and cryptographic operations are not part of this
-compatibility probe.
+Read-only resident-credential enumeration is available after FIDO2 PIN login.
+It creates only private, immutable data objects and does not expose signing or
+credential mutation. See [`fido2.md`](fido2.md) for the object mapping, local
+hardware probes, and deferred firmware questions.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those
 credentials are also available as authentication providers to each ordinary

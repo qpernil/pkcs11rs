@@ -1100,3 +1100,100 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
         );
     }
 }
+
+#[cfg(not(feature = "abi-tests"))]
+mod fido2_hardware {
+    use super::*;
+
+    fn fido2_slot_id() -> CK_SLOT_ID {
+        let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
+        crate::with_context_mut(|context| {
+            context.init();
+            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+                let child = child.lock().ok()?;
+                (child.slot.is_fido2()
+                    && selector.as_ref().is_none_or(|selector| {
+                        child.slot.serial() == selector || child.slot.name() == *selector
+                    }))
+                .then_some(*slot_id)
+            });
+            let slot_id = matches.next().ok_or(CKR_SLOT_ID_INVALID)?;
+            if matches.next().is_some() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            Ok(slot_id)
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "expected exactly one FIDO2 slot matching PKCS11RS_FIDO2_TEST_SOURCE={selector:?}: {error:?}"
+            )
+        })
+    }
+
+    #[test]
+    #[ignore = "requires a YubiKey with the FIDO AID exposed through PC/SC"]
+    fn fido2_ccid_compatibility_probe() {
+        let slot_id = fido2_slot_id();
+        crate::with_context_mut(|context| {
+            let child = context
+                .slot_contexts
+                .get(&slot_id)
+                .ok_or(CKR_SLOT_ID_INVALID)?;
+            let child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let slot = child.get_slot(slot_id)?;
+            let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
+            slot.get_slot_info(&mut slot_info)?;
+            let description = String::from_utf8_lossy(&slot_info.slotDescription)
+                .trim_end()
+                .to_owned();
+            eprintln!(
+                "selected FIDO2 slot {slot_id}: {description}; serial {}; firmware {}.{}",
+                slot.serial(),
+                slot_info.firmwareVersion.major,
+                slot_info.firmwareVersion.minor
+            );
+            let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+            slot.get_token_info(&mut token_info)?;
+            let label = String::from_utf8_lossy(&token_info.label)
+                .trim_end()
+                .to_owned();
+            eprintln!(
+                "GetInfo succeeded: token {label}; flags {:#x}; PIN length {}..={}",
+                token_info.flags, token_info.ulMinPinLen, token_info.ulMaxPinLen
+            );
+            Ok(())
+        })
+        .expect("selected FIDO applet did not complete authenticatorGetInfo");
+    }
+
+    #[test]
+    #[ignore = "requires a YubiKey 5.8+ FIDO2-over-CCID applet and PKCS11RS_FIDO2_TEST_PIN"]
+    fn fido2_read_only_resident_credential_enumeration() {
+        let pin = std::env::var("PKCS11RS_FIDO2_TEST_PIN")
+            .expect("PKCS11RS_FIDO2_TEST_PIN must contain the configured FIDO2 PIN");
+        let slot_id = fido2_slot_id();
+        crate::with_context_mut(|context| {
+            let child = context
+                .slot_contexts
+                .get(&slot_id)
+                .ok_or(CKR_SLOT_ID_INVALID)?;
+            let mut child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            child._get_slot_mut(slot_id)?.login(pin.as_bytes())?;
+            let objects = child.get_slot(slot_id)?.backend_token_objects(slot_id)?;
+            eprintln!(
+                "enumerated {} read-only FIDO2 discoverable credential objects",
+                objects.len()
+            );
+            for object in &objects {
+                eprintln!("  {} ({})", object.label, object.unique_id);
+            }
+            child._get_slot_mut(slot_id)?.logout()?;
+            Ok(())
+        })
+        .expect("read-only FIDO2 resident-credential enumeration failed");
+    }
+}
