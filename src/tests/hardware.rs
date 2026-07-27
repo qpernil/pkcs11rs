@@ -105,9 +105,13 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 
     fn select_yubihsm_slot() -> CK_SLOT_ID {
         let selector = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE").ok();
-        crate::with_context_mut(|context| {
-            context.init();
-            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+        crate::with_context(|context| {
+            context.init()?;
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let mut matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
                 (child.slot.kind() == crate::SlotKind::YubiHsm
                     && child.slot.is_present()
@@ -131,9 +135,13 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 
     fn select_piv_slot() -> CK_SLOT_ID {
         let selector = std::env::var("PKCS11RS_TEST_PIV_SOURCE").ok();
-        crate::with_context_mut(|context| {
-            context.init();
-            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+        crate::with_context(|context| {
+            context.init()?;
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let mut matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
                 (child.slot.kind()
                     == crate::SlotKind::Ccid(crate::CcidApplication::Piv)
@@ -714,11 +722,11 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             kvn,
         };
 
-        let mut context = crate::ModuleContext::new().expect("failed to create hardware context");
-        context.init();
+        let context = crate::ModuleContext::new().expect("failed to create hardware context");
+        context.init().unwrap();
+        let slot_contexts = context.slot_contexts.read().unwrap();
         let issuer_sd = select_connector(
-            context
-                .slot_contexts
+            slot_contexts
                 .values()
                 .filter_map(|child| {
                     child
@@ -888,11 +896,11 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             "YubiHSM admin password must be 8..=64 bytes"
         );
 
-        let mut context = crate::ModuleContext::new().expect("failed to create hardware context");
-        context.init();
+        let context = crate::ModuleContext::new().expect("failed to create hardware context");
+        context.init().unwrap();
+        let slot_contexts = context.slot_contexts.read().unwrap();
         let hsmauth = select_connector(
-            context
-                .slot_contexts
+            slot_contexts
                 .values()
                 .filter_map(|child| child.lock().ok()?.slot.hsmauth_provisioning_connector())
                 .collect(),
@@ -900,8 +908,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             "YubiHSM Auth applet",
         );
         let yubihsm = select_connector(
-            context
-                .slot_contexts
+            slot_contexts
                 .values()
                 .filter_map(|child| child.lock().ok()?.slot.yubihsm_provisioning_connector())
                 .collect(),
@@ -1111,9 +1118,13 @@ mod fido2_hardware {
 
     fn fido2_slot_id() -> CK_SLOT_ID {
         let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
-        crate::with_context_mut(|context| {
-            context.init();
-            let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
+        crate::with_context(|context| {
+            context.init()?;
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let mut matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
                 (child.slot.kind()
                     == crate::SlotKind::Ccid(crate::CcidApplication::Fido2)
@@ -1145,11 +1156,12 @@ mod fido2_hardware {
             CKR_OK as CK_RV
         );
         let slot_id = fido2_slot_id();
-        crate::with_context_mut(|context| {
-            let child = context
+        crate::with_context(|context| {
+            let slot_contexts = context
                 .slot_contexts
-                .get(&slot_id)
-                .ok_or(CKR_SLOT_ID_INVALID)?;
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts.get(&slot_id).ok_or(CKR_SLOT_ID_INVALID)?;
             let child = child
                 .lock()
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
@@ -1191,9 +1203,12 @@ mod fido2_hardware {
         let pin = std::env::var("PKCS11RS_FIDO2_TEST_PIN")
             .expect("PKCS11RS_FIDO2_TEST_PIN must contain the configured FIDO2 PIN");
         let slot_id = fido2_slot_id();
-        crate::with_context_mut(|context| {
-            let child = context
+        crate::with_context(|context| {
+            let slot_contexts = context
                 .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts
                 .get(&slot_id)
                 .ok_or(CKR_SLOT_ID_INVALID)?;
             let mut child = child
@@ -1235,11 +1250,12 @@ mod fido2_hardware {
             CKR_OK as CK_RV
         );
         let slot_id = fido2_slot_id();
-        let credential_id = crate::with_context_mut(|context| {
-            let child = context
+        let credential_id = crate::with_context(|context| {
+            let slot_contexts = context
                 .slot_contexts
-                .get(&slot_id)
-                .ok_or(CKR_SLOT_ID_INVALID)?;
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts.get(&slot_id).ok_or(CKR_SLOT_ID_INVALID)?;
             let mut child = child
                 .lock()
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
@@ -1270,11 +1286,12 @@ mod fido2_hardware {
             CKR_OK as CK_RV,
             "C_Login could not enumerate the newly created credential"
         );
-        let unique_id = crate::with_context_mut(|context| {
-            let child = context
+        let unique_id = crate::with_context(|context| {
+            let slot_contexts = context
                 .slot_contexts
-                .get(&slot_id)
-                .ok_or(CKR_SLOT_ID_INVALID)?;
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts.get(&slot_id).ok_or(CKR_SLOT_ID_INVALID)?;
             let child = child
                 .lock()
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;

@@ -17,11 +17,7 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
     }
-    let _lifecycle = match lock_lifecycle_write() {
-        Ok(guard) => guard,
-        Err(error) => return error.into(),
-    };
-    match lock_context() {
+    match lock_context_write() {
         Ok(mut guard) => match guard.as_mut() {
             Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
             None => match ModuleContext::new() {
@@ -76,25 +72,28 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
     if !pReserved.is_null() {
         return CKR_ARGUMENTS_BAD.into();
     }
-    let _lifecycle = match lock_lifecycle_write() {
-        Ok(guard) => guard,
-        Err(error) => return error.into(),
-    };
-    match lock_context() {
+    match lock_context_write() {
         Ok(mut guard) => match guard.as_mut() {
             Some(ctx) => {
                 let mut logout_failed = false;
-                for child in ctx.slot_contexts.values() {
-                    let Ok(mut child) = child.lock() else {
-                        logout_failed = true;
-                        continue;
-                    };
-                    if child.login_role.is_some() {
-                        let slot_id = child.slot_id;
-                        if child.logout_slot(slot_id).is_err() {
-                            child.clear_login_state(slot_id);
-                            logout_failed = true;
+                match ctx.slot_contexts.read() {
+                    Ok(slot_contexts) => {
+                        for child in slot_contexts.values() {
+                            let Ok(mut child) = child.lock() else {
+                                logout_failed = true;
+                                continue;
+                            };
+                            if child.login_role.is_some() {
+                                let slot_id = child.slot_id;
+                                if child.logout_slot(slot_id).is_err() {
+                                    child.clear_login_state(slot_id);
+                                    logout_failed = true;
+                                }
+                            }
                         }
+                    }
+                    Err(_) => {
+                        logout_failed = true;
                     }
                 }
                 *guard = None;
@@ -160,13 +159,17 @@ pub extern "C" fn C_GetSlotList(
             Some(count) => count,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        match with_context_mut(|ctx| {
-            ctx.init();
+        match with_context(|ctx| {
+            ctx.init()?;
+            let slot_contexts = ctx
+                .slot_contexts
+                .read()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
             let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
-                ctx.slot_contexts.keys().copied().collect()
+                slot_contexts.keys().copied().collect()
             } else {
                 let mut keys = Vec::new();
-                for (slot_id, child) in ctx.slot_contexts.iter() {
+                for (slot_id, child) in slot_contexts.iter() {
                     let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
                     if child.slot.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0 {
                         keys.push(*slot_id);

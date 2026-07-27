@@ -106,12 +106,16 @@ pub extern "C" fn C_OpenSession(
             Some(session) => session,
             None => return CKR_ARGUMENTS_BAD.into(),
         };
-        let _lifecycle = match lock_lifecycle_read() {
+        let module = match lock_context_read() {
             Ok(guard) => guard,
             Err(error) => return error.into(),
         };
+        let context = match module.as_ref() {
+            Some(context) => context,
+            None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
+        };
         let mut opened_handle = None;
-        let result = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
+        let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
             if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
                 return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
             }
@@ -142,19 +146,21 @@ pub extern "C" fn C_OpenSession(
         });
         match (result, opened_handle) {
             (Ok(rv), None) => rv,
-            (Ok(_), Some(handle)) => match register_session_slot(handle, slotID) {
-                Ok(()) => {
-                    *session = handle;
-                    CKR_OK as CK_RV
+            (Ok(_), Some(handle)) => {
+                match register_session_slot_in_context(context, handle, slotID) {
+                    Ok(()) => {
+                        *session = handle;
+                        CKR_OK as CK_RV
+                    }
+                    Err(error) => {
+                        let _ = with_slot_context_mut_in_context(context, slotID, |ctx| {
+                            ctx.sessions.remove(&handle);
+                            Ok(())
+                        });
+                        error.into()
+                    }
                 }
-                Err(error) => {
-                    let _ = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
-                        ctx.sessions.remove(&handle);
-                        Ok(())
-                    });
-                    error.into()
-                }
-            },
+            }
             (Err(error), _) => error.into(),
         }
     }
@@ -163,12 +169,16 @@ pub extern "C" fn C_OpenSession(
 #[no_mangle]
 pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     log!(2, "C_CloseSession called with {:?}", session_handle);
-    let _lifecycle = match lock_lifecycle_read() {
+    let module = match lock_context_read() {
         Ok(guard) => guard,
         Err(error) => return error.into(),
     };
+    let context = match module.as_ref() {
+        Some(context) => context,
+        None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
+    };
     let mut removed = false;
-    let result = with_session_context_mut_with_lifecycle_held(session_handle, |ctx| {
+    let result = with_session_context_mut_in_context(context, session_handle, |ctx| {
         log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
         let slot_id = match ctx.sessions.get(&session_handle) {
             Some(session) => session.backend().slotID(),
@@ -213,7 +223,7 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
         }
     });
     if removed {
-        if let Err(error) = unregister_session_slot(session_handle) {
+        if let Err(error) = unregister_session_slot_in_context(context, session_handle) {
             return error.into();
         }
     }
@@ -226,12 +236,16 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    let _lifecycle = match lock_lifecycle_read() {
+    let module = match lock_context_read() {
         Ok(guard) => guard,
         Err(error) => return error.into(),
     };
+    let context = match module.as_ref() {
+        Some(context) => context,
+        None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
+    };
     let mut closed_sessions = HashSet::new();
-    let result = with_slot_context_mut_with_lifecycle_held(slotID, |ctx| {
+    let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
         log!(2, "C_CloseAllSessions sessions before {:?}", ctx.sessions);
         closed_sessions.extend(
             ctx.sessions
@@ -265,7 +279,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             None => Ok(CKR_OK as CK_RV),
         }
     });
-    if let Err(error) = unregister_session_slots(&closed_sessions) {
+    if let Err(error) = unregister_session_slots_in_context(context, &closed_sessions) {
         return error.into();
     }
     match result {
