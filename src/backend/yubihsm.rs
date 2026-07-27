@@ -2,16 +2,58 @@ use crate::*;
 
 #[derive(Clone, Debug)]
 pub(crate) struct HsmAuthProvider {
-    pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) connector: HsmAuthProviderConnector,
     pub(crate) credential: HsmAuthCredential,
     pub(crate) version: (u8, u8, u8),
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
 }
 
-// Providers contain connector handles that are not marked Send by their
-// dependency crates. They are only shared through HsmAuthProviderRegistry,
-// which keeps selection and use under one mutex; the PC/SC connector then
-// serializes each complete applet exchange on its reader.
+#[derive(Clone)]
+pub(crate) enum HsmAuthProviderConnector {
+    Shared(SharedConnector),
+    #[cfg(test)]
+    Local(Rc<dyn Connector>),
+}
+
+impl std::fmt::Debug for HsmAuthProviderConnector {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_ref().as_debug().fmt(fmt)
+    }
+}
+
+impl AsRef<dyn Connector> for HsmAuthProviderConnector {
+    fn as_ref(&self) -> &(dyn Connector + 'static) {
+        match self {
+            Self::Shared(connector) => connector.as_ref(),
+            #[cfg(test)]
+            Self::Local(connector) => connector.as_ref(),
+        }
+    }
+}
+
+impl From<SharedConnector> for HsmAuthProviderConnector {
+    fn from(connector: SharedConnector) -> Self {
+        Self::Shared(connector)
+    }
+}
+
+#[cfg(test)]
+impl From<Rc<dyn Connector>> for HsmAuthProviderConnector {
+    fn from(connector: Rc<dyn Connector>) -> Self {
+        Self::Local(connector)
+    }
+}
+
+#[cfg(test)]
+impl<T: Connector + 'static> From<Rc<T>> for HsmAuthProviderConnector {
+    fn from(connector: Rc<T>) -> Self {
+        Self::Local(connector)
+    }
+}
+
+// Test-only providers may use single-threaded protocol peers. Production
+// providers contain only SharedConnector and derive Send without assistance.
+#[cfg(test)]
 unsafe impl Send for HsmAuthProvider {}
 
 #[derive(Debug, Default)]
@@ -84,9 +126,10 @@ impl HsmAuthProviderRegistry {
 
 impl HsmAuthProvider {
     fn source_identifier(&self) -> String {
-        let serial = self.connector.serial();
+        let connector = self.connector.as_ref();
+        let serial = connector.serial();
         if serial.is_empty() {
-            self.connector.name()
+            connector.name()
         } else {
             serial.to_owned()
         }

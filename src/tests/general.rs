@@ -360,7 +360,7 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 
 #[test]
 pub fn yubikey_login_preserves_connector_errors() {
-    let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let base: crate::SharedConnector = std::sync::Arc::new(FailingConnector);
     let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
     let mut slot = crate::IssuerSecurityDomainSlot::new(
         std::rc::Rc::new(crate::PcscAppletConnector::new(
@@ -437,9 +437,9 @@ fn ccid_application_discovery_defaults_to_supported_applets() {
 
 #[test]
 fn pcsc_applet_presence_requires_a_successful_aid_select() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "SELECT0001",
     });
     let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
@@ -456,25 +456,26 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
     );
     assert!(crate::Connector::refresh(&connector).is_ok());
     assert!(crate::Connector::is_present(&connector));
-    base.select_ok.set(false);
+    base.select_ok
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(crate::Connector::refresh(&connector).is_err());
     assert!(!crate::Connector::is_present(&connector));
     assert!(connector
-        .discovery_error
-        .borrow()
+        .discovery_error()
         .as_deref()
         .is_some_and(|reason| reason.contains("Generic")));
-    base.select_ok.set(true);
+    base.select_ok
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(crate::Connector::refresh(&connector).is_ok());
     assert!(crate::Connector::is_present(&connector));
-    assert!(connector.discovery_error.borrow().is_none());
+    assert!(connector.discovery_error().is_none());
 }
 
 #[test]
 fn pcsc_applet_connector_reuses_selected_aid() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "SELECT0001",
     });
     let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
@@ -493,7 +494,8 @@ fn pcsc_applet_connector_reuses_selected_aid() {
         std::time::Duration::from_secs(1),
     )
     .is_ok());
-    base.select_ok.set(false);
+    base.select_ok
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(crate::Connector::transmit(
         &connector,
         &[0x00, 0x00],
@@ -505,8 +507,8 @@ fn pcsc_applet_connector_reuses_selected_aid() {
 
 #[test]
 fn pcsc_applet_connectors_share_selected_aid_state() {
-    let commands = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let base = std::rc::Rc::new(RecordingConnector {
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base = std::sync::Arc::new(RecordingConnector {
         commands: commands.clone(),
     });
     let state = std::sync::Arc::new(crate::PcscReaderState::default());
@@ -530,7 +532,8 @@ fn pcsc_applet_connectors_share_selected_aid_state() {
     crate::Connector::send_apdu(&first, &command).unwrap();
 
     let selected = commands
-        .borrow()
+        .lock()
+        .unwrap()
         .iter()
         .filter_map(|encoded| {
             let command = crate::CommandApdu::decode(encoded).ok()?;
@@ -544,8 +547,8 @@ fn pcsc_applet_connectors_share_selected_aid_state() {
 fn passive_ccid_slots_do_not_repeat_presence_select() {
     let connector = || -> std::rc::Rc<dyn crate::Connector> {
         std::rc::Rc::new(SelectableConnector {
-            present: std::cell::Cell::new(true),
-            select_ok: std::cell::Cell::new(false),
+            present: std::sync::atomic::AtomicBool::new(true),
+            select_ok: std::sync::atomic::AtomicBool::new(false),
             serial: "SELECT0001",
         })
     };
@@ -561,9 +564,9 @@ fn passive_ccid_slots_do_not_repeat_presence_select() {
 
 #[test]
 fn openpgp_slot_info_reports_application_version_and_serial() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "12345678",
     });
     let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -614,9 +617,9 @@ fn openpgp_token_pin_bounds_cover_user_and_admin_passwords() {
 
 #[test]
 fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "12345678",
     });
     let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -634,9 +637,9 @@ fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
 
 #[test]
 fn openpgp_slot_uses_shared_firmware_before_metadata_is_loaded() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "12345678",
     });
     let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -874,9 +877,9 @@ fn openpgp_uif_modes_map_to_yubico_touch_policy_values() {
 
 #[test]
 fn openpgp_metadata_failure_does_not_hide_selected_applet() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "12345678",
     });
     let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
@@ -969,8 +972,8 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
 #[test]
 fn openpgp_always_authenticate_expires_after_one_signature() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "OPENPGP001",
     });
     let authenticated = std::rc::Rc::new(std::cell::Cell::new(true));
@@ -992,9 +995,9 @@ fn openpgp_always_authenticate_expires_after_one_signature() {
 
 #[test]
 fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "12345678",
     });
     let aid = crate::piv::PIV_AID.to_vec();
@@ -1026,9 +1029,9 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
 
 #[test]
 fn issuer_sd_token_uses_device_model_and_applet_label() {
-    let base = std::rc::Rc::new(SelectableConnector {
-        present: std::cell::Cell::new(true),
-        select_ok: std::cell::Cell::new(true),
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
         serial: "SELECT0001",
     });
     let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
@@ -1250,7 +1253,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         CKR_OK as CK_RV
     );
 
-    let base: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let base: crate::SharedConnector = std::sync::Arc::new(FailingConnector);
     let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
     let connector: std::rc::Rc<dyn crate::Connector> =
         std::rc::Rc::new(crate::PcscAppletConnector::new(
