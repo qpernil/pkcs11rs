@@ -116,12 +116,7 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(credential.authkey_id, 0x00a5);
     assert!(credential.hsmauth_credential.is_none());
     assert_eq!(
-        credential
-            .password
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(Vec::as_slice),
+        credential.configured_password.as_deref().map(Vec::as_slice),
         Some(b"discovery-password".as_slice())
     );
     let debug = format!("{credential:?}");
@@ -139,12 +134,7 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
     assert_eq!(hsmauth_credential.label, "default key");
     assert_eq!(hsmauth_credential.source.as_deref(), Some("12345678"));
     assert_eq!(
-        credential
-            .password
-            .lock()
-            .unwrap()
-            .as_deref()
-            .map(Vec::as_slice),
+        credential.configured_password.as_deref().map(Vec::as_slice),
         Some(b"password".as_slice())
     );
     let debug = format!("{credential:?}");

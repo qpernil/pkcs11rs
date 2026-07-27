@@ -10,7 +10,7 @@ use crate::{
     CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
     HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
     PcscAppletConnector, PcscConnector, PivSlot, SignatureOperation, Slot, SlotKind, TokenObject,
-    UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
+    UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
@@ -62,7 +62,7 @@ pub(crate) struct ModuleContext {
     pub(crate) libusb: Option<rusb::Context>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
-    pub(crate) yubihsm_public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
+    pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
@@ -284,8 +284,8 @@ impl std::fmt::Debug for ModuleContext {
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field(
-                "yubihsm_public_discovery_credential",
-                &self.yubihsm_public_discovery_credential,
+                "yubihsm_public_discovery_config",
+                &self.yubihsm_public_discovery_config,
             )
             .field("slot_contexts", &slot_ids)
             .finish()
@@ -415,13 +415,13 @@ impl ModuleContext {
         slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
-        let yubihsm_public_discovery_credential =
+        let yubihsm_public_discovery_config =
             configured_yubihsm_public_discovery_credential_with_pinentry(
                 std::env::var_os(YUBIHSM_DISCOVERY_ENV),
                 pinentry.as_ref(),
             )?;
         #[cfg(feature = "abi-tests")]
-        let yubihsm_public_discovery_credential = None;
+        let yubihsm_public_discovery_config = None;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
         let mut context = ModuleContext {
@@ -451,7 +451,7 @@ impl ModuleContext {
                 }
             },
             yubihsm_urls,
-            yubihsm_public_discovery_credential,
+            yubihsm_public_discovery_config,
             handles: handles.clone(),
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
@@ -1026,7 +1026,7 @@ impl ModuleContext {
                                             (0, 0, 0),
                                             Vec::new(),
                                             hsmauth_providers.clone(),
-                                            self.yubihsm_public_discovery_credential.clone(),
+                                            self.yubihsm_public_discovery_config.clone(),
                                         );
                                     yubihsm_slot.set_pinentry(self.pinentry.clone());
                                     let mut slot = Box::new(yubihsm_slot);
@@ -1083,7 +1083,7 @@ impl ModuleContext {
                 (0, 0, 0),
                 Vec::new(),
                 hsmauth_providers.clone(),
-                self.yubihsm_public_discovery_credential.clone(),
+                self.yubihsm_public_discovery_config.clone(),
             );
             yubihsm_slot.set_pinentry(self.pinentry.clone());
             let mut slot = Box::new(yubihsm_slot);
