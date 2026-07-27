@@ -1133,6 +1133,12 @@ mod fido2_hardware {
     #[test]
     #[ignore = "requires a YubiKey with the FIDO AID exposed through PC/SC"]
     fn fido2_ccid_compatibility_probe() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
         let slot_id = fido2_slot_id();
         crate::with_context_mut(|context| {
             let child = context
@@ -1171,6 +1177,12 @@ mod fido2_hardware {
     #[test]
     #[ignore = "requires a YubiKey 5.8+ FIDO2-over-CCID applet and PKCS11RS_FIDO2_TEST_PIN"]
     fn fido2_read_only_resident_credential_enumeration() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
         let pin = std::env::var("PKCS11RS_FIDO2_TEST_PIN")
             .expect("PKCS11RS_FIDO2_TEST_PIN must contain the configured FIDO2 PIN");
         let slot_id = fido2_slot_id();

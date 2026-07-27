@@ -105,6 +105,30 @@ impl AuthenticatorInfo {
             None
         }
     }
+
+    pub(crate) fn primary_version(&self) -> Option<&str> {
+        let version_rank = |version: &String| {
+            let suffix = version.strip_prefix("FIDO_2_")?;
+            let (minor, qualifier) = suffix
+                .split_once('_')
+                .map_or((suffix, None), |(minor, qualifier)| {
+                    (minor, Some(qualifier))
+                });
+            Some((minor.parse::<u16>().ok()?, qualifier.is_none()))
+        };
+        self.versions
+            .iter()
+            .filter(|version| version_rank(version).is_some_and(|(_, stable)| stable))
+            .max_by_key(|version| version_rank(version).map(|(minor, _)| minor))
+            .or_else(|| {
+                self.versions
+                    .iter()
+                    .filter(|version| version_rank(version).is_some())
+                    .max_by_key(|version| version_rank(version).map(|(minor, _)| minor))
+            })
+            .map(String::as_str)
+            .or_else(|| self.versions.first().map(String::as_str))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -177,7 +201,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) || !info.option("pinUvAuthToken") {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
-        let permission = if info.option("pcmr") {
+        let permission = if info.option("perCredMgmtRO") {
             PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
         } else {
             PERMISSION_CREDENTIAL_MANAGEMENT
@@ -935,7 +959,7 @@ mod tests {
                 ("credMgmt".to_owned(), true),
                 ("clientPin".to_owned(), true),
                 ("pinUvAuthToken".to_owned(), true),
-                ("pcmr".to_owned(), true),
+                ("perCredMgmtRO".to_owned(), true),
             ],
             max_msg_size: Some(1200),
             pin_uv_auth_protocols: vec![2],
@@ -1067,6 +1091,23 @@ mod tests {
         );
         assert_eq!(encode_management_next(3).unwrap(), [0xa1, 0x01, 0x03]);
         assert_eq!(encode_management_next(5).unwrap(), [0xa1, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn primary_version_prefers_latest_stable_ctap_over_u2f_and_preview() {
+        let mut info = credential_management_info();
+        info.versions = [
+            "U2F_V2",
+            "FIDO_2_0",
+            "FIDO_2_1_PRE",
+            "FIDO_2_1",
+            "FIDO_2_3",
+            "FIDO_2_4_PRE",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(info.primary_version(), Some("FIDO_2_3"));
     }
 
     #[test]
