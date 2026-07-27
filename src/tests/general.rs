@@ -1280,10 +1280,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         );
         context.login_role = Some(crate::LoginRole::User);
     }
-    crate::SESSION_CONTEXTS
-        .lock()
-        .unwrap()
-        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
+    crate::register_session_slot(TEST_SESSION_HANDLE, TEST_SLOT_ID).unwrap();
 
     let mut info = unsafe { ::std::mem::zeroed::<CK_SESSION_INFO>() };
     assert_eq!(
@@ -1344,10 +1341,7 @@ pub fn authentication_loss_cancels_active_private_signing() {
         );
         context.login_role = Some(crate::LoginRole::User);
     }
-    crate::SESSION_CONTEXTS
-        .lock()
-        .unwrap()
-        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
+    crate::register_session_slot(TEST_SESSION_HANDLE, TEST_SLOT_ID).unwrap();
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,

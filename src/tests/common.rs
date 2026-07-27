@@ -6912,10 +6912,7 @@ fn install_test_session_with_state(
     if logged_in {
         context.login_role = Some(crate::LoginRole::User);
     }
-    crate::SESSION_CONTEXTS
-        .lock()
-        .unwrap()
-        .insert(session_handle, slot_id);
+    crate::register_session_slot(session_handle, slot_id).unwrap();
 }
 
 fn assert_function_slots_present<T>(function_list: *const T, function_count: usize) {

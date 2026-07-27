@@ -664,10 +664,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
             },
         );
     }
-    crate::SESSION_CONTEXTS
-        .lock()
-        .unwrap()
-        .insert(TEST_SESSION_HANDLE, TEST_SLOT_ID);
+    crate::register_session_slot(TEST_SESSION_HANDLE, TEST_SLOT_ID).unwrap();
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
