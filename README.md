@@ -26,7 +26,8 @@ The minimum supported Rust version is 1.85.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
 - **FIDO2** discovery over the YubiKey 5.8+ USB CCID smart-card binding, with
-  read-only resident-credential metadata after PIN login.
+  first-time PIN provisioning and read-only resident-credential metadata after
+  PIN login.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
@@ -211,8 +212,8 @@ Limit discovery to selected applets with:
 export PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-See [FIDO2 over CCID](docs/fido2.md) for the firmware boundary, read-only
-credential mapping, and compatibility-test commands.
+See [FIDO2 over CCID](docs/fido2.md) for the firmware boundary, initial-PIN
+mapping, read-only credential mapping, and compatibility-test commands.
 
 Enable secure messaging for selected applets with one of:
 

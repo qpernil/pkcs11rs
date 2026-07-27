@@ -102,10 +102,6 @@ pub(crate) trait Slot {
     fn yubihsm_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         None
     }
-    #[cfg(all(test, not(feature = "abi-tests")))]
-    fn fido2_provision_pin(&mut self, _new_pin: &[u8]) -> Result<(), Error> {
-        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
-    }
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
