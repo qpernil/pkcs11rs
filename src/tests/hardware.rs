@@ -1199,9 +1199,13 @@ mod fido2_hardware {
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
             child._get_slot_mut(slot_id)?.login(pin.as_bytes())?;
             let objects = child.get_slot(slot_id)?.backend_token_objects(slot_id)?;
+            let credential_count = objects
+                .iter()
+                .filter(|object| object.class == CKO_DATA as CK_OBJECT_CLASS)
+                .count();
             eprintln!(
-                "enumerated {} read-only FIDO2 discoverable credential objects",
-                objects.len()
+                "enumerated {credential_count} read-only FIDO2 discoverable credentials as {} objects",
+                objects.len(),
             );
             for object in &objects {
                 eprintln!("  {} ({})", object.label, object.unique_id);
@@ -1277,7 +1281,10 @@ mod fido2_hardware {
                 .backend_token_objects(slot_id)?
                 .into_iter()
                 .find(|object| {
-                    object.label == crate::ctap::FIDO2_TEST_USER_DISPLAY_NAME
+                    object.class == CKO_DATA as CK_OBJECT_CLASS
+                        && object
+                            .label
+                            .contains(crate::ctap::FIDO2_TEST_USER_DISPLAY_NAME)
                         && object.id == credential_id
                 })
                 .map(|object| object.unique_id)

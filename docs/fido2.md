@@ -106,38 +106,57 @@ delete-credential, authenticator-configuration, reset, or signing commands.
 Discoverable credentials and their metadata remain read-only.
 
 Each sufficiently complete response becomes a private, token-resident,
-immutable `CKO_DATA` object. It is intentionally not modeled as a PKCS #11
-public or private key:
+immutable `CKO_DATA` object:
 
 | Attribute | Value |
 | --- | --- |
 | `CKA_ID` | credential ID |
 | `CKA_OBJECT_ID` | 32-byte RP ID hash |
-| `CKA_LABEL` | display name, user name, RP name/ID, or credential-ID fallback |
+| `CKA_LABEL` | RP and user names when available, or a credential-ID fallback |
 | `CKA_APPLICATION` | `FIDO2 discoverable credential` |
-| `CKA_VALUE` | versioned-by-schema CBOR metadata map described below |
+| `CKA_VALUE` | authenticator credential-management response CBOR |
 | `CKA_PRIVATE` | true |
 | `CKA_MODIFIABLE`, `CKA_COPYABLE`, `CKA_DESTROYABLE` | false |
 
-`CKA_VALUE` uses integer keys:
+`CKA_VALUE` is the credential response body returned by
+`enumerateCredentialsBegin` or `enumerateCredentialsGetNextCredential`,
+without the leading CTAP success status byte. The bytes are retained exactly
+as returned by the authenticator, including unknown fields. CTAP currently
+defines these response fields:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| 1 | bytes, required | RP ID hash |
-| 2 | text | RP ID |
-| 3 | text | RP name |
-| 4 | bytes, required | user ID |
-| 5 | text | user name |
-| 6 | text | user display name |
-| 7 | bytes, required | credential ID |
-| 8 | bytes, required | encoded COSE public-key map |
-| 9 | unsigned integer | credential-protection policy |
-| 10 | boolean | third-party-payment credential |
+| `0x06` | map | user entity |
+| `0x07` | map | credential descriptor |
+| `0x08` | map | COSE public key |
+| `0x09` | unsigned integer | total credential count; begin response only |
+| `0x0a` | unsigned integer | credential-protection policy |
+| `0x0b` | bytes | large-blob key |
+| `0x0c` | boolean | third-party-payment credential |
 
-Unknown response fields are skipped. An object is not created unless the RP ID
-hash, user ID, credential ID, and encoded public key are all available.
-Object handles are reconciled from the RP hash plus credential ID, so repeated
-logins retain handles for unchanged credentials.
+The object is private because credential enumeration requires FIDO PIN/UV
+authorization. After login, an application may read all returned response
+fields, including `largeBlobKey`, through `CKA_VALUE`.
+
+When the COSE public key has a lossless PKCS #11 representation, the backend
+also creates linked immutable `CKO_PUBLIC_KEY` and `CKO_PRIVATE_KEY` objects.
+The data and key objects share the credential ID in `CKA_ID`. EC2 P-256,
+P-384, and P-521, OKP Ed25519, and RSA public keys are projected. Other COSE
+key types leave the data object available without creating misleading key
+objects.
+
+The projected public key exposes its standard EC or RSA parameters and
+`CKA_PUBLIC_KEY_INFO`. The private object exposes no private key value. Both
+key objects have `CKA_ENCRYPT`, `CKA_DECRYPT`, `CKA_SIGN`, `CKA_VERIFY`, and
+`CKA_DERIVE` set to false and advertise no allowed mechanisms. In particular,
+authenticator support for the experimental `previewSign` extension does not
+show that an enumerated credential is one of its derived signing keys, and
+pkcs11rs does not yet implement the corresponding signing operation.
+
+An object is not created unless the RP ID hash, user ID, credential ID, and
+encoded public key are all available. Object handles are reconciled from the
+RP hash plus credential ID and object kind, so repeated logins retain handles
+for unchanged credentials.
 
 The ignored enumeration test is read-only but requires the FIDO2 PIN:
 
