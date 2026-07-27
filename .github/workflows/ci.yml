@@ -116,6 +116,8 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings
 
     steps:
       - name: Check out repository
