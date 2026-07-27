@@ -124,6 +124,10 @@ fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential()
             .map(Vec::as_slice),
         Some(b"discovery-password".as_slice())
     );
+    let debug = format!("{credential:?}");
+    assert!(debug.contains("00a5"));
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("discovery-password"));
 
     let credential = crate::configured_yubihsm_public_discovery_credential(Some(
         ":0001default key@12345678:password".into(),
