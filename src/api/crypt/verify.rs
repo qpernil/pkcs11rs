@@ -25,7 +25,11 @@ fn verify_init(
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
-        if ctx.verify_operations.contains_key(&session_handle) {
+        if ctx
+            .get_session_context(session_handle)?
+            .verify_operation
+            .is_some()
+        {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
 
@@ -154,21 +158,19 @@ fn verify_init(
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
 
-        ctx.verify_operations.insert(
-            session_handle,
-            SignatureOperation {
-                key: object.material.clone(),
-                slot_id,
-                requires_login: object.private,
-                context_specific_extended: false,
-                mechanism: mechanism.mechanism,
-                mac_length,
-                gmac,
-                pss,
-                piv_pin_policy: None,
-                buffer: Vec::new(),
-            },
-        );
+        ctx.get_session_context_mut(session_handle)?
+            .verify_operation = Some(SignatureOperation {
+            key: object.material.clone(),
+            slot_id,
+            requires_login: object.private,
+            context_specific_extended: false,
+            mechanism: mechanism.mechanism,
+            mac_length,
+            gmac,
+            pss,
+            piv_pin_policy: None,
+            buffer: Vec::new(),
+        });
         Ok(())
     })
 }
@@ -203,10 +205,10 @@ fn verify(
     signature_len: CK_ULONG,
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let operation = ctx
-            .verify_operations
-            .remove(&session_handle)
+            .get_session_context_mut(session_handle)?
+            .verify_operation
+            .take()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
@@ -456,11 +458,11 @@ pub extern "C" fn C_VerifyUpdate(
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     map(with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let part = from_raw_parts(part, part_len as usize)?.to_vec();
         let operation = ctx
-            .verify_operations
-            .get_mut(&session_handle)
+            .get_session_context_mut(session_handle)?
+            .verify_operation
+            .as_mut()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         operation.buffer.extend_from_slice(&part);
         Ok(())

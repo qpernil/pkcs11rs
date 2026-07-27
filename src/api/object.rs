@@ -1663,7 +1663,11 @@ fn find_objects_init(
         .collect::<Result<_, Error>>()?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.find_operations.contains_key(&session_handle) {
+        if ctx
+            .get_session_context(session_handle)?
+            .find_operation
+            .is_some()
+        {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         ctx.insert_session_objects(slot_id, session_handle)?;
@@ -1687,8 +1691,8 @@ fn find_objects_init(
             }
         }
         objects.sort();
-        ctx.find_operations
-            .insert(session_handle, FindOperation { objects, next: 0 });
+        ctx.get_session_context_mut(session_handle)?.find_operation =
+            Some(FindOperation { objects, next: 0 });
         Ok(())
     })
 }
@@ -1722,10 +1726,10 @@ fn find_objects(
     let object_count = as_mut(object_count)?;
     let output = _from_raw_parts_mut(object, max_object_count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let operation = ctx
-            .find_operations
-            .get_mut(&session_handle)
+            .get_session_context_mut(session_handle)?
+            .find_operation
+            .as_mut()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
 
         let remaining = &operation.objects[operation.next..];
@@ -1746,9 +1750,9 @@ pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV
 
 fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
-        ctx.find_operations
-            .remove(&session_handle)
+        ctx.get_session_context_mut(session_handle)?
+            .find_operation
+            .take()
             .map(|_| ())
             .ok_or(CKR_OPERATION_NOT_INITIALIZED.into())
     })

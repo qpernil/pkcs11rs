@@ -51,7 +51,7 @@ impl Slot for AbiTestSlot {
         true
     }
 
-    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(AbiTestSession { slot_id, flags })
     }
 
@@ -116,7 +116,7 @@ impl Slot for AbiTestSlot {
 }
 
 #[cfg(feature = "abi-tests")]
-impl Session for AbiTestSession {
+impl BackendSession for AbiTestSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -455,7 +455,7 @@ impl Slot for AbiScp03Slot {
         true
     }
 
-    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(IssuerSecurityDomainSession {
             slotID: slot_id,
             flags,

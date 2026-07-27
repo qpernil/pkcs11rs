@@ -195,7 +195,7 @@ impl Slot for OpenPgpSlot {
     fn clear_discovery_error(&self) {
         self.connector.clear_discovery_error();
     }
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(OpenPgpSession {
             slotID,
             flags,
@@ -935,7 +935,7 @@ pub(crate) struct OpenPgpSession {
     pub(crate) authenticated: Rc<Cell<bool>>,
 }
 
-impl Session for OpenPgpSession {
+impl BackendSession for OpenPgpSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

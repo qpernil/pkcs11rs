@@ -225,14 +225,15 @@ fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(),
         info.ulSessionCount = ctx
             .sessions
             .values()
-            .filter(|session| session.slotID() == slotID)
+            .filter(|session| session.backend().slotID() == slotID)
             .count() as CK_ULONG;
         info.ulMaxRwSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulRwSessionCount = ctx
             .sessions
             .values()
             .filter(|session| {
-                session.slotID() == slotID && session.flags() & CKF_RW_SESSION as CK_FLAGS != 0
+                session.backend().slotID() == slotID
+                    && session.backend().flags() & CKF_RW_SESSION as CK_FLAGS != 0
             })
             .count() as CK_ULONG;
         Ok(())

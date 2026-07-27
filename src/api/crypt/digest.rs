@@ -22,7 +22,11 @@ fn digest_init(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, _logged_in) = ctx.session_details(session_handle)?;
-        if ctx.digest_operations.contains_key(&session_handle) {
+        if ctx
+            .get_session_context(session_handle)?
+            .digest_operation
+            .is_some()
+        {
             return Err(Error::from(CKR_OPERATION_ACTIVE as CK_RV));
         }
         let mechanism = _as_ref(mechanism)?;
@@ -30,20 +34,17 @@ fn digest_init(
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(Error::from(CKR_MECHANISM_PARAM_INVALID as CK_RV));
         }
-        ctx.digest_operations.insert(
-            session_handle,
-            DigestOperation {
-                algorithm: software_digest(mechanism.mechanism)?,
-                buffer: Vec::new(),
-            },
-        );
+        ctx.get_session_context_mut(session_handle)?
+            .digest_operation = Some(DigestOperation {
+            algorithm: software_digest(mechanism.mechanism)?,
+            buffer: Vec::new(),
+        });
         Ok(())
     })
 }
 
 fn copy_digest(
-    ctx: &mut SlotContext,
-    session_handle: CK_SESSION_HANDLE,
+    session: &mut SessionContext,
     operation: &DigestOperation,
     data: &[u8],
     digest: *mut u8,
@@ -66,7 +67,7 @@ fn copy_digest(
         ptr::copy_nonoverlapping(value.as_ptr(), digest, value.len());
     }
     *digest_len = required;
-    ctx.digest_operations.remove(&session_handle);
+    session.digest_operation = None;
     Ok(())
 }
 
@@ -99,28 +100,35 @@ pub extern "C" fn C_Digest(
     map((|| {
         if digest_len.is_null() {
             let _ = with_session_context_mut(session_handle, |ctx| {
-                if ctx._get_session(session_handle).is_ok() {
-                    ctx.digest_operations.remove(&session_handle);
+                if let Ok(session) = ctx.get_session_context_mut(session_handle) {
+                    session.digest_operation = None;
                 }
                 Ok(())
             });
             return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
         }
         with_session_context_mut(session_handle, |ctx| {
-            ctx._get_session(session_handle)?;
             let operation = ctx
-                .digest_operations
-                .get(&session_handle)
+                .get_session_context(session_handle)?
+                .digest_operation
+                .as_ref()
                 .cloned()
                 .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
             let data = match from_raw_parts(data, data_len as usize) {
                 Ok(data) => data,
                 Err(error) => {
-                    ctx.digest_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .digest_operation = None;
                     return Err(error);
                 }
             };
-            copy_digest(ctx, session_handle, &operation, data, digest, digest_len)
+            copy_digest(
+                ctx.get_session_context_mut(session_handle)?,
+                &operation,
+                data,
+                digest,
+                digest_len,
+            )
         })
     })())
 }
@@ -137,16 +145,17 @@ pub extern "C" fn C_DigestUpdate(
         (session_handle, part, part_len)
     );
     map(with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let part = match from_raw_parts(part, part_len as usize) {
             Ok(part) => part,
             Err(error) => {
-                ctx.digest_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .digest_operation = None;
                 return Err(error);
             }
         };
-        ctx.digest_operations
-            .get_mut(&session_handle)
+        ctx.get_session_context_mut(session_handle)?
+            .digest_operation
+            .as_mut()
             .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
             .buffer
             .extend_from_slice(part);
@@ -159,7 +168,11 @@ pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_
     log!(2, "C_DigestKey called with {:?}", (session_handle, key));
     map(with_session_context_mut(session_handle, |ctx| {
         let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        if !ctx.digest_operations.contains_key(&session_handle) {
+        if ctx
+            .get_session_context(session_handle)?
+            .digest_operation
+            .is_none()
+        {
             return Err(Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV));
         }
         let object = ctx
@@ -175,8 +188,9 @@ pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_
             KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => value.to_vec(),
             _ => return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV)),
         };
-        ctx.digest_operations
-            .get_mut(&session_handle)
+        ctx.get_session_context_mut(session_handle)?
+            .digest_operation
+            .as_mut()
             .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?
             .buffer
             .extend_from_slice(&value);
@@ -198,21 +212,27 @@ pub extern "C" fn C_DigestFinal(
     map((|| {
         if digest_len.is_null() {
             let _ = with_session_context_mut(session_handle, |ctx| {
-                if ctx._get_session(session_handle).is_ok() {
-                    ctx.digest_operations.remove(&session_handle);
+                if let Ok(session) = ctx.get_session_context_mut(session_handle) {
+                    session.digest_operation = None;
                 }
                 Ok(())
             });
             return Err(Error::from(CKR_ARGUMENTS_BAD as CK_RV));
         }
         with_session_context_mut(session_handle, |ctx| {
-            ctx._get_session(session_handle)?;
             let operation = ctx
-                .digest_operations
-                .get(&session_handle)
+                .get_session_context(session_handle)?
+                .digest_operation
+                .as_ref()
                 .cloned()
                 .ok_or_else(|| Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV))?;
-            copy_digest(ctx, session_handle, &operation, &[], digest, digest_len)
+            copy_digest(
+                ctx.get_session_context_mut(session_handle)?,
+                &operation,
+                &[],
+                digest,
+                digest_len,
+            )
         })
     })())
 }

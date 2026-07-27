@@ -195,17 +195,14 @@ fn crypt_init(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        let operation_active = if encrypting {
-            ctx.encrypt_operations.contains_key(&session_handle)
-        } else {
-            ctx.decrypt_operations.contains_key(&session_handle)
-        };
+        let operation_active = ctx
+            .get_session_context(session_handle)?
+            .crypt_operation(encrypting)
+            .is_some();
         if mechanism.is_null() {
-            let removed = if encrypting {
-                ctx.encrypt_operations.remove(&session_handle)
-            } else {
-                ctx.decrypt_operations.remove(&session_handle)
-            };
+            let removed = ctx
+                .get_session_context_mut(session_handle)?
+                .take_crypt_operation(encrypting);
             return if removed.is_some() {
                 Ok(())
             } else {
@@ -388,11 +385,8 @@ fn crypt_init(
             multipart: false,
             result: None,
         };
-        if encrypting {
-            ctx.encrypt_operations.insert(session_handle, operation);
-        } else {
-            ctx.decrypt_operations.insert(session_handle, operation);
-        }
+        ctx.get_session_context_mut(session_handle)?
+            .set_crypt_operation(encrypting, operation);
         Ok(())
     })
 }
@@ -1028,36 +1022,33 @@ fn crypt(
 ) -> Result<(), Error> {
     if output_len.is_null() {
         let _ = with_session_context_mut(session_handle, |ctx| {
-            ctx.encrypt_operations.remove(&session_handle);
-            ctx.decrypt_operations.remove(&session_handle);
+            ctx.get_session_context_mut(session_handle)?
+                .clear_crypt_operations();
             Ok(())
         });
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     let output_len = as_mut(output_len)?;
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
-        let operation = if encrypting {
-            ctx.encrypt_operations.get(&session_handle)
-        } else {
-            ctx.decrypt_operations.get(&session_handle)
-        }
-        .cloned()
-        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let operation = ctx
+            .get_session_context(session_handle)?
+            .crypt_operation(encrypting)
+            .cloned()
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if operation.multipart && !finalizing {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
-            ctx.encrypt_operations.remove(&session_handle);
-            ctx.decrypt_operations.remove(&session_handle);
+            ctx.get_session_context_mut(session_handle)?
+                .clear_crypt_operations();
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let input = match from_raw_parts(input, input_len as usize) {
             Ok(input) => input,
             Err(error) => {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .clear_crypt_operations();
                 return Err(error);
             }
         };
@@ -1066,8 +1057,8 @@ fn crypt(
         let input = buffered_input.as_slice();
         let required = if operation.mechanism == CKM_AES_CCM as CK_MECHANISM_TYPE {
             let Some(parameters) = operation.ccm.as_ref() else {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .clear_crypt_operations();
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             };
             let expected_input = if encrypting {
@@ -1079,8 +1070,8 @@ fn crypt(
                     .ok_or(CKR_ENCRYPTED_DATA_LEN_RANGE)?
             };
             if input.len() != expected_input {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .clear_crypt_operations();
                 return Err(if encrypting {
                     CKR_DATA_LEN_RANGE.into()
                 } else {
@@ -1096,8 +1087,8 @@ fn crypt(
             }
         } else if operation.mechanism == CKM_AES_GCM as CK_MECHANISM_TYPE {
             let Some(parameters) = operation.gcm.as_ref() else {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .clear_crypt_operations();
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             };
             let tag_length = parameters.tag_bits.div_ceil(8);
@@ -1107,8 +1098,8 @@ fn crypt(
                 input.len().checked_sub(tag_length)
             };
             let Some(required) = required else {
-                ctx.encrypt_operations.remove(&session_handle);
-                ctx.decrypt_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?
+                    .clear_crypt_operations();
                 return Err(if encrypting {
                     CKR_DATA_LEN_RANGE.into()
                 } else {
@@ -1122,15 +1113,15 @@ fn crypt(
                     .len()
                     .checked_add(AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH)
                 else {
-                    ctx.encrypt_operations.remove(&session_handle);
-                    ctx.decrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .clear_crypt_operations();
                     return Err(CKR_DATA_LEN_RANGE.into());
                 };
                 required
             } else {
                 if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
-                    ctx.encrypt_operations.remove(&session_handle);
-                    ctx.decrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .clear_crypt_operations();
                     return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
                 }
                 input.len()
@@ -1140,7 +1131,8 @@ fn crypt(
                 if input.len() < AES_BLOCK_LENGTH
                     || !crate::is_multiple_of(input.len(), AES_KEY_WRAP_SEMIBLOCK_LENGTH)
                 {
-                    ctx.encrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(true);
                     return Err(CKR_DATA_LEN_RANGE.into());
                 }
                 input
@@ -1151,7 +1143,8 @@ fn crypt(
                 if input.len() < AES_BLOCK_LENGTH + AES_KEY_WRAP_SEMIBLOCK_LENGTH
                     || !crate::is_multiple_of(input.len(), AES_KEY_WRAP_SEMIBLOCK_LENGTH)
                 {
-                    ctx.decrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(false);
                     return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
                 }
                 input.len() - AES_KEY_WRAP_SEMIBLOCK_LENGTH
@@ -1159,7 +1152,8 @@ fn crypt(
         } else if operation.mechanism == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE {
             if encrypting {
                 if input.is_empty() || input.len() > u32::MAX as usize {
-                    ctx.encrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(true);
                     return Err(CKR_DATA_LEN_RANGE.into());
                 }
                 input
@@ -1170,7 +1164,8 @@ fn crypt(
                     .ok_or(CKR_DATA_LEN_RANGE)?
             } else {
                 if input.len() < AES_BLOCK_LENGTH || !crate::is_multiple_of(input.len(), 8) {
-                    ctx.decrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(false);
                     return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
                 }
                 input.len() - 8
@@ -1184,8 +1179,8 @@ fn crypt(
                     match yubihsm_rsa_length(*algorithm) {
                         Ok(length) => length,
                         Err(error) => {
-                            ctx.encrypt_operations.remove(&session_handle);
-                            ctx.decrypt_operations.remove(&session_handle);
+                            ctx.get_session_context_mut(session_handle)?
+                                .clear_crypt_operations();
                             return Err(error);
                         }
                     }
@@ -1391,28 +1386,26 @@ fn crypt(
             match result {
                 Ok(result) => result,
                 Err(error) => {
-                    ctx.encrypt_operations.remove(&session_handle);
-                    ctx.decrypt_operations.remove(&session_handle);
+                    ctx.get_session_context_mut(session_handle)?
+                        .clear_crypt_operations();
                     return Err(error);
                 }
             }
         };
         if *output_len < result.len() as CK_ULONG {
             *output_len = result.len() as CK_ULONG;
-            let operations = if encrypting {
-                &mut ctx.encrypt_operations
-            } else {
-                &mut ctx.decrypt_operations
-            };
-            if let Some(operation) = operations.get_mut(&session_handle) {
+            if let Some(operation) = ctx
+                .get_session_context_mut(session_handle)?
+                .crypt_operation_mut(encrypting)
+            {
                 operation.result = Some(Zeroizing::new(result));
             }
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
         unsafe { ptr::copy_nonoverlapping(result.as_ptr(), output, result.len()) };
         *output_len = result.len() as CK_ULONG;
-        ctx.encrypt_operations.remove(&session_handle);
-        ctx.decrypt_operations.remove(&session_handle);
+        ctx.get_session_context_mut(session_handle)?
+            .clear_crypt_operations();
         Ok(())
     })
 }
@@ -1484,50 +1477,34 @@ fn crypt_update(
 ) -> Result<(), Error> {
     if output_len.is_null() {
         return with_session_context_mut(session_handle, |ctx| {
-            ctx._get_session(session_handle)?;
-            if encrypting {
-                ctx.encrypt_operations.remove(&session_handle);
-            } else {
-                ctx.decrypt_operations.remove(&session_handle);
-            }
+            ctx.get_session_context_mut(session_handle)?
+                .take_crypt_operation(encrypting);
             Err(CKR_ARGUMENTS_BAD.into())
         });
     }
     let output_len = as_mut(output_len)?;
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
-        let operation = if encrypting {
-            ctx.encrypt_operations.get(&session_handle)
-        } else {
-            ctx.decrypt_operations.get(&session_handle)
-        }
-        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let operation = ctx
+            .get_session_context(session_handle)?
+            .crypt_operation(encrypting)
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             let slot_id = operation.slot_id;
             ctx.reconcile_login_state(slot_id);
-            if encrypting {
-                ctx.encrypt_operations.remove(&session_handle);
-            } else {
-                ctx.decrypt_operations.remove(&session_handle);
-            }
+            ctx.get_session_context_mut(session_handle)?
+                .take_crypt_operation(encrypting);
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         if operation.result.is_some() {
-            if encrypting {
-                ctx.encrypt_operations.remove(&session_handle);
-            } else {
-                ctx.decrypt_operations.remove(&session_handle);
-            }
+            ctx.get_session_context_mut(session_handle)?
+                .take_crypt_operation(encrypting);
             return Err(CKR_OPERATION_NOT_INITIALIZED.into());
         }
         let input = match from_raw_parts(input, input_len as usize) {
             Ok(input) => input,
             Err(error) => {
-                if encrypting {
-                    ctx.encrypt_operations.remove(&session_handle);
-                } else {
-                    ctx.decrypt_operations.remove(&session_handle);
-                }
+                ctx.get_session_context_mut(session_handle)?
+                    .take_crypt_operation(encrypting);
                 return Err(error);
             }
         };
@@ -1535,18 +1512,13 @@ fn crypt_update(
         if output.is_null() {
             return Ok(());
         }
-        let operation = if encrypting {
-            ctx.encrypt_operations.get_mut(&session_handle)
-        } else {
-            ctx.decrypt_operations.get_mut(&session_handle)
-        }
-        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        let operation = ctx
+            .get_session_context_mut(session_handle)?
+            .crypt_operation_mut(encrypting)
+            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if operation.buffer.try_reserve(input.len()).is_err() {
-            if encrypting {
-                ctx.encrypt_operations.remove(&session_handle);
-            } else {
-                ctx.decrypt_operations.remove(&session_handle);
-            }
+            ctx.get_session_context_mut(session_handle)?
+                .take_crypt_operation(encrypting);
             return Err(CKR_HOST_MEMORY.into());
         }
         operation.buffer.extend_from_slice(input);

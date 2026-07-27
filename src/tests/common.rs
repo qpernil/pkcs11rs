@@ -1408,7 +1408,13 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(decrypt_commands(), decrypt_commands_before_retry_test + 1);
     {
         let debug = with_test_slot_context(SLOT_ID, |context| {
-            format!("{:?}", context.decrypt_operations.get(&session).unwrap())
+            format!(
+                "{:?}",
+                context.sessions[&session]
+                    .decrypt_operation
+                    .as_ref()
+                    .unwrap()
+            )
         });
         assert!(debug.contains("result_length"));
         assert!(!debug.contains("plaintext"));
@@ -6453,7 +6459,7 @@ unsafe extern "C" fn test_unlock_mutex(_mutex: CK_VOID_PTR) -> CK_RV {
     CKR_OK as CK_RV
 }
 
-impl crate::Session for TestSession {
+impl crate::BackendSession for TestSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -6471,7 +6477,7 @@ impl crate::Session for TestSession {
     }
 }
 
-impl crate::Session for ConcurrentSession {
+impl crate::BackendSession for ConcurrentSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -6545,7 +6551,11 @@ impl crate::Slot for ConcurrentSlot {
         true
     }
 
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
+    fn open_session(
+        &mut self,
+        slotID: CK_SLOT_ID,
+        flags: CK_FLAGS,
+    ) -> Box<dyn crate::BackendSession> {
         Box::new(ConcurrentSession {
             slot_id: slotID,
             flags,
@@ -6577,7 +6587,7 @@ impl crate::Slot for ConcurrentSlot {
     }
 }
 
-impl crate::Session for PivSigningTestSession {
+impl crate::BackendSession for PivSigningTestSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -6655,7 +6665,11 @@ impl crate::Slot for TestSlot {
         self.login_active.as_ref().is_none_or(|active| active.get())
     }
 
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn crate::Session> {
+    fn open_session(
+        &mut self,
+        slotID: CK_SLOT_ID,
+        flags: CK_FLAGS,
+    ) -> Box<dyn crate::BackendSession> {
         Box::new(TestSession {
             slot_id: slotID,
             flags,
@@ -6891,9 +6905,10 @@ fn install_test_session_with_state(
     install_test_slot(slot_id);
     let child = test_slot_context(slot_id);
     let mut context = child.lock().unwrap();
-    context
-        .sessions
-        .insert(session_handle, Box::new(TestSession { slot_id, flags }));
+    context.sessions.insert(
+        session_handle,
+        crate::SessionContext::new(Box::new(TestSession { slot_id, flags })),
+    );
     if logged_in {
         context.login_role = Some(crate::LoginRole::User);
     }

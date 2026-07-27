@@ -2253,7 +2253,7 @@ impl Slot for YubiHsmSlot {
     fn refresh(&self) -> Result<(), Error> {
         self.connector.refresh()
     }
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(YubiHsmSession {
             slotID,
             flags,
@@ -2752,7 +2752,7 @@ pub(crate) struct YubiHsmSession {
     session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
 }
 
-impl Session for YubiHsmSession {
+impl BackendSession for YubiHsmSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

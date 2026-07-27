@@ -145,7 +145,11 @@ fn sign_init(
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
 
-        if ctx.sign_operations.contains_key(&session_handle) {
+        if ctx
+            .get_session_context(session_handle)?
+            .sign_operation
+            .is_some()
+        {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
 
@@ -303,24 +307,21 @@ fn sign_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
-        ctx.sign_operations.insert(
-            session_handle,
-            SignatureOperation {
-                key: object.material.clone(),
-                slot_id,
-                requires_login: object.private,
-                context_specific_extended: false,
-                mechanism: mechanism.mechanism,
-                mac_length,
-                gmac,
-                pss,
-                piv_pin_policy: match &object.material {
-                    KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
-                    _ => None,
-                },
-                buffer: Vec::new(),
+        ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
+            key: object.material.clone(),
+            slot_id,
+            requires_login: object.private,
+            context_specific_extended: false,
+            mechanism: mechanism.mechanism,
+            mac_length,
+            gmac,
+            pss,
+            piv_pin_policy: match &object.material {
+                KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
+                _ => None,
             },
-        );
+            buffer: Vec::new(),
+        });
         Ok(())
     })
 }
@@ -356,8 +357,8 @@ fn sign(
 ) -> Result<(), Error> {
     if signature_len.is_null() {
         let _ = with_session_context_mut(session_handle, |ctx| {
-            if ctx._get_session(session_handle).is_ok() {
-                ctx.sign_operations.remove(&session_handle);
+            if let Ok(session) = ctx.get_session_context_mut(session_handle) {
+                session.sign_operation = None;
             }
             Ok(())
         });
@@ -365,21 +366,21 @@ fn sign(
     }
     let signature_len = as_mut(signature_len)?;
     with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let operation = ctx
-            .sign_operations
-            .get(&session_handle)
+            .get_session_context(session_handle)?
+            .sign_operation
+            .as_ref()
             .cloned()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         if operation.requires_login && !ctx.is_slot_user_logged_in(operation.slot_id) {
             ctx.reconcile_login_state(operation.slot_id);
-            ctx.sign_operations.remove(&session_handle);
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let data = match from_raw_parts(data, data_len as usize) {
             Ok(data) => data,
             Err(error) => {
-                ctx.sign_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(error);
             }
         };
@@ -440,17 +441,17 @@ fn sign(
         if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
             && data.len() > required.saturating_sub(11)
         {
-            ctx.sign_operations.remove(&session_handle);
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
             let Some((_mgf, _salt, hash)) = operation.pss else {
-                ctx.sign_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             };
             let expected = digest_for_hash_mechanism(hash)?.size();
             if data.len() != expected {
-                ctx.sign_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(CKR_DATA_LEN_RANGE.into());
             }
         }
@@ -610,11 +611,11 @@ fn sign(
         let signature_bytes = match signature_result {
             Ok(signature) if signature.len() == required => signature,
             Ok(_) => {
-                ctx.sign_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(CKR_DEVICE_ERROR.into());
             }
             Err(error) => {
-                ctx.sign_operations.remove(&session_handle);
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(error);
             }
         };
@@ -623,7 +624,7 @@ fn sign(
             ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
         }
         *signature_len = required as CK_ULONG;
-        ctx.sign_operations.remove(&session_handle);
+        ctx.get_session_context_mut(session_handle)?.sign_operation = None;
         Ok(())
     })
 }
@@ -635,11 +636,11 @@ pub extern "C" fn C_SignUpdate(
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
     map(with_session_context_mut(session_handle, |ctx| {
-        ctx._get_session(session_handle)?;
         let part = from_raw_parts(part, part_len as usize)?.to_vec();
         let operation = ctx
-            .sign_operations
-            .get_mut(&session_handle)
+            .get_session_context_mut(session_handle)?
+            .sign_operation
+            .as_mut()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
         operation.buffer.extend_from_slice(&part);
         Ok(())

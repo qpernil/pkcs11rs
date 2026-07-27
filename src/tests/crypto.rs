@@ -216,6 +216,70 @@ pub fn find_objects_tracks_empty_search_lifecycle() {
 }
 
 #[test]
+pub fn operations_are_owned_by_their_pkcs11_session() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let second_session = TEST_SESSION_HANDLE + 1;
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_session(TEST_SLOT_ID, second_session);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    for session in [TEST_SESSION_HANDLE, second_session] {
+        assert_eq!(
+            crate::api::C_DigestInit(session, &mut mechanism),
+            CKR_OK as CK_RV
+        );
+    }
+
+    let mut first_input = *b"first";
+    let mut second_input = *b"second";
+    assert_eq!(
+        crate::api::C_DigestUpdate(
+            TEST_SESSION_HANDLE,
+            first_input.as_mut_ptr(),
+            first_input.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DigestUpdate(
+            second_session,
+            second_input.as_mut_ptr(),
+            second_input.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    let expected = <sha2::Sha256 as sha2::Digest>::digest(second_input);
+    let mut actual = [0u8; 32];
+    let mut actual_len = actual.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_DigestFinal(second_session, actual.as_mut_ptr(), &mut actual_len),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(actual_len, actual.len() as CK_ULONG);
+    assert_eq!(actual.as_slice(), expected.as_slice());
+
+    assert_eq!(crate::api::C_CloseSession(second_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 pub fn sign_tracks_single_part_operation_lifecycle() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
@@ -559,10 +623,10 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
-            Box::new(PivSigningTestSession {
+            crate::SessionContext::new(Box::new(PivSigningTestSession {
                 slot_id: TEST_SLOT_ID,
                 captured: captured.clone(),
-            }),
+            })),
         );
         context.login_role = Some(crate::LoginRole::User);
         context.memory_objects.insert(
