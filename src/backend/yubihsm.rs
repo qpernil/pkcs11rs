@@ -2203,6 +2203,9 @@ impl Slot for YubiHsmSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::YubiHsm
+    }
     fn name(&self) -> String {
         self.connector.name()
     }
@@ -2335,6 +2338,20 @@ impl Slot for YubiHsmSlot {
             }
         }
         Ok(())
+    }
+    fn supports_login_user(&self) -> bool {
+        true
+    }
+    fn login_user_without_pin(&mut self, username: &[u8]) -> Result<(), Error> {
+        let title = self.label();
+        let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        let description = format!("Enter the authentication password for {username} on {title}.");
+        let pin = pinentry::request(pinentry::Prompt {
+            title: &title,
+            description: &description,
+            label: "Authentication password:",
+        })?;
+        self.login_user(username.as_bytes(), pin.as_slice())
     }
     fn logout(&mut self) -> Result<(), Error> {
         if !self.has_session_role(YubiHsmSessionRole::User) {
@@ -2600,7 +2617,7 @@ impl Slot for YubiHsmSlot {
     fn supports_public_certificates_token_profile(&self, slot_id: CK_SLOT_ID) -> bool {
         self.public_discovery_available(slot_id)
     }
-    fn is_yubihsm(&self) -> bool {
+    fn supports_protected_authentication_path(&self) -> bool {
         true
     }
     fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {

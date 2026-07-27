@@ -365,7 +365,7 @@ fn validate_security_domain_administration(
     flags: CK_FLAGS,
     logged_in: bool,
 ) -> Result<(), Error> {
-    if !ctx.get_slot(slot_id)?.is_issuer_security_domain() {
+    if ctx.get_slot(slot_id)?.kind() != SlotKind::Ccid(CcidApplication::IssuerSecurityDomain) {
         return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
     }
     if flags & CKF_RW_SESSION as CK_FLAGS == 0 {

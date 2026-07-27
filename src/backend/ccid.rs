@@ -207,6 +207,9 @@ impl Slot for HsmAuthSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::HsmAuth)
+    }
     fn name(&self) -> String {
         format!("{} YubiHSM Auth", self.connector.name())
     }
@@ -267,6 +270,9 @@ impl Slot for HsmAuthSlot {
         self.authenticated.set(true);
         Ok(())
     }
+    fn login_without_pin(&mut self) -> Result<(), Error> {
+        self.login(&[])
+    }
     fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.management_key.get_mut().take();
@@ -279,6 +285,16 @@ impl Slot for HsmAuthSlot {
             .replace(HsmAuthManagementKey(key));
         self.authenticated.set(true);
         Ok(())
+    }
+    fn login_so_without_pin(&mut self) -> Result<(), Error> {
+        let title = self.label();
+        let description = format!("Enter the YubiHSM Auth management password for {title}.");
+        let pin = pinentry::request(pinentry::Prompt {
+            title: &title,
+            description: &description,
+            label: "Management password:",
+        })?;
+        self.login_so(pin.as_slice())
     }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
@@ -314,6 +330,9 @@ impl Slot for HsmAuthSlot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
     }
+    fn supports_protected_authentication_path(&self) -> bool {
+        true
+    }
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let info = self.discovered_info()?;
         let objects = hsmauth_token_objects(slot_id, &info);
@@ -330,9 +349,6 @@ impl Slot for HsmAuthSlot {
         if let Ok(mut info) = self.info.try_borrow_mut() {
             *info = None;
         }
-    }
-    fn is_hsmauth(&self) -> bool {
-        true
     }
     fn hsmauth_administration(
         &mut self,
@@ -535,6 +551,9 @@ impl Slot for IssuerSecurityDomainSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::IssuerSecurityDomain)
+    }
     fn name(&self) -> String {
         format!("{} Issuer SD", self.connector.name())
     }
@@ -601,6 +620,9 @@ impl Slot for IssuerSecurityDomainSlot {
         self.authenticated.set(true);
         Ok(())
     }
+    fn login_without_pin(&mut self) -> Result<(), Error> {
+        self.login(&[])
+    }
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
         self.connector.clear_secure_channel();
@@ -634,9 +656,6 @@ impl Slot for IssuerSecurityDomainSlot {
         if let Ok(mut info) = self.info.try_borrow_mut() {
             *info = None;
         }
-    }
-    fn is_issuer_security_domain(&self) -> bool {
-        true
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()

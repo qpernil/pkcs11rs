@@ -139,7 +139,7 @@ fn validate_yubihsm_enrollment(
     flags: CK_FLAGS,
     logged_in: bool,
 ) -> Result<(), Error> {
-    if !ctx.get_slot(slot_id)?.is_yubihsm() {
+    if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
         return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
     }
     if flags & CKF_RW_SESSION as CK_FLAGS == 0 {

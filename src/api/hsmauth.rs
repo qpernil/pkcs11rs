@@ -319,7 +319,7 @@ fn validate_hsmauth_session(
     session_handle: CK_SESSION_HANDLE,
 ) -> Result<CK_SLOT_ID, Error> {
     let (slot_id, flags, _) = ctx.session_details(session_handle)?;
-    if !ctx.get_slot(slot_id)?.is_hsmauth() {
+    if ctx.get_slot(slot_id)?.kind() != SlotKind::Ccid(CcidApplication::HsmAuth) {
         return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
     }
     if flags & CKF_RW_SESSION as CK_FLAGS == 0 {

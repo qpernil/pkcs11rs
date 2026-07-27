@@ -443,6 +443,9 @@ impl Slot for PivSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::Piv)
+    }
     fn name(&self) -> String {
         self.slot_description
             .clone()
@@ -837,9 +840,6 @@ impl Slot for PivSlot {
     }
     fn login_is_active(&self) -> bool {
         self.authenticated.get() || self.management_authenticated.get()
-    }
-    fn is_piv(&self) -> bool {
-        true
     }
     fn piv_generate_key_pair(
         &mut self,

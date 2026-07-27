@@ -406,25 +406,11 @@ fn login(
             login_role(ctx, session_handle, slot_id, role, |slot| match role {
                 LoginRole::User => match pin {
                     Some(pin) => slot.login(pin),
-                    None if slot.is_hsmauth() || slot.is_issuer_security_domain() => {
-                        slot.login(&[])
-                    }
-                    None => Err(CKR_ARGUMENTS_BAD.into()),
+                    None => slot.login_without_pin(),
                 },
                 LoginRole::So => match pin {
                     Some(pin) => slot.login_so(pin),
-                    None if slot.is_hsmauth() => {
-                        let title = slot.label();
-                        let description =
-                            format!("Enter the YubiHSM Auth management password for {title}.");
-                        let pin = pinentry::request(pinentry::Prompt {
-                            title: &title,
-                            description: &description,
-                            label: "Management password:",
-                        })?;
-                        slot.login_so(pin.as_slice())
-                    }
-                    None => Err(CKR_ARGUMENTS_BAD.into()),
+                    None => slot.login_so_without_pin(),
                 },
             })
         })
@@ -485,7 +471,7 @@ fn login_user(
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
-        if !ctx.get_slot(slot_id)?.is_yubihsm() {
+        if !ctx.get_slot(slot_id)?.supports_login_user() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         let username = from_raw_parts(username, username_len as usize)?;
@@ -495,15 +481,7 @@ fn login_user(
                 if let Some(pin) = pin {
                     return slot.login_user(username.as_bytes(), pin);
                 }
-                let title = slot.label();
-                let description =
-                    format!("Enter the authentication password for {username} on {title}.");
-                let pin = pinentry::request(pinentry::Prompt {
-                    title: &title,
-                    description: &description,
-                    label: "Authentication password:",
-                })?;
-                slot.login_user(username.as_bytes(), pin.as_slice())
+                slot.login_user_without_pin(username.as_bytes())
             })
         })
     })

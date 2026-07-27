@@ -149,6 +149,9 @@ impl Slot for OpenPgpSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::OpenPgp)
+    }
     fn name(&self) -> String {
         format!("{} OpenPGP", self.connector.name())
     }
@@ -558,9 +561,6 @@ impl Slot for OpenPgpSlot {
     }
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
-    }
-    fn is_openpgp(&self) -> bool {
-        true
     }
     fn openpgp_generate_key_pair(
         &mut self,

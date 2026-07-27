@@ -338,6 +338,9 @@ impl Slot for Fido2Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::Fido2)
+    }
 
     fn name(&self) -> String {
         match self.primary_protocol_version() {
@@ -555,11 +558,6 @@ impl Slot for Fido2Slot {
     }
 
     fn refresh_token_objects_after_login(&self) -> bool {
-        true
-    }
-
-    #[cfg(all(test, not(feature = "abi-tests")))]
-    fn is_fido2(&self) -> bool {
         true
     }
 }

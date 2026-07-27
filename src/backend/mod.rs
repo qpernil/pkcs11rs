@@ -27,7 +27,7 @@ pub(crate) use piv::{
     piv_effective_pin_policy, piv_policy_requires_login, piv_public_key_from_certificate,
     piv_sign_mechanism_supported, piv_slot_label, PivPublicKey, PivSlot,
 };
-pub(crate) use traits::{apply_connector_versions, session_state, Session, Slot};
+pub(crate) use traits::{apply_connector_versions, session_state, Session, Slot, SlotKind};
 pub(crate) use yubihsm::{
     send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry,
     YubiHsmPublicDiscoveryCredential, YubiHsmSlot,

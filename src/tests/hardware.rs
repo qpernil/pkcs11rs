@@ -109,7 +109,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             context.init();
             let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
-                (child.slot.is_yubihsm()
+                (child.slot.kind() == crate::SlotKind::YubiHsm
                     && child.slot.is_present()
                     && selector.as_ref().is_none_or(|selector| {
                         child.slot.serial() == selector || child.slot.name() == *selector
@@ -135,7 +135,8 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             context.init();
             let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
-                (child.slot.is_piv()
+                (child.slot.kind()
+                    == crate::SlotKind::Ccid(crate::CcidApplication::Piv)
                     && child.slot.is_present()
                     && selector.as_ref().is_none_or(|selector| {
                         child.slot.serial() == selector || child.slot.name() == *selector
@@ -1114,7 +1115,8 @@ mod fido2_hardware {
             context.init();
             let mut matches = context.slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
-                (child.slot.is_fido2()
+                (child.slot.kind()
+                    == crate::SlotKind::Ccid(crate::CcidApplication::Fido2)
                     && selector.as_ref().is_none_or(|selector| {
                         child.slot.serial() == selector || child.slot.name() == *selector
                     }))
