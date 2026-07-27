@@ -64,13 +64,17 @@ slot name with `PKCS11RS_FIDO2_TEST_SOURCE`.
 ## Resident-credential enumeration
 
 `C_Login(CKU_USER)` accepts the configured FIDO2 PIN. This phase supports only
-PIN/UV protocol 2 and obtains a permission-scoped PIN/UV auth token. It requests
-the persistent-credential-management-read-only (`pcmr`) permission when the
+PIN/UV protocol 2. On authenticators reporting `pinUvAuthToken`, it obtains a
+permission-scoped token and requests the
+persistent-credential-management-read-only (`pcmr`) permission when the
 authenticator reports `perCredMgmtRO`; otherwise it requests the standard
-credential management permission but sends only enumeration subcommands. The
-PIN and auth token are never exposed through PKCS #11. The auth token is
-zeroized after the one login-time enumeration, and cached credential metadata
-is cleared at logout.
+credential-management permission but sends only enumeration subcommands.
+Older CTAP 2.0 and `FIDO_2_1_PRE` authenticators without `pinUvAuthToken` use
+the superseded `getPINToken` ClientPIN subcommand and
+`credentialMgmtPreview`. That token is not permission-scoped, but production
+code still uses it only for read-only enumeration. The PIN and auth token are
+never exposed through PKCS #11. The auth token is zeroized after the one
+login-time enumeration, and cached credential metadata is cleared at logout.
 
 PKCS #11's `CKU_USER` is an authorization role here, not a named FIDO account.
 The ClientPIN is authenticator-wide, so successful PIN/UV token acquisition is
@@ -266,8 +270,10 @@ field checks, and response bounds explicit.
 ## Deferred hardware and firmware questions
 
 The initial implementation was completed without hardware. The compatibility
-probe has since succeeded against pre-release hardware and a pre-release
-YubiKey reporting `FIDO_2_3` over macOS PC/SC. On the latter, the exported
+probe has since succeeded against a YubiKey 5C NFC running firmware 5.4.3 and
+reporting `FIDO_2_0` over NFC, and against pre-release YubiKeys reporting
+`FIDO_2_3` over macOS PC/SC. The 5.4.3 key exercises the legacy `getPINToken`
+plus `credentialMgmtPreview` login path. On pre-release hardware, the exported
 `C_SetPIN` entry point successfully provisioned the initial PIN from a non-null
 zero-length old-PIN buffer and `C_Login(CKU_USER)` verified it. The test-only
 makeCredential fixture then created a persistent discoverable credential, and
@@ -280,7 +286,7 @@ deferred. Validation remains necessary for:
 - PC/SC behavior and APDU response sizes on macOS, Linux, and Windows;
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one
   reader, and multiple simultaneous YubiKeys;
-- the exact GetInfo option combinations for `credMgmt`,
+- additional GetInfo option combinations for `credMgmt`,
   `credentialMgmtPreview`, `pinUvAuthToken`, and `perCredMgmtRO`;
 - PIN retry, temporary block, permanent block, and no-PIN status mapping;
 - credential responses with long or truncated RP/user fields, multiple RPs,

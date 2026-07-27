@@ -31,6 +31,8 @@ const CTAP2_ERR_PIN_AUTH_INVALID: u8 = 0x33;
 const CTAP2_ERR_PIN_AUTH_BLOCKED: u8 = 0x34;
 const CTAP2_ERR_PIN_NOT_SET: u8 = 0x35;
 const CTAP2_ERR_PIN_POLICY_VIOLATION: u8 = 0x37;
+const CLIENT_PIN_GET_PIN_TOKEN: u8 = 0x05;
+const CLIENT_PIN_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS: u8 = 0x09;
 const PIN_UV_AUTH_PROTOCOL_TWO: u8 = 2;
 #[cfg(test)]
 const PERMISSION_MAKE_CREDENTIAL: u8 = 0x01;
@@ -328,7 +330,7 @@ impl Client {
         if !info.option("clientPin") {
             return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
         }
-        if !info.pin_uv_auth_protocols.contains(&2) || !info.option("pinUvAuthToken") {
+        if !info.pin_uv_auth_protocols.contains(&2) {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
         let pin = normalize_pin(info, pin, true)?;
@@ -341,7 +343,11 @@ impl Client {
         let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
         let pin_hash = Zeroizing::new(Sha256::digest(&*pin).to_vec());
         let pin_hash_enc = protocol_two_encrypt(&shared_secret, &pin_hash[..16])?;
-        let request = encode_get_token_request(&platform_key, &pin_hash_enc, permission, rp_id)?;
+        let request = if info.option("pinUvAuthToken") {
+            encode_get_permissioned_token_request(&platform_key, &pin_hash_enc, permission, rp_id)?
+        } else {
+            encode_get_pin_token_request(&platform_key, &pin_hash_enc)?
+        };
         let mut response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
         let encrypted_token = parse_pin_token_response(&response)?;
         let token = Zeroizing::new(protocol_two_decrypt(&shared_secret, &encrypted_token)?);
@@ -796,7 +802,7 @@ fn encode_cose_key(encoder: &mut Encoder<&mut Vec<u8>>, key: &CoseKey) -> Result
     Ok(())
 }
 
-fn encode_get_token_request(
+fn encode_get_permissioned_token_request(
     platform_key: &CoseKey,
     pin_hash_enc: &[u8],
     permission: u8,
@@ -809,7 +815,7 @@ fn encode_get_token_request(
         .u8(0x01)?
         .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
         .u8(0x02)?
-        .u8(0x09)?
+        .u8(CLIENT_PIN_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS)?
         .u8(0x03)?;
     encode_cose_key(&mut encoder, platform_key)?;
     encoder
@@ -820,6 +826,24 @@ fn encode_get_token_request(
     if let Some(rp_id) = rp_id {
         encoder.u8(0x0a)?.str(rp_id)?;
     }
+    Ok(output)
+}
+
+fn encode_get_pin_token_request(
+    platform_key: &CoseKey,
+    pin_hash_enc: &[u8],
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder
+        .map(4)?
+        .u8(0x01)?
+        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(0x02)?
+        .u8(CLIENT_PIN_GET_PIN_TOKEN)?
+        .u8(0x03)?;
+    encode_cose_key(&mut encoder, platform_key)?;
+    encoder.u8(0x06)?.bytes(pin_hash_enc)?;
     Ok(output)
 }
 
@@ -1317,6 +1341,23 @@ mod tests {
         }
     }
 
+    fn preview_credential_management_info() -> AuthenticatorInfo {
+        AuthenticatorInfo {
+            versions: vec!["FIDO_2_0".to_owned(), "FIDO_2_1_PRE".to_owned()],
+            extensions: Vec::new(),
+            aaguid: [0; 16],
+            options: vec![
+                ("rk".to_owned(), true),
+                ("clientPin".to_owned(), true),
+                ("credentialMgmtPreview".to_owned(), true),
+            ],
+            max_msg_size: Some(1200),
+            pin_uv_auth_protocols: vec![2, 1],
+            transports: vec!["nfc".to_owned(), "usb".to_owned()],
+            min_pin_length: Some(4),
+        }
+    }
+
     fn key_agreement_response() -> Vec<u8> {
         let key = CoseKey {
             x: [
@@ -1537,7 +1578,7 @@ mod tests {
             x: [0x33; 32],
             y: [0x44; 32],
         };
-        let request = encode_get_token_request(
+        let request = encode_get_permissioned_token_request(
             &key,
             &[0x55; 32],
             PERMISSION_MAKE_CREDENTIAL,
@@ -1559,6 +1600,72 @@ mod tests {
         assert_eq!(decoder.u8().unwrap(), 0x0a);
         assert_eq!(decoder.str().unwrap(), FIDO2_TEST_RP_ID);
         assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn legacy_get_pin_token_request_matches_ctap20_shape() {
+        let key = CoseKey {
+            x: [0x33; 32],
+            y: [0x44; 32],
+        };
+        let request = encode_get_pin_token_request(&key, &[0x55; 32]).unwrap();
+        let mut decoder = Decoder::new(&request);
+        assert_eq!(decoder.map().unwrap(), Some(4));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), PIN_UV_AUTH_PROTOCOL_TWO);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), CLIENT_PIN_GET_PIN_TOKEN);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(parse_cose_key(&mut decoder).unwrap(), key);
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.bytes().unwrap(), &[0x55; 32]);
+        assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn legacy_authorization_uses_get_pin_token_without_permissions() {
+        let transport = Rc::new(MockTransport::new(vec![
+            key_agreement_response(),
+            vec![0, 0xa0],
+        ]));
+        let client = Client::new(transport.clone());
+        assert!(matches!(
+            client
+                .authorize_credential_enumeration(&preview_credential_management_info(), b"123456"),
+            Err(CtapError::Malformed("missing PIN/UV auth token"))
+        ));
+
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1][0], AUTHENTICATOR_CLIENT_PIN);
+        let mut decoder = Decoder::new(&requests[1][1..]);
+        assert_eq!(decoder.map().unwrap(), Some(4));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), PIN_UV_AUTH_PROTOCOL_TWO);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), CLIENT_PIN_GET_PIN_TOKEN);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        parse_cose_key(&mut decoder).unwrap();
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.bytes().unwrap().len(), 32);
+        assert_eq!(decoder.position(), requests[1].len() - 1);
+    }
+
+    #[test]
+    fn malformed_pin_token_responses_are_rejected() {
+        assert!(matches!(
+            parse_pin_token_response(&[0xa0]),
+            Err(CtapError::Malformed("missing PIN/UV auth token"))
+        ));
+        assert!(parse_pin_token_response(&[0xa1, 0x02, 0x01]).is_err());
+        assert!(matches!(
+            parse_pin_token_response(&[0xa2, 0x02, 0x40, 0x02, 0x40]),
+            Err(CtapError::Malformed("duplicate PIN/UV auth token"))
+        ));
+        assert!(matches!(
+            parse_pin_token_response(&[0xa1, 0x02, 0x40, 0x00]),
+            Err(CtapError::Malformed("trailing PIN token response"))
+        ));
     }
 
     #[test]
