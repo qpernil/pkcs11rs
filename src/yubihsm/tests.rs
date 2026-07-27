@@ -127,7 +127,7 @@ pub(crate) struct ProtocolPeer {
     asymmetric_authkeys: RefCell<HashSet<u16>>,
     listed_authkeys: RefCell<HashSet<u16>>,
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
-    corrupt_card_cryptogram: bool,
+    corrupt_card_cryptogram: Cell<bool>,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
     authenticate_payload: Vec<u8>,
     closed_sessions: Cell<usize>,
@@ -181,7 +181,7 @@ impl ProtocolPeer {
             asymmetric_authkeys: RefCell::new(HashSet::new()),
             listed_authkeys: RefCell::new(HashSet::new()),
             x25519_private_keys: RefCell::new(x25519_private_keys),
-            corrupt_card_cryptogram: false,
+            corrupt_card_cryptogram: Cell::new(false),
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
             authenticate_payload: Vec::new(),
             closed_sessions: Cell::new(0),
@@ -209,10 +209,9 @@ impl ProtocolPeer {
     }
 
     fn with_bad_card_cryptogram() -> Self {
-        Self {
-            corrupt_card_cryptogram: true,
-            ..Self::new()
-        }
+        let peer = Self::new();
+        peer.corrupt_card_cryptogram.set(true);
+        peer
     }
 
     fn with_authenticate_payload(payload: Vec<u8>) -> Self {
@@ -451,7 +450,7 @@ impl ProtocolPeer {
             .map(u16::from_be_bytes)
             .ok_or(CKR_DEVICE_ERROR)?;
         if !matches!(authkey_id, 1 | 2) {
-            return Err(CKR_DEVICE_ERROR.into());
+            return Frame::new(COMMAND_ERROR, vec![0x0b]).map(|frame| frame.encode());
         }
         let asymmetric = self.asymmetric_authkeys.borrow().contains(&authkey_id);
         match (asymmetric, frame.data.len()) {
@@ -470,7 +469,7 @@ impl ProtocolPeer {
         *self.session.borrow_mut() = Some(session);
         self.expected_host_cryptogram
             .set(Some(expected_host_cryptogram));
-        if self.corrupt_card_cryptogram {
+        if self.corrupt_card_cryptogram.replace(false) {
             response[3 + 1 + CHALLENGE_LENGTH] ^= 0x80;
         }
         Ok(response)
@@ -1612,10 +1611,17 @@ fn hsmauth_public_discovery_credential() -> Arc<YubiHsmPublicDiscoveryCredential
 }
 
 fn symmetric_hsmauth_provider(serial: &'static str) -> crate::HsmAuthProvider {
+    symmetric_hsmauth_provider_with_label(serial, "default key")
+}
+
+fn symmetric_hsmauth_provider_with_label(
+    serial: &'static str,
+    label: &str,
+) -> crate::HsmAuthProvider {
     crate::HsmAuthProvider {
         connector: Rc::new(SymmetricHsmAuthPeer { serial }),
         credential: crate::HsmAuthCredential {
-            label: "default key".to_owned(),
+            label: label.to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
             retries: 8,
             touch_required: false,
@@ -1624,6 +1630,101 @@ fn symmetric_hsmauth_provider(serial: &'static str) -> crate::HsmAuthProvider {
         version: (5, 7, 1),
         trust_prefix: None,
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum YubiHsmAuthFailure {
+    UnknownAuthenticationKey,
+    MissingCredential,
+    MissingSlot,
+    SecureChannel,
+}
+
+impl YubiHsmAuthFailure {
+    pub(crate) fn expected_login_error(self) -> crate::CK_RV {
+        match self {
+            Self::SecureChannel => crate::CKR_DATA_INVALID as crate::CK_RV,
+            _ => crate::CKR_PIN_INCORRECT as crate::CK_RV,
+        }
+    }
+
+    pub(crate) fn failed_username(self) -> &'static [u8] {
+        match self {
+            Self::UnknownAuthenticationKey => b":0003default key@12345678",
+            Self::MissingCredential | Self::SecureChannel => b":0001default key@12345678",
+            Self::MissingSlot => b":0001default key@87654321",
+        }
+    }
+
+    fn configured_public_discovery_credential(self) -> &'static str {
+        match self {
+            Self::UnknownAuthenticationKey => ":0003default key@12345678:password",
+            Self::MissingCredential | Self::SecureChannel => ":0001default key@12345678:password",
+            Self::MissingSlot => ":0001default key@87654321:password",
+        }
+    }
+}
+
+fn hsmauth_failure_parts(
+    failure: YubiHsmAuthFailure,
+) -> (Rc<ProtocolPeer>, Vec<crate::HsmAuthProvider>, &'static [u8]) {
+    match failure {
+        YubiHsmAuthFailure::UnknownAuthenticationKey => (
+            Rc::new(ProtocolPeer::new()),
+            vec![symmetric_hsmauth_provider("12345678")],
+            b":0001default key@12345678",
+        ),
+        YubiHsmAuthFailure::MissingCredential => (
+            Rc::new(ProtocolPeer::new()),
+            vec![symmetric_hsmauth_provider_with_label(
+                "12345678",
+                "different key",
+            )],
+            b":0001different key@12345678",
+        ),
+        YubiHsmAuthFailure::MissingSlot => (
+            Rc::new(ProtocolPeer::new()),
+            vec![symmetric_hsmauth_provider("12345678")],
+            b":0001default key@12345678",
+        ),
+        YubiHsmAuthFailure::SecureChannel => (
+            Rc::new(ProtocolPeer::with_bad_card_cryptogram()),
+            vec![symmetric_hsmauth_provider("12345678")],
+            b":0001default key@12345678",
+        ),
+    }
+}
+
+pub(crate) fn make_yubihsm_hsmauth_login_failure_test_slot(
+    failure: YubiHsmAuthFailure,
+) -> Box<dyn crate::Slot> {
+    let (peer, providers, _) = hsmauth_failure_parts(failure);
+    Box::new(YubiHsmSlot::with_hsmauth_providers(
+        peer,
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        Arc::new(crate::HsmAuthProviderRegistry::new(providers)),
+    ))
+}
+
+pub(crate) fn make_yubihsm_hsmauth_public_discovery_failure_test_slot(
+    failure: YubiHsmAuthFailure,
+) -> (Box<dyn crate::Slot>, &'static [u8]) {
+    let (peer, providers, successful_username) = hsmauth_failure_parts(failure);
+    peer.add_public_certificate_pair();
+    let credential = configured_yubihsm_public_discovery_credential(Some(
+        failure.configured_public_discovery_credential().into(),
+    ))
+    .unwrap()
+    .unwrap();
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer,
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        Arc::new(crate::HsmAuthProviderRegistry::new(providers)),
+        Some(credential),
+    );
+    (Box::new(slot), successful_username)
 }
 
 fn asymmetric_hsmauth_provider(peer: Rc<AsymmetricHsmAuthPeer>) -> crate::HsmAuthProvider {
@@ -3305,10 +3406,90 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
         .unwrap()
         .iter()
         .any(|object| matches!(
-                object.material,
-                KeyMaterial::Profile { profile_id }
-                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+                    object.material,
+                    KeyMaterial::Profile { profile_id }
+                        if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
         )));
+}
+
+fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
+    mut slot: YubiHsmSlot,
+    attempted: bool,
+) {
+    assert!(!Slot::token_objects(&slot, 7)
+        .unwrap()
+        .iter()
+        .any(|object| matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )));
+    assert_eq!(slot.object_cache.borrow().attempted, attempted);
+    assert!(!slot.object_cache.borrow().available);
+
+    Slot::login_user(&mut slot, b"0001", PASSWORD).unwrap();
+    assert!(Slot::login_is_active(&slot));
+    assert!(!Slot::token_objects(&slot, 7)
+        .unwrap()
+        .iter()
+        .any(|object| matches!(
+            object.material,
+            KeyMaterial::Profile { profile_id }
+                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+        )));
+}
+
+#[test]
+fn unknown_public_discovery_authkey_does_not_gain_a_profile_from_user_login() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let credential = configured_yubihsm_public_discovery_credential(Some("0003password".into()))
+        .unwrap()
+        .unwrap();
+    let slot = public_discovery_test_slot(peer, credential);
+
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, true);
+}
+
+#[test]
+fn public_discovery_secure_channel_fault_does_not_gain_a_profile_from_user_login() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let slot = public_discovery_test_slot(peer, public_discovery_credential("wrong password"));
+
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, true);
+}
+
+#[test]
+fn missing_hsmauth_slot_does_not_gain_a_profile_from_user_login() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer,
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        Arc::new(crate::HsmAuthProviderRegistry::default()),
+        Some(hsmauth_public_discovery_credential()),
+    );
+
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, false);
+}
+
+#[test]
+fn missing_hsmauth_credential_does_not_gain_a_profile_from_user_login() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let mut provider = symmetric_hsmauth_provider("12345678");
+    provider.credential.label = "different key".to_owned();
+    let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        peer,
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+        Arc::new(crate::HsmAuthProviderRegistry::new(vec![provider])),
+        Some(hsmauth_public_discovery_credential()),
+    );
+
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, false);
 }
 
 #[test]

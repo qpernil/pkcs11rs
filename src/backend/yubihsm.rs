@@ -1383,6 +1383,14 @@ impl YubiHsmSlot {
         let Some(credential) = self.public_discovery_credential.as_ref() else {
             return false;
         };
+        match self.object_cache.try_borrow() {
+            Ok(state) if state.available => return true,
+            Err(_) => return false,
+            _ => {}
+        }
+        if self.has_session_role(YubiHsmSessionRole::User) {
+            return false;
+        }
         if credential.uses_hsmauth() {
             let provider_available = match parse_yubihsm_login_username(&credential.username) {
                 Ok(YubiHsmLoginUsername::HsmAuth(login)) => {
@@ -1412,9 +1420,6 @@ impl YubiHsmSlot {
             let Ok(mut state) = self.object_cache.try_borrow_mut() else {
                 return false;
             };
-            if state.available {
-                return true;
-            }
             if state.attempted {
                 return false;
             }

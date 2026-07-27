@@ -1054,8 +1054,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ABI_TEST_PIV_SLOT_ID: (
                 "123456",
                 [
-                    "testrsa-pub",
-                    "testrsa-pri",
+                    "PIV slot 9C",
                     "Certificate Object; type = X.509 cert",
                     "Data object",
                     "Profile object",
@@ -1063,7 +1062,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             ABI_TEST_SCP03_SLOT_ID: ("1234", ["Profile object"]),
             ABI_TEST_YUBIHSM_SLOT_ID: (
-                "1234",
+                "0001password",
                 [
                     "Private Key Object; RSA",
                     "Public Key Object; RSA",
@@ -1152,7 +1151,17 @@ class Pkcs11AbiTests(unittest.TestCase):
         return session.value
 
     def login_session(self, session: int) -> None:
-        pin = (CK_BYTE * 4)(*b"1234")
+        info = CK_SESSION_INFO()
+        self.assertEqual(
+            self.lib.C_GetSessionInfo(session, ctypes.byref(info)),
+            CKR_OK,
+        )
+        encoded_pin = (
+            b"0001password"
+            if info.slotID == ABI_TEST_YUBIHSM_SLOT_ID
+            else b"1234"
+        )
+        pin = (CK_BYTE * len(encoded_pin))(*encoded_pin)
         self.assertEqual(
             self.lib.C_Login(session, CKU_USER, pin, len(pin)),
             CKR_OK,
@@ -2023,7 +2032,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         username = (CK_BYTE * 4)(*b"0001")
-        pin = (CK_BYTE * 4)(*b"1234")
+        pin = (CK_BYTE * 8)(*b"password")
         self.assertEqual(
             self.lib.C_LoginUser(
                 session,
@@ -2060,7 +2069,7 @@ printf '%s\\n' 'OK ready'
 while IFS= read -r command; do
     case "$command" in
         GETPIN)
-            printf '%s\\n' 'D 1234' 'OK'
+            printf '%s\\n' 'D password' 'OK'
             ;;
         BYE)
             printf '%s\\n' 'OK'
@@ -2129,16 +2138,6 @@ done
                     CKR_ARGUMENTS_BAD,
                 )
 
-                combined = (CK_BYTE * len(b":0001default"))(*b":0001default")
-                self.assertEqual(
-                    self.lib.C_Login(
-                        session,
-                        CKU_USER,
-                        combined,
-                        len(combined),
-                    ),
-                    CKR_OK,
-                )
             finally:
                 self.lib.C_Finalize(None)
                 if previous is None:
@@ -3760,7 +3759,7 @@ done
                 scalar_attribute(data, attribute_type, CK_BYTE()), expected
             )
 
-        certificate = find_one(CKA_ID, (1).to_bytes(2, "big"), CKO_CERTIFICATE)
+        certificate = find_one(CKA_LABEL, b"opaque-cert", CKO_CERTIFICATE)
         self.assertEqual(
             scalar_attribute(certificate, CKA_CLASS, CK_ULONG()), CKO_CERTIFICATE
         )
@@ -4471,6 +4470,20 @@ done
                         None,
                         None,
                         ctypes.byref(session),
+                    ),
+                    CKR_OK,
+                )
+            username = (CK_BYTE * 4)(*b"0001")
+            password = (CK_BYTE * 8)(*b"password")
+            for _, session in sessions[:2]:
+                self.assertEqual(
+                    self.lib.C_LoginUser(
+                        session,
+                        CKU_USER,
+                        password,
+                        len(password),
+                        username,
+                        len(username),
                     ),
                     CKR_OK,
                 )

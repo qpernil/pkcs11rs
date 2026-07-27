@@ -55,28 +55,10 @@ pub(crate) fn profile_token_objects(
         .collect()
 }
 
-#[cfg(feature = "abi-tests")]
-pub(crate) fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetails]) -> bool {
-    let supports = |type_: CK_MECHANISM_TYPE, flags: CK_FLAGS| {
-        mechanisms
-            .iter()
-            .any(|mechanism| mechanism.type_ == type_ && mechanism.flags & flags == flags)
-    };
-    supports(CKM_SHA512 as CK_MECHANISM_TYPE, CKF_DIGEST as CK_FLAGS)
-        && supports(
-            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            CKF_GENERATE_KEY_PAIR as CK_FLAGS,
-        )
-        && supports(
-            CKM_RSA_PKCS as CK_MECHANISM_TYPE,
-            (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
-        )
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SlotKind {
     #[cfg(any(test, feature = "abi-tests"))]
-    Software,
+    Synthetic,
     YubiHsm,
     Ccid(CcidApplication),
 }

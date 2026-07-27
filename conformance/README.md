@@ -38,9 +38,14 @@ python3 conformance/run_oasis.py \
   --results target/oasis-results
 ```
 
-Omit `--case` to execute all four. Without `--module`, the runner builds and
-uses the deterministic `abi-tests` backend. This is the mode used in CI to
-exercise the executor and prevent regressions.
+Omit `--case` to execute every advertised case for which the selected token is
+provisioned. Without `--module`, the runner builds and uses the deterministic
+`abi-tests` backend. Its ordinary PIV fixture qualifies only the Baseline
+case because PIV labels are fixed by the applet architecture; its ordinary
+YubiHSM fixture qualifies Baseline, Authentication, and Public Certificates.
+This is the mode used in CI to exercise the executor and prevent regressions.
+With `--module`, every advertised profile is selected and failures are not
+filtered by the runner.
 
 ## Qualify a production module and token
 

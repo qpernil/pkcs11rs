@@ -1643,8 +1643,8 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         assert!(!description.to_ascii_lowercase().contains("token"));
         if *slot_id == crate::ABI_TEST_PIV_SLOT_ID {
             assert_eq!(
-                &slot_info.slotDescription[..b"PKCS11RS ABI PIV test slot".len()],
-                b"PKCS11RS ABI PIV test slot"
+                &slot_info.slotDescription[..b"PKCS11RS YubiKey PIV00001 PIV".len()],
+                b"PKCS11RS YubiKey PIV00001 PIV"
             );
         }
     }
@@ -1657,8 +1657,8 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         (
             crate::ABI_TEST_PIV_SLOT_ID,
-            b"PIV #PIV00001".as_slice(),
-            b"PIV00001".as_slice(),
+            b"PIV #1".as_slice(),
+            b"1".as_slice(),
         ),
         (
             crate::ABI_TEST_SCP03_SLOT_ID,
@@ -1667,8 +1667,8 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         (
             crate::ABI_TEST_YUBIHSM_SLOT_ID,
-            b"ABI YubiHSM #HSM00001".as_slice(),
-            b"HSM00001".as_slice(),
+            b"YubiHSM #1".as_slice(),
+            b"1".as_slice(),
         ),
         (
             crate::ABI_TEST_SCP11_SLOT_ID,
@@ -1754,12 +1754,13 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         CKR_OK as CK_RV
     );
     let username = *b"0001";
+    let yubihsm_pin = *b"password";
     assert_eq!(
         crate::api::C_LoginUser(
             yubihsm_session,
             CKU_USER as CK_USER_TYPE,
-            pin.as_ptr() as *mut CK_BYTE,
-            pin.len() as CK_ULONG,
+            yubihsm_pin.as_ptr() as *mut CK_BYTE,
+            yubihsm_pin.len() as CK_ULONG,
             username.as_ptr() as *mut CK_BYTE,
             username.len() as CK_ULONG,
         ),

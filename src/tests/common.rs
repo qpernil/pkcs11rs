@@ -202,17 +202,8 @@ fn profile_objects_are_public_immutable_token_objects() {
     }
 }
 
-#[test]
-fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
-    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-
-    let vectors: [(CK_MECHANISM_TYPE, &str); 9] = [
+fn digest_vectors() -> [(CK_MECHANISM_TYPE, &'static str); 9] {
+    [
         (
             CKM_SHA_1 as CK_MECHANISM_TYPE,
             "a9993e364706816aba3e25717850c26c9cd0d89d",
@@ -249,15 +240,48 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
             CKM_SHA3_512 as CK_MECHANISM_TYPE,
             "b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0",
         ),
-    ];
+    ]
+}
 
-    for (mechanism_type, expected) in vectors {
-        let expected = test_hex(expected);
-        let mut info = unsafe { std::mem::zeroed::<CK_MECHANISM_INFO>() };
-        assert_eq!(
-            crate::C_GetMechanismInfo(TEST_SLOT_ID, mechanism_type, &mut info),
-            CKR_OK as CK_RV
-        );
+fn advertised_mechanisms(slot_id: CK_SLOT_ID) -> Vec<(CK_MECHANISM_TYPE, CK_MECHANISM_INFO)> {
+    let mut count = 0;
+    assert_eq!(
+        crate::C_GetMechanismList(slot_id, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut types = vec![0; count as usize];
+    assert_eq!(
+        crate::C_GetMechanismList(slot_id, types.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    types
+        .into_iter()
+        .map(|mechanism_type| {
+            let mut info = unsafe { std::mem::zeroed::<CK_MECHANISM_INFO>() };
+            assert_eq!(
+                crate::C_GetMechanismInfo(slot_id, mechanism_type, &mut info),
+                CKR_OK as CK_RV
+            );
+            (mechanism_type, info)
+        })
+        .collect()
+}
+
+fn assert_advertised_digest_vectors(slot_id: CK_SLOT_ID, session: CK_SESSION_HANDLE) -> usize {
+    let vectors = digest_vectors()
+        .into_iter()
+        .map(|(mechanism, vector)| (mechanism, test_hex(vector)))
+        .collect::<std::collections::HashMap<_, _>>();
+    let advertised = advertised_mechanisms(slot_id);
+    let mut tested = 0;
+
+    for (mechanism_type, info) in advertised
+        .into_iter()
+        .filter(|(_, info)| info.flags & CKF_DIGEST as CK_FLAGS != 0)
+    {
+        let expected = vectors
+            .get(&mechanism_type)
+            .unwrap_or_else(|| panic!("no test vector for advertised digest {mechanism_type:#x}"));
         assert_eq!(info.flags, CKF_DIGEST as CK_FLAGS);
         assert_eq!((info.ulMinKeySize, info.ulMaxKeySize), (0, 0));
 
@@ -267,14 +291,14 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
             ulParameterLen: 0,
         };
         assert_eq!(
-            crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+            crate::api::C_DigestInit(session, &mut mechanism),
             CKR_OK as CK_RV
         );
         let mut input = *b"abc";
         let mut output_len = 0;
         assert_eq!(
             crate::api::C_Digest(
-                TEST_SESSION_HANDLE,
+                session,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
                 std::ptr::null_mut(),
@@ -286,7 +310,7 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
         let mut output = vec![0; output_len as usize];
         assert_eq!(
             crate::api::C_Digest(
-                TEST_SESSION_HANDLE,
+                session,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
                 output.as_mut_ptr(),
@@ -294,10 +318,10 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
             ),
             CKR_OK as CK_RV
         );
-        assert_eq!(output, expected);
+        assert_eq!(&output, expected);
         assert_eq!(
             crate::api::C_Digest(
-                TEST_SESSION_HANDLE,
+                session,
                 input.as_mut_ptr(),
                 input.len() as CK_ULONG,
                 output.as_mut_ptr(),
@@ -305,51 +329,107 @@ fn software_digests_are_available_on_every_slot_and_match_standard_vectors() {
             ),
             CKR_OPERATION_NOT_INITIALIZED as CK_RV
         );
+        tested += 1;
     }
 
+    tested
+}
+
+fn assert_advertised_sha512_multipart(slot_id: CK_SLOT_ID, session: CK_SESSION_HANDLE) {
+    if !advertised_mechanisms(slot_id)
+        .iter()
+        .any(|(mechanism, info)| {
+            *mechanism == CKM_SHA512 as CK_MECHANISM_TYPE
+                && info.flags & CKF_DIGEST as CK_FLAGS != 0
+        })
+    {
+        return;
+    }
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_SHA512 as CK_MECHANISM_TYPE,
         pParameter: std::ptr::null_mut(),
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut mechanism),
+        crate::api::C_DigestInit(session, &mut mechanism),
         CKR_OK as CK_RV
     );
     let mut first = *b"a";
     let mut second = *b"bc";
     assert_eq!(
-        crate::api::C_DigestUpdate(
-            TEST_SESSION_HANDLE,
-            first.as_mut_ptr(),
-            first.len() as CK_ULONG,
-        ),
+        crate::api::C_DigestUpdate(session, first.as_mut_ptr(), first.len() as CK_ULONG,),
         CKR_OK as CK_RV
     );
     assert_eq!(
-        crate::api::C_DigestUpdate(
-            TEST_SESSION_HANDLE,
-            second.as_mut_ptr(),
-            second.len() as CK_ULONG,
-        ),
+        crate::api::C_DigestUpdate(session, second.as_mut_ptr(), second.len() as CK_ULONG,),
         CKR_OK as CK_RV
     );
     let mut short = [0; 16];
     let mut output_len = short.len() as CK_ULONG;
     assert_eq!(
-        crate::api::C_DigestFinal(TEST_SESSION_HANDLE, short.as_mut_ptr(), &mut output_len),
+        crate::api::C_DigestFinal(session, short.as_mut_ptr(), &mut output_len),
         CKR_BUFFER_TOO_SMALL as CK_RV
     );
     assert_eq!(output_len, 64);
     let mut output = [0; 64];
     assert_eq!(
-        crate::api::C_DigestFinal(TEST_SESSION_HANDLE, output.as_mut_ptr(), &mut output_len),
+        crate::api::C_DigestFinal(session, output.as_mut_ptr(), &mut output_len),
         CKR_OK as CK_RV
     );
     assert_eq!(
         output.to_vec(),
         test_hex("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
     );
+}
+
+#[test]
+fn advertised_digest_mechanisms_match_standard_vectors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        assert_advertised_digest_vectors(TEST_SLOT_ID, TEST_SESSION_HANDLE),
+        digest_vectors().len()
+    );
+    assert_advertised_sha512_multipart(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    finalize_for_test();
+}
+
+#[cfg(feature = "abi-tests")]
+#[test]
+fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+
+    for slot_id in slots {
+        let session = open_test_session(slot_id);
+        assert_eq!(
+            assert_advertised_digest_vectors(slot_id, session),
+            digest_vectors().len(),
+            "slot {slot_id} did not execute every published software digest"
+        );
+        assert_advertised_sha512_multipart(slot_id, session);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    }
     finalize_for_test();
 }
 
@@ -435,6 +515,45 @@ fn yubihsm_imported_keys_do_not_expose_attestation_objects() {
 fn finalize_for_test() {
     let _ = crate::api::C_Finalize(::std::ptr::null_mut());
     crate::reset_object_handles();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum YubiHsmLoginApi {
+    Login,
+    LoginUser,
+}
+
+impl YubiHsmLoginApi {
+    const ALL: [Self; 2] = [Self::Login, Self::LoginUser];
+
+    fn call(self, session: CK_SESSION_HANDLE, username: &[u8], password: &[u8]) -> CK_RV {
+        match self {
+            Self::Login => {
+                let mut packed = Vec::with_capacity(
+                    username.len() + password.len() + usize::from(username.first() == Some(&b':')),
+                );
+                packed.extend_from_slice(username);
+                if username.first() == Some(&b':') {
+                    packed.push(b':');
+                }
+                packed.extend_from_slice(password);
+                crate::api::C_Login(
+                    session,
+                    CKU_USER as CK_USER_TYPE,
+                    packed.as_mut_ptr(),
+                    packed.len() as CK_ULONG,
+                )
+            }
+            Self::LoginUser => crate::api::C_LoginUser(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                password.as_ptr() as *mut CK_BYTE,
+                password.len() as CK_ULONG,
+                username.as_ptr() as *mut CK_BYTE,
+                username.len() as CK_ULONG,
+            ),
+        }
+    }
 }
 
 const HSMAUTH_ADMIN_SLOT_ID: CK_SLOT_ID = 95;
@@ -981,7 +1100,7 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
         ),
         CKR_OK as CK_RV
     );
-    let mut pin = *b"1234";
+    let mut pin = *b"0001password";
     assert_eq!(
         crate::api::C_Login(
             session,
@@ -1745,23 +1864,11 @@ fn pkcs11_tool_style_public_listing_reuses_yubihsm_session_and_object_cache() {
     finalize_for_test();
 }
 
-#[test]
-fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    finalize_for_test();
-    assert_eq!(
-        crate::api::C_Initialize(::std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
-
-    const SLOT_ID: CK_SLOT_ID = 99;
-    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
-    install_test_slot_with_backend(SLOT_ID, slot);
-
+fn open_test_session(slot_id: CK_SLOT_ID) -> CK_SESSION_HANDLE {
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
-            SLOT_ID,
+            slot_id,
             CKF_SERIAL_SESSION as CK_FLAGS,
             ::std::ptr::null_mut(),
             None,
@@ -1769,21 +1876,140 @@ fn yubihsm_abi_login_accepts_asymmetric_authentication_keys() {
         ),
         CKR_OK as CK_RV
     );
-    let mut pin = *b"0001password";
-    assert_eq!(
-        crate::api::C_Login(
-            session,
-            CKU_USER as CK_USER_TYPE,
-            pin.as_mut_ptr(),
-            pin.len() as CK_ULONG,
-        ),
-        CKR_OK as CK_RV
-    );
-    assert!(commands
-        .borrow()
-        .iter()
-        .any(|(command, _)| *command == crate::yubihsm::CommandCode::ListObjects as u8));
-    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    session
+}
+
+fn assert_no_public_certificates_profile(slot_id: CK_SLOT_ID) {
+    with_test_slot_context(slot_id, |context| {
+        assert!(!context
+            .resolved_objects()
+            .unwrap()
+            .iter()
+            .any(|(_, object)| {
+                matches!(
+                    object.material,
+                    crate::KeyMaterial::Profile { profile_id }
+                        if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+                )
+            }));
+    });
+}
+
+fn assert_yubihsm_auth_login_failure_through_both_apis(
+    failure: crate::yubihsm::tests::YubiHsmAuthFailure,
+) {
+    const SLOT_ID: CK_SLOT_ID = 99;
+    for api in YubiHsmLoginApi::ALL {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(::std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let slot = crate::yubihsm::tests::make_yubihsm_hsmauth_login_failure_test_slot(failure);
+        install_test_slot_with_backend(SLOT_ID, slot);
+        let session = open_test_session(SLOT_ID);
+
+        assert_eq!(
+            api.call(session, failure.failed_username(), b"password"),
+            failure.expected_login_error(),
+            "{api:?} unexpectedly handled {failure:?}"
+        );
+        with_test_slot_context(SLOT_ID, |context| {
+            assert_eq!(context.login_role, None);
+            assert!(!context.slot.login_is_active());
+        });
+    }
+    finalize_for_test();
+}
+
+fn assert_failed_hsmauth_public_discovery_through_both_login_apis(
+    failure: crate::yubihsm::tests::YubiHsmAuthFailure,
+) {
+    const SLOT_ID: CK_SLOT_ID = 99;
+    for api in YubiHsmLoginApi::ALL {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(::std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let (slot, successful_username) =
+            crate::yubihsm::tests::make_yubihsm_hsmauth_public_discovery_failure_test_slot(failure);
+        install_test_slot_with_backend(SLOT_ID, slot);
+        with_test_slot_context(SLOT_ID, |context| {
+            context.refresh_slot_token_objects(SLOT_ID).unwrap();
+        });
+        assert_no_public_certificates_profile(SLOT_ID);
+
+        let session = open_test_session(SLOT_ID);
+        assert_eq!(
+            api.call(session, successful_username, b"password"),
+            CKR_OK as CK_RV,
+            "{api:?} could not log in after {failure:?} public discovery"
+        );
+        with_test_slot_context(SLOT_ID, |context| {
+            assert_eq!(context.login_role, Some(crate::LoginRole::User));
+            assert!(context.slot.login_is_active());
+        });
+        assert_no_public_certificates_profile(SLOT_ID);
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn unknown_hsmauth_authkey_is_consistent_across_login_apis() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let failure = crate::yubihsm::tests::YubiHsmAuthFailure::UnknownAuthenticationKey;
+    assert_yubihsm_auth_login_failure_through_both_apis(failure);
+    assert_failed_hsmauth_public_discovery_through_both_login_apis(failure);
+}
+
+#[test]
+fn missing_hsmauth_credential_is_consistent_across_login_apis() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let failure = crate::yubihsm::tests::YubiHsmAuthFailure::MissingCredential;
+    assert_yubihsm_auth_login_failure_through_both_apis(failure);
+    assert_failed_hsmauth_public_discovery_through_both_login_apis(failure);
+}
+
+#[test]
+fn missing_hsmauth_slot_is_consistent_across_login_apis() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let failure = crate::yubihsm::tests::YubiHsmAuthFailure::MissingSlot;
+    assert_yubihsm_auth_login_failure_through_both_apis(failure);
+    assert_failed_hsmauth_public_discovery_through_both_login_apis(failure);
+}
+
+#[test]
+fn hsmauth_secure_channel_fault_is_consistent_across_login_apis() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let failure = crate::yubihsm::tests::YubiHsmAuthFailure::SecureChannel;
+    assert_yubihsm_auth_login_failure_through_both_apis(failure);
+    assert_failed_hsmauth_public_discovery_through_both_login_apis(failure);
+}
+
+#[test]
+fn yubihsm_abi_login_apis_accept_asymmetric_authentication_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    const SLOT_ID: CK_SLOT_ID = 99;
+    for api in YubiHsmLoginApi::ALL {
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(::std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let (slot, commands, _, _trust) =
+            crate::yubihsm::tests::make_yubihsm_asymmetric_test_slot();
+        install_test_slot_with_backend(SLOT_ID, slot);
+        let session = open_test_session(SLOT_ID);
+
+        assert_eq!(api.call(session, b"0001", b"password"), CKR_OK as CK_RV);
+        assert!(commands
+            .borrow()
+            .iter()
+            .any(|(command, _)| *command == crate::yubihsm::CommandCode::ListObjects as u8));
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    }
     finalize_for_test();
 }
 
@@ -6279,7 +6505,7 @@ impl crate::Slot for ConcurrentSlot {
 
     fn name(&self) -> String {
         match self.kind {
-            crate::SlotKind::Software => String::from("Concurrent software token"),
+            crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
             crate::SlotKind::Ccid(application) => {
                 format!("Concurrent {}", crate::ccid_application_label(application))
@@ -6293,7 +6519,7 @@ impl crate::Slot for ConcurrentSlot {
 
     fn product(&self) -> &str {
         match self.kind {
-            crate::SlotKind::Software => "Software token",
+            crate::SlotKind::Synthetic => "Synthetic token",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",
@@ -6387,7 +6613,7 @@ impl crate::Slot for TestSlot {
         self
     }
     fn kind(&self) -> crate::SlotKind {
-        crate::SlotKind::Software
+        crate::SlotKind::Synthetic
     }
 
     fn name(&self) -> String {
