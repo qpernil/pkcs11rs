@@ -249,7 +249,7 @@ impl Slot for HsmAuthSlot {
     fn clear_discovery_error(&self) {
         self.connector.clear_discovery_error();
     }
-    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(PcscAppletSession {
             slotID: slot_id,
             flags,
@@ -600,7 +600,7 @@ impl Slot for IssuerSecurityDomainSlot {
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
     }
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(PcscAppletSession {
             slotID,
             flags,
@@ -843,7 +843,7 @@ pub(crate) struct PcscAppletSession {
     pub(crate) connector: Rc<dyn Connector>,
 }
 
-impl Session for PcscAppletSession {
+impl BackendSession for PcscAppletSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
@@ -918,7 +918,7 @@ pub(crate) struct IssuerSecurityDomainSession {
     pub(crate) session: Rc<RefCell<Option<Scp03Session>>>,
 }
 
-impl Session for IssuerSecurityDomainSession {
+impl BackendSession for IssuerSecurityDomainSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

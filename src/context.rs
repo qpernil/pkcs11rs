@@ -6,11 +6,11 @@ use crate::{
 };
 use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
-    configured_ccid_configurations, pinentry, select_application, str_pad, CcidApplication,
-    Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
+    configured_ccid_configurations, pinentry, select_application, str_pad, BackendSession,
+    CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
     HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
-    PcscAppletConnector, PcscConnector, PivSlot, Session, SignatureOperation, Slot, SlotKind,
-    TokenObject, UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
+    PcscAppletConnector, PcscConnector, PivSlot, SignatureOperation, Slot, SlotKind, TokenObject,
+    UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential, YUBIHSM_DISCOVERY_ENV};
@@ -67,16 +67,21 @@ pub(crate) struct ModuleContext {
 pub(crate) struct SlotContext {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) slot: Box<dyn Slot>,
-    pub(crate) sessions: HashMap<CK_SESSION_HANDLE, Box<dyn Session>>,
+    pub(crate) sessions: HashMap<CK_SESSION_HANDLE, SessionContext>,
     pub(crate) login_role: Option<LoginRole>,
     pub(crate) memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     pub(crate) token_object_handles: HashMap<CK_OBJECT_HANDLE, TokenObjectLocator>,
-    pub(crate) find_operations: HashMap<CK_SESSION_HANDLE, FindOperation>,
-    pub(crate) digest_operations: HashMap<CK_SESSION_HANDLE, DigestOperation>,
-    pub(crate) encrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
-    pub(crate) decrypt_operations: HashMap<CK_SESSION_HANDLE, CryptOperation>,
-    pub(crate) sign_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
-    pub(crate) verify_operations: HashMap<CK_SESSION_HANDLE, SignatureOperation>,
+}
+
+// Mutable PKCS #11 operation state belonging to one application session.
+pub(crate) struct SessionContext {
+    backend: Box<dyn BackendSession>,
+    pub(crate) find_operation: Option<FindOperation>,
+    pub(crate) digest_operation: Option<DigestOperation>,
+    pub(crate) encrypt_operation: Option<CryptOperation>,
+    pub(crate) decrypt_operation: Option<CryptOperation>,
+    pub(crate) sign_operation: Option<SignatureOperation>,
+    pub(crate) verify_operation: Option<SignatureOperation>,
 }
 
 pub(crate) enum SlotContextRegistry {
@@ -194,12 +199,90 @@ impl std::fmt::Debug for SlotContext {
             .field("sessions", &self.sessions)
             .field("memory_objects", &self.memory_objects)
             .field("token_object_handles", &self.token_object_handles)
-            .field("find_operations", &self.find_operations)
-            .field("digest_operations", &self.digest_operations)
-            .field("encrypt_operations", &self.encrypt_operations)
-            .field("decrypt_operations", &self.decrypt_operations)
-            .field("sign_operations", &self.sign_operations)
-            .field("verify_operations", &self.verify_operations)
+            .finish()
+    }
+}
+
+impl SessionContext {
+    pub(crate) fn new(backend: Box<dyn BackendSession>) -> Self {
+        Self {
+            backend,
+            find_operation: None,
+            digest_operation: None,
+            encrypt_operation: None,
+            decrypt_operation: None,
+            sign_operation: None,
+            verify_operation: None,
+        }
+    }
+
+    fn clear_operations(&mut self) {
+        self.find_operation = None;
+        self.digest_operation = None;
+        self.encrypt_operation = None;
+        self.decrypt_operation = None;
+        self.sign_operation = None;
+        self.verify_operation = None;
+    }
+
+    pub(crate) fn backend(&self) -> &(dyn BackendSession + '_) {
+        self.backend.as_ref()
+    }
+
+    pub(crate) fn crypt_operation(&self, encrypting: bool) -> Option<&CryptOperation> {
+        if encrypting {
+            self.encrypt_operation.as_ref()
+        } else {
+            self.decrypt_operation.as_ref()
+        }
+    }
+
+    pub(crate) fn crypt_operation_mut(&mut self, encrypting: bool) -> Option<&mut CryptOperation> {
+        if encrypting {
+            self.encrypt_operation.as_mut()
+        } else {
+            self.decrypt_operation.as_mut()
+        }
+    }
+
+    pub(crate) fn set_crypt_operation(&mut self, encrypting: bool, operation: CryptOperation) {
+        if encrypting {
+            self.encrypt_operation = Some(operation);
+        } else {
+            self.decrypt_operation = Some(operation);
+        }
+    }
+
+    pub(crate) fn take_crypt_operation(&mut self, encrypting: bool) -> Option<CryptOperation> {
+        if encrypting {
+            self.encrypt_operation.take()
+        } else {
+            self.decrypt_operation.take()
+        }
+    }
+
+    pub(crate) fn clear_crypt_operations(&mut self) {
+        self.encrypt_operation = None;
+        self.decrypt_operation = None;
+    }
+}
+
+impl std::fmt::Debug for SessionContext {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        fmt.debug_struct("SessionContext")
+            .field("backend", &self.backend)
+            .field("find_operation_active", &self.find_operation.is_some())
+            .field("digest_operation_active", &self.digest_operation.is_some())
+            .field(
+                "encrypt_operation_active",
+                &self.encrypt_operation.is_some(),
+            )
+            .field(
+                "decrypt_operation_active",
+                &self.decrypt_operation.is_some(),
+            )
+            .field("sign_operation_active", &self.sign_operation.is_some())
+            .field("verify_operation_active", &self.verify_operation.is_some())
             .finish()
     }
 }
@@ -419,12 +502,6 @@ impl SlotContext {
             login_role: None,
             memory_objects: HashMap::new(),
             token_object_handles: HashMap::new(),
-            find_operations: HashMap::new(),
-            digest_operations: HashMap::new(),
-            encrypt_operations: HashMap::new(),
-            decrypt_operations: HashMap::new(),
-            sign_operations: HashMap::new(),
-            verify_operations: HashMap::new(),
         };
         context.reconcile_slot_token_objects(slot_id, token_objects)?;
         Ok(context)
@@ -460,18 +537,45 @@ impl SlotContext {
     pub(crate) fn get_session_(
         &self,
         session_handle: CK_SESSION_HANDLE,
-    ) -> Option<(&(dyn Slot + '_), &(dyn Session + '_))> {
+    ) -> Option<(&(dyn Slot + '_), &(dyn BackendSession + '_))> {
         let session = self.sessions.get(&session_handle)?;
-        (session.slotID() == self.slot_id).then_some((self.slot.as_ref(), session.as_ref()))
+        (session.backend().slotID() == self.slot_id)
+            .then_some((self.slot.as_ref(), session.backend()))
     }
     pub(crate) fn _get_session(
         &self,
         session_handle: CK_SESSION_HANDLE,
-    ) -> Result<(&(dyn Slot + '_), &(dyn Session + '_)), Error> {
+    ) -> Result<(&(dyn Slot + '_), &(dyn BackendSession + '_)), Error> {
         match self.get_session_(session_handle) {
             Some(ctx) => Ok(ctx),
             None => Err(CKR_SESSION_HANDLE_INVALID.into()),
         }
+    }
+    pub(crate) fn get_session_context(
+        &self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<&SessionContext, Error> {
+        let session = self
+            .sessions
+            .get(&session_handle)
+            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
+        if session.backend().slotID() != self.slot_id {
+            return Err(CKR_SESSION_HANDLE_INVALID.into());
+        }
+        Ok(session)
+    }
+    pub(crate) fn get_session_context_mut(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+    ) -> Result<&mut SessionContext, Error> {
+        let session = self
+            .sessions
+            .get_mut(&session_handle)
+            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
+        if session.backend().slotID() != self.slot_id {
+            return Err(CKR_SESSION_HANDLE_INVALID.into());
+        }
+        Ok(session)
     }
     pub(crate) fn session_details(
         &self,
@@ -555,14 +659,16 @@ impl SlotContext {
     pub(crate) fn remove_object_handle(&mut self, handle: CK_OBJECT_HANDLE) {
         self.memory_objects.remove(&handle);
         self.token_object_handles.remove(&handle);
-        for operation in self.find_operations.values_mut() {
-            let already_returned = operation.next.min(operation.objects.len());
-            let removed_before_cursor = operation.objects[..already_returned]
-                .iter()
-                .filter(|&&candidate| candidate == handle)
-                .count();
-            operation.objects.retain(|&candidate| candidate != handle);
-            operation.next -= removed_before_cursor;
+        for session in self.sessions.values_mut() {
+            if let Some(operation) = &mut session.find_operation {
+                let already_returned = operation.next.min(operation.objects.len());
+                let removed_before_cursor = operation.objects[..already_returned]
+                    .iter()
+                    .filter(|&&candidate| candidate == handle)
+                    .count();
+                operation.objects.retain(|&candidate| candidate != handle);
+                operation.next -= removed_before_cursor;
+            }
         }
     }
 
@@ -688,12 +794,9 @@ impl SlotContext {
             return;
         }
         self.login_role = None;
-        self.find_operations.clear();
-        self.digest_operations.clear();
-        self.encrypt_operations.clear();
-        self.decrypt_operations.clear();
-        self.sign_operations.clear();
-        self.verify_operations.clear();
+        for session in self.sessions.values_mut() {
+            session.clear_operations();
+        }
         self.memory_objects
             .retain(|_, object| object.token || !object.private);
     }
@@ -712,12 +815,6 @@ impl SlotContext {
         self.login_role = None;
         self.slot.clear_session();
         self.sessions.clear();
-        self.find_operations.clear();
-        self.digest_operations.clear();
-        self.encrypt_operations.clear();
-        self.decrypt_operations.clear();
-        self.sign_operations.clear();
-        self.verify_operations.clear();
         self.memory_objects
             .retain(|_, object| !remove_token_objects && object.token);
         if remove_token_objects {

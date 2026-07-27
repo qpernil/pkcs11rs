@@ -79,7 +79,7 @@ pub(crate) trait Slot {
         0
     }
     fn is_present(&self) -> bool;
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
     fn login_without_pin(&mut self) -> Result<(), Error> {
         Err(CKR_ARGUMENTS_BAD.into())
@@ -397,7 +397,7 @@ impl std::fmt::Debug for dyn Slot + '_ {
     }
 }
 
-pub(crate) trait Session {
+pub(crate) trait BackendSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn slotID(&self) -> CK_SLOT_ID;
     fn flags(&self) -> CK_FLAGS;
@@ -483,7 +483,7 @@ pub(crate) fn session_state(flags: CK_FLAGS, role: Option<LoginRole>) -> CK_STAT
     }
 }
 
-impl std::fmt::Debug for dyn Session + '_ {
+impl std::fmt::Debug for dyn BackendSession + '_ {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         self.as_debug().fmt(fmt)
     }

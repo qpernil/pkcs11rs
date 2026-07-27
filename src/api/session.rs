@@ -125,7 +125,8 @@ pub extern "C" fn C_OpenSession(
             if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
                 let k = allocate_session_handle()?;
                 log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
-                ctx.sessions.insert(k, ctx.slot.open_session(slotID, flags));
+                ctx.sessions
+                    .insert(k, SessionContext::new(ctx.slot.open_session(slotID, flags)));
                 if SESSION_CONTEXTS
                     .lock()
                     .map_err(|_| Error::from(CKR_MUTEX_BAD))
@@ -155,13 +156,12 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     match with_session_context_mut(session_handle, |ctx| {
         log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
         let slot_id = match ctx.sessions.get(&session_handle) {
-            Some(session) => session.slotID(),
+            Some(session) => session.backend().slotID(),
             None => return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
         };
-        let is_last_session = !ctx
-            .sessions
-            .iter()
-            .any(|(handle, session)| *handle != session_handle && session.slotID() == slot_id);
+        let is_last_session = !ctx.sessions.iter().any(|(handle, session)| {
+            *handle != session_handle && session.backend().slotID() == slot_id
+        });
         ctx.reconcile_login_state(slot_id);
         let logout_error = if is_last_session && ctx.is_slot_logged_in(slot_id) {
             match ctx.logout_slot(slot_id) {
@@ -179,12 +179,6 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             .sessions
             .remove(&session_handle)
             .ok_or(CKR_SESSION_HANDLE_INVALID)?;
-        ctx.find_operations.remove(&session_handle);
-        ctx.digest_operations.remove(&session_handle);
-        ctx.encrypt_operations.remove(&session_handle);
-        ctx.decrypt_operations.remove(&session_handle);
-        ctx.sign_operations.remove(&session_handle);
-        ctx.verify_operations.remove(&session_handle);
         let creator_objects = ctx
             .memory_objects
             .iter()
@@ -219,7 +213,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
         let closed_sessions: HashSet<CK_SESSION_HANDLE> = ctx
             .sessions
             .iter()
-            .filter(|(_k, v)| v.slotID() == slotID)
+            .filter(|(_k, v)| v.backend().slotID() == slotID)
             .map(|(k, _v)| *k)
             .collect();
         ctx.reconcile_login_state(slotID);
@@ -235,19 +229,7 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
         } else {
             None
         };
-        ctx.sessions.retain(|_k, v| v.slotID() != slotID);
-        ctx.find_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.digest_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.encrypt_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.decrypt_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.sign_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
-        ctx.verify_operations
-            .retain(|session, _operation| !closed_sessions.contains(session));
+        ctx.sessions.retain(|_k, v| v.backend().slotID() != slotID);
         ctx.memory_objects.retain(|_, object| {
             object
                 .creator_session
@@ -349,7 +331,8 @@ fn login_role(
             return Err(CKR_SESSION_READ_ONLY.into());
         }
         if ctx.sessions.values().any(|session| {
-            session.slotID() == slot_id && session.flags() & CKF_RW_SESSION as CK_FLAGS == 0
+            session.backend().slotID() == slot_id
+                && session.backend().flags() & CKF_RW_SESSION as CK_FLAGS == 0
         }) {
             return Err(CKR_SESSION_READ_ONLY_EXISTS.into());
         }
@@ -377,11 +360,12 @@ fn login(
         if user_type == CKU_CONTEXT_SPECIFIC as CK_USER_TYPE {
             return with_pin(pin, pin_len, |pin| {
                 let mut context_operation = None;
-                if let Some(operation) = ctx.sign_operations.get(&session_handle) {
+                let session = ctx.get_session_context_mut(session_handle)?;
+                if let Some(operation) = &session.sign_operation {
                     context_operation =
                         Some((operation.slot_id, operation.context_specific_extended));
                 }
-                if let Some(operation) = ctx.decrypt_operations.get(&session_handle) {
+                if let Some(operation) = &session.decrypt_operation {
                     if context_operation.is_some() {
                         return Err(CKR_OPERATION_ACTIVE.into());
                     }

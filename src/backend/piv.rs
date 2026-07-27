@@ -471,7 +471,7 @@ impl Slot for PivSlot {
     fn clear_discovery_error(&self) {
         self.connector.clear_discovery_error();
     }
-    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(PivSession {
             slotID,
             flags,
@@ -1236,7 +1236,7 @@ pub(crate) struct PivSession {
     management_authenticated: Rc<Cell<bool>>,
 }
 
-impl Session for PivSession {
+impl BackendSession for PivSession {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }

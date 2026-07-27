@@ -982,7 +982,7 @@ fn openpgp_always_authenticate_expires_after_one_signature() {
         authenticated: authenticated.clone(),
     };
 
-    let _ = crate::Session::openpgp_sign(
+    let _ = crate::BackendSession::openpgp_sign(
         &session,
         crate::openpgp::KeyRef::Signature,
         &[],
@@ -1272,11 +1272,11 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
         let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
-            Box::new(crate::PcscAppletSession {
+            crate::SessionContext::new(Box::new(crate::PcscAppletSession {
                 slotID: TEST_SLOT_ID,
                 flags: CKF_SERIAL_SESSION as CK_FLAGS,
                 connector,
-            }),
+            })),
         );
         context.login_role = Some(crate::LoginRole::User);
     }
@@ -1337,10 +1337,10 @@ pub fn authentication_loss_cancels_active_private_signing() {
         let mut context = child.lock().unwrap();
         context.sessions.insert(
             TEST_SESSION_HANDLE,
-            Box::new(TestSession {
+            crate::SessionContext::new(Box::new(TestSession {
                 slot_id: TEST_SLOT_ID,
                 flags: CKF_SERIAL_SESSION as CK_FLAGS,
-            }),
+            })),
         );
         context.login_role = Some(crate::LoginRole::User);
     }
@@ -3367,20 +3367,31 @@ fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
         .unwrap();
     assert!(context.token_object_handles.contains_key(&original));
 
-    context.find_operations.insert(
+    context.sessions.insert(
         TEST_SESSION_HANDLE,
-        crate::FindOperation {
-            objects: vec![original],
-            next: 0,
-        },
+        crate::SessionContext::new(Box::new(TestSession {
+            slot_id: 100,
+            flags: CKF_SERIAL_SESSION as CK_FLAGS,
+        })),
     );
+    context
+        .sessions
+        .get_mut(&TEST_SESSION_HANDLE)
+        .unwrap()
+        .find_operation = Some(crate::FindOperation {
+        objects: vec![original],
+        next: 0,
+    });
     object.unique_id = "native-object-v2".to_owned();
     context
         .reconcile_slot_token_objects(100, vec![object.clone()])
         .unwrap();
     let replacement = *context.token_object_handles.keys().next().unwrap();
     assert_ne!(replacement, original);
-    assert!(context.find_operations[&TEST_SESSION_HANDLE]
+    assert!(context.sessions[&TEST_SESSION_HANDLE]
+        .find_operation
+        .as_ref()
+        .unwrap()
         .objects
         .is_empty());
 

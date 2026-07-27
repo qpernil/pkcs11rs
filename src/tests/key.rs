@@ -567,17 +567,17 @@ pub fn removing_a_slot_clears_its_runtime_state() {
         session_object.token = false;
         session_object.creator_session = Some(TEST_SESSION_HANDLE);
         let object_handle = context.insert_object(session_object).unwrap();
-        context.find_operations.insert(
-            TEST_SESSION_HANDLE,
-            crate::FindOperation {
-                objects: vec![object_handle],
-                next: 0,
-            },
-        );
+        context
+            .sessions
+            .get_mut(&TEST_SESSION_HANDLE)
+            .unwrap()
+            .find_operation = Some(crate::FindOperation {
+            objects: vec![object_handle],
+            next: 0,
+        });
 
         context.close_slot_state(TEST_SLOT_ID, true);
         assert!(!context.sessions.contains_key(&TEST_SESSION_HANDLE));
-        assert!(!context.find_operations.contains_key(&TEST_SESSION_HANDLE));
         assert!(context.login_role.is_none());
         assert!(context.memory_objects.is_empty());
     }

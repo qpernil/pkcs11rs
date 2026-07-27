@@ -400,7 +400,7 @@ impl Slot for Fido2Slot {
         self.connector.clear_discovery_error();
     }
 
-    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
+    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
         Box::new(PcscAppletSession {
             slotID: slot_id,
             flags,
