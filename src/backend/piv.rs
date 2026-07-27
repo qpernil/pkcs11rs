@@ -670,6 +670,10 @@ impl Slot for PivSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        str_pad(
+            &self.connector.identity().manufacturer,
+            &mut info.manufacturerID,
+        );
         let version = self.reported_version();
         info.firmwareVersion.major = version.major;
         info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
@@ -677,6 +681,9 @@ impl Slot for PivSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        let identity = self.connector.identity();
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        str_pad(&identity.product, &mut info.model);
         info.ulMaxPinLen = 64;
         info.ulMinPinLen = 6;
         let version = self.reported_version();
