@@ -538,6 +538,30 @@ impl Slot for Fido2Slot {
         result
     }
 
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn create_fido2_preview_sign_test_registration(
+        &mut self,
+        pin: &[u8],
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.connector.clear_secure_channel();
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = self.discovered_info()?;
+            self.client
+                .create_preview_sign_test_registration(
+                    &info,
+                    pin,
+                    Some(self.connector.serial().to_owned()),
+                )
+                .map_err(CtapError::into_pkcs11)
+        })();
+        self.connector.clear_secure_channel();
+        result
+    }
+
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();

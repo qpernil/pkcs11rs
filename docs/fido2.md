@@ -163,6 +163,9 @@ key objects have `CKA_ENCRYPT`, `CKA_DECRYPT`, `CKA_SIGN`, `CKA_VERIFY`, and
 authenticator support for the experimental `previewSign` extension does not
 show that an enumerated credential is one of its derived signing keys, and
 pkcs11rs does not yet implement the corresponding signing operation.
+The separate [previewSign protocol model](preview-sign.md) parses registration
+material and defines canonical persistence records, but is not connected to
+these resident-credential objects.
 
 An object is not created unless the RP ID hash, user ID, credential ID, and
 encoded public key are all available. Object handles are reconciled from the
@@ -329,16 +332,14 @@ on pre-release hardware. Additional robustness validation remains useful for:
 - interaction with configured SCP03/SCP11 channels. Yubico documents FIDO2 SCP
   over USB CCID for firmware 5.8+, but it has not been exercised here.
 
-Yubico SDK 1.17 added the WebAuthn `previewSign` extension for firmware 5.8+
-and explicitly warns that the associated ARKG preview code is experimental,
-not production cryptographic guidance. pkcs11rs does not parse, advertise, or
-invoke `previewSign`; it creates no signing objects or signing mechanisms.
-Any future work must first establish a stable standardized security and key
-model suitable for PKCS #11 rather than treating the preview as an ordinary
-hardware private key. The existing
-[content-addressed CBOR storage boundary](storage.md) is only persistence
-infrastructure: it is not connected to FIDO objects, make-credential,
-derivation, or signing.
+Yubico SDK 1.17 added the WebAuthn `previewSign` extension and explicitly warns
+that the associated ARKG preview code is experimental, not production
+cryptographic guidance. pkcs11rs now has an isolated request encoder,
+structural registration parser, canonical
+[previewSign persistence model](preview-sign.md), protocol vectors, and an
+ignored capability-gated registration test. It still creates no PKCS #11
+signing objects or mechanisms, performs no ARKG derivation or signing, and does
+not write to the [content-addressed CBOR storage boundary](storage.md).
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

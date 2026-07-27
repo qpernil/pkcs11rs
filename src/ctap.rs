@@ -21,9 +21,13 @@ pub(crate) const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00,
 pub(crate) const FIDO2_TEST_RP_ID: &str = "pkcs11rs.invalid";
 #[cfg(test)]
 pub(crate) const FIDO2_TEST_USER_DISPLAY_NAME: &str = "pkcs11rs synthetic user";
+#[cfg(test)]
+pub(crate) const PREVIEW_SIGN_TEST_RP_ID: &str = "preview-sign.pkcs11rs.invalid";
 
 #[cfg(all(test, not(feature = "abi-tests")))]
 const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
+#[cfg(test)]
+const PREVIEW_SIGN_ARKG_P256_ESP256: i64 = -65_539;
 const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
 const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
 const CTAP2_ERR_PIN_BLOCKED: u8 = 0x32;
@@ -388,6 +392,70 @@ impl Client {
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
         parse_make_credential_response(&response)
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    pub(crate) fn create_preview_sign_test_registration(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+        token_serial_hint: Option<String>,
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, CtapError> {
+        if !info
+            .extensions
+            .iter()
+            .any(|extension| extension == "previewSign")
+        {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        let mut nonce = [0_u8; 32];
+        getrandom::fill(&mut nonce)
+            .map_err(|_| CtapError::Transport(crate::CKR_RANDOM_NO_RNG.into()))?;
+        let mut client_data_hasher = Sha256::new();
+        client_data_hasher.update(b"pkcs11rs previewSign registration v1");
+        client_data_hasher.update(nonce);
+        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let authorization = if pin.is_empty() {
+            None
+        } else {
+            if info.option("noMcGaPermissionsWithClientPin") {
+                return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+            }
+            Some(self.authorize_with_pin(
+                info,
+                pin,
+                PERMISSION_MAKE_CREDENTIAL,
+                Some(PREVIEW_SIGN_TEST_RP_ID),
+            )?)
+        };
+        let pin_uv_auth = authorization
+            .as_ref()
+            .map(|authorization| {
+                authenticate(&authorization.token, &client_data_hash)
+                    .map(|parameter| (parameter, authorization.protocol))
+            })
+            .transpose()?;
+        let request = encode_test_preview_sign_make_credential_request(
+            &client_data_hash,
+            &nonce,
+            pin_uv_auth
+                .as_ref()
+                .map(|(parameter, protocol)| (parameter.as_slice(), *protocol)),
+        )?;
+        let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
+        crate::preview_sign::PreviewSignRegistration::new(
+            PREVIEW_SIGN_TEST_RP_ID,
+            client_data_hash,
+            response,
+            token_serial_hint,
+        )
+        .map_err(|error| {
+            log!(
+                1,
+                "previewSign registration response validation failed: {error}"
+            );
+            CtapError::Malformed("invalid previewSign registration response")
+        })
     }
 
     pub(crate) fn enumerate_credentials(
@@ -888,6 +956,58 @@ fn encode_test_make_credential_request(
         .bytes(pin_uv_auth_param)?
         .u8(0x09)?
         .u8(protocol)?;
+    Ok(output)
+}
+
+#[cfg(test)]
+fn encode_test_preview_sign_make_credential_request(
+    client_data_hash: &[u8; 32],
+    user_id: &[u8; 32],
+    pin_uv_auth: Option<(&[u8], u8)>,
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder
+        .map(if pin_uv_auth.is_some() { 8 } else { 6 })?
+        .u8(0x01)?
+        .bytes(client_data_hash)?
+        .u8(0x02)?
+        .map(2)?
+        .str("id")?
+        .str(PREVIEW_SIGN_TEST_RP_ID)?
+        .str("name")?
+        .str("pkcs11rs previewSign test")?
+        .u8(0x03)?
+        .map(3)?
+        .str("id")?
+        .bytes(user_id)?
+        .str("name")?
+        .str("pkcs11rs-preview-sign")?
+        .str("displayName")?
+        .str("pkcs11rs previewSign test registration")?
+        .u8(0x04)?
+        .array(1)?
+        .map(2)?
+        .str("alg")?
+        .i8(-7)?
+        .str("type")?
+        .str("public-key")?
+        .u8(0x06)?
+        .map(1)?
+        .str("previewSign")?
+        .map(2)?
+        .u8(0x03)?
+        .array(1)?
+        .i64(PREVIEW_SIGN_ARKG_P256_ESP256)?
+        .u8(0x04)?
+        .u8(crate::preview_sign::PreviewSignPolicy::RequireUserPresence.wire_value())?
+        .u8(0x07)?
+        .map(1)?
+        .str("rk")?
+        .bool(true)?;
+    if let Some((parameter, protocol)) = pin_uv_auth {
+        encoder.u8(0x08)?.bytes(parameter)?.u8(0x09)?.u8(protocol)?;
+    }
     Ok(output)
 }
 
@@ -1576,6 +1696,75 @@ mod tests {
         assert_eq!(decoder.u8().unwrap(), 9);
         assert_eq!(decoder.u8().unwrap(), 2);
         assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn preview_sign_make_credential_request_matches_extension_vector() {
+        let request =
+            encode_test_preview_sign_make_credential_request(&[0x11; 32], &[0x22; 32], None)
+                .unwrap();
+        let mut decoder = Decoder::new(&request);
+        assert_eq!(decoder.map().unwrap(), Some(6));
+        let mut saw_extension = false;
+        let mut saw_resident_key = false;
+        for _ in 0..6 {
+            match decoder.u8().unwrap() {
+                6 => {
+                    assert_eq!(decoder.map().unwrap(), Some(1));
+                    assert_eq!(decoder.str().unwrap(), "previewSign");
+                    let start = decoder.position();
+                    decoder.skip().unwrap();
+                    assert_eq!(
+                        &request[start..decoder.position()],
+                        &[0xa2, 0x03, 0x81, 0x3a, 0x00, 0x01, 0x00, 0x02, 0x04, 0x01]
+                    );
+                    saw_extension = true;
+                }
+                7 => {
+                    assert_eq!(decoder.map().unwrap(), Some(1));
+                    assert_eq!(decoder.str().unwrap(), "rk");
+                    assert!(decoder.bool().unwrap());
+                    saw_resident_key = true;
+                }
+                _ => decoder.skip().unwrap(),
+            }
+        }
+        assert!(saw_extension);
+        assert!(saw_resident_key);
+        assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn preview_sign_make_credential_request_appends_pin_authorization() {
+        let request = encode_test_preview_sign_make_credential_request(
+            &[0x11; 32],
+            &[0x22; 32],
+            Some((&[0x33; 32], 2)),
+        )
+        .unwrap();
+        let mut decoder = Decoder::new(&request);
+        assert_eq!(decoder.map().unwrap(), Some(8));
+        for _ in 0..6 {
+            decoder.skip().unwrap();
+            decoder.skip().unwrap();
+        }
+        assert_eq!(decoder.u8().unwrap(), 8);
+        assert_eq!(decoder.bytes().unwrap(), &[0x33; 32]);
+        assert_eq!(decoder.u8().unwrap(), 9);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    #[cfg(not(feature = "abi-tests"))]
+    fn preview_sign_registration_requires_advertised_support_before_transport() {
+        let transport = Rc::new(MockTransport::new(Vec::new()));
+        let client = Client::new(transport.clone());
+        assert!(matches!(
+            client.create_preview_sign_test_registration(&credential_management_info(), b"", None,),
+            Err(CtapError::Transport(_))
+        ));
+        assert!(transport.requests.borrow().is_empty());
     }
 
     #[test]

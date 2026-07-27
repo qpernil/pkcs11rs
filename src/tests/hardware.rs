@@ -1315,6 +1315,53 @@ mod fido2_hardware {
     }
 
     #[test]
+    #[ignore = "creates a persistent FIDO credential with the experimental previewSign extension and requires touch"]
+    fn creates_preview_sign_registration() {
+        let Ok(pin) = std::env::var(CURRENT_PIN_ENV) else {
+            eprintln!(
+                "skipped persistent previewSign registration; set {CURRENT_PIN_ENV} (to an empty value for an authenticator without a PIN) to enable it"
+            );
+            return;
+        };
+        let pin = zeroize::Zeroizing::new(pin.into_bytes());
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let slot_id = fido2_slot_id();
+        let registration = crate::with_context(|context| {
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts.get(&slot_id).ok_or(CKR_SLOT_ID_INVALID)?;
+            let mut child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            child
+                ._get_slot_mut(slot_id)?
+                .create_fido2_preview_sign_test_registration(&pin)
+        })
+        .expect("authenticatorMakeCredential rejected the previewSign registration");
+        eprintln!(
+            "created previewSign registration: parent credential {} bytes, signing key handle {} bytes, seed COSE key {} bytes, algorithm {}, policy {:?}, AAGUID {:02x?}, serial hint {:?}, wrapper {} bytes",
+            registration.credential_id().len(),
+            registration.signing_key_handle().len(),
+            registration.signing_seed_public_key_cose().len(),
+            registration.algorithm(),
+            registration.policy(),
+            registration.aaguid(),
+            registration.token_serial_hint(),
+            registration
+                .to_cbor()
+                .expect("previewSign wrapper encoding failed")
+                .len(),
+        );
+    }
+
+    #[test]
     #[ignore = "sets and verifies the initial persistent FIDO2 PIN on a live authenticator"]
     fn provisions_initial_fido2_pin() {
         let Ok(new_pin) = std::env::var(NEW_PIN_ENV) else {
