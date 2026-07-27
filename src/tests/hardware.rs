@@ -673,8 +673,8 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     fn provisioning_connectors_are_exposed_by_the_matching_slots() {
         let connector = || -> Rc<dyn crate::Connector> {
             Rc::new(SelectableConnector {
-                present: std::cell::Cell::new(true),
-                select_ok: std::cell::Cell::new(true),
+                present: std::sync::atomic::AtomicBool::new(true),
+                select_ok: std::sync::atomic::AtomicBool::new(true),
                 serial: "PROVISION",
             })
         };
@@ -1087,7 +1087,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             .expect("generated YubiHSM Auth credential was not rediscovered");
         assert_eq!(credential.touch_required, case.touch_required);
         let mut session = crate::HsmAuthProvider {
-            connector: hsmauth,
+            connector: hsmauth.into(),
             credential,
             version: info.version,
             trust_prefix: None,

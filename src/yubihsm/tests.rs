@@ -1619,7 +1619,7 @@ fn symmetric_hsmauth_provider_with_label(
     label: &str,
 ) -> crate::HsmAuthProvider {
     crate::HsmAuthProvider {
-        connector: Rc::new(SymmetricHsmAuthPeer { serial }),
+        connector: Rc::new(SymmetricHsmAuthPeer { serial }).into(),
         credential: crate::HsmAuthCredential {
             label: label.to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -1729,7 +1729,7 @@ pub(crate) fn make_yubihsm_hsmauth_public_discovery_failure_test_slot(
 
 fn asymmetric_hsmauth_provider(peer: Rc<AsymmetricHsmAuthPeer>) -> crate::HsmAuthProvider {
     crate::HsmAuthProvider {
-        connector: peer.clone(),
+        connector: peer.clone().into(),
         credential: crate::HsmAuthCredential {
             label: "asymmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
@@ -4158,7 +4158,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     let _pinentry = crate::test::TestPinentry::new("password");
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }).into(),
         credential: crate::HsmAuthCredential {
             label: "default key".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -4170,7 +4170,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         trust_prefix: None,
     };
     let duplicate = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "87654321" }),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "87654321" }).into(),
         ..provider.clone()
     };
     let mut slot = crate::YubiHsmSlot::with_hsmauth_providers(
@@ -4209,7 +4209,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
 fn hsmauth_symmetric_failure_finishes_the_pending_yubihsm_session() {
     let yubihsm = ProtocolPeer::new();
     let provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }).into(),
         credential: crate::HsmAuthCredential {
             label: "default key".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -4245,7 +4245,7 @@ fn hsmauth_asymmetric_credential_works_without_device_trust_configuration() {
     yubihsm.use_asymmetric_authentication(1);
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
     let provider = crate::HsmAuthProvider {
-        connector: hsmauth.clone(),
+        connector: hsmauth.clone().into(),
         credential: crate::HsmAuthCredential {
             label: "asymmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
@@ -4281,7 +4281,7 @@ fn hsmauth_asymmetric_failure_invalidates_the_pending_yubihsm_session() {
     yubihsm.use_asymmetric_authentication(1);
     let hsmauth = std::rc::Rc::new(AsymmetricHsmAuthPeer::failing_calculate());
     let provider = crate::HsmAuthProvider {
-        connector: hsmauth.clone(),
+        connector: hsmauth.clone().into(),
         credential: crate::HsmAuthCredential {
             label: "asymmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,
@@ -4310,7 +4310,7 @@ fn hsmauth_algorithm_mismatches_fail_without_probing() {
     let asymmetric_target = ProtocolPeer::new();
     asymmetric_target.use_asymmetric_authentication(1);
     let symmetric_provider = crate::HsmAuthProvider {
-        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }),
+        connector: std::rc::Rc::new(SymmetricHsmAuthPeer { serial: "12345678" }).into(),
         credential: crate::HsmAuthCredential {
             label: "symmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::Aes128YubicoAuthentication,
@@ -4330,7 +4330,7 @@ fn hsmauth_algorithm_mismatches_fail_without_probing() {
     let symmetric_target = ProtocolPeer::new();
     let asymmetric_peer = std::rc::Rc::new(AsymmetricHsmAuthPeer::new());
     let asymmetric_provider = crate::HsmAuthProvider {
-        connector: asymmetric_peer.clone(),
+        connector: asymmetric_peer.clone().into(),
         credential: crate::HsmAuthCredential {
             label: "asymmetric".to_owned(),
             algorithm: crate::HsmAuthAlgorithm::EcP256YubicoAuthentication,

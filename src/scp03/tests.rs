@@ -1,5 +1,5 @@
 use super::*;
-use std::{cell::RefCell, collections::VecDeque};
+use std::{cell::RefCell, collections::VecDeque, sync::Mutex};
 
 #[derive(Debug)]
 struct ScriptedConnector {
@@ -60,6 +60,53 @@ impl Connector for ScriptedConnector {
 
 fn hex(value: &str) -> Vec<u8> {
     parse_hex(value).unwrap()
+}
+
+#[derive(Debug)]
+struct SharedScriptedConnector {
+    responses: Mutex<VecDeque<Vec<u8>>>,
+}
+
+impl Connector for SharedScriptedConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+    fn manufacturer(&self) -> &str {
+        "Test"
+    }
+    fn product(&self) -> &str {
+        "SCP03"
+    }
+    fn serial(&self) -> &str {
+        "1"
+    }
+    fn major(&self) -> u8 {
+        1
+    }
+    fn minor(&self) -> u8 {
+        0
+    }
+    fn is_present(&self) -> bool {
+        true
+    }
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+    fn transmit<'a>(
+        &self,
+        _send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let response = self
+            .responses
+            .lock()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .pop_front()
+            .ok_or(CKR_DEVICE_ERROR)?;
+        receive_buffer[..response.len()].copy_from_slice(&response);
+        Ok(&receive_buffer[..response.len()])
+    }
 }
 
 fn test_session(security_level: u8) -> Scp03Session {
@@ -237,8 +284,9 @@ fn decodes_apdu_forms_used_by_secure_channel_transport() {
 
 #[test]
 fn secure_channel_connector_wraps_encoded_apdus() {
-    let base = std::rc::Rc::new(ScriptedConnector::new(vec![hex("90 00")]))
-        as std::rc::Rc<dyn crate::Connector>;
+    let base: crate::SharedConnector = std::sync::Arc::new(SharedScriptedConnector {
+        responses: Mutex::new(vec![hex("90 00")].into()),
+    });
     let application_aid = vec![1, 2, 3, 4, 5];
     let connector = crate::PcscAppletConnector {
         base,
@@ -248,9 +296,11 @@ fn secure_channel_connector_wraps_encoded_apdus() {
             application_aid,
             test_session(0x01),
         )),
-        enabled: std::cell::Cell::new(true),
-        applet_present: std::cell::Cell::new(true),
-        discovery_error: RefCell::new(None),
+        applet: std::sync::Arc::new(crate::connector::PcscAppletState {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            applet_present: std::sync::atomic::AtomicBool::new(true),
+            discovery_error: Mutex::new(None),
+        }),
     };
     let command = CommandApdu {
         cla: 0,

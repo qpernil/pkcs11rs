@@ -9,6 +9,8 @@ pub(crate) struct ConnectorIdentity {
     pub(crate) firmware_version: Option<(u8, u8, u8)>,
 }
 
+pub(crate) type SharedConnector = Arc<dyn Connector + Send + Sync>;
+
 pub(crate) trait Connector {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn manufacturer(&self) -> &str;
@@ -207,20 +209,70 @@ impl PcscReaderState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
+pub(crate) struct PcscAppletState {
+    pub(crate) enabled: std::sync::atomic::AtomicBool,
+    pub(crate) applet_present: std::sync::atomic::AtomicBool,
+    pub(crate) discovery_error: Mutex<Option<String>>,
+}
+
+#[derive(Clone)]
 pub(crate) struct PcscAppletConnector {
-    pub(crate) base: Rc<dyn Connector>,
+    pub(crate) base: SharedConnector,
     pub(crate) application_aid: Vec<u8>,
     pub(crate) protocol: Option<SecureChannelProtocol>,
     pub(crate) state: Arc<PcscReaderState>,
-    pub(crate) enabled: Cell<bool>,
-    pub(crate) applet_present: Cell<bool>,
-    pub(crate) discovery_error: RefCell<Option<String>>,
+    pub(crate) applet: Arc<PcscAppletState>,
+}
+
+impl std::fmt::Debug for PcscAppletConnector {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("PcscAppletConnector")
+            .field("base", self.base.as_ref().as_debug())
+            .field("application_aid", &self.application_aid)
+            .field("protocol", &self.protocol)
+            .field("state", &self.state)
+            .field("applet", &self.applet)
+            .finish()
+    }
 }
 
 impl PcscAppletConnector {
+    #[cfg(test)]
+    pub(crate) fn discovery_error(&self) -> Option<String> {
+        self.applet
+            .discovery_error
+            .lock()
+            .ok()
+            .and_then(|error| error.clone())
+    }
+
+    fn enabled(&self) -> bool {
+        self.applet
+            .enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.applet
+            .enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn applet_present(&self) -> bool {
+        self.applet
+            .applet_present
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn set_applet_presence(&self, present: bool) {
+        self.applet
+            .applet_present
+            .store(present, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn new(
-        base: Rc<dyn Connector>,
+        base: SharedConnector,
         application_aid: &[u8],
         protocol: Option<SecureChannelProtocol>,
         state: Arc<PcscReaderState>,
@@ -231,9 +283,11 @@ impl PcscAppletConnector {
             application_aid: application_aid.to_vec(),
             protocol,
             state,
-            enabled: Cell::new(false),
-            applet_present: Cell::new(applet_present),
-            discovery_error: RefCell::new(None),
+            applet: Arc::new(PcscAppletState {
+                enabled: std::sync::atomic::AtomicBool::new(false),
+                applet_present: std::sync::atomic::AtomicBool::new(applet_present),
+                discovery_error: Mutex::new(None),
+            }),
         }
     }
 
@@ -248,7 +302,7 @@ impl PcscAppletConnector {
             state.application_aid = self.application_aid.clone();
         }
 
-        if self.protocol.is_none() || !self.enabled.get() || state.session.is_some() {
+        if self.protocol.is_none() || !self.enabled() || state.session.is_some() {
             return Ok(());
         }
 
@@ -313,7 +367,7 @@ impl PcscAppletConnector {
 
     fn send_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
-        if self.protocol.is_none() || !self.enabled.get() {
+        if self.protocol.is_none() || !self.enabled() {
             return self.base.send_apdu(command);
         }
         let mut state = self.state.secure_channel()?;
@@ -328,7 +382,7 @@ impl PcscAppletConnector {
 
     fn send_short_apdu_locked(&self, command: &CommandApdu) -> Result<ResponseApdu, Error> {
         self.ensure_selected_locked()?;
-        if self.protocol.is_none() || !self.enabled.get() {
+        if self.protocol.is_none() || !self.enabled() {
             return crate::iso7816::transmit_short(self.base.as_ref(), command);
         }
         let mut state = self.state.secure_channel()?;
@@ -342,7 +396,7 @@ impl PcscAppletConnector {
     }
 
     fn clear_secure_channel_locked(&self) -> Result<(), Error> {
-        self.enabled.set(false);
+        self.set_enabled(false);
         let mut state = self.state.secure_channel()?;
         if state.application_aid == self.application_aid {
             state.session = None;
@@ -352,11 +406,15 @@ impl PcscAppletConnector {
     }
 
     fn record_discovery_error(&self, error: &Error) {
-        *self.discovery_error.borrow_mut() = Some(format!("{error:?}"));
+        if let Ok(mut discovery_error) = self.applet.discovery_error.lock() {
+            *discovery_error = Some(format!("{error:?}"));
+        }
     }
 
     fn forget_discovery_error(&self) {
-        *self.discovery_error.borrow_mut() = None;
+        if let Ok(mut discovery_error) = self.applet.discovery_error.lock() {
+            *discovery_error = None;
+        }
     }
 }
 
@@ -405,7 +463,7 @@ impl Connector for PcscAppletConnector {
     }
 
     fn is_present(&self) -> bool {
-        self.base.is_present() && self.applet_present.get()
+        self.base.is_present() && self.applet_present()
     }
 
     fn buffer_size(&self) -> usize {
@@ -433,7 +491,7 @@ impl Connector for PcscAppletConnector {
     ) -> Result<&'a [u8], Error> {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
-            if self.protocol.is_none() || !self.enabled.get() {
+            if self.protocol.is_none() || !self.enabled() {
                 return self.base.transmit(send_buffer, receive_buffer, timeout);
             }
             let command = CommandApdu::decode(send_buffer)?;
@@ -450,7 +508,7 @@ impl Connector for PcscAppletConnector {
         self.state.with_operation(|| {
             let result = self.base.refresh();
             if result.is_err() || !self.base.is_present() {
-                self.applet_present.set(false);
+                self.set_applet_presence(false);
                 if let Err(error) = &result {
                     self.record_discovery_error(error);
                 } else {
@@ -466,12 +524,12 @@ impl Connector for PcscAppletConnector {
                     let mut state = self.state.secure_channel()?;
                     state.session = None;
                     state.application_aid = self.application_aid.clone();
-                    self.applet_present.set(true);
+                    self.set_applet_presence(true);
                     self.forget_discovery_error();
                     Ok(())
                 }
                 Err(error) => {
-                    self.applet_present.set(false);
+                    self.set_applet_presence(false);
                     self.record_discovery_error(&error);
                     Err(error)
                 }
@@ -481,7 +539,7 @@ impl Connector for PcscAppletConnector {
 
     fn set_applet_present(&self, present: bool) {
         let _ = self.state.with_operation(|| {
-            self.applet_present.set(present);
+            self.set_applet_presence(present);
             if !present {
                 self.clear_secure_channel_locked()?;
             }
@@ -502,9 +560,9 @@ impl Connector for PcscAppletConnector {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
         self.state.with_operation(|| {
-            self.enabled.set(true);
+            self.set_enabled(true);
             if let Err(error) = self.ensure_selected_locked() {
-                self.enabled.set(false);
+                self.set_enabled(false);
                 return Err(error);
             }
             Ok(())
@@ -518,7 +576,7 @@ impl Connector for PcscAppletConnector {
     }
 
     fn secure_channel_is_active(&self) -> bool {
-        if self.protocol.is_none() || !self.enabled.get() {
+        if self.protocol.is_none() || !self.enabled() {
             return false;
         }
         self.state
@@ -537,7 +595,7 @@ impl Connector for PcscAppletConnector {
     ) -> Result<(), Error> {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
-            if !self.enabled.get() {
+            if !self.enabled() {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;
@@ -567,7 +625,7 @@ impl Connector for PcscAppletConnector {
     ) -> Result<(), Error> {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
-            if !self.enabled.get() {
+            if !self.enabled() {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;
@@ -591,7 +649,7 @@ impl Connector for PcscAppletConnector {
     ) -> Result<Vec<u8>, Error> {
         self.state.with_operation(|| {
             self.ensure_selected_locked()?;
-            if !self.enabled.get() {
+            if !self.enabled() {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;

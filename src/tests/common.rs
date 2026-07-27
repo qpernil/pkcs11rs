@@ -6293,14 +6293,14 @@ impl crate::Connector for FailingConnector {
 
 #[derive(Debug)]
 struct SelectableConnector {
-    present: std::cell::Cell<bool>,
-    select_ok: std::cell::Cell<bool>,
+    present: std::sync::atomic::AtomicBool,
+    select_ok: std::sync::atomic::AtomicBool,
     serial: &'static str,
 }
 
 #[derive(Debug)]
 struct RecordingConnector {
-    commands: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>,
+    commands: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
 }
 
 impl crate::Connector for RecordingConnector {
@@ -6342,7 +6342,7 @@ impl crate::Connector for RecordingConnector {
         receive_buffer: &'a mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
-        self.commands.borrow_mut().push(send_buffer.to_vec());
+        self.commands.lock().unwrap().push(send_buffer.to_vec());
         receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);
         Ok(&receive_buffer[..2])
     }
@@ -6378,7 +6378,7 @@ impl crate::Connector for SelectableConnector {
     }
 
     fn is_present(&self) -> bool {
-        self.present.get()
+        self.present.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn buffer_size(&self) -> usize {
@@ -6391,10 +6391,12 @@ impl crate::Connector for SelectableConnector {
         receive_buffer: &'a mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
-        if !self.present.get() {
+        if !self.present.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(rusb::Error::NoDevice.into());
         }
-        if send_buffer.get(1) == Some(&0xa4) && !self.select_ok.get() {
+        if send_buffer.get(1) == Some(&0xa4)
+            && !self.select_ok.load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Err(CKR_DEVICE_ERROR.into());
         }
         receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);

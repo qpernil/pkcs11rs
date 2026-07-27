@@ -9,8 +9,8 @@ use crate::{
     configured_ccid_configurations, pinentry, select_application, str_pad, BackendSession,
     CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
     HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
-    PcscAppletConnector, PcscConnector, PivSlot, SignatureOperation, Slot, SlotKind, TokenObject,
-    UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    PcscAppletConnector, PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot,
+    SlotKind, TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
@@ -1140,7 +1140,7 @@ impl ModuleContext {
                         }
                     };
                     let reader_state = connector.state.clone();
-                    let base_connector: Rc<dyn Connector> = Rc::new(connector);
+                    let base_connector: SharedConnector = Arc::new(connector);
                     let mut reader_slots = Vec::new();
                     let Some(mut next_reader_slot_id) = slot_contexts.next_slot_id() else {
                         log!(1, "PCSC slot ID space exhausted");
@@ -1185,13 +1185,16 @@ impl ModuleContext {
                             );
                             continue;
                         }
+                        let application_connector = PcscAppletConnector::new(
+                            base_connector.clone(),
+                            &application_aid,
+                            configuration.secure_channel,
+                            reader_state.clone(),
+                        );
+                        let shared_application_connector: SharedConnector =
+                            Arc::new(application_connector.clone());
                         let application_connector: Rc<dyn Connector> =
-                            Rc::new(PcscAppletConnector::new(
-                                base_connector.clone(),
-                                &application_aid,
-                                configuration.secure_channel,
-                                reader_state.clone(),
-                            ));
+                            Rc::new(application_connector);
                         let mut slot: Box<dyn Slot> = match configuration.application {
                             CcidApplication::Piv => Box::new(PivSlot::new(
                                 application_connector,
@@ -1202,8 +1205,11 @@ impl ModuleContext {
                                 application_aid.clone(),
                             )),
                             CcidApplication::HsmAuth => {
-                                let hsmauth_slot =
-                                    HsmAuthSlot::new(application_connector, application_aid);
+                                let hsmauth_slot = HsmAuthSlot::new_shared(
+                                    application_connector,
+                                    shared_application_connector,
+                                    application_aid,
+                                );
                                 match hsmauth_slot.providers() {
                                     Ok(providers) => {
                                         if let Err(error) = hsmauth_providers.extend(providers) {
@@ -1361,14 +1367,11 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
     Ok(objects)
 }
 
-// A SlotContext is always protected by its slot-context mutex. Connector handles
-// that are not marked Send by their dependency crates never escape that guard.
+// Each SlotContext and every Rc reachable from it is owned by one slot-context
+// mutex. Physical PC/SC state and HSM Auth providers cross slot boundaries only
+// through synchronized Arc handles; the slot-local Rc graph never escapes this
+// guard.
 unsafe impl Send for SlotContext {}
-
-// ModuleContext is always protected by MODULE_CONTEXT.
-// Connector handles that are not marked Send by their dependency crates never
-// escape their owning context guard.
-unsafe impl Send for ModuleContext {}
 
 // Presence is the module lifecycle state. Ordinary calls retain a shared guard
 // for their complete duration; C_Initialize and C_Finalize require exclusivity.

@@ -160,24 +160,54 @@ impl std::fmt::Debug for HsmAuthManagementKey {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
+    shared_connector: Option<SharedConnector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
     management_key: RefCell<Option<HsmAuthManagementKey>>,
     info: RefCell<Option<HsmAuthInfo>>,
 }
 
+impl std::fmt::Debug for HsmAuthSlot {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("HsmAuthSlot")
+            .field("connector", &self.connector)
+            .field(
+                "shared_connector",
+                &self
+                    .shared_connector
+                    .as_ref()
+                    .map(|connector| connector.as_ref().as_debug()),
+            )
+            .field("application_aid", &self.application_aid)
+            .field("authenticated", &self.authenticated)
+            .field("management_key", &self.management_key)
+            .field("info", &self.info)
+            .finish()
+    }
+}
+
 impl HsmAuthSlot {
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         Self {
             connector,
+            shared_connector: None,
             application_aid,
             authenticated: Cell::new(false),
             management_key: RefCell::new(None),
             info: RefCell::new(None),
         }
+    }
+
+    pub(crate) fn new_shared(
+        connector: Rc<dyn Connector>,
+        shared_connector: SharedConnector,
+        application_aid: Vec<u8>,
+    ) -> Self {
+        let mut slot = Self::new(connector, application_aid);
+        slot.shared_connector = Some(shared_connector);
+        slot
     }
 
     fn discovered_info(&self) -> Result<HsmAuthInfo, Error> {
@@ -190,11 +220,16 @@ impl HsmAuthSlot {
 
     pub(crate) fn providers(&self) -> Result<Vec<HsmAuthProvider>, Error> {
         let info = self.discovered_info()?;
+        let connector = self
+            .shared_connector
+            .as_ref()
+            .cloned()
+            .ok_or(CKR_FUNCTION_NOT_SUPPORTED)?;
         Ok(info
             .credentials
             .into_iter()
             .map(|credential| HsmAuthProvider {
-                connector: self.connector.clone(),
+                connector: connector.clone().into(),
                 credential,
                 version: info.version,
                 trust_prefix: None,
