@@ -3402,7 +3402,7 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
     };
-    with_test_slot_context(slot_id, |context| context.insert_object(object))
+    with_test_slot_context(slot_id, |context| context.insert_object(object).unwrap())
 }
 
 fn assert_pkcs11_aes_vector(
@@ -6559,7 +6559,7 @@ fn new_test_slot_context(slot_id: CK_SLOT_ID) -> crate::SlotContext {
     let slot: Box<dyn crate::Slot> = Box::new(test_slot(true));
     let mut context = crate::SlotContext::new(slot_id, slot, Vec::new()).unwrap();
     for (_, object) in crate::default_objects().unwrap() {
-        context.insert_object(object);
+        context.insert_object(object).unwrap();
     }
     context
 }
@@ -6590,7 +6590,7 @@ fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot
             objects.sort_by_key(|(handle, _)| *handle);
             for (_, mut object) in objects {
                 object.slot_id = Some(slot_id);
-                child.insert_object(object);
+                child.insert_object(object).unwrap();
             }
         }
     }

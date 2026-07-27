@@ -98,14 +98,14 @@ impl ContentReference {
     }
 
     /// Encode the reference canonically as `[algorithm-name, digest]`.
-    pub fn to_cbor(&self) -> Vec<u8> {
+    pub fn to_cbor(&self) -> Result<Vec<u8>, StorageError> {
         let mut encoded = Vec::with_capacity(self.digest.len() + self.algorithm.name().len() + 5);
         Encoder::new(&mut encoded)
             .array(2)
             .and_then(|encoder| encoder.str(self.algorithm.name()))
             .and_then(|encoder| encoder.bytes(&self.digest))
-            .expect("encoding a content reference into a Vec cannot fail");
-        encoded
+            .map_err(|_| StorageError::InvalidReference)?;
+        Ok(encoded)
     }
 
     /// Decode and validate a canonical content reference.
@@ -129,7 +129,7 @@ impl ContentReference {
             return Err(StorageError::InvalidReference);
         }
         let reference = Self::new(algorithm, digest)?;
-        if reference.to_cbor() != encoded {
+        if reference.to_cbor()? != encoded {
             return Err(StorageError::InvalidReference);
         }
         Ok(reference)
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn content_references_round_trip_through_canonical_cbor() {
         let reference = ContentReference::for_object(&[0xa1, 0x01, 0x61, 0x61]);
-        let encoded = reference.to_cbor();
+        let encoded = reference.to_cbor().unwrap();
         assert_eq!(&encoded[0..10], b"\x82\x68sha3-256");
         assert_eq!(ContentReference::from_cbor(&encoded).unwrap(), reference);
 

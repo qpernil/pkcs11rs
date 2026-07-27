@@ -103,6 +103,17 @@ fn verify_init(
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        let hmac_key_is_invalid = hmac_mechanism.is_some_and(|(key_type, algorithm, _)| {
+            object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+                || object.key_type != key_type
+                || !matches!(
+                    object.material,
+                    KeyMaterial::YubiHsm {
+                        algorithm: object_algorithm,
+                        ..
+                    } if object_algorithm == algorithm
+                )
+        });
         if (cmac_mechanism
             && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
                 || object.key_type != CKK_AES as CK_KEY_TYPE
@@ -113,14 +124,7 @@ fn verify_init(
                         ..
                     }
                 )))
-            || (hmac_mechanism.is_some()
-                && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-                    || object.key_type != hmac_mechanism.unwrap().0
-                    || !matches!(
-                        object.material,
-                        KeyMaterial::YubiHsm { algorithm, .. }
-                            if algorithm == hmac_mechanism.unwrap().1
-                    )))
+            || hmac_key_is_invalid
             || (!cmac_mechanism
                 && hmac_mechanism.is_none()
                 && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)

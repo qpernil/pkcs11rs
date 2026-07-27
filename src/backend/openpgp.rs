@@ -866,7 +866,7 @@ pub(crate) fn openpgp_private_key_template(
                     curve.coordinate_length().unwrap_or(32)
                 }
                 OpenPgpAlgorithm::Ed25519 => 32,
-                _ => unreachable!(),
+                _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
             };
             append(0x92, &openpgp_pad_integer(value, length)?)?;
         }

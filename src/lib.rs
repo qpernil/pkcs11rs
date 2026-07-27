@@ -1,5 +1,16 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
 
 use rsa::{
     traits::{PrivateKeyParts, PublicKeyParts},
@@ -136,6 +147,7 @@ mod yubico_kdf;
 use yubico_kdf::yubico_password_kdf;
 
 #[cfg(any(test, feature = "abi-tests"))]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod certificate_builder;
 mod certificate_chain;
 
@@ -786,6 +798,7 @@ const ABI_TEST_SCP11_SLOT_ID: CK_SLOT_ID = 81;
 const ABI_TEST_SECOND_YUBIHSM_SLOT_ID: CK_SLOT_ID = 82;
 
 #[cfg(feature = "abi-tests")]
+#[allow(clippy::unwrap_used)]
 mod abi_test_backend;
 #[cfg(feature = "abi-tests")]
 use abi_test_backend::*;

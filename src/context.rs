@@ -131,26 +131,31 @@ pub(crate) static NEXT_OBJECT_HANDLE: std::sync::atomic::AtomicU64 =
 pub(crate) static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
-pub(crate) fn allocate_object_handle() -> CK_OBJECT_HANDLE {
-    let handle = NEXT_OBJECT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        handle != 0 && u128::from(handle) <= u128::from(CK_ULONG::MAX),
-        "object handle space exhausted"
-    );
-    handle as CK_OBJECT_HANDLE
+fn allocate_handle(counter: &std::sync::atomic::AtomicU64) -> Result<u64, Error> {
+    counter
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |candidate| {
+                if candidate == 0 || u128::from(candidate) > u128::from(CK_ULONG::MAX) {
+                    return None;
+                }
+                Some(candidate.wrapping_add(1))
+            },
+        )
+        .map_err(|_| CKR_HOST_MEMORY.into())
+}
+
+pub(crate) fn allocate_object_handle() -> Result<CK_OBJECT_HANDLE, Error> {
+    allocate_handle(&NEXT_OBJECT_HANDLE).map(|handle| handle as CK_OBJECT_HANDLE)
 }
 
 pub(crate) fn reset_object_handles() {
     NEXT_OBJECT_HANDLE.store(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub(crate) fn allocate_session_handle() -> CK_SESSION_HANDLE {
-    let handle = NEXT_SESSION_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        handle != 0 && u128::from(handle) <= u128::from(CK_ULONG::MAX),
-        "session handle space exhausted"
-    );
-    handle as CK_SESSION_HANDLE
+pub(crate) fn allocate_session_handle() -> Result<CK_SESSION_HANDLE, Error> {
+    allocate_handle(&NEXT_SESSION_HANDLE).map(|handle| handle as CK_SESSION_HANDLE)
 }
 
 pub(crate) fn reset_session_handles() {
@@ -281,7 +286,7 @@ impl ModuleContext {
                 let mut objects = default_objects()?.into_iter().collect::<Vec<_>>();
                 objects.sort_by_key(|(handle, _)| *handle);
                 for (_, object) in objects {
-                    child.insert_object(object);
+                    child.insert_object(object)?;
                 }
                 child.reconcile_slot_token_objects(slot_id, token_objects)?;
             }
@@ -379,12 +384,12 @@ impl ModuleContext {
         self.insert_pcsc_slot_contexts(slots).map(|_| ())
     }
 
-    fn next_slot_id(&self) -> CK_SLOT_ID {
+    fn next_slot_id(&self) -> Option<CK_SLOT_ID> {
         self.slot_contexts
             .keys()
             .max()
             .copied()
-            .map_or(0, |slot_id| slot_id + 1)
+            .map_or(Some(0), |slot_id| slot_id.checked_add(1))
     }
     pub(crate) fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
         info.cryptokiVersion.major = 3;
@@ -501,13 +506,16 @@ impl SlotContext {
         }
     }
 
-    pub(crate) fn insert_object(&mut self, mut object: TokenObject) -> CK_OBJECT_HANDLE {
-        let handle = allocate_object_handle();
+    pub(crate) fn insert_object(
+        &mut self,
+        mut object: TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        let handle = allocate_object_handle()?;
         if object.unique_id.is_empty() {
             object.unique_id = handle.to_string();
         }
         self.memory_objects.insert(handle, object);
-        handle
+        Ok(handle)
     }
 
     pub(crate) fn resolve_object(
@@ -642,7 +650,7 @@ impl SlotContext {
         new_unique_ids.sort();
         for unique_id in new_unique_ids {
             self.token_object_handles
-                .insert(allocate_object_handle(), TokenObjectLocator { unique_id });
+                .insert(allocate_object_handle()?, TokenObjectLocator { unique_id });
         }
         Ok(())
     }
@@ -670,7 +678,7 @@ impl SlotContext {
                 continue;
             }
             object.set_creator(session_handle, slot_id);
-            self.insert_object(object);
+            self.insert_object(object)?;
         }
         Ok(())
     }
@@ -786,7 +794,10 @@ impl ModuleContext {
                                         log!(1, "libusb.claim_interface: {:?}", error);
                                         continue;
                                     }
-                                    let slot_id = self.next_slot_id();
+                                    let Some(slot_id) = self.next_slot_id() else {
+                                        log!(1, "YubiHSM slot ID space exhausted");
+                                        continue;
+                                    };
                                     let mut slot = Box::new(
                                         YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
                                             Rc::new(connector),
@@ -831,7 +842,10 @@ impl ModuleContext {
             };
             let name = connector.name();
             log!(2, "{} at {}", name, url);
-            let slot_id = self.next_slot_id();
+            let Some(slot_id) = self.next_slot_id() else {
+                log!(1, "YubiHSM connector slot ID space exhausted");
+                continue;
+            };
             let connector = Rc::new(connector);
             let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
                 connector.clone(),
@@ -891,13 +905,18 @@ impl ModuleContext {
                     let reader_state = connector.state.clone();
                     let base_connector: Rc<dyn Connector> = Rc::new(connector);
                     let mut reader_slots = Vec::new();
-                    let mut next_reader_slot_id = self.next_slot_id();
+                    let Some(mut next_reader_slot_id) = self.next_slot_id() else {
+                        log!(1, "PCSC slot ID space exhausted");
+                        break;
+                    };
                     for configuration in configurations {
                         let application_label = ccid_application_label(configuration.application);
                         let slot_id = next_reader_slot_id;
-                        next_reader_slot_id = next_reader_slot_id
-                            .checked_add(1)
-                            .expect("slot ID space exhausted");
+                        let Some(next_slot_id) = next_reader_slot_id.checked_add(1) else {
+                            log!(1, "PCSC slot ID space exhausted");
+                            break;
+                        };
+                        next_reader_slot_id = next_slot_id;
                         let application_aid = match ccid_application_aid(
                             configuration.application,
                             configuration.secure_channel,

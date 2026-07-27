@@ -139,7 +139,7 @@ fn install_yubihsm_wrap_test_objects(
                     } => (id, object_type),
                     _ => unreachable!(),
                 };
-                let handle = context.insert_object(object);
+                let handle = context.insert_object(object).unwrap();
                 match (id, material_type) {
                     (30, crate::YUBIHSM_SYMMETRIC_KEY) => target = Some(handle),
                     (31, crate::YUBIHSM_WRAP_KEY) => ccm = Some(handle),
@@ -239,7 +239,7 @@ fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u
                             .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
                             .is_none());
                     }
-                    (context.insert_object(object), object_type, id)
+                    (context.insert_object(object).unwrap(), object_type, id)
                 },
             )
             .collect()

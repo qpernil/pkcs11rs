@@ -3315,6 +3315,39 @@ fn token_object_handles_are_allocated_in_stable_identity_order() {
 }
 
 #[test]
+fn exhausted_pkcs11_handle_spaces_return_host_memory_errors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    struct ResetHandles;
+    impl Drop for ResetHandles {
+        fn drop(&mut self) {
+            crate::reset_object_handles();
+            crate::reset_session_handles();
+        }
+    }
+    let _reset = ResetHandles;
+    #[allow(clippy::unnecessary_cast)]
+    let maximum = CK_ULONG::MAX as u64;
+
+    crate::NEXT_OBJECT_HANDLE.store(maximum, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        crate::allocate_object_handle().unwrap(),
+        CK_OBJECT_HANDLE::MAX
+    );
+    let object_error: CK_RV = crate::allocate_object_handle().unwrap_err().into();
+    assert_eq!(object_error, CKR_HOST_MEMORY as CK_RV);
+
+    crate::NEXT_SESSION_HANDLE.store(maximum, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        crate::allocate_session_handle().unwrap(),
+        CK_SESSION_HANDLE::MAX
+    );
+    let session_error: CK_RV = crate::allocate_session_handle().unwrap_err().into();
+    assert_eq!(session_error, CKR_HOST_MEMORY as CK_RV);
+}
+
+#[test]
 fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

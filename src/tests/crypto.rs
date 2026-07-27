@@ -1306,7 +1306,7 @@ fn ecdsa_verifier_supports_every_advertised_prime_curve() {
         crate::EcCurve::BrainpoolP384,
         crate::EcCurve::BrainpoolP512,
     ] {
-        let parameters = crate::ec_parameters(curve);
+        let parameters = crate::ec_parameters(curve).unwrap();
         let generator = crate::EcPointValue {
             x: parameters.gx.clone(),
             y: parameters.gy.clone(),

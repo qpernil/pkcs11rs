@@ -198,7 +198,7 @@ fn create_object(
             return Ok(());
         }
         object.set_creator(session_handle, slot_id);
-        let handle = ctx.insert_object(object);
+        let handle = ctx.insert_object(object)?;
         *object_handle = handle;
         Ok(())
     })
@@ -1114,7 +1114,7 @@ fn copy_object(
         copied_object.set_creator(session_handle, slot_id);
         copied_object.unique_id.clear();
 
-        let handle = ctx.insert_object(copied_object);
+        let handle = ctx.insert_object(copied_object)?;
         *new_object_handle = handle;
         Ok(())
     })

@@ -1205,17 +1205,6 @@ fn parse_generated_public_key(algorithm: Algorithm, response: &[u8]) -> Result<P
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?,
             ))
         }
-        Algorithm::Ecdsa(curve) | Algorithm::Ecdh(curve) if curve.coordinate_length().is_some() => {
-            let point = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
-            let expected = curve.coordinate_length().unwrap() * 2 + 1;
-            if point.len() != expected || point[0] != 0x04 {
-                return Err(CKR_DATA_INVALID.into());
-            }
-            Ok(PublicKey::Ec {
-                curve,
-                point: point[1..].to_vec(),
-            })
-        }
         Algorithm::Ed25519 | Algorithm::Ecdh(Curve::X25519) => {
             let key = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
             if key.len() != 32 {
@@ -1230,7 +1219,17 @@ fn parse_generated_public_key(algorithm: Algorithm, response: &[u8]) -> Result<P
                 key: key.to_vec(),
             })
         }
-        _ => Err(CKR_DATA_INVALID.into()),
+        Algorithm::Ecdsa(curve) | Algorithm::Ecdh(curve) => {
+            let point = field_value(&fields, 0x86).ok_or(CKR_DATA_INVALID)?;
+            let expected = curve.coordinate_length().ok_or(CKR_DATA_INVALID)? * 2 + 1;
+            if point.len() != expected || point[0] != 0x04 {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(PublicKey::Ec {
+                curve,
+                point: point[1..].to_vec(),
+            })
+        }
     }
 }
 
@@ -1289,7 +1288,11 @@ fn parse_application_info(encoded: &[u8]) -> Result<ApplicationInfo, Error> {
             .map(|value| format!("{value:02x}"))
             .collect()
     } else {
-        u32::from_be_bytes(aid[10..14].try_into().unwrap()).to_string()
+        let serial = aid
+            .get(10..14)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+            .ok_or(CKR_DATA_INVALID)?;
+        u32::from_be_bytes(serial).to_string()
     };
     let discretionary = field_value(&fields, 0x73)
         .map(parse_tlvs)
@@ -1396,7 +1399,11 @@ fn parse_kdf(encoded: &[u8]) -> Result<Option<KdfParams>, Error> {
     }
     Ok(Some(KdfParams {
         hash_algorithm,
-        iteration_count: u32::from_be_bytes(iteration_bytes.try_into().unwrap()),
+        iteration_count: u32::from_be_bytes(
+            iteration_bytes
+                .try_into()
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+        ),
         user_salt,
         reset_salt,
         admin_salt,
@@ -1423,7 +1430,7 @@ fn parse_algorithm(value: &[u8]) -> Result<Algorithm, Error> {
                 0x12 => Ok(Algorithm::Ecdh(curve)),
                 0x13 => Ok(Algorithm::Ecdsa(curve)),
                 0x16 => Ok(Algorithm::Ed25519),
-                _ => unreachable!(),
+                _ => Err(CKR_DATA_INVALID.into()),
             }
         }
         _ => Err(CKR_DATA_INVALID.into()),

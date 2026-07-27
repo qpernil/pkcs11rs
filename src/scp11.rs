@@ -205,16 +205,14 @@ impl Scp11KeySet {
     }
 
     pub(crate) fn certificate_cache_key(&self) -> Option<Scp11CertificateCacheKey> {
-        self.card_public_key.is_none().then(|| {
-            (
-                self.variant.key_id(),
-                self.key_version,
-                self.certificate_trust
-                    .as_ref()
-                    .expect("certificate trust exists without a static card key")
-                    .fingerprint(),
-            )
-        })
+        if self.card_public_key.is_some() {
+            return None;
+        }
+        Some((
+            self.variant.key_id(),
+            self.key_version,
+            self.certificate_trust.as_ref()?.fingerprint(),
+        ))
     }
 
     #[cfg(test)]
