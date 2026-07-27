@@ -25,9 +25,11 @@ The minimum supported Rust version is 1.85.
   authenticate sessions on local or remote YubiHSM slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
-- **FIDO2** discovery over the YubiKey 5.8+ USB CCID smart-card binding, with
-  PIN provisioning and changes plus read-only resident-credential metadata
-  and non-operational key projections after PIN login.
+- **FIDO2** discovery over the CTAP smart-card binding: over USB CCID on
+  YubiKey firmware that exposes it there, and over NFC on compatible
+  YubiKeys. This includes PIN provisioning and changes plus read-only
+  resident-credential metadata and non-operational key projections after PIN
+  login.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
@@ -64,8 +66,9 @@ The module uses its own synchronization when `C_Initialize` permits native
 locking through `CKF_OS_LOCKING_OK`. Application-provided mutex callbacks are
 not used; when both callbacks and `CKF_OS_LOCKING_OK` are supplied, native
 locking is selected. Each PKCS #11 slot has an independently locked child
-context containing its sessions, login state, objects, searches, and
-cryptographic operation state.
+context containing its sessions, login state, and object-handle state.
+Searches and active cryptographic operations belong to their individual
+sessions.
 
 Initialization and finalization are nonblocking lifecycle transitions. They
 return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
@@ -77,17 +80,20 @@ exchange lock. Local operations on different applet slots can execute
 concurrently; actual card exchanges on one reader are serialized. Different
 YubiHSMs and different PC/SC readers can also execute concurrently.
 
+See [Architecture](docs/architecture.md) for the object graph, lifecycle
+locking, session ownership, transport sharing, and cache boundaries.
+
 ## Compatibility and Validation
 
 | Area | Status |
 | --- | --- |
 | PKCS #11 ABI | Function-list layouts and behavior for 2.40, 3.0, 3.1, and 3.2 are covered by Rust and Python tests. |
 | Linux | The complete hardware-independent Rust and Python suites run in GitHub Actions. |
-| Windows | Rust tests and the synthetic ABI backend are compiled on a native Windows runner. |
+| Windows | Rust tests and the synthetic ABI backend are compiled with warnings denied on a native Windows runner. |
 | macOS | The `.dylib`, Rust tests, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
 | MSRV | An all-features build is checked with Rust 1.85. |
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
-| Live hardware | Opt-in Rust and Python smoke tests verify slot and token metadata on attached YubiKey and YubiHSM devices. |
+| Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. The Python smoke test covers production slot and token metadata. |
 
 Protocol tests use deterministic mock transports and official cryptographic
 test vectors where available. Live-device tests are deliberately excluded from
@@ -174,9 +180,10 @@ is reopened lazily by the next public hardware read. While the profile is
 active, user-login Authentication Keys must have exactly the same domains as
 the discovery Authentication Key. The value accepts the same direct or
 YubiHSM Auth selector as `C_Login`. The password may be omitted when
-`PKCS11RS_PINENTRY` is configured; it is requested lazily once and reused for
-all YubiHSMs. CCID applets, including YubiHSM Auth providers, are discovered
-before this YubiHSM discovery pass.
+`PKCS11RS_PINENTRY` is configured; each YubiHSM slot requests it lazily and
+caches it only after that slot authenticates successfully. A failed attempt
+does not populate another slot's cache. CCID applets, including YubiHSM Auth
+providers, are discovered before this YubiHSM discovery pass.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
@@ -206,6 +213,13 @@ The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
 and FIDO2. Each selectable applet is exposed as its own PKCS #11
 slot.
 
+Discovery is a snapshot taken by the first `C_GetSlotList` after
+`C_Initialize`. An empty reader contributes no slot. A selected applet keeps
+its slot even if later initialization fails; existing slots reconnect and
+reselect their own AID when sessions are opened. New readers and applets that
+were absent from the original snapshot require `C_Finalize` followed by
+`C_Initialize`.
+
 Limit discovery to selected applets with:
 
 ```sh
@@ -232,6 +246,8 @@ Detailed configuration:
 - [OpenPGP backend](docs/openpgp.md)
 - [SCP03](docs/scp03.md)
 - [SCP11a, SCP11b, and SCP11c](docs/scp11.md)
+- [Internal architecture and object graph](docs/architecture.md)
+- [Content-addressed CBOR storage boundary](docs/storage.md)
 
 ## Diagnostics
 
@@ -272,12 +288,19 @@ See the [OASIS profile test runner](conformance/README.md) for individual test
 commands, live-module provisioning requirements, result provenance, and the
 qualification boundary.
 
-Live hardware tests are opt-in:
+Live hardware tests are excluded from normal test runs. Run the Python
+read-only smoke test explicitly:
 
 ```sh
 PKCS11RS_RUN_HARDWARE_TESTS=1 python3 test_hardware.py
-cargo test --locked -- --ignored
 ```
+
+Rust hardware tests are individually ignored. Run a named test rather than
+the entire ignored set: several tests provision, change, or deliberately
+retain persistent device objects. Each mutating test documents and checks its
+own environment-variable gate; the FIDO2 tests are documented in
+[FIDO2 support](docs/fido2.md), and YubiHSM Auth and SCP11 provisioning tests
+are documented in their backend guides.
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048
@@ -315,12 +338,22 @@ slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
+## Persistence boundary
+
+The crate exposes a `StorageProvider` boundary and a local implementation for
+immutable, content-addressed CBOR blobs. This is infrastructure for future
+hybrid hardware/software FIDO objects; it is not yet connected to a PKCS #11
+slot, configuration variable, or `previewSign`. See
+[Content-addressed CBOR storage](docs/storage.md) for its exact durability,
+integrity, and integration boundary.
+
 ## Known Limitations
 
 - Mechanisms and objects are advertised dynamically, so availability depends
   on the selected backend, installed keys, device firmware, and policy.
-- The live-hardware suite is currently a discovery and metadata smoke test; it
-  does not exercise every cryptographic operation against physical devices.
+- Live-hardware coverage includes discovery, authentication, provisioning,
+  PIN management, and selected cryptographic interoperability paths, but it
+  does not qualify every supported operation, platform, or firmware.
 - OpenPGP key generation and private-key import are restricted to references
   that the card reports as empty, so PKCS #11 operations cannot overwrite an
   existing OpenPGP key. Readable OpenPGP data objects are exported read-only.

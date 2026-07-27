@@ -19,7 +19,7 @@ connector slots. The only accepted values are `0` and `1`.
 
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For
-one YubiKey with all four default applets and one YubiHSM, the result is five
+one YubiKey with all five default applets and one YubiHSM, the result is six
 slots.
 
 The YubiHSM Auth slot contains read-only metadata objects for its credentials.
@@ -76,12 +76,14 @@ when labels are not unique. An explicit trailing colon represents an empty
 credential password.
 
 The password may be omitted when `PKCS11RS_PINENTRY` is configured. Public
-discovery requests it lazily after finding the required YubiHSM Auth provider,
-caches it in zeroizing module memory, and reuses it across every YubiHSM because
-the discovery credential is global. Direct configuration consisting of only
-the four-digit Authentication Key ID uses the same behavior. Without pinentry,
-the password must be explicit. A malformed or incomplete value makes
-`C_Initialize` return `CKR_ARGUMENTS_BAD`.
+discovery requests it lazily after finding the required YubiHSM Auth provider.
+The selector is global configuration, but a prompted password is cached in
+zeroizing memory only by the YubiHSM slot on which authentication succeeds.
+Each slot may therefore prompt independently, and a missing provider or failed
+authentication does not expose or cache the password in another slot. Direct
+configuration consisting of only the four-digit Authentication Key ID uses the
+same behavior. Without pinentry, the password must be explicit. A malformed or
+incomplete value makes `C_Initialize` return `CKR_ARGUMENTS_BAD`.
 
 CCID applets and their YubiHSM Auth credentials are enumerated before the module
 performs YubiHSM public discovery. The same configured credential is then tried
@@ -153,10 +155,12 @@ private view again.
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
 opaque-value caches and retries public discovery. Reinitialize the module after
-replacing a USB device or changing the domains visible to an authentication
-credential. A remote connector's status serial/version and recovery after a
-transport failure advance its connection epoch, which clears that slot's
-caches and retries public discovery automatically.
+replacing a directly attached USB device or changing the domains visible to an
+authentication credential. A configured remote slot that cannot complete its
+initial status request remains empty until reinitialization. After a remote
+connector has connected successfully, however, a later transport recovery or
+status serial/version change advances its connection epoch, clears that
+slot's caches, and retries public discovery automatically.
 
 The retained discovery session has a distinct transport role from the PKCS #11
 user-login session and is never used for private or mutating operations.
@@ -346,7 +350,14 @@ prompts because it has no PIN of its own.
 Yubico's password input convention is used for both management and credential
 passwords. A printable UTF-8 value of at most 16 bytes is padded on the right
 with zero bytes. Exactly 32 hexadecimal characters provide the raw 16-byte
-value. Other lengths and malformed hexadecimal values are rejected.
+value. Other lengths and malformed hexadecimal values are rejected. The token
+reports the broad 0-through-32-byte envelope: zero covers the `CKU_USER`
+whole-slot login and 32 covers the raw hexadecimal form. Each login role and
+administration call still enforces its own syntax.
+
+The YubiHSM Auth backend advertises no key operations. The module-wide software
+digest mechanisms remain available because they require no credential or
+applet key.
 
 ## Protected password entry
 

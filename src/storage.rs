@@ -1,10 +1,14 @@
-//! Persistence primitives for the hybrid FIDO hardware/software slot.
+//! Persistence primitives intended for a future hybrid FIDO
+//! hardware/software slot.
 //!
 //! Providers store opaque, immutable CBOR data items without decoding or
 //! re-encoding them. The schema layer is responsible for producing canonical
 //! CBOR; providers preserve those exact bytes and address them by an
 //! algorithm-tagged digest. This keeps local-directory and future remote
 //! providers behind the same boundary without coupling storage to CTAP.
+//!
+//! This module is not yet connected to PKCS #11 slot discovery, configuration,
+//! FIDO credential registration, key derivation, or signing.
 
 use minicbor::{Decoder, Encoder};
 use sha3::{Digest, Sha3_256};
