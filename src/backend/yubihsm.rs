@@ -301,9 +301,9 @@ impl HsmAuthProvider {
 #[derive(Debug)]
 pub(crate) struct YubiHsmSlot {
     pub(crate) connector: Rc<dyn Connector>,
-    pub(crate) session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
-    pub(crate) session_role: Cell<Option<YubiHsmSessionRole>>,
-    pub(crate) public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
+    pub(crate) session: Rc<RefCell<YubiHsmSessionState>>,
+    pub(crate) public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
+    pub(crate) public_discovery_password: RefCell<Option<Zeroizing<Vec<u8>>>>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
@@ -325,13 +325,41 @@ pub(crate) enum YubiHsmSessionRole {
     User,
 }
 
+#[derive(Debug, Default)]
+pub(crate) enum YubiHsmSessionState {
+    #[default]
+    LoggedOut,
+    InvalidatedUser,
+    Active {
+        session: YubiHsmSecureSession,
+        role: YubiHsmSessionRole,
+    },
+}
+
+impl YubiHsmSessionState {
+    pub(crate) fn role(&self) -> Option<YubiHsmSessionRole> {
+        match self {
+            Self::Active { role, .. } => Some(*role),
+            Self::LoggedOut | Self::InvalidatedUser => None,
+        }
+    }
+
+    fn is_active_as(&self, expected: YubiHsmSessionRole) -> bool {
+        self.role() == Some(expected)
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self, Self::Active { .. })
+    }
+}
+
 #[cfg_attr(feature = "abi-tests", allow(dead_code))]
 pub(crate) const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
 
-pub(crate) struct YubiHsmPublicDiscoveryCredential {
+pub(crate) struct YubiHsmPublicDiscoveryConfig {
     pub(crate) authkey_id: u16,
     pub(crate) hsmauth_credential: Option<HsmAuthCredentialSelector>,
-    pub(crate) password: Mutex<Option<Zeroizing<Vec<u8>>>>,
+    pub(crate) configured_password: Option<Zeroizing<Vec<u8>>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -340,9 +368,9 @@ pub(crate) struct HsmAuthCredentialSelector {
     pub(crate) source: Option<String>,
 }
 
-impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
+impl std::fmt::Debug for YubiHsmPublicDiscoveryConfig {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.debug_struct("YubiHsmPublicDiscoveryCredential")
+        fmt.debug_struct("YubiHsmPublicDiscoveryConfig")
             .field("authkey_id", &format_args!("{:04x}", self.authkey_id))
             .field("hsmauth_credential", &self.hsmauth_credential)
             .field("password", &"[REDACTED]")
@@ -350,7 +378,7 @@ impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
     }
 }
 
-impl YubiHsmPublicDiscoveryCredential {
+impl YubiHsmPublicDiscoveryConfig {
     fn login(&self) -> YubiHsmLoginUsername<'_> {
         match self.hsmauth_credential.as_ref() {
             Some(credential) => YubiHsmLoginUsername::HsmAuth(HsmAuthLogin {
@@ -360,32 +388,6 @@ impl YubiHsmPublicDiscoveryCredential {
             }),
             None => YubiHsmLoginUsername::Direct(self.authkey_id),
         }
-    }
-
-    fn with_password<T>(
-        &self,
-        pinentry: &pinentry::Pinentry,
-        prompt: pinentry::Prompt<'_>,
-        operation: impl FnOnce(&[u8]) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let password = {
-            let mut password = self.password.lock().map_err(|_| CKR_MUTEX_BAD)?;
-            if password.is_none() {
-                let entered = pinentry.request(prompt)?;
-                match self.login() {
-                    YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
-                        return Err(CKR_PIN_INCORRECT.into());
-                    }
-                    YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
-                        return Err(CKR_PIN_INCORRECT.into());
-                    }
-                    _ => {}
-                }
-                *password = Some(entered);
-            }
-            password.clone().ok_or(CKR_PIN_INCORRECT)?
-        };
-        operation(password.as_slice())
     }
 }
 
@@ -402,7 +404,7 @@ pub(crate) struct YubiHsmObjectCache {
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) fn configured_yubihsm_public_discovery_credential(
     credential: Option<std::ffi::OsString>,
-) -> Result<Option<Arc<YubiHsmPublicDiscoveryCredential>>, Error> {
+) -> Result<Option<Arc<YubiHsmPublicDiscoveryConfig>>, Error> {
     #[cfg(test)]
     let pinentry = match crate::lock_context_read() {
         Ok(module) => module.as_ref().map(|context| context.pinentry.clone()),
@@ -421,7 +423,7 @@ pub(crate) fn configured_yubihsm_public_discovery_credential(
 pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
     credential: Option<std::ffi::OsString>,
     pinentry: &pinentry::Pinentry,
-) -> Result<Option<Arc<YubiHsmPublicDiscoveryCredential>>, Error> {
+) -> Result<Option<Arc<YubiHsmPublicDiscoveryConfig>>, Error> {
     let Some(credential) = credential else {
         return Ok(None);
     };
@@ -458,10 +460,10 @@ pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
     if password.is_none() && !pinentry.is_configured() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    Ok(Some(Arc::new(YubiHsmPublicDiscoveryCredential {
+    Ok(Some(Arc::new(YubiHsmPublicDiscoveryConfig {
         authkey_id,
         hsmauth_credential,
-        password: Mutex::new(password.map(|password| Zeroizing::new(password.to_vec()))),
+        configured_password: password.map(|password| Zeroizing::new(password.to_vec())),
     })))
 }
 
@@ -582,9 +584,9 @@ impl YubiHsmSlot {
     ) -> Self {
         Self {
             connector,
-            session: Rc::new(RefCell::new(None)),
-            session_role: Cell::new(None),
-            public_discovery_credential: None,
+            session: Rc::new(RefCell::new(YubiHsmSessionState::LoggedOut)),
+            public_discovery_config: None,
+            public_discovery_password: RefCell::new(None),
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
             object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
@@ -616,11 +618,16 @@ impl YubiHsmSlot {
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
         hsmauth_providers: Arc<HsmAuthProviderRegistry>,
-        public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
+        public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     ) -> Self {
         let mut slot =
             Self::with_hsmauth_providers(connector, version, algorithms, hsmauth_providers);
-        slot.public_discovery_credential = public_discovery_credential;
+        slot.public_discovery_password = RefCell::new(
+            public_discovery_config
+                .as_ref()
+                .and_then(|config| config.configured_password.clone()),
+        );
+        slot.public_discovery_config = public_discovery_config;
         slot
     }
 
@@ -696,7 +703,7 @@ impl YubiHsmSlot {
 
     pub(crate) fn read_object_info(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
         id: u16,
         object_type: u8,
         expected_sequence: Option<u8>,
@@ -718,7 +725,7 @@ impl YubiHsmSlot {
 
     fn listed_object_info(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
         id: u16,
         object_type: u8,
         sequence: u8,
@@ -755,7 +762,7 @@ impl YubiHsmSlot {
 
     fn object_info_with_session(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
         id: u16,
         object_type: u8,
     ) -> Result<YubiHsmObjectInfo, Error> {
@@ -789,7 +796,7 @@ impl YubiHsmSlot {
     fn read_object_value_with_session(
         &self,
         info: &YubiHsmObjectInfo,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
     ) -> Result<Vec<u8>, Error> {
         let cached = self.object_value_cache_entry(info)?;
         if let Some(value) = cached
@@ -816,7 +823,7 @@ impl YubiHsmSlot {
     fn read_opaque_with_session(
         &self,
         info: &YubiHsmObjectInfo,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
     ) -> Result<Vec<u8>, Error> {
         if info.object_type != YUBIHSM_OPAQUE {
             return Err(CKR_ATTRIBUTE_TYPE_INVALID.into());
@@ -826,7 +833,7 @@ impl YubiHsmSlot {
 
     fn read_object_value_by_id(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
         id: u16,
         object_type: u8,
     ) -> Result<Vec<u8>, Error> {
@@ -837,7 +844,7 @@ impl YubiHsmSlot {
     fn public_key_with_session(
         &self,
         info: &YubiHsmObjectInfo,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
     ) -> Result<YubiHsmPublicKey, Error> {
         if let Some(public_key) = self
             .object_cache
@@ -895,7 +902,7 @@ impl YubiHsmSlot {
 
     fn authentication_key_info(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
         authkey_id: u16,
     ) -> Result<YubiHsmObjectInfo, Error> {
         self.read_object_info(session, authkey_id, YUBIHSM_AUTHENTICATION_KEY, None)
@@ -1021,10 +1028,10 @@ impl YubiHsmSlot {
 
     fn authenticate_public_discovery(
         &self,
-        credential: &YubiHsmPublicDiscoveryCredential,
+        config: &YubiHsmPublicDiscoveryConfig,
     ) -> Result<(YubiHsmSecureSession, u16), Error> {
         let title = format!("Public discovery on {}", self.label());
-        let description = match credential.login() {
+        let description = match config.login() {
             YubiHsmLoginUsername::Direct(authkey_id) => {
                 format!("Enter the password for YubiHSM Authentication Key {authkey_id:04x}.")
             }
@@ -1032,24 +1039,39 @@ impl YubiHsmSlot {
                 format!("Enter the authentication password for {:?}.", login.label)
             }
         };
-        credential.with_password(
-            self.pinentry.as_ref(),
-            pinentry::Prompt {
-                title: &title,
-                description: &description,
-                label: "Authentication password:",
-            },
-            |password| self.authenticate_parsed_login(credential.login(), password),
-        )
+        if let Some(password) = self
+            .public_discovery_password
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .as_ref()
+        {
+            return self.authenticate_parsed_login(config.login(), password);
+        }
+        let entered = self.pinentry.request(pinentry::Prompt {
+            title: &title,
+            description: &description,
+            label: "Authentication password:",
+        })?;
+        match config.login() {
+            YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+            YubiHsmLoginUsername::HsmAuth(_) if entered.len() > 16 => {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
+            _ => {}
+        }
+        let authenticated = self.authenticate_parsed_login(config.login(), entered.as_slice())?;
+        self.public_discovery_password
+            .try_borrow_mut()?
+            .replace(entered);
+        Ok(authenticated)
     }
 
     fn has_session_role(&self, role: YubiHsmSessionRole) -> bool {
-        let present = self
-            .session
+        self.session
             .try_borrow()
-            .map(|session| session.is_some())
-            .unwrap_or(false);
-        present && self.session_role.get() == Some(role)
+            .is_ok_and(|state| state.is_active_as(role))
     }
 
     fn close_session_cell(
@@ -1075,26 +1097,34 @@ impl YubiHsmSlot {
     }
 
     fn close_active_session(&self, purpose: &str) -> Result<(), Error> {
-        self.session_role.set(None);
-        self.close_session_cell(self.session.as_ref(), purpose)
+        let active = {
+            let mut state = self.session.try_borrow_mut()?;
+            match std::mem::take(&mut *state) {
+                YubiHsmSessionState::Active { session, .. } => Some(session),
+                YubiHsmSessionState::LoggedOut | YubiHsmSessionState::InvalidatedUser => None,
+            }
+        };
+        let Some(session) = active else {
+            return Ok(());
+        };
+        self.close_session_cell(&RefCell::new(Some(session)), purpose)
     }
 
     fn ensure_read_session(&self) -> Result<(), Error> {
         self.synchronize_caches()?;
-        if self
-            .session_role
-            .get()
-            .is_some_and(|role| self.has_session_role(role))
         {
-            return Ok(());
+            let mut state = self.session.try_borrow_mut()?;
+            match &*state {
+                YubiHsmSessionState::Active { .. } => return Ok(()),
+                YubiHsmSessionState::InvalidatedUser => {
+                    *state = YubiHsmSessionState::LoggedOut;
+                    return Err(CKR_USER_NOT_LOGGED_IN.into());
+                }
+                YubiHsmSessionState::LoggedOut => {}
+            }
         }
-        if self.session_role.get() == Some(YubiHsmSessionRole::User) {
-            self.session_role.set(None);
-            return Err(CKR_USER_NOT_LOGGED_IN.into());
-        }
-        self.session_role.set(None);
-        let credential = self
-            .public_discovery_credential
+        let config = self
+            .public_discovery_config
             .as_ref()
             .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let expected_domains = {
@@ -1104,14 +1134,14 @@ impl YubiHsmSlot {
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.authkey_domains
         };
-        let (session, authkey_id) = match self.authenticate_public_discovery(credential) {
+        let (session, authkey_id) = match self.authenticate_public_discovery(config) {
             Ok(authenticated) => authenticated,
             Err(error) => {
                 log!(
                     2,
                     "YubiHSM pre-login authentication failed while reopening public discovery on {} with authentication key {:04x}: {:?}",
                     self.connector.name(),
-                    credential.authkey_id,
+                    config.authkey_id,
                     error
                 );
                 return Err(error);
@@ -1131,9 +1161,11 @@ impl YubiHsmSlot {
             let _ = self.close_session_cell(&session, "rejected public discovery");
             return Err(error);
         }
-        *self.session.try_borrow_mut()? = session.into_inner();
-        self.session_role
-            .set(Some(YubiHsmSessionRole::PublicDiscovery));
+        let session = session.into_inner().ok_or(CKR_DEVICE_ERROR)?;
+        *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
+            session,
+            role: YubiHsmSessionRole::PublicDiscovery,
+        };
         log!(
             2,
             "YubiHSM public discovery session reopened on {}",
@@ -1161,15 +1193,16 @@ impl YubiHsmSlot {
                     return Ok(value);
                 }
                 Err(error) => {
-                    let invalidated = self
-                        .session
-                        .try_borrow()
-                        .map_err(|_| Error::from(CKR_CANT_LOCK))?
-                        .is_none();
+                    let invalidated = matches!(
+                        *self
+                            .session
+                            .try_borrow()
+                            .map_err(|_| Error::from(CKR_CANT_LOCK))?,
+                        YubiHsmSessionState::LoggedOut
+                    );
                     if !invalidated || attempt == 1 {
                         return Err(error);
                     }
-                    self.session_role.set(None);
                     log!(
                         2,
                         "YubiHSM public discovery session was invalidated on {}; reopening once",
@@ -1205,7 +1238,7 @@ impl YubiHsmSlot {
 
     fn discover_objects(
         &self,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
     ) -> Result<YubiHsmDiscoveredObjects, Error> {
         let listed = send_yubihsm_secure_command(
             self.connector.as_ref(),
@@ -1323,7 +1356,7 @@ impl YubiHsmSlot {
     fn build_public_discovery_objects(
         &self,
         slot_id: CK_SLOT_ID,
-        session: &RefCell<Option<YubiHsmSecureSession>>,
+        session: &impl YubiHsmSessionCell,
     ) -> Result<Vec<TokenObject>, Error> {
         let (discovered, mut metadata) = self.discover_objects(session)?;
         let mut candidates = Vec::new();
@@ -1434,7 +1467,7 @@ impl YubiHsmSlot {
         if self.synchronize_caches().is_err() {
             return false;
         }
-        let Some(credential) = self.public_discovery_credential.as_ref() else {
+        let Some(config) = self.public_discovery_config.as_ref() else {
             return false;
         };
         match self.object_cache.try_borrow() {
@@ -1445,7 +1478,7 @@ impl YubiHsmSlot {
         if self.has_session_role(YubiHsmSessionRole::User) {
             return false;
         }
-        if let YubiHsmLoginUsername::HsmAuth(login) = credential.login() {
+        if let YubiHsmLoginUsername::HsmAuth(login) = config.login() {
             let provider_available = match self.with_hsmauth_provider(&login, |_| Ok(())) {
                 Ok(()) => true,
                 Err(error) => {
@@ -1479,9 +1512,9 @@ impl YubiHsmSlot {
             2,
             "YubiHSM public discovery starting on {} with authentication key {:04x}",
             self.connector.name(),
-            credential.authkey_id
+            config.authkey_id
         );
-        let session = self.authenticate_public_discovery(credential);
+        let session = self.authenticate_public_discovery(config);
         let session = match session {
             Ok((session, _)) => session,
             Err(error) => {
@@ -1489,7 +1522,7 @@ impl YubiHsmSlot {
                     1,
                     "YubiHSM pre-login authentication failed on {} with authentication key {:04x}: {:?}",
                     self.connector.name(),
-                    credential.authkey_id,
+                    config.authkey_id,
                     error
                 );
                 return false;
@@ -1502,7 +1535,7 @@ impl YubiHsmSlot {
         );
         let session = RefCell::new(Some(session));
         let discovery: Result<(Vec<TokenObject>, u16), Error> = (|| {
-            let info = self.authentication_key_info(&session, credential.authkey_id)?;
+            let info = self.authentication_key_info(&session, config.authkey_id)?;
             if !yubihsm_capability(&info.capabilities, 0) {
                 return Err(CKR_FUNCTION_REJECTED.into());
             }
@@ -1530,17 +1563,16 @@ impl YubiHsmSlot {
                 state.available = true;
                 state.authkey_domains = Some(authkey_domains);
                 drop(state);
-                let retained_session = session.into_inner();
-                if self
-                    .session
-                    .try_borrow_mut()
-                    .map(|mut active| *active = retained_session)
-                    .is_err()
-                {
+                let Some(retained_session) = session.into_inner() else {
                     return false;
-                }
-                self.session_role
-                    .set(Some(YubiHsmSessionRole::PublicDiscovery));
+                };
+                let Ok(mut active) = self.session.try_borrow_mut() else {
+                    return false;
+                };
+                *active = YubiHsmSessionState::Active {
+                    session: retained_session,
+                    role: YubiHsmSessionRole::PublicDiscovery,
+                };
                 log!(
                     2,
                     "YubiHSM public discovery completed on {}; retained its session and cached token objects",
@@ -1576,10 +1608,12 @@ impl YubiHsmSlot {
             }
         };
         if changed {
-            let user_session_was_active = self.session_role.get() == Some(YubiHsmSessionRole::User);
-            self.session.try_borrow_mut()?.take();
-            self.session_role
-                .set(user_session_was_active.then_some(YubiHsmSessionRole::User));
+            let mut session = self.session.try_borrow_mut()?;
+            *session = if session.is_active_as(YubiHsmSessionRole::User) {
+                YubiHsmSessionState::InvalidatedUser
+            } else {
+                YubiHsmSessionState::LoggedOut
+            };
             log!(
                 2,
                 "YubiHSM discovery cache reset on {} after connector state changed",
@@ -1859,13 +1893,56 @@ impl YubiHsmSlot {
     }
 }
 
-pub(crate) fn send_yubihsm_secure_command(
+pub(crate) trait YubiHsmSessionCell {
+    fn send_secure_command(
+        &self,
+        connector: &dyn Connector,
+        command: &YubiHsmCommand,
+    ) -> Result<Vec<u8>, Error>;
+}
+
+impl YubiHsmSessionCell for RefCell<Option<YubiHsmSecureSession>> {
+    fn send_secure_command(
+        &self,
+        connector: &dyn Connector,
+        command: &YubiHsmCommand,
+    ) -> Result<Vec<u8>, Error> {
+        let mut session_guard = self.try_borrow_mut()?;
+        send_yubihsm_secure_command_with_session(connector, &mut session_guard, command)
+    }
+}
+
+impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
+    fn send_secure_command(
+        &self,
+        connector: &dyn Connector,
+        command: &YubiHsmCommand,
+    ) -> Result<Vec<u8>, Error> {
+        let mut state = self.try_borrow_mut()?;
+        let (session, role) = match &mut *state {
+            YubiHsmSessionState::Active { session, role } => (session, *role),
+            YubiHsmSessionState::LoggedOut | YubiHsmSessionState::InvalidatedUser => {
+                return Err(CKR_USER_NOT_LOGGED_IN.into());
+            }
+        };
+        YubiHsmSecureSession::validate_command(connector, command)?;
+        let result = session.send_command(connector, command);
+        if !session.is_valid() {
+            *state = match role {
+                YubiHsmSessionRole::User => YubiHsmSessionState::InvalidatedUser,
+                YubiHsmSessionRole::PublicDiscovery => YubiHsmSessionState::LoggedOut,
+            };
+        }
+        result
+    }
+}
+
+pub(crate) fn send_yubihsm_secure_command<S: YubiHsmSessionCell + ?Sized>(
     connector: &dyn Connector,
-    shared_session: &RefCell<Option<YubiHsmSecureSession>>,
+    shared_session: &S,
     command: &YubiHsmCommand,
 ) -> Result<Vec<u8>, Error> {
-    let mut session_guard = shared_session.try_borrow_mut()?;
-    send_yubihsm_secure_command_with_session(connector, &mut session_guard, command)
+    shared_session.send_secure_command(connector, command)
 }
 
 pub(crate) fn send_yubihsm_secure_command_with_session(
@@ -2385,8 +2462,10 @@ impl Slot for YubiHsmSlot {
                 }
             }
         }
-        *self.session.try_borrow_mut()? = Some(session.into_inner().ok_or(CKR_DEVICE_ERROR)?);
-        self.session_role.set(Some(YubiHsmSessionRole::User));
+        *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
+            session: session.into_inner().ok_or(CKR_DEVICE_ERROR)?,
+            role: YubiHsmSessionRole::User,
+        };
         for cache in self
             .attestation_cache
             .try_borrow()
@@ -2485,16 +2564,12 @@ impl Slot for YubiHsmSlot {
         }
     }
     fn login_is_active(&self) -> bool {
-        let active = self.has_session_role(YubiHsmSessionRole::User);
-        if !active && self.session_role.get() == Some(YubiHsmSessionRole::User) {
-            self.session_role.set(None);
-        }
-        active
+        self.has_session_role(YubiHsmSessionRole::User)
     }
     fn backend_session_is_active(&self) -> bool {
-        self.session_role
-            .get()
-            .is_some_and(|role| self.has_session_role(role))
+        self.session
+            .try_borrow()
+            .is_ok_and(|state| matches!(*state, YubiHsmSessionState::Active { .. }))
     }
     fn ensure_backend_read_session(&self) -> Result<(), Error> {
         self.ensure_read_session()
@@ -2813,7 +2888,7 @@ pub(crate) struct YubiHsmSession {
     slotID: CK_SLOT_ID,
     flags: CK_FLAGS,
     connector: Rc<dyn Connector>,
-    session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+    session: Rc<RefCell<YubiHsmSessionState>>,
 }
 
 impl BackendSession for YubiHsmSession {

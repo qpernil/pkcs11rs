@@ -7,7 +7,7 @@ use crate::{
     piv_public_key_from_certificate, send_yubihsm_secure_command,
     yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
-    PivClient, YubiHsmCommand, YubiHsmSecureSession, CKA_PKCS11RS_PIV_OBJECT_TAG,
+    PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_PIV_OBJECT_TAG,
     CKA_YUBICO_HSMAUTH_ALGORITHM, CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
     CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
     YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC,
@@ -164,7 +164,7 @@ pub(crate) enum KeyMaterial {
     },
     YubiHsmAttestation {
         connector: Rc<dyn Connector>,
-        session: Rc<RefCell<Option<YubiHsmSecureSession>>>,
+        session: Rc<RefCell<YubiHsmSessionState>>,
         id: u16,
         algorithm: u8,
         value: Rc<RefCell<Option<Vec<u8>>>>,
@@ -836,7 +836,7 @@ pub(crate) fn lazy_piv_attestation_certificate(
 
 pub(crate) fn lazy_yubihsm_attestation_certificate(
     connector: &dyn Connector,
-    session: &RefCell<Option<YubiHsmSecureSession>>,
+    session: &RefCell<YubiHsmSessionState>,
     id: u16,
     value: &RefCell<Option<Vec<u8>>>,
     attempted: &Cell<bool>,
