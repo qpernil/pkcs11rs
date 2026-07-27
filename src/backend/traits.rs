@@ -107,6 +107,13 @@ pub(crate) trait Slot {
     fn create_fido2_test_credential(&mut self, _pin: &[u8]) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn create_fido2_preview_sign_test_registration(
+        &mut self,
+        _pin: &[u8],
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }

@@ -343,9 +343,12 @@ is not intended for a normal module build.
 The crate exposes a `StorageProvider` boundary and a local implementation for
 immutable, content-addressed CBOR blobs. This is infrastructure for future
 hybrid hardware/software FIDO objects; it is not yet connected to a PKCS #11
-slot, configuration variable, or `previewSign`. See
-[Content-addressed CBOR storage](docs/storage.md) for its exact durability,
-integrity, and integration boundary.
+slot or configuration variable. The experimental `previewSign` model defines
+canonical registration and derived-key records, but does not automatically
+persist them or expose PKCS #11 signing objects. See
+[Content-addressed CBOR storage](docs/storage.md) and
+[Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
+integration limits.
 
 ## Known Limitations
 

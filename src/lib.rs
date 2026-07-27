@@ -178,6 +178,7 @@ use hsmauth::{
 mod ctap;
 use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport, FIDO2_AID};
 
+pub mod preview_sign;
 pub mod storage;
 
 mod piv;

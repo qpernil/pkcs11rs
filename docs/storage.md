@@ -3,8 +3,7 @@
 The public `storage` module defines persistence infrastructure intended for a
 future hybrid FIDO hardware/software slot. It is usable as a standalone Rust
 API today, but it is not connected to PKCS #11 slot discovery, an environment
-variable, resident-credential enumeration, `previewSign`, or any signing
-mechanism.
+variable, resident-credential enumeration, or any signing mechanism.
 
 ## Provider boundary
 
@@ -20,6 +19,11 @@ exactly one well-formed CBOR data item, but does not decode, re-encode,
 deduplicate fields, or impose a schema. A future schema layer must produce any
 required canonical representation before storing it. The exact submitted bytes
 are what the content hash identifies and what `get` returns.
+
+The experimental [`previewSign` protocol model](preview-sign.md) supplies two
+such canonical schema layers: one for exact registration material and one for
+an offline-derived public key plus its algorithm-specific signing arguments.
+Neither schema is automatically written to a provider.
 
 `ContentReference` is algorithm-tagged for hash agility. The currently
 implemented algorithm is SHA3-256. Its canonical CBOR form is the two-element
@@ -73,7 +77,6 @@ Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-Future integration must define the canonical wrapper schema, ownership and
-deletion semantics, token binding, private-data protection, and the PKCS #11
-mapping before stored FIDO registration material can become a token or session
-object.
+Future integration must still define configuration, ownership and deletion
+semantics, token binding, private-data protection, and the PKCS #11 mapping
+before stored FIDO registration material can become a token or session object.
