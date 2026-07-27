@@ -2326,6 +2326,16 @@ pub fn set_pin_validates_session_and_changes_supported_token_pin() {
     assert_eq!(
         crate::api::C_SetPIN(
             session,
+            std::ptr::null_mut(),
+            0,
+            new_pin.as_mut_ptr(),
+            new_pin.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SetPIN(
+            session,
             wrong_pin.as_mut_ptr(),
             wrong_pin.len() as CK_ULONG,
             new_pin.as_mut_ptr(),

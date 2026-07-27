@@ -9,6 +9,7 @@ use minicbor::{data::Type, Decoder, Encoder};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 use std::rc::Rc;
+use unicode_normalization::UnicodeNormalization;
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const AUTHENTICATOR_GET_INFO: u8 = 0x04;
@@ -172,6 +173,22 @@ impl std::fmt::Debug for Client {
     }
 }
 
+fn normalize_pin(info: &AuthenticatorInfo, pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, CtapError> {
+    let pin_text =
+        std::str::from_utf8(pin).map_err(|_| CtapError::Transport(CKR_PIN_INVALID.into()))?;
+    let normalized = Zeroizing::new(pin_text.nfc().collect::<String>());
+    let minimum = usize::try_from(info.min_pin_length.unwrap_or(4))
+        .map_err(|_| CtapError::Transport(crate::CKR_PIN_LEN_RANGE.into()))?;
+    if normalized.is_empty()
+        || normalized.len() > 63
+        || normalized.as_bytes().contains(&0)
+        || normalized.chars().count() < minimum
+    {
+        return Err(CtapError::Transport(crate::CKR_PIN_LEN_RANGE.into()));
+    }
+    Ok(Zeroizing::new(normalized.as_bytes().to_vec()))
+}
+
 impl Client {
     pub(crate) fn new(transport: Rc<dyn CtapTransport>) -> Self {
         Self { transport }
@@ -196,8 +213,7 @@ impl Client {
         parse_authenticator_info(&response)
     }
 
-    #[cfg(all(test, not(feature = "abi-tests")))]
-    pub(crate) fn provision_pin(
+    pub(crate) fn set_initial_pin(
         &self,
         info: &AuthenticatorInfo,
         new_pin: &[u8],
@@ -208,17 +224,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
-        let pin_text = std::str::from_utf8(new_pin)
-            .map_err(|_| CtapError::Transport(CKR_PIN_INVALID.into()))?;
-        let minimum = usize::try_from(info.min_pin_length.unwrap_or(4))
-            .map_err(|_| CtapError::Transport(crate::CKR_PIN_LEN_RANGE.into()))?;
-        if new_pin.is_empty()
-            || new_pin.len() > 63
-            || new_pin.contains(&0)
-            || pin_text.chars().count() < minimum
-        {
-            return Err(CtapError::Transport(crate::CKR_PIN_LEN_RANGE.into()));
-        }
+        let new_pin = normalize_pin(info, new_pin)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
@@ -227,7 +233,7 @@ impl Client {
         let authenticator_key = parse_key_agreement_response(&response)?;
         let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
         let mut padded_pin = Zeroizing::new(vec![0; 64]);
-        padded_pin[..new_pin.len()].copy_from_slice(new_pin);
+        padded_pin[..new_pin.len()].copy_from_slice(&new_pin);
         let mut new_pin_enc = protocol_two_encrypt(&shared_secret, &padded_pin)?;
         let pin_uv_auth_param = authenticate(&shared_secret[..32], &new_pin_enc)?;
         let request = encode_set_pin_request(&platform_key, &pin_uv_auth_param, &new_pin_enc)?;
@@ -251,6 +257,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) || !info.option("pinUvAuthToken") {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
+        let pin = normalize_pin(info, pin)?;
         let permission = if info.option("perCredMgmtRO") {
             PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
         } else {
@@ -263,7 +270,7 @@ impl Client {
         )?;
         let authenticator_key = parse_key_agreement_response(&response)?;
         let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
-        let pin_hash = Zeroizing::new(Sha256::digest(pin).to_vec());
+        let pin_hash = Zeroizing::new(Sha256::digest(&*pin).to_vec());
         let pin_hash_enc = protocol_two_encrypt(&shared_secret, &pin_hash[..16])?;
         let request = encode_get_token_request(&platform_key, &pin_hash_enc, permission)?;
         let mut response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
@@ -628,7 +635,6 @@ fn encode_get_key_agreement_request() -> Result<Vec<u8>, CtapError> {
     Ok(output)
 }
 
-#[cfg(all(test, not(feature = "abi-tests")))]
 fn encode_set_pin_request(
     platform_key: &CoseKey,
     pin_uv_auth_param: &[u8; 32],
@@ -1084,7 +1090,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "abi-tests"))]
     fn key_agreement_response() -> Vec<u8> {
         let key = CoseKey {
             x: [
@@ -1232,14 +1237,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "abi-tests"))]
     fn set_pin_uses_protocol_two_request_shape() {
         let transport = Rc::new(MockTransport::new(vec![key_agreement_response(), vec![0]]));
         let client = Client::new(transport.clone());
         let mut info = credential_management_info();
         info.options
             .retain(|(name, _)| name.as_str() != "clientPin");
-        client.provision_pin(&info, b"test-PIN").unwrap();
+        client.set_initial_pin(&info, b"test-PIN").unwrap();
 
         let requests = transport.requests.borrow();
         assert_eq!(
@@ -1270,12 +1274,11 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "abi-tests"))]
     fn set_pin_rejects_unsafe_inputs_and_malformed_success_data() {
         let transport = Rc::new(MockTransport::new(Vec::new()));
         let client = Client::new(transport.clone());
         let info = credential_management_info();
-        assert!(client.provision_pin(&info, b"test-PIN").is_err());
+        assert!(client.set_initial_pin(&info, b"test-PIN").is_err());
         assert!(transport.requests.borrow().is_empty());
 
         let mut unset = info;
@@ -1283,8 +1286,8 @@ mod tests {
             .options
             .retain(|(name, _)| name.as_str() != "clientPin");
         unset.min_pin_length = Some(8);
-        assert!(client.provision_pin(&unset, b"short").is_err());
-        assert!(client.provision_pin(&unset, b"has\0zero").is_err());
+        assert!(client.set_initial_pin(&unset, b"short").is_err());
+        assert!(client.set_initial_pin(&unset, b"has\0zero").is_err());
         assert!(transport.requests.borrow().is_empty());
 
         let malformed = Rc::new(MockTransport::new(vec![
@@ -1292,8 +1295,25 @@ mod tests {
             vec![0, 0xa0],
         ]));
         assert!(matches!(
-            Client::new(malformed).provision_pin(&unset, b"long-enough"),
+            Client::new(malformed).set_initial_pin(&unset, b"long-enough"),
             Err(CtapError::Malformed("unexpected setPIN response data"))
+        ));
+    }
+
+    #[test]
+    fn fido_pins_are_normalized_to_nfc_before_use() {
+        let mut info = credential_management_info();
+        info.min_pin_length = Some(4);
+        assert_eq!(
+            normalize_pin(&info, "ra\u{0308}ka".as_bytes())
+                .unwrap()
+                .as_slice(),
+            "räka".as_bytes()
+        );
+        info.min_pin_length = Some(5);
+        assert!(matches!(
+            normalize_pin(&info, "ra\u{0308}ka".as_bytes()),
+            Err(CtapError::Transport(_))
         ));
     }
 

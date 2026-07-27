@@ -279,10 +279,6 @@ impl Slot for Fido2Slot {
     }
 
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        let pin_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
-        if pin.len() > 63 || pin_text.chars().count() < 4 {
-            return Err(CKR_PIN_LEN_RANGE.into());
-        }
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.connector.clear_secure_channel();
@@ -354,23 +350,25 @@ impl Slot for Fido2Slot {
         Ok(())
     }
 
-    #[cfg(all(test, not(feature = "abi-tests")))]
-    fn fido2_provision_pin(&mut self, new_pin: &[u8]) -> Result<(), Error> {
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.connector.clear_secure_channel();
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
+            self.info.get_mut().take();
             let info = self.discovered_info()?;
+            if info.option("clientPin") {
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            if !old_pin.is_empty() {
+                return Err(CKR_PIN_INCORRECT.into());
+            }
             self.client
-                .provision_pin(&info, new_pin)
+                .set_initial_pin(&info, new_pin)
                 .map_err(CtapError::into_pkcs11)?;
             self.info.get_mut().take();
-            let refreshed = self.discovered_info()?;
-            if !refreshed.option("clientPin") {
-                return Err(CKR_DEVICE_ERROR.into());
-            }
             Ok(())
         })();
         self.connector.clear_secure_channel();
@@ -419,6 +417,7 @@ impl Slot for Fido2Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO};
     use std::{cell::RefCell, collections::VecDeque, time::Duration};
 
     #[derive(Debug)]
@@ -475,6 +474,86 @@ mod tests {
             receive[..response.len()].copy_from_slice(&response);
             Ok(&receive[..response.len()])
         }
+    }
+
+    fn get_info_apdu_response(client_pin: bool) -> Vec<u8> {
+        let mut response = vec![0];
+        Encoder::new(&mut response)
+            .map(5)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .array(1)
+            .unwrap()
+            .str("FIDO_2_1")
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .bytes(&[0; 16])
+            .unwrap()
+            .u8(4)
+            .unwrap()
+            .map(1)
+            .unwrap()
+            .str("clientPin")
+            .unwrap()
+            .bool(client_pin)
+            .unwrap()
+            .u8(6)
+            .unwrap()
+            .array(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(0x0d)
+            .unwrap()
+            .u8(4)
+            .unwrap();
+        response.extend([0x90, 0x00]);
+        response
+    }
+
+    fn key_agreement_apdu_response() -> Vec<u8> {
+        let x = [
+            0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4,
+            0x40, 0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45,
+            0xd8, 0x98, 0xc2, 0x96,
+        ];
+        let y = [
+            0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f,
+            0x9e, 0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68,
+            0x37, 0xbf, 0x51, 0xf5,
+        ];
+        let mut response = vec![0];
+        Encoder::new(&mut response)
+            .map(1)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .map(5)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .i8(-25)
+            .unwrap()
+            .i8(-1)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .i8(-2)
+            .unwrap()
+            .bytes(&x)
+            .unwrap()
+            .i8(-3)
+            .unwrap()
+            .bytes(&y)
+            .unwrap();
+        response.extend([0x90, 0x00]);
+        response
     }
 
     #[test]
@@ -556,6 +635,55 @@ mod tests {
         assert_eq!(token_info.ulMinPinLen, 4);
         assert_eq!(token_info.ulMaxPinLen, 63);
         assert!(slot.backend_mechanisms().is_empty());
+    }
+
+    #[test]
+    fn public_set_pin_initializes_only_an_unconfigured_fido_authenticator() {
+        let connector = Rc::new(ScriptedConnector::new(vec![
+            get_info_apdu_response(false),
+            key_agreement_apdu_response(),
+            vec![0, 0x90, 0x00],
+            get_info_apdu_response(true),
+        ]));
+        let mut slot = Fido2Slot::new(connector.clone(), FIDO2_AID.to_vec());
+        slot.set_pin(&[], "ra\u{0308}ka".as_bytes()).unwrap();
+
+        let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+        slot.get_token_info(&mut token_info).unwrap();
+        assert_ne!(token_info.flags & CKF_USER_PIN_INITIALIZED as CK_FLAGS, 0);
+        let commands = connector.commands.borrow();
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0][5], AUTHENTICATOR_GET_INFO);
+        assert_eq!(commands[1][5], AUTHENTICATOR_CLIENT_PIN);
+        assert_eq!(commands[2][5], AUTHENTICATOR_CLIENT_PIN);
+        assert_eq!(commands[3][5], AUTHENTICATOR_GET_INFO);
+    }
+
+    #[test]
+    fn public_set_pin_refuses_old_pin_and_existing_pin_paths() {
+        let connector: Rc<dyn Connector> =
+            Rc::new(ScriptedConnector::new(vec![get_info_apdu_response(false)]));
+        let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
+        assert!(matches!(
+            slot.set_pin(b"old", b"new-PIN"),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
+        ));
+
+        let connector: Rc<dyn Connector> =
+            Rc::new(ScriptedConnector::new(vec![get_info_apdu_response(true)]));
+        let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
+        assert!(matches!(
+            slot.set_pin(&[], b"new-PIN"),
+            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+        ));
+        assert!(matches!(
+            slot.login_user(b"alice", b"new-PIN"),
+            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+        ));
+        assert!(matches!(
+            slot.login_so(b"new-PIN"),
+            Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV
+        ));
     }
 
     #[test]

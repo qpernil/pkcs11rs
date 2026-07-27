@@ -1,4 +1,4 @@
-# Read-only FIDO2 support
+# FIDO2 support
 
 ## Verified transport boundary
 
@@ -70,10 +70,25 @@ PIN and auth token are never exposed through PKCS #11. The auth token is
 zeroized after the one login-time enumeration, and cached credential metadata
 is cleared at logout.
 
+PKCS #11's `CKU_USER` is an authorization role here, not a named FIDO account.
+The ClientPIN is authenticator-wide, so successful PIN/UV token acquisition is
+the FIDO verification operation underlying `C_Login`. `C_LoginUser` remains
+unsupported for FIDO2 because CTAP PIN/UV authentication accepts no username.
+The `user.id`, `user.name`, and `displayName` values returned with discoverable
+credentials are relying-party-scoped credential metadata, not authenticator
+login identities. Likewise, CTAP provides no Security Officer identity, so
+`C_Login(CKU_SO)` is unsupported.
+
+This mapping follows the distinction between
+[PKCS #11 `C_Login` and `C_LoginUser`](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.html)
+and FIDO's
+[authenticator-wide ClientPIN verification](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html).
+
 The production backend issues only:
 
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
+- first-time `authenticatorClientPIN/setPIN`;
 - `authenticatorClientPIN/getPinUvAuthTokenUsingPinWithPermissions`;
 - `authenticatorCredentialManagement/enumerateRPsBegin` and
   `enumerateRPsGetNextRP`;
@@ -82,8 +97,7 @@ The production backend issues only:
 
 It never sends make-credential, get-assertion, update-user-information,
 delete-credential, authenticator-configuration, reset, or signing commands.
-The separately gated hardware test described below additionally implements only
-the first-time `authenticatorClientPIN/setPIN` operation.
+Discoverable credentials and their metadata remain read-only.
 
 Each sufficiently complete response becomes a private, token-resident,
 immutable `CKO_DATA` object. It is intentionally not modeled as a PKCS #11
@@ -128,12 +142,31 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   -- --ignored --nocapture
 ```
 
-## Initial PIN provisioning hardware test
+## Initial PIN provisioning through PKCS #11
 
-The normal backend remains read-only and does not expose PIN initialization
-through PKCS #11. A test-only CTAP `setPIN` path exists solely for provisioning
-an otherwise compatible authenticator during local hardware validation. The
-ignored test requires both an explicit mutation enable flag and the new PIN:
+An application can provision the first FIDO2 PIN through `C_SetPIN` in an R/W
+public session:
+
+```c
+C_SetPIN(session, NULL_PTR, 0, new_pin, new_pin_len);
+```
+
+The empty old PIN represents the authenticator's uninitialized PIN state. The
+operation is accepted only while GetInfo reports `clientPin=false`; once a PIN
+exists, `C_SetPIN` returns `CKR_FUNCTION_NOT_SUPPORTED`. A nonempty old PIN on
+an uninitialized authenticator returns `CKR_PIN_INCORRECT`. Consequently this
+mapping cannot change or reset an existing PIN. `C_InitPIN` remains unsupported
+for FIDO2 because PKCS #11 requires it to run in an authenticated SO session,
+while CTAP has no Security Officer identity.
+
+New PINs are validated as UTF-8, normalized to Unicode NFC, checked against the
+authenticator's reported `minPINLength`, and limited to CTAP's 63-byte maximum.
+FIDO2 PIN login applies the same NFC normalization before hashing.
+
+The ignored hardware test provisions through the exported `C_SetPIN` entry
+point, verifies `CKF_USER_PIN_INITIALIZED`, then authenticates through
+`C_Login(CKU_USER)` with the new PIN and logs out. It requires both an explicit
+mutation enable flag and the new PIN:
 
 ```sh
 PKCS11RS_CCID_APPLICATIONS=fido2 \
@@ -142,11 +175,9 @@ PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
   cargo test provisions_initial_fido2_pin -- --ignored --nocapture
 ```
 
-The test refuses to send `setPIN` when GetInfo already reports `clientPin=true`;
-it never changes or resets an existing PIN. It accepts only 4 through 63
-printable ASCII characters, which are unambiguously UTF-8 NFC, and also enforces
-the authenticator's reported `minPINLength`. If multiple compatible keys are
-attached, set `PKCS11RS_FIDO2_TEST_SOURCE` as described above.
+The test adds a stricter printable-ASCII input restriction for predictable
+shell invocation. If multiple compatible keys are attached, set
+`PKCS11RS_FIDO2_TEST_SOURCE` as described above.
 
 Provisioning changes persistent authenticator configuration. Run this test only
 against the intended test key and store the selected PIN securely. The PIN is
@@ -165,8 +196,8 @@ field checks, and response bounds explicit.
 
 The initial implementation was completed without hardware. The compatibility
 probe has since run against pre-release hardware, while resident-credential
-enumeration and initial PIN provisioning remain deferred. Validation remains
-necessary for:
+enumeration and PKCS #11 PIN provisioning/login remain deferred. Validation
+remains necessary for:
 
 - USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8
   production, pre-release, FIPS, and Security Key model of interest;
