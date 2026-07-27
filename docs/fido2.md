@@ -8,7 +8,9 @@ application normally returns `U2F_V2`. CTAP CBOR messages use
 `80 10 80 00`, with the CTAP command byte followed by its CBOR parameters.
 The CTAP status byte and optional CBOR response are returned with ISO 7816
 status `90 00`. ISO status `91 00` is a keepalive indication and is followed
-by `80 11 00 00` GET RESPONSE.
+by `80 11 00 00` GET RESPONSE. The transport waits 100 ms between keepalive
+polls, matching Yubico's maintained `SmartCardCtapDevice` behavior and leaving
+time for user-presence interaction.
 
 Yubico's current documentation and implementation confirm that YubiKey
 firmware 5.8 and later exposes this binding over the USB CCID interface.
@@ -142,6 +144,46 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   -- --ignored --nocapture
 ```
 
+## Synthetic discoverable-credential hardware fixture
+
+Production code never sends `authenticatorMakeCredential`. A test-only hook,
+compiled only into Rust test builds, can create one persistent discoverable
+credential so the read-only PKCS #11 mapping can be exercised against a
+nonempty authenticator.
+
+The fixture uses deliberately synthetic values:
+
+| Field | Value |
+| --- | --- |
+| RP ID | `pkcs11rs.invalid` |
+| RP name | `pkcs11rs synthetic relying party` |
+| User ID | `pkcs11rs-fido2-hardware-user-v1` |
+| User name | `pkcs11rs-test` |
+| Display name | `pkcs11rs synthetic user` |
+| Algorithm | ES256 (`-7`) |
+| Discoverable | `rk=true` |
+
+The test obtains a protocol-2 PIN/UV token with only the RP-bound `mc`
+permission, authenticates a fixed synthetic client-data hash, sends
+`authenticatorMakeCredential`, and validates the returned attested credential
+ID. It then calls the exported `C_Login(CKU_USER)` path and requires the same
+credential ID and display name to appear as a read-only PKCS #11 object.
+
+```sh
+PKCS11RS_CCID_APPLICATIONS=fido2 \
+PKCS11RS_FIDO2_TEST_PIN='your PIN' \
+  cargo test creates_and_rediscovers_synthetic_fido2_credential \
+  -- --ignored --nocapture
+```
+
+This test requires user presence, permanently writes a credential, and does
+not delete it. The PIN variable itself is the execution gate. Repeated runs use
+the same RP and user identifiers so authenticators that replace an existing
+discoverable credential for that account need not consume another logical
+account entry. The test has passed on the pre-release `FIDO_2_3` hardware
+described below, and the standalone read-only enumeration test subsequently
+found the resulting object.
+
 ## PIN management through PKCS #11
 
 An application can provision the first FIDO2 PIN through `C_SetPIN` in an R/W
@@ -227,10 +269,11 @@ The initial implementation was completed without hardware. The compatibility
 probe has since succeeded against pre-release hardware and a pre-release
 YubiKey reporting `FIDO_2_3` over macOS PC/SC. On the latter, the exported
 `C_SetPIN` entry point successfully provisioned the initial PIN from a non-null
-zero-length old-PIN buffer, `C_Login(CKU_USER)` verified it, and read-only
-resident-credential enumeration returned an empty store. Existing-PIN
-`changePIN` hardware validation remains deferred. Validation remains necessary
-for:
+zero-length old-PIN buffer and `C_Login(CKU_USER)` verified it. The test-only
+makeCredential fixture then created a persistent discoverable credential, and
+both its immediate PKCS #11 check and the standalone read-only enumeration test
+rediscovered that object. Existing-PIN `changePIN` hardware validation remains
+deferred. Validation remains necessary for:
 
 - USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8+
   production, pre-release, FIPS, and Security Key model of interest;

@@ -2,12 +2,14 @@ use super::ccid::PcscAppletSession;
 use crate::ctap::DiscoverableCredential;
 use crate::*;
 use minicbor::Encoder;
+use std::time::Duration;
 
 const NFCCTAP_MSG: u8 = 0x10;
 const NFCCTAP_GETRESPONSE: u8 = 0x11;
 const NFCCTAP_KEEPALIVE_STATUS: u16 = 0x9100;
 const ISO7816_SUCCESS: u16 = 0x9000;
 const MAX_KEEPALIVE_RESPONSES: usize = 600;
+const KEEPALIVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub(crate) struct CcidCtapTransport {
@@ -49,6 +51,7 @@ impl CtapTransport for CcidCtapTransport {
                         le: Some(256),
                         extended: false,
                     };
+                    std::thread::sleep(KEEPALIVE_POLL_INTERVAL);
                 }
                 _ => return Err(CKR_DEVICE_ERROR.into()),
             }
@@ -381,6 +384,23 @@ impl Slot for Fido2Slot {
         result
     }
 
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn create_fido2_test_credential(&mut self, pin: &[u8]) -> Result<Vec<u8>, Error> {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.connector.clear_secure_channel();
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = self.discovered_info()?;
+            self.client
+                .create_discoverable_test_credential(&info, pin)
+                .map_err(CtapError::into_pkcs11)
+        })();
+        self.connector.clear_secure_channel();
+        result
+    }
+
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
@@ -424,7 +444,7 @@ impl Slot for Fido2Slot {
 mod tests {
     use super::*;
     use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO};
-    use std::{cell::RefCell, collections::VecDeque, time::Duration};
+    use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Debug)]
     struct ScriptedConnector {

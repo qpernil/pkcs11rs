@@ -1213,6 +1213,86 @@ mod fido2_hardware {
     }
 
     #[test]
+    #[ignore = "creates a persistent discoverable FIDO2 credential and requires touch"]
+    fn creates_and_rediscovers_synthetic_fido2_credential() {
+        let Ok(pin) = std::env::var(CURRENT_PIN_ENV) else {
+            eprintln!(
+                "skipped persistent FIDO2 credential creation; set {CURRENT_PIN_ENV} to enable it"
+            );
+            return;
+        };
+        let mut pin = zeroize::Zeroizing::new(pin.into_bytes());
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let slot_id = fido2_slot_id();
+        let credential_id = crate::with_context_mut(|context| {
+            let child = context
+                .slot_contexts
+                .get(&slot_id)
+                .ok_or(CKR_SLOT_ID_INVALID)?;
+            let mut child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            child
+                ._get_slot_mut(slot_id)?
+                .create_fido2_test_credential(&pin)
+        })
+        .expect("authenticatorMakeCredential failed for the synthetic hardware fixture");
+
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                pin.as_mut_ptr(),
+                pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV,
+            "C_Login could not enumerate the newly created credential"
+        );
+        let unique_id = crate::with_context_mut(|context| {
+            let child = context
+                .slot_contexts
+                .get(&slot_id)
+                .ok_or(CKR_SLOT_ID_INVALID)?;
+            let child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            child
+                .get_slot(slot_id)?
+                .backend_token_objects(slot_id)?
+                .into_iter()
+                .find(|object| {
+                    object.label == crate::ctap::FIDO2_TEST_USER_DISPLAY_NAME
+                        && object.id == credential_id
+                })
+                .map(|object| object.unique_id)
+                .ok_or_else(|| crate::Error::from(CKR_DEVICE_ERROR))
+        })
+        .expect("the synthetic credential was not rediscovered as a PKCS #11 object");
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        eprintln!(
+            "created and rediscovered synthetic FIDO2 credential {unique_id} for RP {}",
+            crate::ctap::FIDO2_TEST_RP_ID
+        );
+    }
+
+    #[test]
     #[ignore = "sets and verifies the initial persistent FIDO2 PIN on a live authenticator"]
     fn provisions_initial_fido2_pin() {
         let Ok(new_pin) = std::env::var(NEW_PIN_ENV) else {

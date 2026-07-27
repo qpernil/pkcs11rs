@@ -17,7 +17,13 @@ pub(crate) const AUTHENTICATOR_CLIENT_PIN: u8 = 0x06;
 pub(crate) const AUTHENTICATOR_CREDENTIAL_MANAGEMENT: u8 = 0x0a;
 pub(crate) const AUTHENTICATOR_CREDENTIAL_MANAGEMENT_PREVIEW: u8 = 0x41;
 pub(crate) const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+#[cfg(test)]
+pub(crate) const FIDO2_TEST_RP_ID: &str = "pkcs11rs.invalid";
+#[cfg(test)]
+pub(crate) const FIDO2_TEST_USER_DISPLAY_NAME: &str = "pkcs11rs synthetic user";
 
+#[cfg(all(test, not(feature = "abi-tests")))]
+const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
 const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
 const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
 const CTAP2_ERR_PIN_BLOCKED: u8 = 0x32;
@@ -26,6 +32,8 @@ const CTAP2_ERR_PIN_AUTH_BLOCKED: u8 = 0x34;
 const CTAP2_ERR_PIN_NOT_SET: u8 = 0x35;
 const CTAP2_ERR_PIN_POLICY_VIOLATION: u8 = 0x37;
 const PIN_UV_AUTH_PROTOCOL_TWO: u8 = 2;
+#[cfg(test)]
+const PERMISSION_MAKE_CREDENTIAL: u8 = 0x01;
 const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
 const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
@@ -302,6 +310,21 @@ impl Client {
         info: &AuthenticatorInfo,
         pin: &[u8],
     ) -> Result<CredentialAuthorization, CtapError> {
+        let permission = if info.option("perCredMgmtRO") {
+            PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
+        } else {
+            PERMISSION_CREDENTIAL_MANAGEMENT
+        };
+        self.authorize_with_pin(info, pin, permission, None)
+    }
+
+    fn authorize_with_pin(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+        permission: u8,
+        rp_id: Option<&str>,
+    ) -> Result<CredentialAuthorization, CtapError> {
         if !info.option("clientPin") {
             return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
         }
@@ -309,11 +332,6 @@ impl Client {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
         let pin = normalize_pin(info, pin, true)?;
-        let permission = if info.option("perCredMgmtRO") {
-            PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
-        } else {
-            PERMISSION_CREDENTIAL_MANAGEMENT
-        };
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
@@ -323,7 +341,7 @@ impl Client {
         let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
         let pin_hash = Zeroizing::new(Sha256::digest(&*pin).to_vec());
         let pin_hash_enc = protocol_two_encrypt(&shared_secret, &pin_hash[..16])?;
-        let request = encode_get_token_request(&platform_key, &pin_hash_enc, permission)?;
+        let request = encode_get_token_request(&platform_key, &pin_hash_enc, permission, rp_id)?;
         let mut response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
         let encrypted_token = parse_pin_token_response(&response)?;
         let token = Zeroizing::new(protocol_two_decrypt(&shared_secret, &encrypted_token)?);
@@ -336,6 +354,33 @@ impl Client {
             protocol: PIN_UV_AUTH_PROTOCOL_TWO,
             token,
         })
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    pub(crate) fn create_discoverable_test_credential(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+    ) -> Result<Vec<u8>, CtapError> {
+        if info.option("noMcGaPermissionsWithClientPin") {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        let authorization = self.authorize_with_pin(
+            info,
+            pin,
+            PERMISSION_MAKE_CREDENTIAL,
+            Some(FIDO2_TEST_RP_ID),
+        )?;
+        let client_data_hash: [u8; 32] =
+            Sha256::digest(b"pkcs11rs synthetic FIDO2 hardware credential").into();
+        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let request = encode_test_make_credential_request(
+            &client_data_hash,
+            &pin_uv_auth_param,
+            authorization.protocol,
+        )?;
+        let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
+        parse_make_credential_response(&response)
     }
 
     pub(crate) fn enumerate_credentials(
@@ -755,11 +800,12 @@ fn encode_get_token_request(
     platform_key: &CoseKey,
     pin_hash_enc: &[u8],
     permission: u8,
+    rp_id: Option<&str>,
 ) -> Result<Vec<u8>, CtapError> {
     let mut output = Vec::new();
     let mut encoder = Encoder::new(&mut output);
     encoder
-        .map(5)?
+        .map(if rp_id.is_some() { 6 } else { 5 })?
         .u8(0x01)?
         .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
         .u8(0x02)?
@@ -771,7 +817,111 @@ fn encode_get_token_request(
         .bytes(pin_hash_enc)?
         .u8(0x09)?
         .u8(permission)?;
+    if let Some(rp_id) = rp_id {
+        encoder.u8(0x0a)?.str(rp_id)?;
+    }
     Ok(output)
+}
+
+#[cfg(test)]
+fn encode_test_make_credential_request(
+    client_data_hash: &[u8; 32],
+    pin_uv_auth_param: &[u8; 32],
+    protocol: u8,
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(7)?
+        .u8(0x01)?
+        .bytes(client_data_hash)?
+        .u8(0x02)?
+        .map(2)?
+        .str("id")?
+        .str(FIDO2_TEST_RP_ID)?
+        .str("name")?
+        .str("pkcs11rs synthetic relying party")?
+        .u8(0x03)?
+        .map(3)?
+        .str("id")?
+        .bytes(b"pkcs11rs-fido2-hardware-user-v1")?
+        .str("name")?
+        .str("pkcs11rs-test")?
+        .str("displayName")?
+        .str(FIDO2_TEST_USER_DISPLAY_NAME)?
+        .u8(0x04)?
+        .array(1)?
+        .map(2)?
+        .str("alg")?
+        .i8(-7)?
+        .str("type")?
+        .str("public-key")?
+        .u8(0x07)?
+        .map(1)?
+        .str("rk")?
+        .bool(true)?
+        .u8(0x08)?
+        .bytes(pin_uv_auth_param)?
+        .u8(0x09)?
+        .u8(protocol)?;
+    Ok(output)
+}
+
+#[cfg(test)]
+fn parse_make_credential_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut format = None;
+    let mut authenticator_data = None;
+    let mut attestation_statement = false;
+    for _ in 0..count {
+        match decoder.u64()? {
+            0x01 if format.is_none() => format = Some(decoder.str()?.to_owned()),
+            0x01 => return Err(CtapError::Malformed("duplicate attestation format")),
+            0x02 if authenticator_data.is_none() => {
+                authenticator_data = Some(decoder.bytes()?.to_vec())
+            }
+            0x02 => return Err(CtapError::Malformed("duplicate authenticator data")),
+            0x03 if !attestation_statement => {
+                let entries = definite_map(&mut decoder)?;
+                for _ in 0..entries {
+                    decoder.skip()?;
+                    decoder.skip()?;
+                }
+                attestation_statement = true;
+            }
+            0x03 => return Err(CtapError::Malformed("duplicate attestation statement")),
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed(
+            "trailing makeCredential response data",
+        ));
+    }
+    let _format = format.ok_or(CtapError::Malformed("missing attestation format"))?;
+    if !attestation_statement {
+        return Err(CtapError::Malformed("missing attestation statement"));
+    }
+    let authenticator_data =
+        authenticator_data.ok_or(CtapError::Malformed("missing authenticator data"))?;
+    if authenticator_data.len() < 55 || authenticator_data[32] & 0x40 == 0 {
+        return Err(CtapError::Malformed("missing attested credential data"));
+    }
+    let expected_rp_id_hash = Sha256::digest(FIDO2_TEST_RP_ID.as_bytes());
+    if authenticator_data[..32] != expected_rp_id_hash[..] {
+        return Err(CtapError::Malformed("unexpected relying-party ID hash"));
+    }
+    let credential_id_length = usize::from(u16::from_be_bytes([
+        authenticator_data[53],
+        authenticator_data[54],
+    ]));
+    let credential_id_end = 55_usize
+        .checked_add(credential_id_length)
+        .ok_or(CtapError::Malformed("credential ID length overflow"))?;
+    if credential_id_length == 0 || credential_id_end >= authenticator_data.len() {
+        return Err(CtapError::Malformed("invalid credential ID length"));
+    }
+    Ok(authenticator_data[55..credential_id_end].to_vec())
 }
 
 fn parse_pin_token_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
@@ -1187,6 +1337,35 @@ mod tests {
         response
     }
 
+    fn make_credential_response(credential_id: &[u8]) -> Vec<u8> {
+        let mut authenticator_data = Sha256::digest(FIDO2_TEST_RP_ID.as_bytes()).to_vec();
+        authenticator_data.push(0x41);
+        authenticator_data.extend_from_slice(&[0; 4]);
+        authenticator_data.extend_from_slice(&[0x33; 16]);
+        authenticator_data
+            .extend_from_slice(&(u16::try_from(credential_id.len()).unwrap()).to_be_bytes());
+        authenticator_data.extend_from_slice(credential_id);
+        authenticator_data.push(0xa0);
+
+        let mut response = Vec::new();
+        Encoder::new(&mut response)
+            .map(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .str("none")
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .map(0)
+            .unwrap();
+        response
+    }
+
     fn rp_response() -> Vec<u8> {
         let mut output = vec![0];
         let mut encoder = Encoder::new(&mut output);
@@ -1311,6 +1490,104 @@ mod tests {
         );
         assert_eq!(encode_management_next(3).unwrap(), [0xa1, 0x01, 0x03]);
         assert_eq!(encode_management_next(5).unwrap(), [0xa1, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn synthetic_make_credential_request_matches_ctap_shape() {
+        let request = encode_test_make_credential_request(&[0x11; 32], &[0x22; 32], 2).unwrap();
+        let mut decoder = Decoder::new(&request);
+        assert_eq!(decoder.map().unwrap(), Some(7));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.bytes().unwrap(), &[0x11; 32]);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.map().unwrap(), Some(2));
+        assert_eq!(decoder.str().unwrap(), "id");
+        assert_eq!(decoder.str().unwrap(), FIDO2_TEST_RP_ID);
+        assert_eq!(decoder.str().unwrap(), "name");
+        assert_eq!(decoder.str().unwrap(), "pkcs11rs synthetic relying party");
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(decoder.map().unwrap(), Some(3));
+        assert_eq!(decoder.str().unwrap(), "id");
+        assert_eq!(decoder.bytes().unwrap(), b"pkcs11rs-fido2-hardware-user-v1");
+        assert_eq!(decoder.str().unwrap(), "name");
+        assert_eq!(decoder.str().unwrap(), "pkcs11rs-test");
+        assert_eq!(decoder.str().unwrap(), "displayName");
+        assert_eq!(decoder.str().unwrap(), FIDO2_TEST_USER_DISPLAY_NAME);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.array().unwrap(), Some(1));
+        assert_eq!(decoder.map().unwrap(), Some(2));
+        assert_eq!(decoder.str().unwrap(), "alg");
+        assert_eq!(decoder.i8().unwrap(), -7);
+        assert_eq!(decoder.str().unwrap(), "type");
+        assert_eq!(decoder.str().unwrap(), "public-key");
+        assert_eq!(decoder.u8().unwrap(), 7);
+        assert_eq!(decoder.map().unwrap(), Some(1));
+        assert_eq!(decoder.str().unwrap(), "rk");
+        assert!(decoder.bool().unwrap());
+        assert_eq!(decoder.u8().unwrap(), 8);
+        assert_eq!(decoder.bytes().unwrap(), &[0x22; 32]);
+        assert_eq!(decoder.u8().unwrap(), 9);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn make_credential_pin_token_request_is_bound_to_the_test_rp() {
+        let key = CoseKey {
+            x: [0x33; 32],
+            y: [0x44; 32],
+        };
+        let request = encode_get_token_request(
+            &key,
+            &[0x55; 32],
+            PERMISSION_MAKE_CREDENTIAL,
+            Some(FIDO2_TEST_RP_ID),
+        )
+        .unwrap();
+        let mut decoder = Decoder::new(&request);
+        assert_eq!(decoder.map().unwrap(), Some(6));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 9);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        parse_cose_key(&mut decoder).unwrap();
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.bytes().unwrap(), &[0x55; 32]);
+        assert_eq!(decoder.u8().unwrap(), 9);
+        assert_eq!(decoder.u8().unwrap(), PERMISSION_MAKE_CREDENTIAL);
+        assert_eq!(decoder.u8().unwrap(), 0x0a);
+        assert_eq!(decoder.str().unwrap(), FIDO2_TEST_RP_ID);
+        assert_eq!(decoder.position(), request.len());
+    }
+
+    #[test]
+    fn make_credential_response_extracts_and_validates_credential_id() {
+        let response = make_credential_response(&[0x44; 32]);
+        assert_eq!(
+            parse_make_credential_response(&response).unwrap(),
+            [0x44; 32]
+        );
+
+        let mut wrong_rp = response.clone();
+        let hash_offset = wrong_rp
+            .windows(32)
+            .position(|window| window == Sha256::digest(FIDO2_TEST_RP_ID.as_bytes()).as_slice())
+            .unwrap();
+        wrong_rp[hash_offset] ^= 1;
+        assert!(matches!(
+            parse_make_credential_response(&wrong_rp),
+            Err(CtapError::Malformed("unexpected relying-party ID hash"))
+        ));
+
+        let mut trailing = response;
+        trailing.push(0);
+        assert!(matches!(
+            parse_make_credential_response(&trailing),
+            Err(CtapError::Malformed(
+                "trailing makeCredential response data"
+            ))
+        ));
     }
 
     #[test]
