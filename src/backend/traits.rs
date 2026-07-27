@@ -81,7 +81,14 @@ pub(crate) trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
-    fn login_without_pin(&mut self) -> Result<(), Error> {
+    fn login_with_pinentry(
+        &mut self,
+        pin: &[u8],
+        _pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
+        self.login(pin)
+    }
+    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         Err(CKR_ARGUMENTS_BAD.into())
     }
     #[cfg(all(test, not(feature = "abi-tests")))]
@@ -106,13 +113,17 @@ pub(crate) trait Slot {
     fn supports_login_user(&self) -> bool {
         false
     }
-    fn login_user_without_pin(&mut self, _username: &[u8]) -> Result<(), Error> {
+    fn login_user_without_pin(
+        &mut self,
+        _username: &[u8],
+        _pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn login_so(&mut self, _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_USER_TYPE_INVALID.into())
     }
-    fn login_so_without_pin(&mut self) -> Result<(), Error> {
+    fn login_so_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         Err(CKR_ARGUMENTS_BAD.into())
     }
     fn set_pin(&mut self, _old_pin: &[u8], _new_pin: &[u8]) -> Result<(), Error> {
@@ -359,9 +370,6 @@ pub(crate) trait Slot {
         info.flags =
             (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED)
                 as CK_FLAGS;
-        if pinentry::is_configured() && self.supports_protected_authentication_path() {
-            info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH as CK_FLAGS;
-        }
         info.ulMaxSessionCount = 0;
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = 0;

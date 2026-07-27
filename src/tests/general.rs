@@ -3229,7 +3229,8 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    let mut first = new_test_slot_context(100);
+    let handles = std::sync::Arc::new(crate::HandleCounters::new());
+    let mut first = new_test_slot_context_with_handles(100, handles.clone());
     let mut first_slot_object = first.memory_objects.values().next().unwrap().clone();
     first_slot_object.slot_id = Some(100);
     first_slot_object.unique_id = "slot-100-object".to_owned();
@@ -3238,7 +3239,7 @@ fn object_handles_are_unique_across_storage_kinds_and_slots() {
         .reconcile_slot_token_objects(100, vec![first_slot_object.clone()])
         .unwrap();
 
-    let mut second = new_test_slot_context(101);
+    let mut second = new_test_slot_context_with_handles(101, handles);
     let mut second_slot_object = first_slot_object;
     second_slot_object.slot_id = Some(101);
     second_slot_object.unique_id = "slot-101-object".to_owned();
@@ -3294,12 +3295,10 @@ fn token_object_handles_are_allocated_in_stable_identity_order() {
             .collect()
     }
 
-    crate::reset_object_handles();
     let mut first = new_test_slot_context(100);
     let first_order = reconcile_order(&mut first, &["object-c", "object-a", "object-b"]);
     drop(first);
 
-    crate::reset_object_handles();
     let mut second = new_test_slot_context(100);
     let second_order = reconcile_order(&mut second, &["object-b", "object-c", "object-a"]);
 
@@ -3313,31 +3312,18 @@ fn exhausted_pkcs11_handle_spaces_return_host_memory_errors() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
 
-    struct ResetHandles;
-    impl Drop for ResetHandles {
-        fn drop(&mut self) {
-            crate::reset_object_handles();
-            crate::reset_session_handles();
-        }
-    }
-    let _reset = ResetHandles;
     #[allow(clippy::unnecessary_cast)]
     let maximum = CK_ULONG::MAX as u64;
+    let handles = crate::HandleCounters::new();
 
-    crate::NEXT_OBJECT_HANDLE.store(maximum, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(
-        crate::allocate_object_handle().unwrap(),
-        CK_OBJECT_HANDLE::MAX
-    );
-    let object_error: CK_RV = crate::allocate_object_handle().unwrap_err().into();
+    handles.set_next_object(maximum);
+    assert_eq!(handles.allocate_object().unwrap(), CK_OBJECT_HANDLE::MAX);
+    let object_error: CK_RV = handles.allocate_object().unwrap_err().into();
     assert_eq!(object_error, CKR_HOST_MEMORY as CK_RV);
 
-    crate::NEXT_SESSION_HANDLE.store(maximum, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(
-        crate::allocate_session_handle().unwrap(),
-        CK_SESSION_HANDLE::MAX
-    );
-    let session_error: CK_RV = crate::allocate_session_handle().unwrap_err().into();
+    handles.set_next_session(maximum);
+    assert_eq!(handles.allocate_session().unwrap(), CK_SESSION_HANDLE::MAX);
+    let session_error: CK_RV = handles.allocate_session().unwrap_err().into();
     assert_eq!(session_error, CKR_HOST_MEMORY as CK_RV);
 }
 

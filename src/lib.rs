@@ -23,10 +23,7 @@ use std::{
     ptr,
     rc::Rc,
     slice,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc, Mutex, MutexGuard, OnceLock,
-    },
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
 use zeroize::Zeroizing;
@@ -105,8 +102,6 @@ where
     divisor != T::from(0) && value % divisor == T::from(0)
 }
 
-static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
-
 fn parse_debug_level(value: Option<&str>) -> Result<u8, CK_RV> {
     match value {
         None | Some("0") => Ok(0),
@@ -116,21 +111,27 @@ fn parse_debug_level(value: Option<&str>) -> Result<u8, CK_RV> {
     }
 }
 
-fn initialize_debug_logging() -> Result<(), CK_RV> {
+fn configured_debug_level() -> Result<u8, CK_RV> {
     let value = match std::env::var("PKCS11RS_DEBUG") {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
         Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD as CK_RV),
     };
-    let level = parse_debug_level(value.as_deref())?;
-    DEBUG_LEVEL.store(level, Ordering::Relaxed);
-    Ok(())
+    parse_debug_level(value.as_deref())
+}
+
+fn debug_enabled(level: u8) -> bool {
+    MODULE_CONTEXT
+        .try_read()
+        .ok()
+        .and_then(|module| module.as_ref().map(|context| context.debug_level >= level))
+        .unwrap_or(false)
 }
 
 /// Emit diagnostic output when the configured level includes the message.
 macro_rules! log {
     ($level:literal, $($arg:tt)*) => {
-        if crate::DEBUG_LEVEL.load(std::sync::atomic::Ordering::Relaxed) >= $level {
+        if crate::debug_enabled($level) {
             eprintln!($($arg)*);
         }
     };

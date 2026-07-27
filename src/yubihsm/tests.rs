@@ -3146,7 +3146,7 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
         assert_eq!(peer.create_session_count(), 1);
     }
 
-    assert!(!crate::pinentry::is_configured());
+    assert!(credential.password.lock().unwrap().is_some());
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
@@ -4144,7 +4144,12 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
         Err(crate::Error::Generic(value)) if value == crate::CKR_PIN_INCORRECT as crate::CK_RV
     ));
     #[cfg(unix)]
-    crate::Slot::login(&mut slot, b":0001default key@12345678").unwrap();
+    crate::Slot::login_with_pinentry(
+        &mut slot,
+        b":0001default key@12345678",
+        &crate::pinentry::Pinentry::from_environment().unwrap(),
+    )
+    .unwrap();
     #[cfg(not(unix))]
     crate::Slot::login_user(&mut slot, b":0001default key@12345678", b"password").unwrap();
     let session =

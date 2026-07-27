@@ -132,7 +132,7 @@ pub extern "C" fn C_OpenSession(
             let _ = ctx.slot.refresh();
             log!(2, "{:?}", ctx.slot);
             if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                let k = allocate_session_handle()?;
+                let k = context.handles.allocate_session()?;
                 log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
                 ctx.sessions
                     .insert(k, SessionContext::new(ctx.slot.open_session(slotID, flags)));
@@ -392,6 +392,7 @@ fn login(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
+        let pinentry = ctx.pinentry.clone();
         if user_type == CKU_CONTEXT_SPECIFIC as CK_USER_TYPE {
             return with_pin(pin, pin_len, |pin| {
                 let mut context_operation = None;
@@ -424,12 +425,12 @@ fn login(
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, role, |slot| match role {
                 LoginRole::User => match pin {
-                    Some(pin) => slot.login(pin),
-                    None => slot.login_without_pin(),
+                    Some(pin) => slot.login_with_pinentry(pin, pinentry.as_ref()),
+                    None => slot.login_without_pin(pinentry.as_ref()),
                 },
                 LoginRole::So => match pin {
                     Some(pin) => slot.login_so(pin),
-                    None => slot.login_so_without_pin(),
+                    None => slot.login_so_without_pin(pinentry.as_ref()),
                 },
             })
         })
@@ -487,6 +488,7 @@ fn login_user(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = ctx._get_session(session_handle)?.1.slotID();
+        let pinentry = ctx.pinentry.clone();
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
@@ -500,7 +502,7 @@ fn login_user(
                 if let Some(pin) = pin {
                     return slot.login_user(username.as_bytes(), pin);
                 }
-                slot.login_user_without_pin(username.as_bytes())
+                slot.login_user_without_pin(username.as_bytes(), pinentry.as_ref())
             })
         })
     })

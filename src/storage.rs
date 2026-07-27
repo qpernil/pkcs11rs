@@ -13,7 +13,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 const OBJECT_DIRECTORY: &str = "objects";
@@ -21,8 +24,6 @@ const SHA3_256_NAME: &str = "sha3-256";
 const SHA3_256_LENGTH: usize = 32;
 const TEMPORARY_FILE_PREFIX: &str = ".pkcs11rs-";
 const TEMPORARY_FILE_SUFFIX: &str = ".tmp";
-
-static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
 
 /// A content-addressing algorithm supported by a [`StorageProvider`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -232,6 +233,7 @@ pub trait StorageProvider: Send + Sync {
 pub struct LocalStorageProvider {
     root: PathBuf,
     objects: PathBuf,
+    next_temporary_file: Arc<AtomicU64>,
 }
 
 impl LocalStorageProvider {
@@ -240,7 +242,11 @@ impl LocalStorageProvider {
         let root = root.as_ref().to_path_buf();
         let objects = root.join(OBJECT_DIRECTORY);
         fs::create_dir_all(&objects)?;
-        Ok(Self { root, objects })
+        Ok(Self {
+            root,
+            objects,
+            next_temporary_file: Arc::new(AtomicU64::new(1)),
+        })
     }
 
     /// Return the configured store root.
@@ -268,7 +274,7 @@ impl LocalStorageProvider {
 
     fn temporary_file(&self) -> Result<(PathBuf, File), StorageError> {
         loop {
-            let id = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
+            let id = self.next_temporary_file.fetch_add(1, Ordering::Relaxed);
             let path = self.objects.join(format!(
                 "{TEMPORARY_FILE_PREFIX}{}-{id}{TEMPORARY_FILE_SUFFIX}",
                 std::process::id()

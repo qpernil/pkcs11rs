@@ -33,9 +33,12 @@ pub(crate) use yubihsm::{
     YubiHsmPublicDiscoveryCredential, YubiHsmSlot,
 };
 
+#[cfg(any(test, feature = "abi-tests"))]
 pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential;
 #[cfg(not(feature = "abi-tests"))]
-pub(crate) use yubihsm::YUBIHSM_DISCOVERY_ENV;
+pub(crate) use yubihsm::{
+    configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV,
+};
 
 #[cfg(test)]
 pub(crate) use ccid::{

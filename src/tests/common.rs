@@ -514,7 +514,6 @@ fn yubihsm_imported_keys_do_not_expose_attestation_objects() {
 
 fn finalize_for_test() {
     let _ = crate::api::C_Finalize(::std::ptr::null_mut());
-    crate::reset_object_handles();
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -667,6 +666,7 @@ fn install_hsmauth_admin_slot() -> (std::rc::Rc<HsmAuthAdminConnector>, CK_SESSI
 #[cfg(unix)]
 pub(crate) struct TestPinentry {
     path: std::path::PathBuf,
+    previous_program: Option<std::ffi::OsString>,
 }
 
 #[cfg(unix)]
@@ -704,8 +704,13 @@ done
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
+        let previous_program = std::env::var_os("PKCS11RS_PINENTRY");
+        std::env::set_var("PKCS11RS_PINENTRY", path.as_os_str());
         crate::pinentry::configure_for_test(Some(path.clone().into_os_string())).unwrap();
-        Self { path }
+        Self {
+            path,
+            previous_program,
+        }
     }
 }
 
@@ -713,6 +718,10 @@ done
 impl Drop for TestPinentry {
     fn drop(&mut self) {
         crate::pinentry::configure_for_test(None).unwrap();
+        match self.previous_program.as_ref() {
+            Some(program) => std::env::set_var("PKCS11RS_PINENTRY", program),
+            None => std::env::remove_var("PKCS11RS_PINENTRY"),
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -6814,8 +6823,23 @@ fn install_test_slot(slot_id: CK_SLOT_ID) {
 }
 
 fn new_test_slot_context(slot_id: CK_SLOT_ID) -> crate::SlotContext {
+    new_test_slot_context_with_handles(slot_id, std::sync::Arc::new(crate::HandleCounters::new()))
+}
+
+fn new_test_slot_context_with_handles(
+    slot_id: CK_SLOT_ID,
+    handles: std::sync::Arc<crate::HandleCounters>,
+) -> crate::SlotContext {
     let slot: Box<dyn crate::Slot> = Box::new(test_slot(true));
-    let mut context = crate::SlotContext::new(slot_id, slot, Vec::new()).unwrap();
+    let mut context = crate::SlotContext::new(
+        slot_id,
+        slot,
+        Vec::new(),
+        handles,
+        std::sync::Arc::new(crate::pinentry::Pinentry::from_environment().unwrap()),
+        std::sync::Arc::new(crate::yubihsm::trust::TrustStore::new()),
+    )
+    .unwrap();
     for (_, object) in crate::default_objects().unwrap() {
         context.insert_object(object).unwrap();
     }
@@ -6823,12 +6847,15 @@ fn new_test_slot_context(slot_id: CK_SLOT_ID) -> crate::SlotContext {
 }
 
 fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot>) {
-    let mut child = crate::SlotContext::new(slot_id, slot, Vec::new()).unwrap();
+    let mut module = crate::lock_context().unwrap();
+    let context = module.as_mut().unwrap();
+    let handles = context.handles.clone();
+    let pinentry = context.pinentry.clone();
+    let trust_store = context.trust_store.clone();
+    let mut child =
+        crate::SlotContext::new(slot_id, slot, Vec::new(), handles, pinentry, trust_store).unwrap();
     if slot_id == TEST_SLOT_ID {
-        let existing_objects = crate::lock_context()
-            .unwrap()
-            .as_ref()
-            .unwrap()
+        let existing_objects = context
             .slot_contexts
             .read()
             .unwrap()
@@ -6854,10 +6881,7 @@ fn install_test_slot_with_backend(slot_id: CK_SLOT_ID, slot: Box<dyn crate::Slot
             }
         }
     }
-    let mut context = crate::lock_context().unwrap();
     context
-        .as_mut()
-        .unwrap()
         .slot_contexts
         .get_mut()
         .unwrap()

@@ -13,7 +13,7 @@ use crate::{
     UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
-use crate::{configured_yubihsm_public_discovery_credential, YUBIHSM_DISCOVERY_ENV};
+use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{KeyMaterial, ABI_TEST_SLOT_ID};
 #[cfg(any(test, feature = "abi-tests"))]
@@ -58,10 +58,14 @@ pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Resul
 // The registry lock protects lazy discovery and session-handle routing; slot
 // operations release it before taking an individual SlotContext lock.
 pub(crate) struct ModuleContext {
+    pub(crate) debug_level: u8,
     pub(crate) libusb: Option<rusb::Context>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_public_discovery_credential: Option<Arc<YubiHsmPublicDiscoveryCredential>>,
+    pub(crate) handles: Arc<HandleCounters>,
+    pub(crate) pinentry: Arc<pinentry::Pinentry>,
+    pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
@@ -69,6 +73,9 @@ pub(crate) struct ModuleContext {
 pub(crate) struct SlotContext {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) slot: Box<dyn Slot>,
+    handles: Arc<HandleCounters>,
+    pub(crate) pinentry: Arc<pinentry::Pinentry>,
+    pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     pub(crate) sessions: HashMap<CK_SESSION_HANDLE, SessionContext>,
     pub(crate) login_role: Option<LoginRole>,
     pub(crate) memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
@@ -143,6 +150,9 @@ impl SlotContextRegistry {
     fn insert_pcsc_slot_contexts(
         &mut self,
         slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
+        handles: Arc<HandleCounters>,
+        pinentry: Arc<pinentry::Pinentry>,
+        trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
         // Each applet is a separate PKCS token with its own logical state.
         // Their connectors share PcscReaderState for physical reader access.
@@ -162,7 +172,14 @@ impl SlotContextRegistry {
         let contexts = slots
             .into_iter()
             .map(|(slot_id, slot, token_objects)| {
-                let context = SlotContext::new(slot_id, slot, token_objects)?;
+                let context = SlotContext::new(
+                    slot_id,
+                    slot,
+                    token_objects,
+                    handles.clone(),
+                    pinentry.clone(),
+                    trust_store.clone(),
+                )?;
                 Ok((slot_id, Arc::new(Mutex::new(context))))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -200,10 +217,39 @@ pub(crate) struct TokenObjectLocator {
     pub(crate) unique_id: String,
 }
 
-pub(crate) static NEXT_OBJECT_HANDLE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
-pub(crate) static NEXT_SESSION_HANDLE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+pub(crate) struct HandleCounters {
+    next_object: std::sync::atomic::AtomicU64,
+    next_session: std::sync::atomic::AtomicU64,
+}
+
+impl HandleCounters {
+    pub(crate) fn new() -> Self {
+        Self {
+            next_object: std::sync::atomic::AtomicU64::new(1),
+            next_session: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    pub(crate) fn allocate_object(&self) -> Result<CK_OBJECT_HANDLE, Error> {
+        allocate_handle(&self.next_object).map(|handle| handle as CK_OBJECT_HANDLE)
+    }
+
+    pub(crate) fn allocate_session(&self) -> Result<CK_SESSION_HANDLE, Error> {
+        allocate_handle(&self.next_session).map(|handle| handle as CK_SESSION_HANDLE)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_object(&self, handle: u64) {
+        self.next_object
+            .store(handle, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_session(&self, handle: u64) {
+        self.next_session
+            .store(handle, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 fn allocate_handle(counter: &std::sync::atomic::AtomicU64) -> Result<u64, Error> {
     counter
@@ -218,22 +264,6 @@ fn allocate_handle(counter: &std::sync::atomic::AtomicU64) -> Result<u64, Error>
             },
         )
         .map_err(|_| CKR_HOST_MEMORY.into())
-}
-
-pub(crate) fn allocate_object_handle() -> Result<CK_OBJECT_HANDLE, Error> {
-    allocate_handle(&NEXT_OBJECT_HANDLE).map(|handle| handle as CK_OBJECT_HANDLE)
-}
-
-pub(crate) fn reset_object_handles() {
-    NEXT_OBJECT_HANDLE.store(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub(crate) fn allocate_session_handle() -> Result<CK_SESSION_HANDLE, Error> {
-    allocate_handle(&NEXT_SESSION_HANDLE).map(|handle| handle as CK_SESSION_HANDLE)
-}
-
-pub(crate) fn reset_session_handles() {
-    NEXT_SESSION_HANDLE.store(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -361,7 +391,10 @@ impl std::fmt::Debug for SessionContext {
 impl ModuleContext {
     #[allow(unused_mut)]
     pub(crate) fn new() -> Result<ModuleContext, Error> {
-        pinentry::configure_from_environment()?;
+        let debug_level = crate::configured_debug_level()?;
+        let pinentry = Arc::new(pinentry::Pinentry::from_environment()?);
+        let handles = Arc::new(HandleCounters::new());
+        let trust_store = Arc::new(crate::yubihsm::trust::TrustStore::new());
         #[cfg(feature = "abi-tests")]
         let mut slots = HashMap::from([
             (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
@@ -382,14 +415,17 @@ impl ModuleContext {
         slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
-        let yubihsm_public_discovery_credential = configured_yubihsm_public_discovery_credential(
-            std::env::var_os(YUBIHSM_DISCOVERY_ENV),
-        )?;
+        let yubihsm_public_discovery_credential =
+            configured_yubihsm_public_discovery_credential_with_pinentry(
+                std::env::var_os(YUBIHSM_DISCOVERY_ENV),
+                pinentry.clone(),
+            )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_credential = None;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
         let mut context = ModuleContext {
+            debug_level,
             #[cfg(feature = "abi-tests")]
             libusb: None,
             #[cfg(not(feature = "abi-tests"))]
@@ -416,6 +452,9 @@ impl ModuleContext {
             },
             yubihsm_urls,
             yubihsm_public_discovery_credential,
+            handles: handles.clone(),
+            pinentry: pinentry.clone(),
+            trust_store: trust_store.clone(),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
         #[cfg(feature = "abi-tests")]
@@ -435,7 +474,14 @@ impl ModuleContext {
             } else {
                 std::mem::take(&mut token_objects)
             };
-            let mut child = SlotContext::new(slot_id, slot, initial_token_objects)?;
+            let mut child = SlotContext::new(
+                slot_id,
+                slot,
+                initial_token_objects,
+                handles.clone(),
+                pinentry.clone(),
+                trust_store.clone(),
+            )?;
             if slot_id == ABI_TEST_SLOT_ID {
                 let mut objects = default_objects()?.into_iter().collect::<Vec<_>>();
                 objects.sort_by_key(|(handle, _)| *handle);
@@ -458,6 +504,9 @@ impl ModuleContext {
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
         discover_objects: bool,
+        handles: Arc<HandleCounters>,
+        pinentry: Arc<pinentry::Pinentry>,
+        trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<SlotContext, Error> {
         let token_objects = if discover_objects && slot.is_present() {
             match slot.token_objects(slot_id) {
@@ -470,7 +519,7 @@ impl ModuleContext {
         } else {
             Vec::new()
         };
-        SlotContext::new(slot_id, slot, token_objects)
+        SlotContext::new(slot_id, slot, token_objects, handles, pinentry, trust_store)
     }
 
     #[cfg(test)]
@@ -483,7 +532,15 @@ impl ModuleContext {
             .slot_contexts
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        Self::insert_yubihsm_slot_with_discovery(&mut slot_contexts, slot_id, slot, true)
+        Self::insert_yubihsm_slot_with_discovery(
+            &mut slot_contexts,
+            slot_id,
+            slot,
+            true,
+            self.handles.clone(),
+            self.pinentry.clone(),
+            self.trust_store.clone(),
+        )
     }
 
     fn insert_yubihsm_slot_with_discovery(
@@ -491,8 +548,18 @@ impl ModuleContext {
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
         discover_objects: bool,
+        handles: Arc<HandleCounters>,
+        pinentry: Arc<pinentry::Pinentry>,
+        trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<(), Error> {
-        let context = Self::new_yubihsm_slot_context(slot_id, slot, discover_objects)?;
+        let context = Self::new_yubihsm_slot_context(
+            slot_id,
+            slot,
+            discover_objects,
+            handles,
+            pinentry,
+            trust_store,
+        )?;
         slot_contexts.insert_yubihsm_slot_context(slot_id, context);
         Ok(())
     }
@@ -512,7 +579,12 @@ impl ModuleContext {
         self.slot_contexts
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .insert_pcsc_slot_contexts(slots)
+            .insert_pcsc_slot_contexts(
+                slots,
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+            )
             .map(|_| ())
     }
     pub(crate) fn get_info(&self, info: &mut CK_INFO) -> Result<(), Error> {
@@ -535,10 +607,16 @@ impl SlotContext {
         slot_id: CK_SLOT_ID,
         slot: Box<dyn Slot>,
         token_objects: Vec<TokenObject>,
+        handles: Arc<HandleCounters>,
+        pinentry: Arc<pinentry::Pinentry>,
+        trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<Self, Error> {
         let mut context = Self {
             slot_id,
             slot,
+            handles,
+            pinentry,
+            trust_store,
             sessions: HashMap::new(),
             login_role: None,
             memory_objects: HashMap::new(),
@@ -655,7 +733,7 @@ impl SlotContext {
         &mut self,
         mut object: TokenObject,
     ) -> Result<CK_OBJECT_HANDLE, Error> {
-        let handle = allocate_object_handle()?;
+        let handle = self.handles.allocate_object()?;
         if object.unique_id.is_empty() {
             object.unique_id = handle.to_string();
         }
@@ -796,8 +874,10 @@ impl SlotContext {
             .collect::<Vec<_>>();
         new_unique_ids.sort();
         for unique_id in new_unique_ids {
-            self.token_object_handles
-                .insert(allocate_object_handle()?, TokenObjectLocator { unique_id });
+            self.token_object_handles.insert(
+                self.handles.allocate_object()?,
+                TokenObjectLocator { unique_id },
+            );
         }
         Ok(())
     }
@@ -958,6 +1038,9 @@ impl ModuleContext {
                                         slot_id,
                                         slot,
                                         true,
+                                        self.handles.clone(),
+                                        self.pinentry.clone(),
+                                        self.trust_store.clone(),
                                     ) {
                                         log!(1, "YubiHSM slot registration: {:?}", error);
                                         continue;
@@ -1007,9 +1090,15 @@ impl ModuleContext {
                     connector.set_unavailable();
                 }
             }
-            if let Err(error) =
-                Self::insert_yubihsm_slot_with_discovery(&mut slot_contexts, slot_id, slot, true)
-            {
+            if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
+                &mut slot_contexts,
+                slot_id,
+                slot,
+                true,
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+            ) {
                 log!(
                     1,
                     "YubiHSM connector slot registration for {url}: {:?}",
@@ -1171,7 +1260,12 @@ impl ModuleContext {
                         reader_slots.push((slot_id, slot, token_objects));
                     }
                     if !reader_slots.is_empty() {
-                        if let Err(error) = slot_contexts.insert_pcsc_slot_contexts(reader_slots) {
+                        if let Err(error) = slot_contexts.insert_pcsc_slot_contexts(
+                            reader_slots,
+                            self.handles.clone(),
+                            self.pinentry.clone(),
+                            self.trust_store.clone(),
+                        ) {
                             log!(1, "PCSC slot context registration: {:?}", error);
                         }
                     }

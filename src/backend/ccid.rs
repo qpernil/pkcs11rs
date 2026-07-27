@@ -270,7 +270,7 @@ impl Slot for HsmAuthSlot {
         self.authenticated.set(true);
         Ok(())
     }
-    fn login_without_pin(&mut self) -> Result<(), Error> {
+    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.login(&[])
     }
     fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
@@ -286,10 +286,10 @@ impl Slot for HsmAuthSlot {
         self.authenticated.set(true);
         Ok(())
     }
-    fn login_so_without_pin(&mut self) -> Result<(), Error> {
+    fn login_so_without_pin(&mut self, pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         let title = self.label();
         let description = format!("Enter the YubiHSM Auth management password for {title}.");
-        let pin = pinentry::request(pinentry::Prompt {
+        let pin = pinentry.request(pinentry::Prompt {
             title: &title,
             description: &description,
             label: "Management password:",
@@ -620,7 +620,7 @@ impl Slot for IssuerSecurityDomainSlot {
         self.authenticated.set(true);
         Ok(())
     }
-    fn login_without_pin(&mut self) -> Result<(), Error> {
+    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.login(&[])
     }
     fn logout(&mut self) -> Result<(), Error> {

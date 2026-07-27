@@ -479,7 +479,7 @@ impl Slot for AbiScp03Slot {
         )?);
         Ok(())
     }
-    fn login_without_pin(&mut self) -> Result<(), Error> {
+    fn login_without_pin(&mut self, _pinentry: &pinentry::Pinentry) -> Result<(), Error> {
         self.login(&[])
     }
 

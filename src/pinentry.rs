@@ -10,8 +10,10 @@ use zeroize::Zeroizing;
 const CONFIGURATION_ENV: &str = "PKCS11RS_PINENTRY";
 const MAX_RESPONSE_LINE: usize = 1024 * 1024;
 
-static PROGRAM: Mutex<Option<OsString>> = Mutex::new(None);
-static PROMPT: Mutex<()> = Mutex::new(());
+pub(crate) struct Pinentry {
+    program: Mutex<Option<OsString>>,
+    prompt: Mutex<()>,
+}
 
 pub(crate) struct Prompt<'a> {
     pub(crate) title: &'a str,
@@ -19,23 +21,66 @@ pub(crate) struct Prompt<'a> {
     pub(crate) label: &'a str,
 }
 
-pub(crate) fn configure_from_environment() -> Result<(), Error> {
-    configure(std::env::var_os(CONFIGURATION_ENV))
-}
-
-fn configure(value: Option<OsString>) -> Result<(), Error> {
-    let value = parse_configuration(value)?;
-    match value.as_deref() {
-        Some(program) => log!(2, "Pinentry configured with executable {:?}", program),
-        None => log!(2, "Pinentry is not configured"),
+impl Pinentry {
+    pub(crate) fn from_environment() -> Result<Self, Error> {
+        let pinentry = Self {
+            program: Mutex::new(None),
+            prompt: Mutex::new(()),
+        };
+        pinentry.configure(std::env::var_os(CONFIGURATION_ENV))?;
+        Ok(pinentry)
     }
-    *PROGRAM.lock().map_err(|_| CKR_CANT_LOCK)? = value;
-    Ok(())
+
+    fn configure(&self, value: Option<OsString>) -> Result<(), Error> {
+        let value = parse_configuration(value)?;
+        match value.as_deref() {
+            Some(program) => log!(2, "Pinentry configured with executable {:?}", program),
+            None => log!(2, "Pinentry is not configured"),
+        }
+        *self.program.lock().map_err(|_| CKR_CANT_LOCK)? = value;
+        Ok(())
+    }
+
+    pub(crate) fn is_configured(&self) -> bool {
+        self.program
+            .lock()
+            .map(|program| program.is_some())
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn request(&self, prompt: Prompt<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
+        let program = self
+            .program
+            .lock()
+            .map_err(|_| CKR_CANT_LOCK)?
+            .clone()
+            .ok_or(CKR_ARGUMENTS_BAD)?;
+        let _prompt = self.prompt.lock().map_err(|_| CKR_CANT_LOCK)?;
+        log!(
+            2,
+            "Starting pinentry executable {:?} for prompt {:?}",
+            program,
+            prompt.label
+        );
+        let result = Client::start(&program).and_then(|client| client.request(prompt));
+        match &result {
+            Ok(_) => log!(2, "Pinentry returned a password"),
+            Err(Error::Generic(rv)) if *rv == CKR_CANCEL as crate::CK_RV => {
+                log!(2, "Pinentry prompt was cancelled")
+            }
+            Err(error) => log!(2, "Pinentry prompt failed: {:?}", error),
+        }
+        result
+    }
 }
 
 #[cfg(all(test, unix))]
 pub(crate) fn configure_for_test(value: Option<OsString>) -> Result<(), Error> {
-    configure(value)
+    let module = crate::lock_context_read()?;
+    match module.as_ref() {
+        Some(context) => context.pinentry.configure(value),
+        None => Ok(()),
+    }
 }
 
 fn parse_configuration(value: Option<OsString>) -> Result<Option<OsString>, Error> {
@@ -43,37 +88,6 @@ fn parse_configuration(value: Option<OsString>) -> Result<Option<OsString>, Erro
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(value)
-}
-
-pub(crate) fn is_configured() -> bool {
-    PROGRAM
-        .lock()
-        .map(|program| program.is_some())
-        .unwrap_or(false)
-}
-
-pub(crate) fn request(prompt: Prompt<'_>) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let program = PROGRAM
-        .lock()
-        .map_err(|_| CKR_CANT_LOCK)?
-        .clone()
-        .ok_or(CKR_ARGUMENTS_BAD)?;
-    let _prompt = PROMPT.lock().map_err(|_| CKR_CANT_LOCK)?;
-    log!(
-        2,
-        "Starting pinentry executable {:?} for prompt {:?}",
-        program,
-        prompt.label
-    );
-    let result = Client::start(&program).and_then(|client| client.request(prompt));
-    match &result {
-        Ok(_) => log!(2, "Pinentry returned a password"),
-        Err(Error::Generic(rv)) if *rv == CKR_CANCEL as crate::CK_RV => {
-            log!(2, "Pinentry prompt was cancelled")
-        }
-        Err(error) => log!(2, "Pinentry prompt failed: {:?}", error),
-    }
-    result
 }
 
 struct Client {
