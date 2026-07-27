@@ -70,7 +70,7 @@ PIN and auth token are never exposed through PKCS #11. The auth token is
 zeroized after the one login-time enumeration, and cached credential metadata
 is cleared at logout.
 
-The implementation issues only:
+The production backend issues only:
 
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
@@ -82,6 +82,8 @@ The implementation issues only:
 
 It never sends make-credential, get-assertion, update-user-information,
 delete-credential, authenticator-configuration, reset, or signing commands.
+The separately gated hardware test described below additionally implements only
+the first-time `authenticatorClientPIN/setPIN` operation.
 
 Each sufficiently complete response becomes a private, token-resident,
 immutable `CKO_DATA` object. It is intentionally not modeled as a PKCS #11
@@ -126,6 +128,31 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   -- --ignored --nocapture
 ```
 
+## Initial PIN provisioning hardware test
+
+The normal backend remains read-only and does not expose PIN initialization
+through PKCS #11. A test-only CTAP `setPIN` path exists solely for provisioning
+an otherwise compatible authenticator during local hardware validation. The
+ignored test requires both an explicit mutation enable flag and the new PIN:
+
+```sh
+PKCS11RS_CCID_APPLICATIONS=fido2 \
+PKCS11RS_TEST_PROVISION_FIDO2_PIN=1 \
+PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
+  cargo test provisions_initial_fido2_pin -- --ignored --nocapture
+```
+
+The test refuses to send `setPIN` when GetInfo already reports `clientPin=true`;
+it never changes or resets an existing PIN. It accepts only 4 through 63
+printable ASCII characters, which are unambiguously UTF-8 NFC, and also enforces
+the authenticator's reported `minPINLength`. If multiple compatible keys are
+attached, set `PKCS11RS_FIDO2_TEST_SOURCE` as described above.
+
+Provisioning changes persistent authenticator configuration. Run this test only
+against the intended test key and store the selected PIN securely. The PIN is
+read from the environment, is not printed, and is held in zeroizing memory by
+the test process.
+
 ## CBOR implementation
 
 Protocol encoding and strict definite-length response parsing use
@@ -136,9 +163,10 @@ field checks, and response bounds explicit.
 
 ## Deferred hardware and firmware questions
 
-No computer or physical YubiKey was available during this implementation.
-The ignored tests above are compile-checked but have not been executed.
-Validation remains necessary for:
+The initial implementation was completed without hardware. The compatibility
+probe has since run against pre-release hardware, while resident-credential
+enumeration and initial PIN provisioning remain deferred. Validation remains
+necessary for:
 
 - USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8
   production, pre-release, FIPS, and Security Key model of interest;

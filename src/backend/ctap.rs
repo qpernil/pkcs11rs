@@ -322,7 +322,7 @@ impl Slot for Fido2Slot {
         let info = self.discovered_info()?;
         log!(
             2,
-            "FIDO2 authenticator info on {}: versions {:?}, extensions {:?}, AAGUID {:02x?}, options {:?}, max message {:?}, PIN/UV protocols {:?}, transports {:?}",
+            "FIDO2 authenticator info on {}: versions {:?}, extensions {:?}, AAGUID {:02x?}, options {:?}, max message {:?}, PIN/UV protocols {:?}, transports {:?}, minimum PIN length {:?}",
             self.connector.name(),
             info.versions,
             info.extensions,
@@ -330,7 +330,8 @@ impl Slot for Fido2Slot {
             info.options,
             info.max_msg_size,
             info.pin_uv_auth_protocols,
-            info.transports
+            info.transports,
+            info.min_pin_length
         );
         Ok(())
     }
@@ -349,8 +350,31 @@ impl Slot for Fido2Slot {
             info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
         }
         info.ulMaxPinLen = 63;
-        info.ulMinPinLen = 4;
+        info.ulMinPinLen = discovered.min_pin_length.unwrap_or(4) as CK_ULONG;
         Ok(())
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn fido2_provision_pin(&mut self, new_pin: &[u8]) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.connector.clear_secure_channel();
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = self.discovered_info()?;
+            self.client
+                .provision_pin(&info, new_pin)
+                .map_err(CtapError::into_pkcs11)?;
+            self.info.get_mut().take();
+            let refreshed = self.discovered_info()?;
+            if !refreshed.option("clientPin") {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            Ok(())
+        })();
+        self.connector.clear_secure_channel();
+        result
     }
 
     fn clear_session(&mut self) {
@@ -386,7 +410,7 @@ impl Slot for Fido2Slot {
         true
     }
 
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(all(test, not(feature = "abi-tests")))]
     fn is_fido2(&self) -> bool {
         true
     }
