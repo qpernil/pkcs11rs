@@ -3128,13 +3128,16 @@ fn yubihsm_auth_public_discovery_prompts_once_and_reuses_the_password() {
         let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
             symmetric_hsmauth_provider("12345678"),
         ]));
-        let slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+        let mut slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
             peer.clone(),
             (2, 4, 1),
             vec![YUBIHSM_ALGO_RSA_2048],
             providers,
             Some(credential.clone()),
         );
+        slot.set_pinentry(Arc::new(
+            crate::pinentry::Pinentry::from_environment().unwrap(),
+        ));
 
         assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
             matches!(

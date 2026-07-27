@@ -15,6 +15,14 @@ pub(crate) struct Pinentry {
     prompt: Mutex<()>,
 }
 
+impl std::fmt::Debug for Pinentry {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("Pinentry")
+            .field("configured", &self.is_configured())
+            .finish()
+    }
+}
+
 pub(crate) struct Prompt<'a> {
     pub(crate) title: &'a str,
     pub(crate) description: &'a str,
@@ -22,11 +30,15 @@ pub(crate) struct Prompt<'a> {
 }
 
 impl Pinentry {
-    pub(crate) fn from_environment() -> Result<Self, Error> {
-        let pinentry = Self {
+    pub(crate) fn unconfigured() -> Self {
+        Self {
             program: Mutex::new(None),
             prompt: Mutex::new(()),
-        };
+        }
+    }
+
+    pub(crate) fn from_environment() -> Result<Self, Error> {
+        let pinentry = Self::unconfigured();
         pinentry.configure(std::env::var_os(CONFIGURATION_ENV))?;
         Ok(pinentry)
     }
