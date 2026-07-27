@@ -29,8 +29,8 @@ pub(crate) use piv::{
 };
 pub(crate) use traits::{apply_connector_versions, session_state, BackendSession, Slot, SlotKind};
 pub(crate) use yubihsm::{
-    send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry, YubiHsmDiscoveryCache,
-    YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
+    send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
 };
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -39,6 +39,8 @@ pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential;
 pub(crate) use yubihsm::{
     configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV,
 };
+#[cfg(test)]
+pub(crate) use yubihsm::{YubiHsmDiscoveryCache, YubiHsmObjectKey};
 
 #[cfg(test)]
 pub(crate) use ccid::{
