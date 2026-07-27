@@ -24,10 +24,6 @@ pub(crate) struct PivKey {
     pub(crate) pin_policy: u8,
     pub(crate) touch_policy: u8,
     pub(crate) origin: u8,
-    #[cfg(feature = "abi-tests")]
-    pub(crate) public_label: Option<String>,
-    #[cfg(feature = "abi-tests")]
-    pub(crate) private_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,8 +32,6 @@ pub(crate) struct PivCertificate {
     pub(crate) algorithm: piv::Algorithm,
     pub(crate) value: Vec<u8>,
     pub(crate) attestation: bool,
-    #[cfg(feature = "abi-tests")]
-    pub(crate) label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -344,23 +338,11 @@ impl PivSlot {
         }
     }
 
-    fn key_label(key: &PivKey, _private: bool) -> String {
-        #[cfg(feature = "abi-tests")]
-        if let Some(label) = if _private {
-            key.private_label.as_ref()
-        } else {
-            key.public_label.as_ref()
-        } {
-            return label.clone();
-        }
+    fn key_label(key: &PivKey) -> String {
         piv_slot_label(key.slot, false, false)
     }
 
     fn certificate_label(certificate: &PivCertificate) -> String {
-        #[cfg(feature = "abi-tests")]
-        if let Some(label) = certificate.label.as_ref() {
-            return label.clone();
-        }
         piv_slot_label(certificate.slot, true, certificate.attestation)
     }
 
@@ -409,8 +391,6 @@ impl PivSlot {
             algorithm,
             value: certificate.clone(),
             attestation: slot == piv::Slot::Attestation,
-            #[cfg(feature = "abi-tests")]
-            label: None,
         });
         self.data_objects
             .retain(|candidate| candidate.object_id != slot.certificate_object());
@@ -429,10 +409,6 @@ impl PivSlot {
                 pin_policy: 0,
                 touch_policy: 0,
                 origin: 0,
-                #[cfg(feature = "abi-tests")]
-                public_label: None,
-                #[cfg(feature = "abi-tests")]
-                private_label: None,
             });
         }
         Ok(())
@@ -643,8 +619,6 @@ impl Slot for PivSlot {
                         algorithm,
                         value,
                         attestation: slot == piv::Slot::Attestation,
-                        #[cfg(feature = "abi-tests")]
-                        label: None,
                     });
                 }
             }
@@ -682,10 +656,6 @@ impl Slot for PivSlot {
                 pin_policy: metadata.pin_policy.unwrap_or(0),
                 touch_policy: metadata.touch_policy.unwrap_or(0),
                 origin: metadata.origin.unwrap_or(0),
-                #[cfg(feature = "abi-tests")]
-                public_label: None,
-                #[cfg(feature = "abi-tests")]
-                private_label: None,
             });
         }
         for mapping in piv::DATA_OBJECTS
@@ -872,10 +842,6 @@ impl Slot for PivSlot {
             pin_policy,
             touch_policy,
             origin: piv::ORIGIN_GENERATED,
-            #[cfg(feature = "abi-tests")]
-            public_label: None,
-            #[cfg(feature = "abi-tests")]
-            private_label: None,
         });
         Ok(())
     }
@@ -910,10 +876,6 @@ impl Slot for PivSlot {
             pin_policy,
             touch_policy,
             origin: piv::ORIGIN_IMPORTED,
-            #[cfg(feature = "abi-tests")]
-            public_label: None,
-            #[cfg(feature = "abi-tests")]
-            private_label: None,
         });
         Ok(())
     }
@@ -1018,8 +980,8 @@ impl Slot for PivSlot {
             }
             let id = vec![key.slot.cka_id()];
             let fingerprint = piv_key_fingerprint(key)?;
-            let public_label = Self::key_label(key, false);
-            let private_label = Self::key_label(key, true);
+            let public_label = Self::key_label(key);
+            let private_label = public_label.clone();
             let key_type = key.public_key.key_type(key.algorithm);
             let is_rsa = key.algorithm.rsa_input_length().is_some();
             let can_sign = !matches!(key.algorithm, piv::Algorithm::X25519);

@@ -34,6 +34,18 @@ CASE_PROFILES = {
     "CERT-M-1-32": p11.CKP_PUBLIC_CERTIFICATES_TOKEN,
 }
 
+ABI_QUALIFICATION_CASES = {
+    p11.ABI_TEST_SLOT_ID: {"BL-M-1-32"},
+    p11.ABI_TEST_PIV_SLOT_ID: {"BL-M-1-32"},
+    p11.ABI_TEST_SCP03_SLOT_ID: {"BL-M-1-32"},
+    p11.ABI_TEST_YUBIHSM_SLOT_ID: {
+        "BL-M-1-32",
+        "AUTH-M-1-32",
+        "CERT-M-1-32",
+    },
+    p11.ABI_TEST_SCP11_SLOT_ID: {"BL-M-1-32"},
+}
+
 
 def _require_ok(operation: str, rv: int) -> None:
     if rv != p11.CKR_OK:
@@ -188,13 +200,22 @@ def main() -> int:
         for name in selected:
             if CASE_PROFILES[name] not in profile_ids:
                 continue
+            if (
+                args.module is None
+                and name not in ABI_QUALIFICATION_CASES.get(slot_id, set())
+            ):
+                continue
             test = OasisProfileTests(TEST_METHODS[name])
             test.slot_id = slot_id
             if args.module is None:
                 test.pin = (
                     b"123456"
                     if slot_id == p11.ABI_TEST_PIV_SLOT_ID
-                    else b"1234"
+                    else (
+                        b"0001password"
+                        if slot_id == p11.ABI_TEST_YUBIHSM_SLOT_ID
+                        else b"1234"
+                    )
                 )
             if multiple_slots:
                 test.result_suffix = f"-slot-{slot_id}"

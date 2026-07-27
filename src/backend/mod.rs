@@ -33,7 +33,6 @@ pub(crate) use yubihsm::{
     YubiHsmPublicDiscoveryCredential, YubiHsmSlot,
 };
 
-#[cfg(any(not(feature = "abi-tests"), test))]
 pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential;
 #[cfg(not(feature = "abi-tests"))]
 pub(crate) use yubihsm::YUBIHSM_DISCOVERY_ENV;
@@ -64,13 +63,7 @@ pub(crate) use yubihsm::{
 pub(crate) use ccid::IssuerSecurityDomainSession;
 #[cfg(test)]
 pub(crate) use piv::piv_object_fingerprint;
-#[cfg(feature = "abi-tests")]
-pub(crate) use piv::PivCertificate;
-#[cfg(any(test, feature = "abi-tests"))]
+#[cfg(test)]
 pub(crate) use piv::{PivDataObject, PivKey};
-#[cfg(feature = "abi-tests")]
-pub(crate) use traits::mechanisms_support_extended_provider;
-#[cfg(feature = "abi-tests")]
-pub(crate) use yubihsm::yubihsm_device_public_key_object;
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) use yubihsm::yubihsm_token_objects;

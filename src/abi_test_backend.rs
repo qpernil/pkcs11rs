@@ -1,6 +1,9 @@
 use super::*;
 
 #[cfg(feature = "abi-tests")]
+mod yubihsm_connector;
+
+#[cfg(feature = "abi-tests")]
 #[derive(Debug)]
 pub(super) struct AbiTestSlot;
 
@@ -17,7 +20,7 @@ impl Slot for AbiTestSlot {
         self
     }
     fn kind(&self) -> SlotKind {
-        SlotKind::Software
+        SlotKind::Synthetic
     }
 
     fn name(&self) -> String {
@@ -135,7 +138,27 @@ impl Session for AbiTestSession {
 // ABI fixtures exercise slot/session dispatch without touching host hardware.
 // Protocol handshakes and cryptographic vectors remain covered by module tests.
 #[derive(Debug)]
-struct AbiPivConnector;
+struct AbiPivConnector {
+    certificate_data: Vec<u8>,
+}
+
+#[cfg(feature = "abi-tests")]
+fn abi_piv_tlv(tag: u8, value: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut encoded = Vec::with_capacity(value.len() + 4);
+    encoded.push(tag);
+    if value.len() < 0x80 {
+        encoded.push(value.len() as u8);
+    } else if value.len() <= u8::MAX as usize {
+        encoded.extend([0x81, value.len() as u8]);
+    } else if value.len() <= u16::MAX as usize {
+        encoded.push(0x82);
+        encoded.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    } else {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    encoded.extend_from_slice(value);
+    Ok(encoded)
+}
 
 #[cfg(feature = "abi-tests")]
 impl Connector for AbiPivConnector {
@@ -177,18 +200,36 @@ impl Connector for AbiPivConnector {
         receive: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let response = match command.get(1).copied() {
-            Some(0xa4) | Some(0x20) => vec![0x90, 0x00],
-            Some(0xfd) => vec![5, 7, 0, 0x90, 0x00],
-            Some(0xf8) => vec![0, 0, 0, 1, 0x90, 0x00],
-            Some(0x87) => {
+        let command = CommandApdu::decode(command)?;
+        let mut response = match command.ins {
+            0xa4 | 0x20 => Vec::new(),
+            0xfd => vec![5, 7, 0],
+            0xf8 => vec![0, 0, 0, 1],
+            0xf7 if command.p2 == piv::Slot::Signature as u8 => vec![
+                0x01,
+                0x01,
+                piv::Algorithm::Rsa2048 as u8,
+                0x02,
+                0x02,
+                2,
+                1,
+                0x03,
+                0x01,
+                piv::ORIGIN_GENERATED,
+            ],
+            0xcb if command.data == [0x5c, 0x03, 0x5f, 0xc1, 0x0a] => {
+                abi_piv_tlv(0x53, &self.certificate_data)?
+            }
+            0x87 => {
                 let mut response = vec![0x7c, 0x82, 0x01, 0x04, 0x82, 0x82, 0x01, 0x00];
                 response.extend(std::iter::repeat_n(0, 256));
-                response.extend([0x90, 0x00]);
                 response
             }
-            _ => vec![0x6d, 0x00],
+            _ => vec![0x6a, 0x82],
         };
+        if response != [0x6a, 0x82] {
+            response.extend([0x90, 0x00]);
+        }
         if response.len() > receive.len() {
             return Err(CKR_DEVICE_ERROR.into());
         }
@@ -215,43 +256,10 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
         })
         .clone();
     let certificate_data = piv::encode_certificate_object(&certificate)?;
-    let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector);
-    Ok(PivSlot {
-        connector,
-        application_aid: piv::PIV_AID.to_vec(),
-        slot_description: Some(String::from("PKCS11RS ABI PIV test slot")),
-        authenticated: Rc::new(Cell::new(false)),
-        management_authenticated: Rc::new(Cell::new(false)),
-        version: piv::Version {
-            major: 5,
-            minor: 7,
-            patch: 0,
-        },
-        serial: String::from("PIV00001"),
-        keys: vec![PivKey {
-            slot: piv::Slot::Signature,
-            algorithm: piv::Algorithm::Rsa2048,
-            public_key: PivPublicKey::Rsa(public_key),
-            attestation: Rc::new(RefCell::new(None)),
-            attestation_attempted: Rc::new(Cell::new(false)),
-            pin_policy: 2,
-            touch_policy: 1,
-            origin: piv::ORIGIN_GENERATED,
-            public_label: Some(String::from("testrsa-pub")),
-            private_label: Some(String::from("testrsa-pri")),
-        }],
-        certificates: vec![PivCertificate {
-            slot: piv::Slot::Signature,
-            algorithm: piv::Algorithm::Rsa2048,
-            value: certificate,
-            attestation: false,
-            label: Some(String::from("Mozilla Builtin Roots")),
-        }],
-        data_objects: vec![PivDataObject {
-            object_id: piv::Slot::Signature.certificate_object(),
-            value: certificate_data,
-        }],
-    })
+    let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector { certificate_data });
+    let mut slot = PivSlot::new(connector, piv::PIV_AID.to_vec());
+    Slot::init_slot(&mut slot)?;
+    Ok(slot)
 }
 
 #[cfg(feature = "abi-tests")]
@@ -506,164 +514,114 @@ impl Slot for AbiScp03Slot {
 }
 
 #[cfg(feature = "abi-tests")]
-#[derive(Debug)]
-struct AbiYubiHsmSession {
-    slot_id: CK_SLOT_ID,
-    flags: CK_FLAGS,
-    concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
-}
-
-#[cfg(feature = "abi-tests")]
-impl Session for AbiYubiHsmSession {
-    fn as_debug(&self) -> &dyn std::fmt::Debug {
-        self
-    }
-
-    fn slotID(&self) -> CK_SLOT_ID {
-        self.slot_id
-    }
-
-    fn flags(&self) -> CK_FLAGS {
-        self.flags
-    }
-
-    fn get_session_info(&self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn generate_random(&self, output: &mut [u8]) -> Result<(), Error> {
-        if let Some((state, slot_index)) = &self.concurrency {
-            state.overlap(*slot_index)?;
-            output.fill(self.slot_id as u8);
-            return Ok(());
+fn abi_yubihsm_command(command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
+    const NIST_AES_KEY_ID: u16 = 3;
+    const NIST_AES_128_KEY: [u8; 16] = [
+        0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f,
+        0x3c,
+    ];
+    const RFC5649_AES_192_KEY: [u8; 24] = [
+        0x58, 0x40, 0xdf, 0x6e, 0x29, 0xb0, 0x2a, 0xf1, 0xab, 0x49, 0x3b, 0x70, 0x5b, 0xf1, 0x6e,
+        0xa1, 0xae, 0x83, 0x38, 0xf4, 0xdc, 0xc1, 0x76, 0xa8,
+    ];
+    const RFC3610_AES_128_KEY: [u8; 16] = [
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce,
+        0xcf,
+    ];
+    const NIST_GMAC_AES_128_KEY: [u8; 16] = [
+        0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30, 0x83,
+        0x08,
+    ];
+    const RFC3394_AES_128_KEY: [u8; 16] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    let data = command.data();
+    let id = data
+        .get(..2)
+        .and_then(|value| value.try_into().ok())
+        .map(u16::from_be_bytes)
+        .ok_or(CKR_DATA_LEN_RANGE)?;
+    let key: &[u8] = match id {
+        NIST_AES_KEY_ID => &NIST_AES_128_KEY,
+        ABI_YUBIHSM_RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
+        ABI_YUBIHSM_RFC3610_AES_KEY_ID => &RFC3610_AES_128_KEY,
+        ABI_YUBIHSM_NIST_GMAC_AES_KEY_ID => &NIST_GMAC_AES_128_KEY,
+        ABI_YUBIHSM_RFC3394_AES_KEY_ID => &RFC3394_AES_128_KEY,
+        _ => &[0; 16],
+    };
+    let (direction, iv, input) = match command.code() {
+        YubiHsmCommandCode::GetOpaque => {
+            return match id {
+                0 => abi_yubihsm_attestation_signer_certificate(),
+                ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
+                ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
+                _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
+            };
         }
-        getrandom::fill(output).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
-    }
-
-    fn yubihsm_device_public_key(&self) -> Result<Vec<u8>, Error> {
-        abi_yubihsm_device_public_key()
-    }
-
-    fn yubihsm_command(&self, command: &YubiHsmCommand) -> Result<Vec<u8>, Error> {
-        const NIST_AES_KEY_ID: u16 = 3;
-        const NIST_AES_128_KEY: [u8; 16] = [
-            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
-            0x4f, 0x3c,
-        ];
-        const RFC5649_AES_192_KEY: [u8; 24] = [
-            0x58, 0x40, 0xdf, 0x6e, 0x29, 0xb0, 0x2a, 0xf1, 0xab, 0x49, 0x3b, 0x70, 0x5b, 0xf1,
-            0x6e, 0xa1, 0xae, 0x83, 0x38, 0xf4, 0xdc, 0xc1, 0x76, 0xa8,
-        ];
-        const RFC3610_AES_128_KEY: [u8; 16] = [
-            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
-            0xce, 0xcf,
-        ];
-        const NIST_GMAC_AES_128_KEY: [u8; 16] = [
-            0xfe, 0xff, 0xe9, 0x92, 0x86, 0x65, 0x73, 0x1c, 0x6d, 0x6a, 0x8f, 0x94, 0x67, 0x30,
-            0x83, 0x08,
-        ];
-        const RFC3394_AES_128_KEY: [u8; 16] = [
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
-            0x0e, 0x0f,
-        ];
-        let data = command.data();
-        let id = data
-            .get(..2)
-            .and_then(|value| value.try_into().ok())
-            .map(u16::from_be_bytes)
-            .ok_or(CKR_DATA_LEN_RANGE)?;
-        let key: &[u8] = match id {
-            NIST_AES_KEY_ID => &NIST_AES_128_KEY,
-            ABI_YUBIHSM_RFC5649_AES_KEY_ID => &RFC5649_AES_192_KEY,
-            ABI_YUBIHSM_RFC3610_AES_KEY_ID => &RFC3610_AES_128_KEY,
-            ABI_YUBIHSM_NIST_GMAC_AES_KEY_ID => &NIST_GMAC_AES_128_KEY,
-            ABI_YUBIHSM_RFC3394_AES_KEY_ID => &RFC3394_AES_128_KEY,
-            _ => &[0; 16],
-        };
-        let (direction, iv, input) = match command.code() {
-            YubiHsmCommandCode::GetOpaque => {
-                return match id {
-                    0 => abi_yubihsm_attestation_signer_certificate(),
-                    ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
-                    ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
-                    _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
-                };
+        YubiHsmCommandCode::SignAttestationCertificate => {
+            if data != [0, 0, 0, 0] {
+                return Err(CKR_OBJECT_HANDLE_INVALID.into());
             }
-            YubiHsmCommandCode::SignAttestationCertificate => {
-                if data != [0, 0, 0, 0] {
-                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
-                }
-                return abi_yubihsm_device_attestation();
-            }
-            YubiHsmCommandCode::ExportWrapped
-            | YubiHsmCommandCode::GetRsaWrappedKey
-            | YubiHsmCommandCode::ExportRsaWrapped => {
-                return Ok([b"ABI wrapped key:".as_slice(), data].concat());
-            }
-            YubiHsmCommandCode::ImportWrapped | YubiHsmCommandCode::ImportRsaWrapped => {
-                return Ok(vec![YUBIHSM_SYMMETRIC_KEY, 0, 2]);
-            }
-            YubiHsmCommandCode::PutRsaWrappedKey => {
-                let object_type = *data.get(2).ok_or(CKR_DATA_LEN_RANGE)?;
-                return Ok(vec![object_type, 0, 2]);
-            }
-            YubiHsmCommandCode::SignHmac => {
-                if id != ABI_YUBIHSM_HMAC_KEY_ID {
-                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
-                }
-                return abi_yubihsm_hmac_sha256(data.get(2..).ok_or(CKR_DATA_LEN_RANGE)?);
-            }
-            YubiHsmCommandCode::VerifyHmac => {
-                if id != ABI_YUBIHSM_HMAC_KEY_ID {
-                    return Err(CKR_OBJECT_HANDLE_INVALID.into());
-                }
-                let signature = data.get(2..34).ok_or(CKR_DATA_LEN_RANGE)?;
-                let expected = abi_yubihsm_hmac_sha256(data.get(34..).ok_or(CKR_DATA_LEN_RANGE)?)?;
-                return Ok(vec![u8::from(signature == expected)]);
-            }
-            YubiHsmCommandCode::EncryptEcb => (
-                secure_channel_crypto::Direction::Encrypt,
-                None,
-                data.get(2..),
-            ),
-            YubiHsmCommandCode::DecryptEcb => (
-                secure_channel_crypto::Direction::Decrypt,
-                None,
-                data.get(2..),
-            ),
-            YubiHsmCommandCode::EncryptCbc => (
-                secure_channel_crypto::Direction::Encrypt,
-                data.get(2..18),
-                data.get(18..),
-            ),
-            YubiHsmCommandCode::DecryptCbc => (
-                secure_channel_crypto::Direction::Decrypt,
-                data.get(2..18),
-                data.get(18..),
-            ),
-            _ => return Ok(vec![0x5a; 256]),
-        };
-        let input = input.ok_or(CKR_DATA_LEN_RANGE)?;
-        if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
-            return Err(CKR_DATA_LEN_RANGE.into());
+            return abi_yubihsm_device_attestation();
         }
-        if let Some(iv) = iv {
-            secure_channel_crypto::aes_cbc(key, iv, input, direction)
-        } else {
-            secure_channel_crypto::aes_ecb(key, input, direction)
+        YubiHsmCommandCode::ExportWrapped
+        | YubiHsmCommandCode::GetRsaWrappedKey
+        | YubiHsmCommandCode::ExportRsaWrapped => {
+            return Ok([b"ABI wrapped key:".as_slice(), data].concat());
         }
+        YubiHsmCommandCode::ImportWrapped | YubiHsmCommandCode::ImportRsaWrapped => {
+            return Ok(vec![YUBIHSM_SYMMETRIC_KEY, 0, 2]);
+        }
+        YubiHsmCommandCode::PutRsaWrappedKey => {
+            let object_type = *data.get(2).ok_or(CKR_DATA_LEN_RANGE)?;
+            return Ok(vec![object_type, 0, 2]);
+        }
+        YubiHsmCommandCode::SignHmac => {
+            if id != ABI_YUBIHSM_HMAC_KEY_ID {
+                return Err(CKR_OBJECT_HANDLE_INVALID.into());
+            }
+            return abi_yubihsm_hmac_sha256(data.get(2..).ok_or(CKR_DATA_LEN_RANGE)?);
+        }
+        YubiHsmCommandCode::VerifyHmac => {
+            if id != ABI_YUBIHSM_HMAC_KEY_ID {
+                return Err(CKR_OBJECT_HANDLE_INVALID.into());
+            }
+            let signature = data.get(2..34).ok_or(CKR_DATA_LEN_RANGE)?;
+            let expected = abi_yubihsm_hmac_sha256(data.get(34..).ok_or(CKR_DATA_LEN_RANGE)?)?;
+            return Ok(vec![u8::from(signature == expected)]);
+        }
+        YubiHsmCommandCode::EncryptEcb => (
+            secure_channel_crypto::Direction::Encrypt,
+            None,
+            data.get(2..),
+        ),
+        YubiHsmCommandCode::DecryptEcb => (
+            secure_channel_crypto::Direction::Decrypt,
+            None,
+            data.get(2..),
+        ),
+        YubiHsmCommandCode::EncryptCbc => (
+            secure_channel_crypto::Direction::Encrypt,
+            data.get(2..18),
+            data.get(18..),
+        ),
+        YubiHsmCommandCode::DecryptCbc => (
+            secure_channel_crypto::Direction::Decrypt,
+            data.get(2..18),
+            data.get(18..),
+        ),
+        _ => return Ok(vec![0x5a; 256]),
+    };
+    let input = input.ok_or(CKR_DATA_LEN_RANGE)?;
+    if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
     }
-}
-
-#[cfg(feature = "abi-tests")]
-type AbiYubiHsmAttributes = HashMap<String, (Option<Vec<u8>>, Option<String>)>;
-
-#[cfg(feature = "abi-tests")]
-#[derive(Debug)]
-pub(super) struct AbiYubiHsmSlot {
-    attributes: RefCell<AbiYubiHsmAttributes>,
-    serial: &'static str,
-    concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
+    if let Some(iv) = iv {
+        secure_channel_crypto::aes_cbc(key, iv, input, direction)
+    } else {
+        secure_channel_crypto::aes_ecb(key, input, direction)
+    }
 }
 
 #[cfg(feature = "abi-tests")]
@@ -679,6 +637,7 @@ struct AbiYubiHsmConcurrencyState {
     active_by_slot: [std::sync::atomic::AtomicBool; 2],
     changed: std::sync::Condvar,
     round: std::sync::Mutex<AbiYubiHsmConcurrencyRound>,
+    verified: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "abi-tests")]
@@ -686,6 +645,9 @@ impl AbiYubiHsmConcurrencyState {
     fn overlap(&self, slot_index: usize) -> Result<(), Error> {
         use std::sync::atomic::Ordering;
 
+        if self.verified.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         if self.active_by_slot[slot_index].swap(true, Ordering::SeqCst) {
             return Err(CKR_CANT_LOCK.into());
         }
@@ -703,6 +665,7 @@ impl AbiYubiHsmConcurrencyState {
         if round.arrived == 2 {
             round.arrived = 0;
             round.generation += 1;
+            self.verified.store(true, Ordering::SeqCst);
             self.changed.notify_all();
             return Ok(());
         }
@@ -722,25 +685,35 @@ impl AbiYubiHsmConcurrencyState {
 }
 
 #[cfg(feature = "abi-tests")]
-impl Default for AbiYubiHsmSlot {
-    fn default() -> Self {
-        Self {
-            attributes: RefCell::default(),
-            serial: "HSM00001",
-            concurrency: None,
-        }
-    }
-}
+type AbiSlot = (CK_SLOT_ID, Box<dyn Slot>);
 
 #[cfg(feature = "abi-tests")]
-pub(super) fn abi_test_yubihsm_slots() -> Vec<(CK_SLOT_ID, Box<dyn Slot>)> {
+pub(super) fn abi_test_yubihsm_slots() -> Result<Vec<AbiSlot>, Error> {
+    let new_slot = |connector: Rc<dyn Connector>| -> Result<YubiHsmSlot, Error> {
+        let public_discovery = configured_yubihsm_public_discovery_credential(Some(
+            std::ffi::OsString::from("0001password"),
+        ))?;
+        let mut slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+            connector,
+            (2, 4, 0),
+            Vec::new(),
+            Arc::new(HsmAuthProviderRegistry::default()),
+            public_discovery,
+        );
+        Slot::init_slot(&mut slot)?;
+        Ok(slot)
+    };
     if std::env::var_os("PKCS11RS_ABI_CONCURRENCY_TEST").as_deref()
         != Some(std::ffi::OsStr::new("1"))
     {
-        return vec![(
+        let connector: Rc<dyn Connector> = Rc::new(yubihsm_connector::AbiYubiHsmConnector::new(
+            "HSM00001", None,
+        )?);
+        let slot = new_slot(connector)?;
+        return Ok(vec![(
             ABI_TEST_YUBIHSM_SLOT_ID,
-            Box::new(AbiYubiHsmSlot::default()),
-        )];
+            Box::new(slot) as Box<dyn Slot>,
+        )]);
     }
 
     let state = Arc::new(AbiYubiHsmConcurrencyState::default());
@@ -750,14 +723,12 @@ pub(super) fn abi_test_yubihsm_slots() -> Vec<(CK_SLOT_ID, Box<dyn Slot>)> {
     ]
     .into_iter()
     .map(|(slot_id, serial, slot_index)| {
-        (
-            slot_id,
-            Box::new(AbiYubiHsmSlot {
-                attributes: RefCell::default(),
-                serial,
-                concurrency: Some((state.clone(), slot_index)),
-            }) as Box<dyn Slot>,
-        )
+        let connector: Rc<dyn Connector> = Rc::new(yubihsm_connector::AbiYubiHsmConnector::new(
+            serial,
+            Some((state.clone(), slot_index)),
+        )?);
+        let slot = new_slot(connector)?;
+        Ok((slot_id, Box::new(slot) as Box<dyn Slot>))
     })
     .collect()
 }
@@ -1077,6 +1048,12 @@ pub(super) fn abi_test_yubihsm_authentication_objects(
 ) -> Result<Vec<TokenObject>, Error> {
     [
         (
+            1,
+            32,
+            YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
+            b"default-auth".as_slice(),
+        ),
+        (
             4,
             32,
             YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION,
@@ -1091,9 +1068,11 @@ pub(super) fn abi_test_yubihsm_authentication_objects(
     ]
     .into_iter()
     .map(|(id, length, algorithm, name)| {
-        let label = std::str::from_utf8(name).unwrap().to_owned();
+        let label = std::str::from_utf8(name)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?
+            .to_owned();
         let info = YubiHsmObjectInfo {
-            capabilities: yubihsm_capabilities(&[0x05, 0x09, 0x0b, 0x32, 0x33]),
+            capabilities: yubihsm_capabilities(&[0x00, 0x05, 0x09, 0x0b, 0x32, 0x33]),
             id,
             length,
             domains: 1,
@@ -1114,8 +1093,10 @@ pub(super) fn abi_test_yubihsm_authentication_objects(
 #[cfg(feature = "abi-tests")]
 fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
     let wrap_info = |id, object_type, algorithm, length, capabilities, name: &[u8]| {
-        let label = std::str::from_utf8(name).unwrap().to_owned();
-        YubiHsmObjectInfo {
+        let label = std::str::from_utf8(name)
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?
+            .to_owned();
+        Ok::<_, Error>(YubiHsmObjectInfo {
             capabilities: yubihsm_capabilities(capabilities),
             id,
             length,
@@ -1126,7 +1107,7 @@ fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>
             origin: 1,
             label,
             delegated_capabilities: [0; 8],
-        }
+        })
     };
     let mut objects = yubihsm_token_objects(
         slot_id,
@@ -1137,7 +1118,7 @@ fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>
             16,
             &[0x0c, 0x0d, 0x25, 0x26],
             b"ccm-wrap",
-        ),
+        )?,
         None,
     )?;
     let rsa_public = YubiHsmPublicKey {
@@ -1153,7 +1134,7 @@ fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>
             256,
             &[0x0c, 0x0d],
             b"rsa-wrap",
-        ),
+        )?,
         Some(rsa_public.clone()),
     )?);
     objects.extend(yubihsm_token_objects(
@@ -1165,7 +1146,7 @@ fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>
             256,
             &[0x0c],
             b"public-wrap",
-        ),
+        )?,
         Some(rsa_public),
     )?);
     Ok(objects)
@@ -1192,7 +1173,9 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
     definitions
         .into_iter()
         .map(|(id, algorithm, name, length)| {
-            let label = std::str::from_utf8(name).unwrap().to_owned();
+            let label = std::str::from_utf8(name)
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?
+                .to_owned();
             let info = YubiHsmObjectInfo {
                 capabilities: [0; 8],
                 id,
@@ -1214,228 +1197,4 @@ pub(super) fn abi_test_yubihsm_opaque_objects(
             Ok(object)
         })
         .collect()
-}
-
-#[cfg(feature = "abi-tests")]
-impl Slot for AbiYubiHsmSlot {
-    fn as_debug(&self) -> &dyn std::fmt::Debug {
-        self
-    }
-    fn kind(&self) -> SlotKind {
-        SlotKind::YubiHsm
-    }
-
-    fn name(&self) -> String {
-        if self.serial == "HSM00001" {
-            String::from("PKCS11RS ABI YubiHSM test slot")
-        } else {
-            format!("PKCS11RS ABI YubiHSM test slot {}", self.serial)
-        }
-    }
-
-    fn manufacturer(&self) -> &str {
-        "PKCS11RS"
-    }
-
-    fn product(&self) -> &str {
-        "ABI YubiHSM"
-    }
-
-    fn model(&self) -> &str {
-        "ABI YubiHSM"
-    }
-
-    fn serial(&self) -> &str {
-        self.serial
-    }
-
-    fn major(&self) -> u8 {
-        2
-    }
-
-    fn minor(&self) -> u8 {
-        4
-    }
-
-    fn is_present(&self) -> bool {
-        true
-    }
-
-    fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session> {
-        Box::new(AbiYubiHsmSession {
-            slot_id,
-            flags,
-            concurrency: self.concurrency.clone(),
-        })
-    }
-
-    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
-        if pin == b"1234" {
-            Ok(())
-        } else if pin == b":0001default" {
-            let password = pinentry::request(pinentry::Prompt {
-                title: &format!("HSM Auth #AUTH0001 accessing ABI YubiHSM #{}", self.serial),
-                description: "Enter the authentication password for \"default\".",
-                label: "Authentication password:",
-            })?;
-            if password.as_slice() == b"1234" {
-                Ok(())
-            } else {
-                Err(CKR_PIN_INCORRECT.into())
-            }
-        } else {
-            Err(CKR_PIN_INCORRECT.into())
-        }
-    }
-
-    fn login_user(&mut self, username: &[u8], pin: &[u8]) -> Result<(), Error> {
-        if username == b"0001" && pin == b"1234" {
-            Ok(())
-        } else {
-            Err(CKR_PIN_INCORRECT.into())
-        }
-    }
-
-    fn supports_login_user(&self) -> bool {
-        true
-    }
-
-    fn login_user_without_pin(&mut self, username: &[u8]) -> Result<(), Error> {
-        let title = self.label();
-        let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
-        let description = format!("Enter the authentication password for {username} on {title}.");
-        let pin = pinentry::request(pinentry::Prompt {
-            title: &title,
-            description: &description,
-            label: "Authentication password:",
-        })?;
-        self.login_user(username.as_bytes(), pin.as_slice())
-    }
-
-    fn logout(&mut self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn init_slot(&mut self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
-        self.format_slot_info(info);
-        Ok(())
-    }
-
-    fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        self.format_token_info(info);
-        Ok(())
-    }
-
-    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
-        let mut objects = vec![
-            abi_test_yubihsm_object(slot_id),
-            abi_test_yubihsm_public_object(slot_id),
-            abi_test_yubihsm_aes_object(slot_id),
-            abi_test_yubihsm_nist_aes_object(slot_id),
-            abi_test_yubihsm_rfc5649_aes_object(slot_id),
-            abi_test_yubihsm_rfc3610_aes_object(slot_id),
-            abi_test_yubihsm_nist_gmac_aes_object(slot_id),
-            abi_test_yubihsm_rfc3394_aes_object(slot_id),
-        ];
-        objects.push(abi_test_yubihsm_hmac_object(slot_id)?);
-        objects.extend(abi_test_yubihsm_authentication_objects(slot_id)?);
-        objects.extend(abi_test_yubihsm_wrap_objects(slot_id)?);
-        objects.extend(abi_test_yubihsm_opaque_objects(slot_id)?);
-        objects.push(yubihsm_device_public_key_object(
-            slot_id,
-            &abi_yubihsm_device_public_key()?,
-        )?);
-        let attributes = self
-            .attributes
-            .try_borrow()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        for object in &mut objects {
-            if let Some((id, label)) = attributes.get(&object.unique_id) {
-                if let Some(id) = id {
-                    object.id = id.clone();
-                }
-                if let Some(label) = label {
-                    object.label = label.clone();
-                }
-            }
-        }
-        Ok(objects)
-    }
-
-    fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
-        let mut mechanisms = yubihsm_mechanisms(&[
-            YUBIHSM_ALGO_RSA_PKCS1_SHA1,
-            YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-            YUBIHSM_ALGO_RSA_OAEP_SHA1,
-            YUBIHSM_ALGO_RSA_2048,
-            YUBIHSM_ALGO_AES128_CCM_WRAP,
-            YUBIHSM_ALGO_AES128,
-            YUBIHSM_ALGO_AES_ECB,
-            YUBIHSM_ALGO_AES_CBC,
-            YUBIHSM_ALGO_AES_KWP,
-            YUBIHSM_ALGO_HMAC_SHA256,
-        ]);
-        if let Some(rsa_pkcs) = mechanisms
-            .iter_mut()
-            .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
-        {
-            rsa_pkcs.flags |= (CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS;
-        }
-        mechanisms
-    }
-
-    fn supports_extended_provider_profile(&self) -> bool {
-        mechanisms_support_extended_provider(&self.mechanisms())
-    }
-
-    fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
-        true
-    }
-
-    fn supports_protected_authentication_path(&self) -> bool {
-        true
-    }
-
-    fn yubihsm_read_opaque(&self, id: u16) -> Result<Vec<u8>, Error> {
-        match id {
-            ABI_YUBIHSM_OPAQUE_DATA_ID => Ok(ABI_YUBIHSM_OPAQUE_DATA.to_vec()),
-            ABI_YUBIHSM_OPAQUE_CERTIFICATE_ID => abi_yubihsm_opaque_certificate(),
-            _ => Err(CKR_OBJECT_HANDLE_INVALID.into()),
-        }
-    }
-
-    fn yubihsm_set_attributes(
-        &self,
-        slot_id: CK_SLOT_ID,
-        unique_id: &str,
-        id: Option<&[u8]>,
-        label: Option<&str>,
-    ) -> Result<(), Error> {
-        let object = self
-            .token_objects(slot_id)?
-            .into_iter()
-            .find(|object| object.unique_id == unique_id)
-            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
-        if !matches!(object.material, KeyMaterial::YubiHsm { .. }) {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
-        let mut attributes = self
-            .attributes
-            .try_borrow_mut()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        let entry = attributes
-            .entry(unique_id.to_owned())
-            .or_insert((None, None));
-        if let Some(id) = id {
-            entry.0 = Some(id.to_vec());
-        }
-        if let Some(label) = label {
-            entry.1 = Some(label.to_owned());
-        }
-        Ok(())
-    }
 }

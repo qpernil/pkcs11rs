@@ -225,7 +225,7 @@ impl ModuleContext {
             ),
         ]);
         #[cfg(feature = "abi-tests")]
-        slots.extend(abi_test_yubihsm_slots());
+        slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_credential = configured_yubihsm_public_discovery_credential(
