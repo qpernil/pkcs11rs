@@ -28,8 +28,7 @@ pub(crate) struct OpenPgpCertificate {
 pub(crate) struct OpenPgpDataObject {
     pub(crate) tag: u16,
     pub(crate) label: &'static str,
-    pub(crate) value: Rc<RefCell<Option<Vec<u8>>>>,
-    pub(crate) attempted: Rc<Cell<bool>>,
+    pub(crate) cache: SharedLazyBytes,
 }
 
 impl OpenPgpSlot {
@@ -351,8 +350,7 @@ impl Slot for OpenPgpSlot {
             self.data_objects.push(OpenPgpDataObject {
                 tag: data_object.tag(),
                 label,
-                value: Rc::new(RefCell::new(None)),
-                attempted: Rc::new(Cell::new(false)),
+                cache: Rc::new(RefCell::new(LazyCache::Unattempted)),
             });
         }
         for key_ref in OpenPgpKeyRef::ALL {
@@ -759,8 +757,7 @@ impl Slot for OpenPgpSlot {
                 material: KeyMaterial::OpenPgpData {
                     tag: data_object.tag,
                     connector: self.connector.clone(),
-                    value: data_object.value.clone(),
-                    attempted: data_object.attempted.clone(),
+                    cache: data_object.cache.clone(),
                 },
             });
         }

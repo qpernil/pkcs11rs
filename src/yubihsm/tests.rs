@@ -1,15 +1,15 @@
 use super::*;
 use crate::{
     configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
-    Slot, TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot,
-    CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
-    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
-    CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO, YUBIHSM_ALGO_AES128,
-    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
-    YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
-    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
-    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
-    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
+    Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
+    YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY,
+    CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
+    CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
+    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
+    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
+    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY,
+    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
 };
 use std::sync::Arc;
 use std::{
@@ -3043,7 +3043,10 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
         session_role(&slot),
         Some(YubiHsmSessionRole::PublicDiscovery)
     );
-    assert!(slot.object_cache.borrow().available);
+    assert!(matches!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Available { .. }
+    ));
     assert!(peer.session.borrow().is_some());
     assert_eq!(peer.closed_sessions.get(), 0);
 }
@@ -3207,7 +3210,10 @@ fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
             )
         })
     );
-    assert!(!slot.object_cache.borrow().attempted);
+    assert_eq!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Unattempted
+    );
     assert_eq!(peer.create_session_count(), 0);
 
     Slot::login(&mut slot, b"0001password").unwrap();
@@ -3231,7 +3237,10 @@ fn yubihsm_auth_public_discovery_waits_for_provider_discovery() {
 fn yubihsm_public_read_session_can_open_before_object_discovery() {
     let peer = Rc::new(ProtocolPeer::new());
     let slot = public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
-    assert!(!slot.object_cache.borrow().attempted);
+    assert_eq!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Unattempted
+    );
 
     Slot::ensure_backend_read_session(&slot).unwrap();
     assert_eq!(peer.create_session_count(), 1);
@@ -3239,8 +3248,10 @@ fn yubihsm_public_read_session_can_open_before_object_discovery() {
         session_role(&slot),
         Some(YubiHsmSessionRole::PublicDiscovery)
     );
-    assert!(!slot.object_cache.borrow().attempted);
-    assert!(!slot.object_cache.borrow().available);
+    assert_eq!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Unattempted
+    );
 }
 
 #[test]
@@ -3429,7 +3440,7 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
 
 fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
     mut slot: YubiHsmSlot,
-    attempted: bool,
+    expected: YubiHsmDiscoveryCache,
 ) {
     assert!(!Slot::token_objects(&slot, 7)
         .unwrap()
@@ -3439,8 +3450,7 @@ fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
             KeyMaterial::Profile { profile_id }
                 if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
         )));
-    assert_eq!(slot.object_cache.borrow().attempted, attempted);
-    assert!(!slot.object_cache.borrow().available);
+    assert_eq!(slot.object_cache.borrow().discovery, expected);
 
     Slot::login_user(&mut slot, b"0001", PASSWORD).unwrap();
     assert!(Slot::login_is_active(&slot));
@@ -3463,7 +3473,10 @@ fn unknown_public_discovery_authkey_does_not_gain_a_profile_from_user_login() {
         .unwrap();
     let slot = public_discovery_test_slot(peer, credential);
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, true);
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+        slot,
+        YubiHsmDiscoveryCache::Failed,
+    );
 }
 
 #[test]
@@ -3472,7 +3485,10 @@ fn public_discovery_secure_channel_fault_does_not_gain_a_profile_from_user_login
     peer.add_public_certificate_pair();
     let slot = public_discovery_test_slot(peer, public_discovery_credential("wrong password"));
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, true);
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+        slot,
+        YubiHsmDiscoveryCache::Failed,
+    );
 }
 
 #[test]
@@ -3487,7 +3503,10 @@ fn missing_hsmauth_slot_does_not_gain_a_profile_from_user_login() {
         Some(hsmauth_public_discovery_credential()),
     );
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, false);
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+        slot,
+        YubiHsmDiscoveryCache::Unattempted,
+    );
 }
 
 #[test]
@@ -3504,7 +3523,10 @@ fn missing_hsmauth_credential_does_not_gain_a_profile_from_user_login() {
         Some(hsmauth_public_discovery_credential()),
     );
 
-    assert_failed_public_discovery_stays_unprofiled_after_user_login(slot, false);
+    assert_failed_public_discovery_stays_unprofiled_after_user_login(
+        slot,
+        YubiHsmDiscoveryCache::Unattempted,
+    );
 }
 
 #[test]
@@ -3613,7 +3635,10 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
     assert_eq!(session_role(&slot), Some(YubiHsmSessionRole::User));
     assert!(Slot::backend_session_is_active(&slot));
     assert!(Slot::login_is_active(&slot));
-    assert!(slot.object_cache.borrow().available);
+    assert!(matches!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Available { .. }
+    ));
     let logged_in_objects = Slot::token_objects(&slot, 7).unwrap();
     let get_opaque_after_login = peer
         .inner_commands
@@ -3696,7 +3721,10 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
     assert_eq!(session_role(&slot), None);
     assert!(!Slot::backend_session_is_active(&slot));
     assert!(!Slot::login_is_active(&slot));
-    assert!(slot.object_cache.borrow().available);
+    assert!(matches!(
+        slot.object_cache.borrow().discovery,
+        YubiHsmDiscoveryCache::Available { .. }
+    ));
     let logged_out_objects = Slot::token_objects(&slot, 7).unwrap();
     assert!(logged_out_objects.iter().any(|object| {
         matches!(

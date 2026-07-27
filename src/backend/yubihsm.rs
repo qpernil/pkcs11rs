@@ -394,11 +394,28 @@ impl YubiHsmPublicDiscoveryConfig {
 #[derive(Debug, Default)]
 pub(crate) struct YubiHsmObjectCache {
     pub(crate) connection_epoch: u64,
-    pub(crate) attempted: bool,
-    pub(crate) available: bool,
-    pub(crate) authkey_domains: Option<u16>,
+    pub(crate) discovery: YubiHsmDiscoveryCache,
     pub(crate) native_objects: HashMap<YubiHsmObjectKey, YubiHsmCachedObjectProperties>,
     pub(crate) objects: Vec<TokenObject>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum YubiHsmDiscoveryCache {
+    #[default]
+    Unattempted,
+    Failed,
+    Available {
+        authkey_domains: u16,
+    },
+}
+
+impl YubiHsmDiscoveryCache {
+    fn authkey_domains(self) -> Option<u16> {
+        match self {
+            Self::Available { authkey_domains } => Some(authkey_domains),
+            Self::Unattempted | Self::Failed => None,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -505,15 +522,13 @@ impl YubiHsmCachedObjectProperties {
 
 #[derive(Clone, Debug)]
 pub(crate) struct YubiHsmAttestationCache {
-    pub(crate) value: Rc<RefCell<Option<Vec<u8>>>>,
-    pub(crate) attempted: Rc<Cell<bool>>,
+    pub(crate) cache: SharedLazyBytes,
 }
 
 impl YubiHsmAttestationCache {
     fn new() -> Self {
         Self {
-            value: Rc::new(RefCell::new(None)),
-            attempted: Rc::new(Cell::new(false)),
+            cache: Rc::new(RefCell::new(LazyCache::Unattempted)),
         }
     }
 }
@@ -1132,7 +1147,7 @@ impl YubiHsmSlot {
                 .object_cache
                 .try_borrow()
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-            state.authkey_domains
+            state.discovery.authkey_domains()
         };
         let (session, authkey_id) = match self.authenticate_public_discovery(config) {
             Ok(authenticated) => authenticated,
@@ -1471,7 +1486,9 @@ impl YubiHsmSlot {
             return false;
         };
         match self.object_cache.try_borrow() {
-            Ok(state) if state.available => return true,
+            Ok(state) if matches!(state.discovery, YubiHsmDiscoveryCache::Available { .. }) => {
+                return true;
+            }
             Err(_) => return false,
             _ => {}
         }
@@ -1502,10 +1519,10 @@ impl YubiHsmSlot {
             let Ok(mut state) = self.object_cache.try_borrow_mut() else {
                 return false;
             };
-            if state.attempted {
+            if state.discovery != YubiHsmDiscoveryCache::Unattempted {
                 return false;
             }
-            state.attempted = true;
+            state.discovery = YubiHsmDiscoveryCache::Failed;
         }
 
         log!(
@@ -1560,8 +1577,7 @@ impl YubiHsmSlot {
                     retained.insert(object.unique_id.clone(), object);
                 }
                 state.objects = retained.into_values().collect();
-                state.available = true;
-                state.authkey_domains = Some(authkey_domains);
+                state.discovery = YubiHsmDiscoveryCache::Available { authkey_domains };
                 drop(state);
                 let Some(retained_session) = session.into_inner() else {
                     return false;
@@ -1718,8 +1734,7 @@ impl YubiHsmSlot {
         let mut attestation_cache = self.attestation_cache.try_borrow_mut()?;
         for ((target, _), cache) in attestation_cache.iter() {
             if private_targets.contains(target) {
-                *cache.value.try_borrow_mut()? = None;
-                cache.attempted.set(false);
+                *cache.cache.try_borrow_mut()? = LazyCache::Unattempted;
             }
         }
         attestation_cache.retain(|(target, _), _| !private_targets.contains(target));
@@ -2441,7 +2456,7 @@ impl Slot for YubiHsmSlot {
                 .object_cache
                 .try_borrow()
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-            state.available.then_some(state.authkey_domains).flatten()
+            state.discovery.authkey_domains()
         };
         if let Some(discovery_domains) = discovery_domains {
             let user_info = self.authentication_key_info(&session, authkey_id);
@@ -2472,13 +2487,14 @@ impl Slot for YubiHsmSlot {
             .map_err(|_| CKR_CANT_LOCK)?
             .values()
         {
-            if cache
-                .value
-                .try_borrow()
-                .map_err(|_| CKR_CANT_LOCK)?
-                .is_none()
-            {
-                cache.attempted.set(false);
+            if !matches!(
+                *cache
+                    .cache
+                    .try_borrow()
+                    .map_err(|_| Error::from(CKR_CANT_LOCK))?,
+                LazyCache::Value(_)
+            ) {
+                *cache.cache.try_borrow_mut()? = LazyCache::Unattempted;
             }
         }
         Ok(())
@@ -2742,8 +2758,7 @@ impl Slot for YubiHsmSlot {
                     session: self.session.clone(),
                     id: info.id,
                     algorithm: public_key.algorithm,
-                    value: cache.value,
-                    attempted: cache.attempted,
+                    cache: cache.cache,
                 },
             });
         }

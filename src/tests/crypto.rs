@@ -1460,8 +1460,7 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
             connector,
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::EccP256,
-            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
-            attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            cache: std::rc::Rc::new(std::cell::RefCell::new(crate::LazyCache::Unattempted)),
         },
     };
 
@@ -1507,8 +1506,7 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
             slot: crate::piv::Slot::Attestation,
             algorithm: crate::piv::Algorithm::EccP256,
             public_key,
-            attestation: std::rc::Rc::new(std::cell::RefCell::new(None)),
-            attestation_attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            attestation: std::rc::Rc::new(std::cell::RefCell::new(crate::LazyCache::Unattempted)),
             pin_policy: 0,
             touch_policy: 0,
             origin: crate::piv::ORIGIN_GENERATED,
