@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ConnectorIdentity {
+    pub(crate) manufacturer: String,
+    pub(crate) product: String,
+    pub(crate) serial: String,
+    pub(crate) hardware_version: Option<(u8, u8)>,
+    pub(crate) firmware_version: Option<(u8, u8, u8)>,
+}
+
 pub(crate) trait Connector {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
     fn manufacturer(&self) -> &str;
@@ -12,6 +21,15 @@ pub(crate) trait Connector {
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         None
+    }
+    fn identity(&self) -> ConnectorIdentity {
+        ConnectorIdentity {
+            manufacturer: self.manufacturer().to_owned(),
+            product: self.product().to_owned(),
+            serial: self.serial().to_owned(),
+            hardware_version: self.hardware_version(),
+            firmware_version: self.firmware_version(),
+        }
     }
     fn connection_epoch(&self) -> u64 {
         0
@@ -152,6 +170,7 @@ pub(crate) struct PcscReaderState {
     operation: Mutex<()>,
     transport: Mutex<PcscTransportState>,
     secure_channel: Mutex<SecureChannelState>,
+    identity: Mutex<Option<(u64, ConnectorIdentity)>>,
 }
 
 impl PcscReaderState {
@@ -183,6 +202,7 @@ impl PcscReaderState {
                 session: Some(session),
                 ..SecureChannelState::default()
             }),
+            identity: Mutex::new(None),
         }
     }
 }
@@ -373,6 +393,9 @@ impl Connector for PcscAppletConnector {
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         self.base.firmware_version()
+    }
+    fn identity(&self) -> ConnectorIdentity {
+        self.base.identity()
     }
     fn connection_epoch(&self) -> u64 {
         self.base.connection_epoch()
@@ -720,9 +743,6 @@ impl UsbConnector {
 pub(crate) struct PcscConnector {
     pub(crate) reader: std::ffi::CString,
     pub(crate) context: pcsc::Context,
-    pub(crate) yubikey_device_info: OnceLock<YubiKeyDeviceInfo>,
-    pub(crate) firmware_version: Cell<Option<(u8, u8, u8)>>,
-    pub(crate) serial_number: OnceLock<String>,
     pub(crate) state: Arc<PcscReaderState>,
 }
 
@@ -754,17 +774,10 @@ impl Connector for PcscConnector {
         "Yubico"
     }
     fn product(&self) -> &str {
-        self.yubikey_device_info
-            .get()
-            .and_then(|info| info.part_number.as_deref())
-            .unwrap_or("YubiKey")
+        "YubiKey"
     }
     fn serial(&self) -> &str {
-        self.yubikey_device_info
-            .get()
-            .and_then(|info| info.serial.as_deref())
-            .or_else(|| self.serial_number.get().map(String::as_str))
-            .unwrap_or("0")
+        "0"
     }
     fn major(&self) -> u8 {
         self.firmware_version()
@@ -777,10 +790,27 @@ impl Connector for PcscConnector {
             .unwrap_or(0)
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
-        self.yubikey_device_info
-            .get()
-            .and_then(|info| info.version)
-            .or_else(|| self.firmware_version.get())
+        self.identity().firmware_version
+    }
+    fn identity(&self) -> ConnectorIdentity {
+        let epoch = self.connection_epoch();
+        self.state
+            .identity
+            .lock()
+            .ok()
+            .and_then(|identity| {
+                identity
+                    .as_ref()
+                    .filter(|(identity_epoch, _)| *identity_epoch == epoch)
+                    .map(|(_, identity)| identity.clone())
+            })
+            .unwrap_or_else(|| ConnectorIdentity {
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiKey"),
+                serial: String::from("0"),
+                hardware_version: None,
+                firmware_version: None,
+            })
     }
     fn connection_epoch(&self) -> u64 {
         self.state
@@ -790,11 +820,37 @@ impl Connector for PcscConnector {
             .unwrap_or(0)
     }
     fn set_device_identity(&self, firmware: Option<(u8, u8, u8)>, serial: Option<&str>) {
+        let epoch = self.connection_epoch();
+        let Ok(mut stored) = self.state.identity.lock() else {
+            return;
+        };
+        let identity = stored.get_or_insert_with(|| {
+            (
+                epoch,
+                ConnectorIdentity {
+                    manufacturer: String::from("Yubico"),
+                    product: String::from("YubiKey"),
+                    serial: String::from("0"),
+                    hardware_version: None,
+                    firmware_version: None,
+                },
+            )
+        });
+        if identity.0 != epoch {
+            identity.0 = epoch;
+            identity.1 = ConnectorIdentity {
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiKey"),
+                serial: String::from("0"),
+                hardware_version: None,
+                firmware_version: None,
+            };
+        }
         if let Some(firmware) = firmware {
-            self.firmware_version.set(Some(firmware));
+            identity.1.firmware_version = Some(firmware);
         }
         if let Some(serial) = serial {
-            let _ = self.serial_number.set(serial.to_string());
+            identity.1.serial = serial.to_owned();
         }
     }
     fn is_present(&self) -> bool {
@@ -859,6 +915,9 @@ impl Connector for PcscConnector {
         state.apdu_capabilities = detect_pcsc_apdu_capabilities(&card);
         state.card = Some(card);
         state.connection_epoch = state.connection_epoch.wrapping_add(1);
+        if let Ok(mut identity) = self.state.identity.lock() {
+            *identity = None;
+        }
         Ok(())
     }
 }
@@ -938,7 +997,20 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
 
 impl PcscConnector {
     pub(crate) fn set_yubikey_device_info(&self, info: YubiKeyDeviceInfo) {
-        let _ = self.yubikey_device_info.set(info);
+        let epoch = self.connection_epoch();
+        let Ok(mut identity) = self.state.identity.lock() else {
+            return;
+        };
+        *identity = Some((
+            epoch,
+            ConnectorIdentity {
+                manufacturer: String::from("Yubico"),
+                product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
+                serial: info.serial.unwrap_or_else(|| String::from("0")),
+                hardware_version: None,
+                firmware_version: info.version,
+            },
+        ));
     }
 
     fn _reconnect(&self) -> Result<(), Error> {
@@ -970,7 +1042,7 @@ impl PcscConnector {
 
 const YUBIHSM_CONNECTOR_BUFFER_SIZE: usize = 3139;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct YubiHsmConnectorStatus {
     serial: String,
     version: (u8, u8, u8),
@@ -1013,9 +1085,7 @@ fn parse_yubihsm_connector_status(value: &[u8]) -> Result<YubiHsmConnectorStatus
 
 #[derive(Debug)]
 pub(crate) struct HttpConnector {
-    serial: String,
     url: String,
-    version: (u8, u8, u8),
     connected: Cell<bool>,
     reconnectable: Cell<bool>,
     connection_epoch: Cell<u64>,
@@ -1034,13 +1104,46 @@ impl Connector for HttpConnector {
         "YubiHSM Connector"
     }
     fn serial(&self) -> &str {
-        &self.serial
+        "0"
     }
     fn major(&self) -> u8 {
-        self.version.0
+        self.status_identity
+            .try_borrow()
+            .ok()
+            .and_then(|identity| identity.as_ref().map(|identity| identity.version.0))
+            .unwrap_or(0)
     }
     fn minor(&self) -> u8 {
-        self.version.1
+        self.status_identity
+            .try_borrow()
+            .ok()
+            .and_then(|identity| identity.as_ref().map(|identity| identity.version.1))
+            .unwrap_or(0)
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.status_identity
+            .try_borrow()
+            .ok()
+            .and_then(|identity| identity.as_ref().map(|identity| identity.version))
+    }
+    fn identity(&self) -> ConnectorIdentity {
+        let status = self.connected.get().then(|| {
+            self.status_identity
+                .try_borrow()
+                .ok()
+                .and_then(|identity| identity.as_ref().cloned())
+        });
+        let status = status.flatten();
+        ConnectorIdentity {
+            manufacturer: String::from("Yubico"),
+            product: String::from("YubiHSM Connector"),
+            serial: status
+                .as_ref()
+                .map(|status| status.serial.clone())
+                .unwrap_or_else(|| String::from("0")),
+            hardware_version: None,
+            firmware_version: status.map(|status| status.version),
+        }
     }
     fn connection_epoch(&self) -> u64 {
         self.connection_epoch.get()
@@ -1071,7 +1174,7 @@ impl Connector for HttpConnector {
         let mut response = match response {
             Ok(response) => response,
             Err(error) => {
-                self.connected.set(false);
+                self.mark_disconnected();
                 return Err(error.into());
             }
         };
@@ -1086,7 +1189,7 @@ impl Connector for HttpConnector {
                 return Err(CKR_DEVICE_MEMORY.into());
             }
             Err(error) => {
-                self.connected.set(false);
+                self.mark_disconnected();
                 return Err(error.into());
             }
         };
@@ -1123,7 +1226,7 @@ impl Connector for HttpConnector {
                 Ok(())
             }
             Err(error) => {
-                self.connected.set(false);
+                self.mark_disconnected();
                 Err(error)
             }
         }
@@ -1131,6 +1234,13 @@ impl Connector for HttpConnector {
 }
 
 impl HttpConnector {
+    fn mark_disconnected(&self) {
+        self.connected.set(false);
+        if let Ok(mut identity) = self.status_identity.try_borrow_mut() {
+            *identity = None;
+        }
+    }
+
     pub(crate) fn new(url: String) -> Result<Self, Error> {
         let url = url.trim_end_matches('/').to_owned();
         if url.is_empty() {
@@ -1141,9 +1251,7 @@ impl HttpConnector {
             .timeout_connect(Some(Duration::from_secs(5)))
             .build();
         Ok(Self {
-            serial: String::new(),
             url,
-            version: (0, 0, 0),
             connected: Cell::new(false),
             reconnectable: Cell::new(false),
             connection_epoch: Cell::new(0),
@@ -1168,8 +1276,6 @@ impl HttpConnector {
 
     pub(crate) fn connect(&mut self) -> Result<(), Error> {
         let status = self.status()?;
-        self.serial = status.serial.clone();
-        self.version = status.version;
         *self.status_identity.get_mut() = Some(status);
         self.connected.set(true);
         self.reconnectable.set(true);
@@ -1384,7 +1490,7 @@ mod tests {
         let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
         connector.connect().unwrap();
         assert!(connector.is_present());
-        assert_eq!(connector.serial(), "12345678");
+        assert_eq!(connector.identity().serial, "12345678");
         assert_eq!((connector.major(), connector.minor()), (3, 0));
         connector.refresh().unwrap();
         let mut response = [0; 32];
@@ -1424,18 +1530,23 @@ mod tests {
         let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
         connector.connect().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
+        assert_eq!(connector.identity().serial, "11111111");
 
         connector.refresh().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
 
         connector.refresh().unwrap();
         assert_eq!(connector.connection_epoch(), 1);
+        assert_eq!(connector.identity().serial, "22222222");
+        assert_eq!(connector.identity().firmware_version, Some((3, 1, 0)));
 
-        connector.connected.set(false);
+        connector.mark_disconnected();
         assert!(!connector.is_present());
+        assert_eq!(connector.identity().serial, "0");
         connector.refresh().unwrap();
         assert!(connector.is_present());
         assert_eq!(connector.connection_epoch(), 2);
+        assert_eq!(connector.identity().serial, "22222222");
         server.join().unwrap();
     }
 

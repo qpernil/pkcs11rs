@@ -20,10 +20,9 @@ use crate::{KeyMaterial, ABI_TEST_SLOT_ID};
 use rsa::RsaPublicKey;
 use rusb::UsbContext;
 use std::{
-    cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 pub(crate) fn configured_yubihsm_urls(
@@ -1116,9 +1115,6 @@ impl ModuleContext {
                     let connector = PcscConnector {
                         reader,
                         context: context.clone(),
-                        yubikey_device_info: OnceLock::new(),
-                        firmware_version: Cell::new(None),
-                        serial_number: OnceLock::new(),
                         state: Arc::new(Default::default()),
                     };
                     let name = connector.name();

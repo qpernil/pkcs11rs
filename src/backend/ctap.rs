@@ -362,9 +362,10 @@ impl Slot for Fido2Slot {
     }
 
     fn label(&self) -> String {
+        let serial = self.connector.identity().serial;
         match self.primary_protocol_version() {
-            Some(version) => format!("FIDO2 {version} #{}", self.serial()),
-            None => format!("FIDO2 #{}", self.serial()),
+            Some(version) => format!("FIDO2 {version} #{serial}"),
+            None => format!("FIDO2 #{serial}"),
         }
     }
 
@@ -464,6 +465,10 @@ impl Slot for Fido2Slot {
 
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        str_pad(
+            &self.connector.identity().manufacturer,
+            &mut info.manufacturerID,
+        );
         apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
@@ -471,6 +476,11 @@ impl Slot for Fido2Slot {
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let discovered = self.discovered_info()?;
         self.format_token_info(info);
+        let identity = self.connector.identity();
+        str_pad(&self.label(), &mut info.label);
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        str_pad(&identity.product, &mut info.model);
+        str_pad(&identity.serial, &mut info.serialNumber);
         info.flags = (CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
         if discovered.option("clientPin") {
             info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;

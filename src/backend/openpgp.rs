@@ -448,7 +448,9 @@ impl Slot for OpenPgpSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        if let Some((major, minor)) = self.connector.hardware_version() {
+        let identity = self.connector.identity();
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        if let Some((major, minor)) = identity.hardware_version {
             info.hardwareVersion.major = major;
             info.hardwareVersion.minor = minor;
         }
@@ -459,6 +461,9 @@ impl Slot for OpenPgpSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        let identity = self.connector.identity();
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        str_pad(&identity.product, &mut info.model);
         let (major, minor) = self.reported_version();
         info.firmwareVersion.major = major;
         info.firmwareVersion.minor = minor;

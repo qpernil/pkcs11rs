@@ -223,7 +223,7 @@ impl Slot for HsmAuthSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("HSM Auth #{}", self.serial())
+        format!("HSM Auth #{}", self.connector.identity().serial)
     }
     fn serial(&self) -> &str {
         self.connector.serial()
@@ -307,11 +307,20 @@ impl Slot for HsmAuthSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        str_pad(
+            &self.connector.identity().manufacturer,
+            &mut info.manufacturerID,
+        );
         apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        let identity = self.connector.identity();
+        str_pad(&format!("HSM Auth #{}", identity.serial), &mut info.label);
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        str_pad(&identity.product, &mut info.model);
+        str_pad(&identity.serial, &mut info.serialNumber);
         let version = self.discovered_info()?.version;
         info.firmwareVersion.major = version.0;
         info.firmwareVersion.minor = version.1.saturating_mul(10) + version.2;
@@ -567,7 +576,7 @@ impl Slot for IssuerSecurityDomainSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.serial())
+        format!("{} #{}", self.product(), self.connector.identity().serial)
     }
     fn serial(&self) -> &str {
         self.connector.serial()
@@ -633,14 +642,26 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
+        str_pad(
+            &self.connector.identity().manufacturer,
+            &mut info.manufacturerID,
+        );
         apply_connector_versions(info, self.connector.as_ref());
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
+        let identity = self.connector.identity();
+        str_pad(
+            &format!("{} #{}", self.product(), identity.serial),
+            &mut info.label,
+        );
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        str_pad(&identity.product, &mut info.model);
+        str_pad(&identity.serial, &mut info.serialNumber);
         info.ulMinPinLen = 0;
         info.ulMaxPinLen = 0;
-        if let Some((major, minor, patch)) = self.connector.firmware_version() {
+        if let Some((major, minor, patch)) = identity.firmware_version {
             info.firmwareVersion.major = major;
             info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
         }
