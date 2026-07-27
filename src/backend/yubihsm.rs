@@ -2602,6 +2602,9 @@ impl Slot for YubiHsmSlot {
         }
         Ok(objects)
     }
+    fn refresh_token_objects_after_login(&self) -> bool {
+        true
+    }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         yubihsm_mechanisms(&self.algorithms)
     }

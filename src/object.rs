@@ -117,6 +117,10 @@ pub(crate) enum KeyMaterial {
     IssuerSecurityDomainCertificate {
         value: Vec<u8>,
     },
+    FidoCredential {
+        rp_id_hash: [u8; 32],
+        metadata: Vec<u8>,
+    },
     HsmAuthCredential {
         algorithm: HsmAuthAlgorithm,
         retries: u8,
@@ -285,6 +289,14 @@ impl std::fmt::Debug for KeyMaterial {
             Self::IssuerSecurityDomainCertificate { value } => fmt
                 .debug_struct("IssuerSecurityDomainCertificate")
                 .field("size", &value.len())
+                .finish(),
+            Self::FidoCredential {
+                rp_id_hash,
+                metadata,
+            } => fmt
+                .debug_struct("FidoCredential")
+                .field("rp_id_hash", rp_id_hash)
+                .field("metadata_size", &metadata.len())
                 .finish(),
             Self::HsmAuthCredential {
                 algorithm,
@@ -1208,6 +1220,9 @@ impl TokenObject {
                 }
                 KeyMaterial::PivData { .. } => Some(b"PIV".to_vec()),
                 KeyMaterial::OpenPgpData { .. } => Some(b"OpenPGP".to_vec()),
+                KeyMaterial::FidoCredential { .. } => {
+                    Some(b"FIDO2 discoverable credential".to_vec())
+                }
                 _ => None,
             },
             x if x == CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE => match &self.material {
@@ -1218,6 +1233,7 @@ impl TokenObject {
                     piv::data_object_mapping(*object_id).map(piv::data_object_oid)
                 }
                 KeyMaterial::OpenPgpData { tag, .. } => Some(tag.to_be_bytes().to_vec()),
+                KeyMaterial::FidoCredential { rp_id_hash, .. } => Some(rp_id_hash.to_vec()),
                 _ => None,
             },
             x if x == CKA_PKCS11RS_PIV_OBJECT_TAG => match &self.material {
@@ -1519,6 +1535,11 @@ impl TokenObject {
                     KeyMaterial::PivData { value, .. } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         Some(value.clone())
                     }
+                    KeyMaterial::FidoCredential { metadata, .. }
+                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
+                    {
+                        Some(metadata.clone())
+                    }
                     KeyMaterial::OpenPgpData {
                         connector,
                         tag,
@@ -1652,6 +1673,7 @@ impl TokenObject {
                 | KeyMaterial::OpenPgpData { .. }
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
+                | KeyMaterial::FidoCredential { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsmDevicePublic { .. }

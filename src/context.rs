@@ -971,7 +971,7 @@ impl ModuleContext {
                                 ))
                             }
                             CcidApplication::Fido2 => {
-                                Box::new(Fido2Slot::new(application_connector))
+                                Box::new(Fido2Slot::new(application_connector, application_aid))
                             }
                         };
                         if slot.is_present() {
