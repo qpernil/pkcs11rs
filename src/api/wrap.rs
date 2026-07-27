@@ -223,7 +223,7 @@ fn wrap_key(
         let output_len = as_mut(wrapped_key_len)?;
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
-        if !slot.is_yubihsm() {
+        if slot.kind() != SlotKind::YubiHsm {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         if !logged_in {
@@ -337,7 +337,7 @@ fn unwrap_key(
         let template = from_raw_parts(templ, attribute_count as usize)?;
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
-        if !slot.is_yubihsm() {
+        if slot.kind() != SlotKind::YubiHsm {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
         if !logged_in {

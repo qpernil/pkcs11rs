@@ -5988,7 +5988,7 @@ impl ConcurrentOperationState {
 struct ConcurrentSlot {
     state: std::sync::Arc<ConcurrentOperationState>,
     slot_index: usize,
-    yubihsm: bool,
+    kind: crate::SlotKind,
 }
 
 #[derive(Debug)]
@@ -6273,9 +6273,18 @@ impl crate::Slot for ConcurrentSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> crate::SlotKind {
+        self.kind
+    }
 
     fn name(&self) -> String {
-        String::from("Concurrent YubiHSM")
+        match self.kind {
+            crate::SlotKind::Software => String::from("Concurrent software token"),
+            crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
+            crate::SlotKind::Ccid(application) => {
+                format!("Concurrent {}", crate::ccid_application_label(application))
+            }
+        }
     }
 
     fn manufacturer(&self) -> &str {
@@ -6283,7 +6292,15 @@ impl crate::Slot for ConcurrentSlot {
     }
 
     fn product(&self) -> &str {
-        "YubiHSM"
+        match self.kind {
+            crate::SlotKind::Software => "Software token",
+            crate::SlotKind::YubiHsm => "YubiHSM",
+            crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
+            crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",
+            crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) => "YubiHSM Auth",
+            crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain) => "Issuer SD",
+            crate::SlotKind::Ccid(crate::CcidApplication::Fido2) => "FIDO2",
+        }
     }
 
     fn serial(&self) -> &str {
@@ -6332,10 +6349,6 @@ impl crate::Slot for ConcurrentSlot {
         self.format_token_info(info);
         Ok(())
     }
-
-    fn is_yubihsm(&self) -> bool {
-        self.yubihsm
-    }
 }
 
 impl crate::Session for PivSigningTestSession {
@@ -6372,6 +6385,9 @@ impl crate::Session for PivSigningTestSession {
 impl crate::Slot for TestSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
+    }
+    fn kind(&self) -> crate::SlotKind {
+        crate::SlotKind::Software
     }
 
     fn name(&self) -> String {

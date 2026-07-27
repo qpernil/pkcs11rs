@@ -16,6 +16,9 @@ impl Slot for AbiTestSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Software
+    }
 
     fn name(&self) -> String {
         String::from("PKCS11RS ABI test slot")
@@ -404,6 +407,9 @@ impl Slot for AbiScp03Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::Ccid(CcidApplication::IssuerSecurityDomain)
+    }
 
     fn name(&self) -> String {
         format!("PKCS11RS ABI {} test slot", self.protocol)
@@ -465,6 +471,9 @@ impl Slot for AbiScp03Slot {
         )?);
         Ok(())
     }
+    fn login_without_pin(&mut self) -> Result<(), Error> {
+        self.login(&[])
+    }
 
     fn logout(&mut self) -> Result<(), Error> {
         *self.session.try_borrow_mut()? = None;
@@ -493,10 +502,6 @@ impl Slot for AbiScp03Slot {
 
     fn login_is_active(&self) -> bool {
         self.session.borrow().is_some()
-    }
-
-    fn is_issuer_security_domain(&self) -> bool {
-        true
     }
 }
 
@@ -1216,6 +1221,9 @@ impl Slot for AbiYubiHsmSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn kind(&self) -> SlotKind {
+        SlotKind::YubiHsm
+    }
 
     fn name(&self) -> String {
         if self.serial == "HSM00001" {
@@ -1286,6 +1294,22 @@ impl Slot for AbiYubiHsmSlot {
         } else {
             Err(CKR_PIN_INCORRECT.into())
         }
+    }
+
+    fn supports_login_user(&self) -> bool {
+        true
+    }
+
+    fn login_user_without_pin(&mut self, username: &[u8]) -> Result<(), Error> {
+        let title = self.label();
+        let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        let description = format!("Enter the authentication password for {username} on {title}.");
+        let pin = pinentry::request(pinentry::Prompt {
+            title: &title,
+            description: &description,
+            label: "Authentication password:",
+        })?;
+        self.login_user(username.as_bytes(), pin.as_slice())
     }
 
     fn logout(&mut self) -> Result<(), Error> {
@@ -1372,7 +1396,7 @@ impl Slot for AbiYubiHsmSlot {
         true
     }
 
-    fn is_yubihsm(&self) -> bool {
+    fn supports_protected_authentication_path(&self) -> bool {
         true
     }
 

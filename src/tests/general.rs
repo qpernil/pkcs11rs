@@ -2706,7 +2706,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                 Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 0,
-                    yubihsm: true,
+                    kind: crate::SlotKind::YubiHsm,
                 }),
             )
             .unwrap();
@@ -2716,7 +2716,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                 Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 1,
-                    yubihsm: true,
+                    kind: crate::SlotKind::YubiHsm,
                 }),
             )
             .unwrap();
@@ -2804,7 +2804,7 @@ fn assert_pcsc_slot_context_concurrency(same_slot: bool) {
             Box::new(ConcurrentSlot {
                 state: state.clone(),
                 slot_index,
-                yubihsm: false,
+                kind: crate::SlotKind::Ccid(crate::CcidApplication::Piv),
             }) as Box<dyn crate::Slot>,
         )
     };
@@ -2902,7 +2902,7 @@ pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
                 Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 0,
-                    yubihsm: true,
+                    kind: crate::SlotKind::YubiHsm,
                 }),
             )
             .unwrap();
@@ -2912,7 +2912,7 @@ pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
                 Box::new(ConcurrentSlot {
                     state: state.clone(),
                     slot_index: 1,
-                    yubihsm: true,
+                    kind: crate::SlotKind::YubiHsm,
                 }),
             )
             .unwrap();

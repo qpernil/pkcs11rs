@@ -9,8 +9,8 @@ use crate::{
     configured_ccid_configurations, pinentry, select_application, str_pad, CcidApplication,
     Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
     HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
-    PcscAppletConnector, PcscConnector, PivSlot, Session, SignatureOperation, Slot, TokenObject,
-    UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
+    PcscAppletConnector, PcscConnector, PivSlot, Session, SignatureOperation, Slot, SlotKind,
+    TokenObject, UsbConnector, YubiHsmPublicDiscoveryCredential, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential, YUBIHSM_DISCOVERY_ENV};
@@ -1036,7 +1036,7 @@ impl ModuleContext {
                 self.slot_contexts
                     .get(slot_id)
                     .and_then(|context| context.lock().ok())
-                    .is_some_and(|context| context.slot.is_yubihsm())
+                    .is_some_and(|context| context.slot.kind() == SlotKind::YubiHsm)
             })
             .copied()
             .collect::<Vec<_>>();

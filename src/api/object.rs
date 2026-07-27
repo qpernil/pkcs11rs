@@ -32,7 +32,7 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.is_piv() {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
             let import = piv_import_parameters(templ)?;
             match import {
                 PivImport::Private {
@@ -141,7 +141,7 @@ fn create_object(
             }
             return Ok(());
         }
-        if ctx.get_slot(slot_id)?.is_openpgp() {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::OpenPgp) {
             let import = openpgp_private_import(templ)?;
             validate_new_object_access(&import.object, flags, logged_in)?;
             ctx._get_slot_mut(slot_id)?.openpgp_import_private_key(
@@ -164,7 +164,7 @@ fn create_object(
         }
         let mut object = parse_create_object_template(templ)?;
         validate_new_object_access(&object, flags, logged_in)?;
-        if ctx.get_slot(slot_id)?.is_yubihsm() {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
             let hardware_object = yubihsm_hardware_import_object(&object)?;
             let (command, expected_class) = yubihsm_import_command(&hardware_object)?;
             let response = ctx
@@ -1163,7 +1163,7 @@ fn destroy_object(
         if stored_object.is_yubihsm_synthetic_public() {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
-        if stored_object.token && ctx.get_slot(slot_id)?.is_yubihsm() && !logged_in {
+        if stored_object.token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let piv_action = match &stored_object.material {
@@ -1175,7 +1175,7 @@ fn destroy_object(
                 Some((false, piv::Slot::from_cka_id(*id).ok_or(CKR_DEVICE_ERROR)?))
             }
             KeyMaterial::PivPublic { .. } | KeyMaterial::RsaPublic(_)
-                if ctx.get_slot(slot_id)?.is_piv() =>
+                if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) =>
             {
                 return Err(CKR_ACTION_PROHIBITED.into());
             }
@@ -1519,7 +1519,7 @@ fn set_attribute_value(
             ctx.refresh_slot_token_objects(slot_id)?;
             return Ok(());
         }
-        if stored_object.token && ctx.get_slot(slot_id)?.is_yubihsm() {
+        if stored_object.token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
             if templ.is_empty() {
                 return Ok(());
             }

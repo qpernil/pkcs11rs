@@ -73,8 +73,17 @@ pub(crate) fn mechanisms_support_extended_provider(mechanisms: &[MechanismDetail
         )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SlotKind {
+    #[cfg(any(test, feature = "abi-tests"))]
+    Software,
+    YubiHsm,
+    Ccid(CcidApplication),
+}
+
 pub(crate) trait Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
+    fn kind(&self) -> SlotKind;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
@@ -90,6 +99,9 @@ pub(crate) trait Slot {
     fn is_present(&self) -> bool;
     fn open_session(&mut self, slotID: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn Session>;
     fn login(&mut self, pin: &[u8]) -> Result<(), Error>;
+    fn login_without_pin(&mut self) -> Result<(), Error> {
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
     #[cfg(all(test, not(feature = "abi-tests")))]
     fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         None
@@ -109,8 +121,17 @@ pub(crate) trait Slot {
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn supports_login_user(&self) -> bool {
+        false
+    }
+    fn login_user_without_pin(&mut self, _username: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_so(&mut self, _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_USER_TYPE_INVALID.into())
+    }
+    fn login_so_without_pin(&mut self) -> Result<(), Error> {
+        Err(CKR_ARGUMENTS_BAD.into())
     }
     fn set_pin(&mut self, _old_pin: &[u8], _new_pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
@@ -146,6 +167,9 @@ pub(crate) trait Slot {
         })
     }
     fn supports_public_certificates_token_profile(&self, _slot_id: CK_SLOT_ID) -> bool {
+        false
+    }
+    fn supports_protected_authentication_path(&self) -> bool {
         false
     }
     fn profile_objects(&self, slot_id: CK_SLOT_ID) -> Vec<TokenObject> {
@@ -210,13 +234,6 @@ pub(crate) trait Slot {
         }
         mechanisms
     }
-    fn is_yubihsm(&self) -> bool {
-        false
-    }
-    #[cfg(all(test, not(feature = "abi-tests")))]
-    fn is_fido2(&self) -> bool {
-        false
-    }
     fn yubihsm_read_opaque(&self, _id: u16) -> Result<Vec<u8>, Error> {
         Err(CKR_USER_NOT_LOGGED_IN.into())
     }
@@ -246,23 +263,11 @@ pub(crate) trait Slot {
     ) -> Result<(), Error> {
         Err(CKR_ATTRIBUTE_READ_ONLY.into())
     }
-    fn is_issuer_security_domain(&self) -> bool {
-        false
-    }
-    fn is_hsmauth(&self) -> bool {
-        false
-    }
     fn hsmauth_administration(
         &mut self,
         _operation: HsmAuthAdministration<'_>,
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
-    }
-    fn is_piv(&self) -> bool {
-        false
-    }
-    fn is_openpgp(&self) -> bool {
-        false
     }
     fn openpgp_generate_key_pair(
         &mut self,
@@ -372,7 +377,7 @@ pub(crate) trait Slot {
         info.flags =
             (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED)
                 as CK_FLAGS;
-        if pinentry::is_configured() && (self.is_hsmauth() || self.is_yubihsm()) {
+        if pinentry::is_configured() && self.supports_protected_authentication_path() {
             info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH as CK_FLAGS;
         }
         info.ulMaxSessionCount = 0;
