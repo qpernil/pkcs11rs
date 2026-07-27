@@ -37,6 +37,24 @@ The following vendor attributes are available on credential objects:
 | `CKA_YUBICO_HSMAUTH_RETRIES` | Remaining credential-password retries |
 | `CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED` | Whether the credential requires touch |
 
+### Authentication-key public-material boundary
+
+Authentication Key objects in a YubiHSM slot are represented as
+non-operational `CKO_SECRET_KEY` objects with type `CKK_GENERIC_SECRET`,
+including keys that use the asymmetric authentication algorithm. The YubiHSM
+command interface does not provide their public half:
+[`GET PUBLIC KEY`](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-cmd-reference.html#get-public-key-command)
+accepts only Asymmetric Key and Wrap Key objects. Sending that command for an
+Authentication Key is rejected by the device.
+
+An asymmetric credential in a separate YubiHSM Auth slot can expose its own
+long-term public key, and that key may have been provisioned into a matching
+YubiHSM Authentication Key. It is nevertheless a different slot object.
+pkcs11rs does not copy it into the YubiHSM slot or make the YubiHSM object's
+attributes depend on discovery, login, or lifetime of another slot. A public
+key projection will require the YubiHSM firmware command interface itself to
+make the Authentication Key public half readable.
+
 ## Public object discovery
 
 Every profile is represented by a public, immutable, token-resident
