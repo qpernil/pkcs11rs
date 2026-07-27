@@ -49,7 +49,10 @@ PKCS #11 key-pair generation mechanism. Imported keys report
 conservative non-local value.
 
 The applet version and serial number are reported in the slot and token
-information. PIN minimum and maximum lengths come from the applet metadata.
+information. The token-wide minimum is the smaller of the user and admin
+password minima, and the maximum is the larger of their applet-reported
+maxima. Each login and password-change path still enforces the limits for its
+specific password reference.
 
 ## Supported operations
 

@@ -473,7 +473,7 @@ impl Slot for Fido2Slot {
             info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
         }
         info.ulMaxPinLen = 63;
-        info.ulMinPinLen = discovered.min_pin_length.unwrap_or(4) as CK_ULONG;
+        info.ulMinPinLen = 4;
         Ok(())
     }
 
@@ -626,7 +626,7 @@ mod tests {
         }
     }
 
-    fn get_info_apdu_response(client_pin: bool) -> Vec<u8> {
+    fn get_info_apdu_response_with_minimum(client_pin: bool, minimum: u8) -> Vec<u8> {
         let mut response = vec![0];
         Encoder::new(&mut response)
             .map(5)
@@ -657,10 +657,14 @@ mod tests {
             .unwrap()
             .u8(0x0d)
             .unwrap()
-            .u8(4)
+            .u8(minimum)
             .unwrap();
         response.extend([0x90, 0x00]);
         response
+    }
+
+    fn get_info_apdu_response(client_pin: bool) -> Vec<u8> {
+        get_info_apdu_response_with_minimum(client_pin, 4)
     }
 
     fn key_agreement_apdu_response() -> Vec<u8> {
@@ -785,6 +789,19 @@ mod tests {
         assert_eq!(token_info.ulMinPinLen, 4);
         assert_eq!(token_info.ulMaxPinLen, 63);
         assert!(slot.backend_mechanisms().is_empty());
+    }
+
+    #[test]
+    fn token_pin_bounds_cover_existing_pins_after_policy_increases() {
+        let connector: Rc<dyn Connector> = Rc::new(ScriptedConnector::new(vec![
+            get_info_apdu_response_with_minimum(true, 8),
+        ]));
+        let slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
+
+        let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+        slot.get_token_info(&mut token_info).unwrap();
+        assert_eq!(token_info.ulMinPinLen, 4);
+        assert_eq!(token_info.ulMaxPinLen, 63);
     }
 
     #[test]

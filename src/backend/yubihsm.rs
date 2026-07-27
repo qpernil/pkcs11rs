@@ -38,14 +38,6 @@ impl HsmAuthProviderRegistry {
         Ok(())
     }
 
-    fn is_empty(&self) -> Result<bool, Error> {
-        Ok(self
-            .providers
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .is_empty())
-    }
-
     fn with_provider<T>(
         &self,
         login: &HsmAuthLogin<'_>,
@@ -2391,14 +2383,8 @@ impl Slot for YubiHsmSlot {
         str_pad(&device_info.serial.to_string(), &mut info.serialNumber);
         info.firmwareVersion.major = device_info.major;
         info.firmwareVersion.minor = device_info.minor.saturating_mul(10) + device_info.patch;
-        let has_hsmauth = !self.hsmauth_providers.is_empty()?;
-        if has_hsmauth {
-            info.ulMaxPinLen = 216;
-            info.ulMinPinLen = 8;
-        } else {
-            info.ulMaxPinLen = 69;
-            info.ulMinPinLen = 12;
-        }
+        info.ulMaxPinLen = 215;
+        info.ulMinPinLen = 0;
         Ok(())
     }
     fn clear_session(&mut self) {

@@ -9,6 +9,12 @@ PIN. PINs must contain six to eight bytes and are padded to the eight-byte PIV
 APDU field with `FF`. `C_Logout` reselects the application to clear card
 authentication state.
 
+`CK_TOKEN_INFO` reports a slot-wide PIN envelope of 6 through 64 bytes. The
+lower end is the ordinary PIV PIN/PUK minimum. The upper end covers the
+hexadecimal representation of an AES-256 management key accepted by
+`C_Login(CKU_SO)` and SO `C_SetPIN`. Values inside that envelope remain subject
+to their role-specific syntax and exact PIV limits.
+
 The protocol layer implements:
 
 - strict short and extended ISO 7816 APDU encoding;

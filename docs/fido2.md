@@ -85,6 +85,12 @@ credentials are relying-party-scoped credential metadata, not authenticator
 login identities. Likewise, CTAP provides no Security Officer identity, so
 `C_Login(CKU_SO)` is unsupported.
 
+The token reports a stable 4-through-63-byte PIN envelope. Four is the CTAP
+baseline minimum for an existing PIN, while 63 bytes is the protocol maximum.
+An authenticator's current `minPINLength` is a policy for setting a new PIN and
+may be higher than an existing PIN, so it does not raise the token-wide
+minimum or reject that existing PIN during `C_Login`.
+
 This mapping follows the distinction between
 [PKCS #11 `C_Login` and `C_LoginUser`](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/os/pkcs11-spec-v3.2-os.html)
 and FIDO's

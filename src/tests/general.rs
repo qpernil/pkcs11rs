@@ -372,7 +372,9 @@ pub fn yubikey_login_preserves_connector_errors() {
         application_aid,
     );
 
-    let rv: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
+    let nonempty: CK_RV = crate::Slot::login(&mut slot, b"1234").unwrap_err().into();
+    assert_eq!(nonempty, CKR_PIN_INCORRECT as CK_RV);
+    let rv: CK_RV = crate::Slot::login(&mut slot, b"").unwrap_err().into();
     assert_eq!(rv, CKR_DEVICE_ERROR as CK_RV);
 }
 
@@ -593,6 +595,21 @@ fn openpgp_slot_info_reports_application_version_and_serial() {
         (3, 4)
     );
     assert_eq!(crate::Slot::serial(&slot), "12345678");
+}
+
+#[test]
+fn openpgp_token_pin_bounds_cover_user_and_admin_passwords() {
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let mut slot = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
+    slot.pin_min = 6;
+    slot.pin_max = 32;
+    slot.admin_pin_min = 8;
+    slot.admin_pin_max = 64;
+
+    let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    crate::Slot::get_token_info(&slot, &mut token_info).unwrap();
+    assert_eq!(token_info.ulMinPinLen, 6);
+    assert_eq!(token_info.ulMaxPinLen, 64);
 }
 
 #[test]
@@ -1001,6 +1018,11 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
         ),
         (5, 70)
     );
+
+    let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
+    crate::Slot::get_token_info(&slot, &mut token_info).unwrap();
+    assert_eq!(token_info.ulMinPinLen, 6);
+    assert_eq!(token_info.ulMaxPinLen, 64);
 }
 
 #[test]
@@ -1037,6 +1059,11 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     }));
     assert!(crate::Slot::login(&mut slot, &[]).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
+    crate::Slot::logout(&mut slot).unwrap();
+    assert!(matches!(
+        crate::Slot::login(&mut slot, b"ignored"),
+        Err(crate::Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
+    ));
 }
 
 #[test]
@@ -1265,7 +1292,7 @@ pub fn missing_scp_session_invalidates_pkcs11_login_state() {
     );
     assert_eq!(info.state, CKS_RO_PUBLIC_SESSION as CK_STATE);
 
-    let mut pin = *b"1234";
+    let mut pin = [];
     assert_eq!(
         crate::api::C_Login(
             TEST_SESSION_HANDLE,

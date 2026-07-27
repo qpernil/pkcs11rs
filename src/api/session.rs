@@ -403,7 +403,9 @@ fn login(
             login_role(ctx, session_handle, slot_id, role, |slot| match role {
                 LoginRole::User => match pin {
                     Some(pin) => slot.login(pin),
-                    None if slot.is_hsmauth() => slot.login(&[]),
+                    None if slot.is_hsmauth() || slot.is_issuer_security_domain() => {
+                        slot.login(&[])
+                    }
                     None => Err(CKR_ARGUMENTS_BAD.into()),
                 },
                 LoginRole::So => match pin {
@@ -480,15 +482,15 @@ fn login_user(
         if user_type != CKU_USER as CK_USER_TYPE {
             return Err(CKR_USER_TYPE_INVALID.into());
         }
+        if !ctx.get_slot(slot_id)?.is_yubihsm() {
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
         let username = from_raw_parts(username, username_len as usize)?;
         let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, LoginRole::User, |slot| {
                 if let Some(pin) = pin {
                     return slot.login_user(username.as_bytes(), pin);
-                }
-                if !slot.is_yubihsm() {
-                    return Err(CKR_ARGUMENTS_BAD.into());
                 }
                 let title = slot.label();
                 let description =

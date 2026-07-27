@@ -1724,6 +1724,17 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
         ),
         CKR_OK as CK_RV
     );
+    assert_eq!(
+        crate::api::C_LoginUser(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            ::std::ptr::null_mut(),
+            0,
+            ::std::ptr::null_mut(),
+            0,
+        ),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
     let mut random = [0; 16];
     assert_eq!(
         crate::api::C_GenerateRandom(session, random.as_mut_ptr(), random.len() as CK_ULONG),

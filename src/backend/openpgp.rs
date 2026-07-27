@@ -461,8 +461,8 @@ impl Slot for OpenPgpSlot {
         let (major, minor) = self.reported_version();
         info.firmwareVersion.major = major;
         info.firmwareVersion.minor = minor;
-        info.ulMinPinLen = self.pin_min as CK_ULONG;
-        info.ulMaxPinLen = self.pin_max as CK_ULONG;
+        info.ulMinPinLen = self.pin_min.min(self.admin_pin_min) as CK_ULONG;
+        info.ulMaxPinLen = self.pin_max.max(self.admin_pin_max) as CK_ULONG;
         Ok(())
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {

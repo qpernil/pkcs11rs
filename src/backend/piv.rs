@@ -707,7 +707,7 @@ impl Slot for PivSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        info.ulMaxPinLen = 8;
+        info.ulMaxPinLen = 64;
         info.ulMinPinLen = 6;
         let version = self.reported_version();
         info.firmwareVersion.major = version.major;
