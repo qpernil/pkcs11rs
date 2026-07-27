@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
     configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
-    Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
-    YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY,
-    CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
+    Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig,
+    YubiHsmSessionRole, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
+    CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
     CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
     YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
     YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
@@ -2411,7 +2411,7 @@ fn logged_in_discovery_reads_each_native_property_only_once() {
         slot.object_cache
             .borrow()
             .native_objects
-            .get(&(YUBIHSM_ASYMMETRIC_KEY, 1))
+            .get(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1))
             .unwrap()
             .metadata_sources,
         [(101, 1)]
@@ -2420,7 +2420,7 @@ fn logged_in_discovery_reads_each_native_property_only_once() {
         slot.object_cache
             .borrow()
             .native_objects
-            .get(&(YUBIHSM_OPAQUE, 2))
+            .get(&YubiHsmObjectKey::new(YUBIHSM_OPAQUE, 2))
             .unwrap()
             .metadata_sources,
         [(100, 1)]
@@ -2672,7 +2672,7 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
         .attestation_cache
         .borrow()
         .keys()
-        .any(|((object_type, id), _)| { *object_type == YUBIHSM_ASYMMETRIC_KEY && *id == 1 }));
+        .any(|(key, _)| key.object_type == YUBIHSM_ASYMMETRIC_KEY && key.id == 1));
 
     Slot::logout(&mut slot).unwrap();
     let logged_out = Slot::token_objects(&slot, 7).unwrap();
@@ -2686,17 +2686,17 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     assert!(!slot
         .object_metadata
         .borrow()
-        .contains_key(&(YUBIHSM_ASYMMETRIC_KEY, 1)));
+        .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1)));
     assert!(!slot
         .object_cache
         .borrow()
         .native_objects
-        .contains_key(&(YUBIHSM_ASYMMETRIC_KEY, 1)));
+        .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1)));
     assert!(slot
         .attestation_cache
         .borrow()
         .keys()
-        .all(|((object_type, id), _)| { *object_type != YUBIHSM_ASYMMETRIC_KEY || *id != 1 }));
+        .all(|(key, _)| key.object_type != YUBIHSM_ASYMMETRIC_KEY || key.id != 1));
 
     peer.objects.borrow_mut().clear();
     Slot::login(&mut slot, b"0002password").unwrap();
@@ -4429,7 +4429,7 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
         let cache = slot.object_cache.borrow();
         let authentication_key = cache
             .native_objects
-            .get(&(YUBIHSM_AUTHENTICATION_KEY, 1))
+            .get(&YubiHsmObjectKey::new(YUBIHSM_AUTHENTICATION_KEY, 1))
             .unwrap();
         assert_eq!(authentication_key.sequence, None);
         assert!(authentication_key.info.is_none());
@@ -4472,7 +4472,7 @@ fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
         let cache = slot.object_cache.borrow();
         let authentication_key = cache
             .native_objects
-            .get(&(YUBIHSM_AUTHENTICATION_KEY, 2))
+            .get(&YubiHsmObjectKey::new(YUBIHSM_AUTHENTICATION_KEY, 2))
             .unwrap();
         assert!(authentication_key.info.is_some());
         assert_eq!(authentication_key.inferred_authentication_algorithm, None);
@@ -4494,7 +4494,7 @@ fn prelogin_and_user_discovery_share_the_authentication_algorithm_cache() {
         let cache = user_slot.object_cache.borrow();
         let authentication_key = cache
             .native_objects
-            .get(&(YUBIHSM_AUTHENTICATION_KEY, 2))
+            .get(&YubiHsmObjectKey::new(YUBIHSM_AUTHENTICATION_KEY, 2))
             .unwrap();
         assert!(authentication_key.info.is_none());
         assert_eq!(

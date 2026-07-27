@@ -484,18 +484,52 @@ pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
     })))
 }
 
-pub(crate) type YubiHsmObjectKey = (u8, u16);
-pub(crate) type YubiHsmMetadataTarget = (u8, u16, u8);
-pub(crate) type YubiHsmObjectMetadata = (
-    YubiHsmObjectInfo,
-    Option<YubiHsmPublicKey>,
-    u64,
-    Option<YubiHsmPkcs11Metadata>,
-);
-pub(crate) type YubiHsmDiscoveredObjects = (
-    Vec<(YubiHsmObjectInfo, Option<YubiHsmPublicKey>)>,
-    HashMap<(u8, u16, u8, u16), YubiHsmPkcs11Metadata>,
-);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct YubiHsmObjectKey {
+    pub(crate) object_type: u8,
+    pub(crate) id: u16,
+}
+
+impl YubiHsmObjectKey {
+    pub(crate) fn new(object_type: u8, id: u16) -> Self {
+        Self { object_type, id }
+    }
+
+    fn from_info(info: &YubiHsmObjectInfo) -> Self {
+        Self::new(info.object_type, info.id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct YubiHsmMetadataTarget {
+    pub(crate) object: YubiHsmObjectKey,
+    pub(crate) sequence: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct YubiHsmMetadataScope {
+    pub(crate) target: YubiHsmMetadataTarget,
+    pub(crate) domains: u16,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct YubiHsmObjectMetadata {
+    pub(crate) info: YubiHsmObjectInfo,
+    pub(crate) public_key: Option<YubiHsmPublicKey>,
+    pub(crate) generation: u64,
+    pub(crate) attributes: Option<YubiHsmPkcs11Metadata>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct YubiHsmDiscoveredObject {
+    pub(crate) info: YubiHsmObjectInfo,
+    pub(crate) public_key: Option<YubiHsmPublicKey>,
+}
+
+pub(crate) struct YubiHsmDiscoveredObjects {
+    pub(crate) objects: Vec<YubiHsmDiscoveredObject>,
+    pub(crate) metadata: HashMap<YubiHsmMetadataScope, YubiHsmPkcs11Metadata>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct YubiHsmCachedObjectProperties {
@@ -671,7 +705,7 @@ impl YubiHsmSlot {
 
     fn cache_object_info(&self, info: &YubiHsmObjectInfo) -> Result<(), Error> {
         let mut state = self.object_cache.try_borrow_mut()?;
-        let key = (info.object_type, info.id);
+        let key = YubiHsmObjectKey::from_info(info);
         let sequence_changed = {
             let entry = state
                 .native_objects
@@ -711,7 +745,7 @@ impl YubiHsmSlot {
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
             .native_objects
-            .get(&(object_type, id))
+            .get(&YubiHsmObjectKey::new(object_type, id))
             .filter(|entry| sequence.is_none_or(|sequence| entry.sequence == Some(sequence)))
             .and_then(|entry| entry.info.clone()))
     }
@@ -750,7 +784,7 @@ impl YubiHsmSlot {
             let (cached, sequence_changed) = {
                 let entry = state
                     .native_objects
-                    .entry((object_type, id))
+                    .entry(YubiHsmObjectKey::new(object_type, id))
                     .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(sequence)));
                 let sequence_changed = entry.sequence.is_some_and(|cached| cached != sequence);
                 if sequence_changed {
@@ -794,7 +828,7 @@ impl YubiHsmSlot {
         let mut state = self.object_cache.try_borrow_mut()?;
         let entry = state
             .native_objects
-            .entry((info.object_type, info.id))
+            .entry(YubiHsmObjectKey::from_info(info))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
         if entry
             .sequence
@@ -866,7 +900,7 @@ impl YubiHsmSlot {
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
             .native_objects
-            .get(&(info.object_type, info.id))
+            .get(&YubiHsmObjectKey::from_info(info))
             .filter(|entry| entry.sequence == Some(info.sequence))
             .and_then(|entry| entry.public_key.clone())
         {
@@ -881,7 +915,7 @@ impl YubiHsmSlot {
         let mut state = self.object_cache.try_borrow_mut()?;
         let entry = state
             .native_objects
-            .entry((info.object_type, info.id))
+            .entry(YubiHsmObjectKey::from_info(info))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(Some(info.sequence)));
         if entry
             .sequence
@@ -904,11 +938,11 @@ impl YubiHsmSlot {
         for entry in state.native_objects.values_mut() {
             entry.metadata_sources.clear();
         }
-        for ((object_type, id, sequence), sources) in links {
-            let Some(entry) = state.native_objects.get_mut(&(object_type, id)) else {
+        for (target, sources) in links {
+            let Some(entry) = state.native_objects.get_mut(&target.object) else {
                 continue;
             };
-            if entry.sequence == Some(sequence) {
+            if entry.sequence == Some(target.sequence) {
                 entry.metadata_sources = sources;
             }
         }
@@ -932,7 +966,10 @@ impl YubiHsmSlot {
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
             .native_objects
-            .get(&(YUBIHSM_AUTHENTICATION_KEY, authkey_id))
+            .get(&YubiHsmObjectKey::new(
+                YUBIHSM_AUTHENTICATION_KEY,
+                authkey_id,
+            ))
             .and_then(|entry| {
                 entry
                     .info
@@ -959,7 +996,10 @@ impl YubiHsmSlot {
         let mut state = self.object_cache.try_borrow_mut()?;
         let entry = state
             .native_objects
-            .entry((YUBIHSM_AUTHENTICATION_KEY, authkey_id))
+            .entry(YubiHsmObjectKey::new(
+                YUBIHSM_AUTHENTICATION_KEY,
+                authkey_id,
+            ))
             .or_insert_with(|| YubiHsmCachedObjectProperties::new(None));
         match entry.info.as_ref().and_then(Self::authentication_algorithm) {
             Some(cached) if cached == algorithm => {
@@ -1278,22 +1318,32 @@ impl YubiHsmSlot {
                 let Some((target_sequence, target_type, target_id)) =
                     yubihsm_metadata_label_target(&info.label)
                 else {
-                    discovered.push((info, None));
+                    discovered.push(YubiHsmDiscoveredObject {
+                        info,
+                        public_key: None,
+                    });
                     continue;
                 };
                 related_metadata
-                    .entry((target_type, target_id, target_sequence))
+                    .entry(YubiHsmMetadataTarget {
+                        object: YubiHsmObjectKey::new(target_type, target_id),
+                        sequence: target_sequence,
+                    })
                     .or_default()
                     .push((info.id, info.sequence));
                 let value = self.read_opaque_with_session(&info, session)?;
                 match parse_yubihsm_pkcs11_metadata(&info, &value) {
                     Ok(metadata) => {
-                        let target = (
-                            metadata.target_type,
-                            metadata.target_id,
-                            metadata.target_sequence,
-                            info.domains,
-                        );
+                        let target = YubiHsmMetadataScope {
+                            target: YubiHsmMetadataTarget {
+                                object: YubiHsmObjectKey::new(
+                                    metadata.target_type,
+                                    metadata.target_id,
+                                ),
+                                sequence: metadata.target_sequence,
+                            },
+                            domains: info.domains,
+                        };
                         if ambiguous_metadata.contains(&target) {
                             continue;
                         }
@@ -1302,8 +1352,8 @@ impl YubiHsmSlot {
                             log!(
                                 2,
                                 "YubiHSM has duplicate PKCS11 metadata for object type {:02x} ID {:04x}",
-                                target.0,
-                                target.1
+                                target.target.object.object_type,
+                                target.target.object.id
                             );
                         } else {
                             pkcs11_metadata.insert(target, metadata);
@@ -1337,7 +1387,7 @@ impl YubiHsmSlot {
             } else {
                 None
             };
-            discovered.push((info, public_key));
+            discovered.push(YubiHsmDiscoveredObject { info, public_key });
         }
         log!(
             2,
@@ -1347,11 +1397,14 @@ impl YubiHsmSlot {
             self.connector.name()
         );
         self.replace_metadata_links(related_metadata)?;
-        Ok((discovered, pkcs11_metadata))
+        Ok(YubiHsmDiscoveredObjects {
+            objects: discovered,
+            metadata: pkcs11_metadata,
+        })
     }
 
     fn object_generation(&self, info: &YubiHsmObjectInfo) -> Result<u64, Error> {
-        let key = (info.object_type, info.id);
+        let key = YubiHsmObjectKey::from_info(info);
         let mut generations = self
             .object_generations
             .try_borrow_mut()
@@ -1373,9 +1426,12 @@ impl YubiHsmSlot {
         slot_id: CK_SLOT_ID,
         session: &impl YubiHsmSessionCell,
     ) -> Result<Vec<TokenObject>, Error> {
-        let (discovered, mut metadata) = self.discover_objects(session)?;
+        let YubiHsmDiscoveredObjects {
+            objects: discovered,
+            mut metadata,
+        } = self.discover_objects(session)?;
         let mut candidates = Vec::new();
-        'discovered: for (info, public_key) in discovered {
+        'discovered: for YubiHsmDiscoveredObject { info, public_key } in discovered {
             let certificate = if info.object_type == YUBIHSM_OPAQUE
                 && info.algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
             {
@@ -1384,8 +1440,13 @@ impl YubiHsmSlot {
                 None
             };
             let generation = self.object_generation(&info)?;
-            let attribute_metadata =
-                metadata.remove(&(info.object_type, info.id, info.sequence, info.domains));
+            let attribute_metadata = metadata.remove(&YubiHsmMetadataScope {
+                target: YubiHsmMetadataTarget {
+                    object: YubiHsmObjectKey::from_info(&info),
+                    sequence: info.sequence,
+                },
+                domains: info.domains,
+            });
             let mut objects = match yubihsm_token_objects_with_generation(
                 slot_id,
                 info.clone(),
@@ -1694,7 +1755,7 @@ impl YubiHsmSlot {
                     id, object_type, ..
                 } = object.material
                 {
-                    private_targets.insert((object_type & !0x80, id));
+                    private_targets.insert(YubiHsmObjectKey::new(object_type & !0x80, id));
                 }
                 false
             });
@@ -1704,9 +1765,9 @@ impl YubiHsmSlot {
                 .flat_map(|entry| entry.metadata_sources.iter())
                 .map(|(id, _)| *id)
                 .collect::<HashSet<_>>();
-            state.native_objects.retain(|(object_type, id), entry| {
-                if private_targets.contains(&(*object_type, *id)) {
-                    if *object_type != YUBIHSM_AUTHENTICATION_KEY {
+            state.native_objects.retain(|key, entry| {
+                if private_targets.contains(key) {
+                    if key.object_type != YUBIHSM_AUTHENTICATION_KEY {
                         return false;
                     }
                     let sequence = entry.sequence;
@@ -1719,7 +1780,7 @@ impl YubiHsmSlot {
                     entry.inferred_authentication_algorithm = authentication_algorithm;
                     return true;
                 }
-                *object_type != YUBIHSM_OPAQUE || !metadata_ids.contains(id)
+                key.object_type != YUBIHSM_OPAQUE || !metadata_ids.contains(&key.id)
             });
             private_targets
         };
@@ -1742,7 +1803,7 @@ impl YubiHsmSlot {
     }
 
     fn forget_cached_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
-        let key = (object_type & !0x80, id);
+        let key = YubiHsmObjectKey::new(object_type & !0x80, id);
         {
             let mut state = self.object_cache.try_borrow_mut()?;
             state.objects.retain(|object| {
@@ -1777,7 +1838,7 @@ impl YubiHsmSlot {
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?
             .native_objects
-            .get(&(object_type & !0x80, id))
+            .get(&YubiHsmObjectKey::new(object_type & !0x80, id))
             .map(|entry| entry.metadata_sources.clone())
             .unwrap_or_default())
     }
@@ -1791,20 +1852,24 @@ impl YubiHsmSlot {
             .object_metadata
             .try_borrow()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        for (info, public_key, generation, attributes) in metadata.values() {
+        for metadata in metadata.values() {
             let objects = yubihsm_token_objects_with_generation(
                 slot_id,
-                info.clone(),
-                public_key.clone(),
-                *generation,
-                attributes.as_ref(),
+                metadata.info.clone(),
+                metadata.public_key.clone(),
+                metadata.generation,
+                metadata.attributes.as_ref(),
             )?;
             if let Some((index, _)) = objects
                 .iter()
                 .enumerate()
                 .find(|(_, object)| object.unique_id == unique_id)
             {
-                return Ok((info.clone(), attributes.clone(), index != 0));
+                return Ok((
+                    metadata.info.clone(),
+                    metadata.attributes.clone(),
+                    index != 0,
+                ));
             }
         }
         Err(CKR_ATTRIBUTE_READ_ONLY.into())
@@ -2594,11 +2659,14 @@ impl Slot for YubiHsmSlot {
         if !self.has_session_role(YubiHsmSessionRole::User) {
             return Ok(self.cached_objects());
         }
-        let (discovered, mut pkcs11_metadata) = self.discover_objects(self.session.as_ref())?;
+        let YubiHsmDiscoveredObjects {
+            objects: discovered,
+            metadata: mut pkcs11_metadata,
+        } = self.discover_objects(self.session.as_ref())?;
 
         let discovered_keys = discovered
             .iter()
-            .map(|(info, _)| (info.object_type, info.id))
+            .map(|object| YubiHsmObjectKey::from_info(&object.info))
             .collect::<HashSet<_>>();
         let mut generations = self
             .object_generations
@@ -2614,8 +2682,8 @@ impl Slot for YubiHsmSlot {
             }
         };
         let mut metadata = HashMap::new();
-        for (info, public_key) in discovered {
-            let key = (info.object_type, info.id);
+        for YubiHsmDiscoveredObject { info, public_key } in discovered {
+            let key = YubiHsmObjectKey::from_info(&info);
             let generation = match generations.get(&key) {
                 Some((sequence, generation)) if *sequence == info.sequence => *generation,
                 _ => {
@@ -2626,16 +2694,21 @@ impl Slot for YubiHsmSlot {
                     generation
                 }
             };
-            let attribute_metadata =
-                pkcs11_metadata.remove(&(info.object_type, info.id, info.sequence, info.domains));
+            let attribute_metadata = pkcs11_metadata.remove(&YubiHsmMetadataScope {
+                target: YubiHsmMetadataTarget {
+                    object: key,
+                    sequence: info.sequence,
+                },
+                domains: info.domains,
+            });
             metadata.insert(
                 key,
-                (
-                    info.clone(),
-                    public_key.clone(),
+                YubiHsmObjectMetadata {
+                    info: info.clone(),
+                    public_key: public_key.clone(),
                     generation,
-                    attribute_metadata.clone(),
-                ),
+                    attributes: attribute_metadata.clone(),
+                },
             );
             let mut discovered_objects = yubihsm_token_objects_with_generation(
                 slot_id,
@@ -2650,7 +2723,7 @@ impl Slot for YubiHsmSlot {
         drop(generations);
         let current_generations = metadata
             .iter()
-            .map(|(key, (_, _, generation, _))| ((*key, *generation), ()))
+            .map(|(key, metadata)| ((*key, metadata.generation), ()))
             .collect::<HashMap<_, _>>();
         self.attestation_cache
             .try_borrow_mut()?
@@ -2685,15 +2758,15 @@ impl Slot for YubiHsmSlot {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        for (info, public_key, generation, attribute_metadata) in metadata {
+        for metadata in metadata {
             let mut objects = yubihsm_token_objects_with_generation(
                 slot_id,
-                info.clone(),
-                public_key,
-                generation,
-                attribute_metadata.as_ref(),
+                metadata.info.clone(),
+                metadata.public_key,
+                metadata.generation,
+                metadata.attributes.as_ref(),
             )?;
-            self.bind_cached_object_value(&info, &mut objects)?;
+            self.bind_cached_object_value(&metadata.info, &mut objects)?;
             if let Some(object) = objects
                 .into_iter()
                 .find(|object| object.unique_id == unique_id)
@@ -2710,33 +2783,40 @@ impl Slot for YubiHsmSlot {
             .map_err(|_| CKR_CANT_LOCK)?;
         let mut cache = self.attestation_cache.try_borrow_mut()?;
         let mut objects = Vec::new();
-        for (key, (info, public_key, generation, attribute_metadata)) in metadata.iter() {
-            if info.object_type != YUBIHSM_ASYMMETRIC_KEY || info.origin & 0x01 == 0 {
+        for (key, metadata) in metadata.iter() {
+            if metadata.info.object_type != YUBIHSM_ASYMMETRIC_KEY
+                || metadata.info.origin & 0x01 == 0
+            {
                 continue;
             }
-            let Some(public_key) = public_key else {
+            let Some(public_key) = metadata.public_key.as_ref() else {
                 continue;
             };
             let cache = cache
-                .entry((*key, *generation))
+                .entry((*key, metadata.generation))
                 .or_insert_with(YubiHsmAttestationCache::new)
                 .clone();
-            let id = attribute_metadata
+            let id = metadata
+                .attributes
                 .as_ref()
                 .and_then(|metadata| metadata.id.clone())
-                .unwrap_or_else(|| info.id.to_be_bytes().to_vec());
-            let label = attribute_metadata
+                .unwrap_or_else(|| metadata.info.id.to_be_bytes().to_vec());
+            let label = metadata
+                .attributes
                 .as_ref()
                 .and_then(|metadata| metadata.label.clone())
-                .unwrap_or_else(|| yubihsm_object_label(info));
+                .unwrap_or_else(|| yubihsm_object_label(&metadata.info));
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!(
-                    "yubihsm-{:02x}-{:04x}-{:02x}-{generation}-attestation",
-                    info.object_type, info.id, info.sequence
+                    "yubihsm-{:02x}-{:04x}-{:02x}-{}-attestation",
+                    metadata.info.object_type,
+                    metadata.info.id,
+                    metadata.info.sequence,
+                    metadata.generation
                 ),
                 class: CKO_CERTIFICATE as CK_OBJECT_CLASS,
-                key_type: yubihsm_key_type(info.algorithm),
+                key_type: yubihsm_key_type(metadata.info.algorithm),
                 label: format!("{label} attestation certificate"),
                 id,
                 token: false,
@@ -2756,7 +2836,7 @@ impl Slot for YubiHsmSlot {
                 material: KeyMaterial::YubiHsmAttestation {
                     connector: self.connector.clone(),
                     session: self.session.clone(),
-                    id: info.id,
+                    id: metadata.info.id,
                     algorithm: public_key.algorithm,
                     cache: cache.cache,
                 },
