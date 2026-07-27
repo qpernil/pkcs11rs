@@ -16,11 +16,7 @@ use rsa::{
     traits::{PrivateKeyParts, PublicKeyParts},
     BigUint, RsaPrivateKey, RsaPublicKey,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-    slice,
-};
+use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone)]
@@ -60,6 +56,29 @@ pub(crate) enum FidoPublicKey {
         public_exponent: Vec<u8>,
     },
 }
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum LazyCache<T> {
+    #[default]
+    Unattempted,
+    Missing,
+    Value(T),
+}
+
+impl<T> LazyCache<T> {
+    pub(crate) fn is_unattempted(&self) -> bool {
+        matches!(self, Self::Unattempted)
+    }
+
+    pub(crate) fn value(&self) -> Option<&T> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Unattempted | Self::Missing => None,
+        }
+    }
+}
+
+pub(crate) type SharedLazyBytes = Rc<RefCell<LazyCache<Vec<u8>>>>;
 
 #[derive(Clone)]
 #[cfg_attr(not(any(test, feature = "abi-tests")), allow(dead_code))]
@@ -110,8 +129,7 @@ pub(crate) enum KeyMaterial {
         connector: Rc<dyn Connector>,
         slot: piv::Slot,
         algorithm: piv::Algorithm,
-        value: Rc<RefCell<Option<Vec<u8>>>>,
-        attempted: Rc<Cell<bool>>,
+        cache: SharedLazyBytes,
     },
     OpenPgpCertificate {
         value: Vec<u8>,
@@ -119,8 +137,7 @@ pub(crate) enum KeyMaterial {
     OpenPgpData {
         tag: u16,
         connector: Rc<dyn Connector>,
-        value: Rc<RefCell<Option<Vec<u8>>>>,
-        attempted: Rc<Cell<bool>>,
+        cache: SharedLazyBytes,
     },
     IssuerSecurityDomainData {
         value: Vec<u8>,
@@ -167,8 +184,7 @@ pub(crate) enum KeyMaterial {
         session: Rc<RefCell<YubiHsmSessionState>>,
         id: u16,
         algorithm: u8,
-        value: Rc<RefCell<Option<Vec<u8>>>>,
-        attempted: Rc<Cell<bool>>,
+        cache: SharedLazyBytes,
     },
     Secret(Zeroizing<Vec<u8>>),
     DerivedSecret(Zeroizing<Vec<u8>>),
@@ -247,13 +263,13 @@ impl std::fmt::Debug for KeyMaterial {
             Self::YubiHsmAttestation {
                 id,
                 algorithm,
-                value,
+                cache,
                 ..
             } => fmt
                 .debug_struct("YubiHsmAttestation")
                 .field("id", id)
                 .field("algorithm", algorithm)
-                .field("cached", &value.borrow().is_some())
+                .field("cached", &cache.borrow().value().is_some())
                 .finish(),
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
             Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
@@ -270,13 +286,13 @@ impl std::fmt::Debug for KeyMaterial {
             Self::PivAttestation {
                 slot,
                 algorithm,
-                value,
+                cache,
                 ..
             } => fmt
                 .debug_struct("PivAttestation")
                 .field("slot", slot)
                 .field("algorithm", algorithm)
-                .field("cached", &value.borrow().is_some())
+                .field("cached", &cache.borrow().value().is_some())
                 .finish(),
             Self::PivData { object_id, value } => fmt
                 .debug_struct("PivData")
@@ -287,10 +303,10 @@ impl std::fmt::Debug for KeyMaterial {
                 .debug_struct("OpenPgpCertificate")
                 .field("size", &value.len())
                 .finish(),
-            Self::OpenPgpData { tag, value, .. } => fmt
+            Self::OpenPgpData { tag, cache, .. } => fmt
                 .debug_struct("OpenPgpData")
                 .field("tag", tag)
-                .field("cached", &value.borrow().is_some())
+                .field("cached", &cache.borrow().value().is_some())
                 .finish(),
             Self::IssuerSecurityDomainData {
                 value,
@@ -818,31 +834,36 @@ pub(crate) fn lazy_piv_attestation_certificate(
     connector: &dyn Connector,
     slot: piv::Slot,
     algorithm: piv::Algorithm,
-    value: &RefCell<Option<Vec<u8>>>,
-    attempted: &Cell<bool>,
+    cache: &RefCell<LazyCache<Vec<u8>>>,
 ) -> Option<Vec<u8>> {
-    if attempted.replace(true) {
-        return value.borrow().clone();
+    if !cache.borrow().is_unattempted() {
+        return cache.borrow().value().cloned();
     }
 
-    let certificate = PivClient.attestation(connector, slot).ok()?;
-    if piv_algorithm_from_certificate(&certificate)? != algorithm {
-        return None;
-    }
-    piv_public_key_from_certificate(algorithm, &certificate).ok()?;
-    *value.borrow_mut() = Some(certificate.clone());
-    Some(certificate)
+    let certificate = PivClient
+        .attestation(connector, slot)
+        .ok()
+        .filter(|certificate| piv_algorithm_from_certificate(certificate) == Some(algorithm))
+        .and_then(|certificate| {
+            piv_public_key_from_certificate(algorithm, &certificate)
+                .ok()
+                .map(|_| certificate)
+        });
+    *cache.borrow_mut() = match certificate {
+        Some(ref certificate) => LazyCache::Value(certificate.clone()),
+        None => LazyCache::Missing,
+    };
+    certificate
 }
 
 pub(crate) fn lazy_yubihsm_attestation_certificate(
     connector: &dyn Connector,
     session: &RefCell<YubiHsmSessionState>,
     id: u16,
-    value: &RefCell<Option<Vec<u8>>>,
-    attempted: &Cell<bool>,
+    cache: &RefCell<LazyCache<Vec<u8>>>,
 ) -> Option<Vec<u8>> {
-    if attempted.replace(true) {
-        return value.borrow().clone();
+    if !cache.borrow().is_unattempted() {
+        return cache.borrow().value().cloned();
     }
 
     let certificate = send_yubihsm_secure_command(
@@ -850,10 +871,13 @@ pub(crate) fn lazy_yubihsm_attestation_certificate(
         session,
         &YubiHsmCommand::sign_attestation_certificate(id, 0),
     )
-    .ok()?;
-    crate::certificate_chain::validate(&certificate).ok()?;
-    *value.borrow_mut() = Some(certificate.clone());
-    Some(certificate)
+    .ok()
+    .filter(|certificate| crate::certificate_chain::validate(certificate).is_ok());
+    *cache.borrow_mut() = match certificate {
+        Some(ref certificate) => LazyCache::Value(certificate.clone()),
+        None => LazyCache::Missing,
+    };
+    certificate
 }
 
 impl TokenObject {
@@ -1131,9 +1155,9 @@ impl TokenObject {
     pub(crate) fn size(&self) -> CK_ULONG {
         let defer_certificate_attributes = matches!(
             &self.material,
-            KeyMaterial::PivAttestation { attempted, .. }
-                | KeyMaterial::YubiHsmAttestation { attempted, .. }
-                if !attempted.get()
+            KeyMaterial::PivAttestation { cache, .. }
+                | KeyMaterial::YubiHsmAttestation { cache, .. }
+                if cache.borrow().is_unattempted()
         );
         self.attribute_types()
             .into_iter()
@@ -1615,14 +1639,16 @@ impl TokenObject {
                     KeyMaterial::OpenPgpData {
                         connector,
                         tag,
-                        value,
-                        attempted,
+                        cache,
                     } if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
-                        if !attempted.replace(true) {
-                            *value.borrow_mut() =
-                                OpenPgpClient.get_data(connector.as_ref(), *tag).ok();
+                        if cache.borrow().is_unattempted() {
+                            *cache.borrow_mut() =
+                                match OpenPgpClient.get_data(connector.as_ref(), *tag) {
+                                    Ok(value) => LazyCache::Value(value),
+                                    Err(_) => LazyCache::Missing,
+                                };
                         }
-                        value.borrow().clone().or_else(|| Some(Vec::new()))
+                        Some(cache.borrow().value().cloned().unwrap_or_default())
                     }
                     KeyMaterial::YubiHsmDevicePublic {
                         public_key_info, ..
@@ -1633,29 +1659,25 @@ impl TokenObject {
                         connector,
                         slot,
                         algorithm,
-                        value,
-                        attempted,
+                        cache,
                     } => lazy_piv_attestation_certificate(
                         connector.as_ref(),
                         *slot,
                         *algorithm,
-                        value,
-                        attempted,
+                        cache,
                     )
                     .and_then(|value| piv_certificate_attribute(&value, x)),
                     KeyMaterial::YubiHsmAttestation {
                         connector,
                         session,
                         id,
-                        value,
-                        attempted,
+                        cache,
                         ..
                     } => lazy_yubihsm_attestation_certificate(
                         connector.as_ref(),
                         session,
                         *id,
-                        value,
-                        attempted,
+                        cache,
                     )
                     .and_then(|value| piv_certificate_attribute(&value, x)),
                     _ => None,

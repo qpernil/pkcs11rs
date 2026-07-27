@@ -830,8 +830,7 @@ fn openpgp_data_objects_expose_application_tag_and_lazy_value() {
         material: crate::KeyMaterial::OpenPgpData {
             tag: 0x005b,
             connector,
-            value: std::rc::Rc::new(std::cell::RefCell::new(None)),
-            attempted: std::rc::Rc::new(std::cell::Cell::new(false)),
+            cache: std::rc::Rc::new(std::cell::RefCell::new(crate::LazyCache::Unattempted)),
         },
     };
     assert_eq!(

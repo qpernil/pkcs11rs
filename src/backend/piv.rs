@@ -19,8 +19,7 @@ pub(crate) struct PivKey {
     pub(crate) slot: piv::Slot,
     pub(crate) algorithm: piv::Algorithm,
     pub(crate) public_key: PivPublicKey,
-    pub(crate) attestation: Rc<RefCell<Option<Vec<u8>>>>,
-    pub(crate) attestation_attempted: Rc<Cell<bool>>,
+    pub(crate) attestation: SharedLazyBytes,
     pub(crate) pin_policy: u8,
     pub(crate) touch_policy: u8,
     pub(crate) origin: u8,
@@ -404,8 +403,7 @@ impl PivSlot {
                 slot,
                 algorithm,
                 public_key,
-                attestation: Rc::new(RefCell::new(None)),
-                attestation_attempted: Rc::new(Cell::new(false)),
+                attestation: Rc::new(RefCell::new(LazyCache::Unattempted)),
                 pin_policy: 0,
                 touch_policy: 0,
                 origin: 0,
@@ -651,8 +649,7 @@ impl Slot for PivSlot {
                 slot,
                 algorithm,
                 public_key,
-                attestation: Rc::new(RefCell::new(None)),
-                attestation_attempted: Rc::new(Cell::new(false)),
+                attestation: Rc::new(RefCell::new(LazyCache::Unattempted)),
                 pin_policy: metadata.pin_policy.unwrap_or(0),
                 touch_policy: metadata.touch_policy.unwrap_or(0),
                 origin: metadata.origin.unwrap_or(0),
@@ -837,8 +834,7 @@ impl Slot for PivSlot {
             slot,
             algorithm,
             public_key,
-            attestation: Rc::new(RefCell::new(None)),
-            attestation_attempted: Rc::new(Cell::new(false)),
+            attestation: Rc::new(RefCell::new(LazyCache::Unattempted)),
             pin_policy,
             touch_policy,
             origin: piv::ORIGIN_GENERATED,
@@ -871,8 +867,7 @@ impl Slot for PivSlot {
             slot,
             algorithm: key.algorithm,
             public_key,
-            attestation: Rc::new(RefCell::new(None)),
-            attestation_attempted: Rc::new(Cell::new(false)),
+            attestation: Rc::new(RefCell::new(LazyCache::Unattempted)),
             pin_policy,
             touch_policy,
             origin: piv::ORIGIN_IMPORTED,
@@ -911,8 +906,7 @@ impl Slot for PivSlot {
         PivClient.move_key(self.connector.as_ref(), from, to)?;
         if let Some(key) = self.keys.iter_mut().find(|key| key.slot == from) {
             key.slot = to;
-            key.attestation = Rc::new(RefCell::new(None));
-            key.attestation_attempted = Rc::new(Cell::new(false));
+            key.attestation = Rc::new(RefCell::new(LazyCache::Unattempted));
         }
         Ok(())
     }
@@ -1178,8 +1172,7 @@ impl Slot for PivSlot {
                     connector: self.connector.clone(),
                     slot: key.slot,
                     algorithm: key.algorithm,
-                    value: key.attestation.clone(),
-                    attempted: key.attestation_attempted.clone(),
+                    cache: key.attestation.clone(),
                 },
             });
         }
