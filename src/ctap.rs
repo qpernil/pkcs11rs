@@ -173,7 +173,11 @@ impl std::fmt::Debug for Client {
     }
 }
 
-fn normalize_pin(info: &AuthenticatorInfo, pin: &[u8]) -> Result<Zeroizing<Vec<u8>>, CtapError> {
+fn normalize_pin(
+    info: &AuthenticatorInfo,
+    pin: &[u8],
+    enforce_minimum: bool,
+) -> Result<Zeroizing<Vec<u8>>, CtapError> {
     let pin_text =
         std::str::from_utf8(pin).map_err(|_| CtapError::Transport(CKR_PIN_INVALID.into()))?;
     let normalized = Zeroizing::new(pin_text.nfc().collect::<String>());
@@ -182,7 +186,7 @@ fn normalize_pin(info: &AuthenticatorInfo, pin: &[u8]) -> Result<Zeroizing<Vec<u
     if normalized.is_empty()
         || normalized.len() > 63
         || normalized.as_bytes().contains(&0)
-        || normalized.chars().count() < minimum
+        || (enforce_minimum && normalized.chars().count() < minimum)
     {
         return Err(CtapError::Transport(crate::CKR_PIN_LEN_RANGE.into()));
     }
@@ -224,7 +228,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
-        let new_pin = normalize_pin(info, new_pin)?;
+        let new_pin = normalize_pin(info, new_pin, true)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
@@ -246,6 +250,53 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) fn change_pin(
+        &self,
+        info: &AuthenticatorInfo,
+        current_pin: &[u8],
+        new_pin: &[u8],
+    ) -> Result<(), CtapError> {
+        if !info.option("clientPin") {
+            return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
+        }
+        if !info.pin_uv_auth_protocols.contains(&2) {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        let current_pin = normalize_pin(info, current_pin, false)?;
+        let new_pin = normalize_pin(info, new_pin, true)?;
+
+        let response = self.exchange(
+            AUTHENTICATOR_CLIENT_PIN,
+            &encode_get_key_agreement_request()?,
+        )?;
+        let authenticator_key = parse_key_agreement_response(&response)?;
+        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
+        let mut padded_pin = Zeroizing::new(vec![0; 64]);
+        padded_pin[..new_pin.len()].copy_from_slice(&new_pin);
+        let mut new_pin_enc = protocol_two_encrypt(&shared_secret, &padded_pin)?;
+        let current_pin_hash = Zeroizing::new(Sha256::digest(&*current_pin).to_vec());
+        let mut pin_hash_enc = protocol_two_encrypt(&shared_secret, &current_pin_hash[..16])?;
+        let mut authenticated =
+            Zeroizing::new(Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len()));
+        authenticated.extend_from_slice(&new_pin_enc);
+        authenticated.extend_from_slice(&pin_hash_enc);
+        let pin_uv_auth_param = authenticate(&shared_secret[..32], &authenticated)?;
+        let request = encode_change_pin_request(
+            &platform_key,
+            &pin_uv_auth_param,
+            &new_pin_enc,
+            &pin_hash_enc,
+        )?;
+        let response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
+        shared_secret.zeroize();
+        new_pin_enc.zeroize();
+        pin_hash_enc.zeroize();
+        if !response.is_empty() {
+            return Err(CtapError::Malformed("unexpected changePIN response data"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn authorize_credential_enumeration(
         &self,
         info: &AuthenticatorInfo,
@@ -257,7 +308,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) || !info.option("pinUvAuthToken") {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
-        let pin = normalize_pin(info, pin)?;
+        let pin = normalize_pin(info, pin, true)?;
         let permission = if info.option("perCredMgmtRO") {
             PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
         } else {
@@ -655,6 +706,32 @@ fn encode_set_pin_request(
         .bytes(pin_uv_auth_param)?
         .u8(0x05)?
         .bytes(new_pin_enc)?;
+    Ok(output)
+}
+
+fn encode_change_pin_request(
+    platform_key: &CoseKey,
+    pin_uv_auth_param: &[u8; 32],
+    new_pin_enc: &[u8],
+    pin_hash_enc: &[u8],
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder
+        .map(6)?
+        .u8(0x01)?
+        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(0x02)?
+        .u8(0x04)?
+        .u8(0x03)?;
+    encode_cose_key(&mut encoder, platform_key)?;
+    encoder
+        .u8(0x04)?
+        .bytes(pin_uv_auth_param)?
+        .u8(0x05)?
+        .bytes(new_pin_enc)?
+        .u8(0x06)?
+        .bytes(pin_hash_enc)?;
     Ok(output)
 }
 
@@ -1301,20 +1378,95 @@ mod tests {
     }
 
     #[test]
+    fn change_pin_uses_protocol_two_request_shape() {
+        let transport = Rc::new(MockTransport::new(vec![key_agreement_response(), vec![0]]));
+        let client = Client::new(transport.clone());
+        let mut info = credential_management_info();
+        info.min_pin_length = Some(8);
+        client.change_pin(&info, b"old!", b"new-PIN!").unwrap();
+
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests[0],
+            [
+                AUTHENTICATOR_CLIENT_PIN,
+                0xa2,
+                0x01,
+                PIN_UV_AUTH_PROTOCOL_TWO,
+                0x02,
+                0x02
+            ]
+        );
+        assert_eq!(requests[1][0], AUTHENTICATOR_CLIENT_PIN);
+        let mut decoder = Decoder::new(&requests[1][1..]);
+        assert_eq!(decoder.map().unwrap(), Some(6));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), PIN_UV_AUTH_PROTOCOL_TWO);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        parse_cose_key(&mut decoder).unwrap();
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.bytes().unwrap().len(), 32);
+        assert_eq!(decoder.u8().unwrap(), 5);
+        assert_eq!(decoder.bytes().unwrap().len(), 80);
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.bytes().unwrap().len(), 32);
+        assert_eq!(decoder.position(), requests[1].len() - 1);
+    }
+
+    #[test]
+    fn change_pin_rejects_unsafe_inputs_and_malformed_success_data() {
+        let transport = Rc::new(MockTransport::new(Vec::new()));
+        let client = Client::new(transport.clone());
+        let mut info = credential_management_info();
+        info.min_pin_length = Some(8);
+        assert!(client.change_pin(&info, b"old-PIN", b"short").is_err());
+        assert!(client.change_pin(&info, b"old-PIN", b"has\0zero").is_err());
+        assert!(transport.requests.borrow().is_empty());
+
+        let malformed = Rc::new(MockTransport::new(vec![
+            key_agreement_response(),
+            vec![0, 0xa0],
+        ]));
+        assert!(matches!(
+            Client::new(malformed).change_pin(&info, b"old!", b"long-enough"),
+            Err(CtapError::Malformed("unexpected changePIN response data"))
+        ));
+
+        let wrong_pin = Rc::new(MockTransport::new(vec![
+            key_agreement_response(),
+            vec![CTAP2_ERR_PIN_INVALID],
+        ]));
+        assert!(matches!(
+            Client::new(wrong_pin)
+                .change_pin(&info, b"old!", b"long-enough")
+                .map_err(CtapError::into_pkcs11),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
+        ));
+    }
+
+    #[test]
     fn fido_pins_are_normalized_to_nfc_before_use() {
         let mut info = credential_management_info();
         info.min_pin_length = Some(4);
         assert_eq!(
-            normalize_pin(&info, "ra\u{0308}ka".as_bytes())
+            normalize_pin(&info, "ra\u{0308}ka".as_bytes(), true)
                 .unwrap()
                 .as_slice(),
             "räka".as_bytes()
         );
         info.min_pin_length = Some(5);
         assert!(matches!(
-            normalize_pin(&info, "ra\u{0308}ka".as_bytes()),
+            normalize_pin(&info, "ra\u{0308}ka".as_bytes(), true),
             Err(CtapError::Transport(_))
         ));
+        assert_eq!(
+            normalize_pin(&info, "räka".as_bytes(), false)
+                .unwrap()
+                .as_slice(),
+            "räka".as_bytes()
+        );
     }
 
     #[test]

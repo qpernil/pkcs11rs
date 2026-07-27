@@ -88,7 +88,7 @@ The production backend issues only:
 
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
-- first-time `authenticatorClientPIN/setPIN`;
+- `authenticatorClientPIN/setPIN` and `changePIN`;
 - `authenticatorClientPIN/getPinUvAuthTokenUsingPinWithPermissions`;
 - `authenticatorCredentialManagement/enumerateRPsBegin` and
   `enumerateRPsGetNextRP`;
@@ -142,7 +142,7 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   -- --ignored --nocapture
 ```
 
-## Initial PIN provisioning through PKCS #11
+## PIN management through PKCS #11
 
 An application can provision the first FIDO2 PIN through `C_SetPIN` in an R/W
 public session:
@@ -151,26 +151,39 @@ public session:
 C_SetPIN(session, NULL_PTR, 0, new_pin, new_pin_len);
 ```
 
-The empty old PIN represents the authenticator's uninitialized PIN state. The
-operation is accepted only while GetInfo reports `clientPin=false`; once a PIN
-exists, `C_SetPIN` returns `CKR_FUNCTION_NOT_SUPPORTED`. A nonempty old PIN on
-an uninitialized authenticator returns `CKR_PIN_INCORRECT`. Consequently this
-mapping cannot change or reset an existing PIN. `C_InitPIN` remains unsupported
-for FIDO2 because PKCS #11 requires it to run in an authenticated SO session,
-while CTAP has no Security Officer identity.
+The empty old PIN represents the authenticator's uninitialized PIN state.
+Either `NULL_PTR, 0` or a non-null pointer to an empty string with length zero
+is accepted, covering GUI clients that always supply a string buffer. A
+nonempty old PIN on an uninitialized authenticator returns
+`CKR_PIN_INCORRECT`.
+
+Once GetInfo reports `clientPin=true`, the standard PKCS #11 change operation
+maps to CTAP `changePIN`:
+
+```c
+C_SetPIN(session, old_pin, old_pin_len, new_pin, new_pin_len);
+```
+
+An empty old PIN in that state returns `CKR_PIN_INCORRECT`. The CTAP wrong-PIN
+and blocked-PIN statuses map to the corresponding PKCS #11 PIN errors. This
+mapping never invokes CTAP reset. `C_InitPIN` remains unsupported for FIDO2
+because PKCS #11 requires it to run in an authenticated SO session, while CTAP
+has no Security Officer identity.
 
 New PINs are validated as UTF-8, normalized to Unicode NFC, checked against the
 authenticator's reported `minPINLength`, and limited to CTAP's 63-byte maximum.
-FIDO2 PIN login applies the same NFC normalization before hashing.
+FIDO2 PIN login and the current PIN supplied for a change apply the same NFC
+normalization before hashing. The current PIN is not checked against the
+present `minPINLength`, because CTAP permits policy changes that leave an
+existing PIN shorter than a newly raised minimum.
 
 The ignored hardware test provisions through the exported `C_SetPIN` entry
 point, verifies `CKF_USER_PIN_INITIALIZED`, then authenticates through
-`C_Login(CKU_USER)` with the new PIN and logs out. It requires both an explicit
-mutation enable flag and the new PIN:
+`C_Login(CKU_USER)` with the new PIN and logs out. The presence of the new-PIN
+variable is the mutation gate:
 
 ```sh
 PKCS11RS_CCID_APPLICATIONS=fido2 \
-PKCS11RS_TEST_PROVISION_FIDO2_PIN=1 \
 PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
   cargo test provisions_initial_fido2_pin -- --ignored --nocapture
 ```
@@ -184,6 +197,22 @@ against the intended test key and store the selected PIN securely. The PIN is
 read from the environment, is not printed, and is held in zeroizing memory by
 the test process.
 
+The separate ignored change test calls `C_SetPIN` with the current and new PIN,
+then verifies the new PIN through `C_Login(CKU_USER)`:
+
+```sh
+PKCS11RS_CCID_APPLICATIONS=fido2 \
+PKCS11RS_FIDO2_TEST_PIN='current test PIN' \
+PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
+  cargo test changes_existing_fido2_pin -- --ignored --nocapture
+```
+
+This test permanently changes the selected authenticator's PIN and does not
+restore it. The change test runs only when both PIN variables are present. Both
+mutation tests require printable ASCII PINs for predictable shell invocation;
+production callers may use any valid UTF-8 PIN accepted by the CTAP
+normalization rules.
+
 ## CBOR implementation
 
 Protocol encoding and strict definite-length response parsing use
@@ -195,11 +224,13 @@ field checks, and response bounds explicit.
 ## Deferred hardware and firmware questions
 
 The initial implementation was completed without hardware. The compatibility
-probe has since run against pre-release hardware, while resident-credential
-enumeration and PKCS #11 PIN provisioning/login remain deferred. Validation
-remains necessary for:
+probe has since succeeded against pre-release hardware and a pre-release
+YubiKey reporting `FIDO_2_3` over macOS PC/SC. The latter reported
+`clientPin=false`, so resident-credential enumeration and PKCS #11 PIN
+provisioning, change, and login remain deferred. Validation remains necessary
+for:
 
-- USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8
+- USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8+
   production, pre-release, FIPS, and Security Key model of interest;
 - PC/SC behavior and APDU response sizes on macOS, Linux, and Windows;
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one

@@ -360,14 +360,20 @@ impl Slot for Fido2Slot {
             self.info.get_mut().take();
             let info = self.discovered_info()?;
             if info.option("clientPin") {
-                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+                if old_pin.is_empty() {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                self.client
+                    .change_pin(&info, old_pin, new_pin)
+                    .map_err(CtapError::into_pkcs11)?;
+            } else {
+                if !old_pin.is_empty() {
+                    return Err(CKR_PIN_INCORRECT.into());
+                }
+                self.client
+                    .set_initial_pin(&info, new_pin)
+                    .map_err(CtapError::into_pkcs11)?;
             }
-            if !old_pin.is_empty() {
-                return Err(CKR_PIN_INCORRECT.into());
-            }
-            self.client
-                .set_initial_pin(&info, new_pin)
-                .map_err(CtapError::into_pkcs11)?;
             self.info.get_mut().take();
             Ok(())
         })();
@@ -660,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn public_set_pin_refuses_old_pin_and_existing_pin_paths() {
+    fn public_set_pin_rejects_state_mismatches_and_named_login() {
         let connector: Rc<dyn Connector> =
             Rc::new(ScriptedConnector::new(vec![get_info_apdu_response(false)]));
         let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
@@ -674,7 +680,7 @@ mod tests {
         let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
         assert!(matches!(
             slot.set_pin(&[], b"new-PIN"),
-            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as CK_RV
         ));
         assert!(matches!(
             slot.login_user(b"alice", b"new-PIN"),
@@ -684,6 +690,35 @@ mod tests {
             slot.login_so(b"new-PIN"),
             Err(Error::Generic(rv)) if rv == CKR_USER_TYPE_INVALID as CK_RV
         ));
+    }
+
+    #[test]
+    fn public_set_pin_changes_an_existing_fido_pin() {
+        let connector = Rc::new(ScriptedConnector::new(vec![
+            get_info_apdu_response(true),
+            key_agreement_apdu_response(),
+            vec![0, 0x90, 0x00],
+            get_info_apdu_response(true),
+        ]));
+        let mut slot = Fido2Slot::new(connector.clone(), FIDO2_AID.to_vec());
+        slot.set_pin(b"old-PIN", b"new-PIN").unwrap();
+
+        let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+        slot.get_token_info(&mut token_info).unwrap();
+        assert_ne!(token_info.flags & CKF_USER_PIN_INITIALIZED as CK_FLAGS, 0);
+
+        let commands = connector.commands.borrow();
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0][5], AUTHENTICATOR_GET_INFO);
+        assert_eq!(commands[1][5], AUTHENTICATOR_CLIENT_PIN);
+        assert_eq!(commands[2][5], AUTHENTICATOR_CLIENT_PIN);
+        let mut decoder = minicbor::Decoder::new(&commands[2][6..commands[2].len() - 2]);
+        assert_eq!(decoder.map().unwrap(), Some(6));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(commands[3][5], AUTHENTICATOR_GET_INFO);
     }
 
     #[test]
