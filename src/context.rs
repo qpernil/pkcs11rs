@@ -418,7 +418,7 @@ impl ModuleContext {
         let yubihsm_public_discovery_credential =
             configured_yubihsm_public_discovery_credential_with_pinentry(
                 std::env::var_os(YUBIHSM_DISCOVERY_ENV),
-                pinentry.clone(),
+                pinentry.as_ref(),
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_credential = None;
@@ -1020,15 +1020,16 @@ impl ModuleContext {
                                         log!(1, "YubiHSM slot ID space exhausted");
                                         continue;
                                     };
-                                    let mut slot = Box::new(
+                                    let mut yubihsm_slot =
                                         YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
                                             Rc::new(connector),
                                             (0, 0, 0),
                                             Vec::new(),
                                             hsmauth_providers.clone(),
                                             self.yubihsm_public_discovery_credential.clone(),
-                                        ),
-                                    );
+                                        );
+                                    yubihsm_slot.set_pinentry(self.pinentry.clone());
+                                    let mut slot = Box::new(yubihsm_slot);
                                     if let Err(error) = slot.init_slot() {
                                         log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
                                         continue;
@@ -1077,13 +1078,15 @@ impl ModuleContext {
                 continue;
             };
             let connector = Rc::new(connector);
-            let mut slot = Box::new(YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+            let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
                 connector.clone(),
                 (0, 0, 0),
                 Vec::new(),
                 hsmauth_providers.clone(),
                 self.yubihsm_public_discovery_credential.clone(),
-            ));
+            );
+            yubihsm_slot.set_pinentry(self.pinentry.clone());
+            let mut slot = Box::new(yubihsm_slot);
             if connected {
                 if let Err(error) = slot.init_slot() {
                     log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
