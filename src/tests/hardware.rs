@@ -1180,7 +1180,7 @@ mod fido2_hardware {
     }
 
     #[test]
-    #[ignore = "requires a YubiKey 5.8+ FIDO2-over-CCID applet and PKCS11RS_FIDO2_TEST_PIN"]
+    #[ignore = "requires a YubiKey FIDO2 smart-card applet over USB CCID or NFC and PKCS11RS_FIDO2_TEST_PIN"]
     fn fido2_read_only_resident_credential_enumeration() {
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();

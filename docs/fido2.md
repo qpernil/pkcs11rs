@@ -303,8 +303,9 @@ plus `credentialMgmtPreview` login path. On pre-release hardware, the exported
 zero-length old-PIN buffer and `C_Login(CKU_USER)` verified it. The test-only
 makeCredential fixture then created a persistent discoverable credential, and
 both its immediate PKCS #11 check and the standalone read-only enumeration test
-rediscovered that object. Existing-PIN `changePIN` hardware validation remains
-deferred. Validation remains necessary for:
+rediscovered that object. Existing-PIN `changePIN` through `C_SetPIN` and
+subsequent `C_Login` verification with the replacement PIN have also succeeded
+on pre-release hardware. Additional robustness validation remains useful for:
 
 - USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8+
   production, pre-release, FIPS, and Security Key model of interest;

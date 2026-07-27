@@ -53,9 +53,10 @@ OpenPGP, or YubiHSM Auth.
 
 YubiKey firmware 5.8 and later exposes FIDO2 through the USB CCID smart-card
 interface. Earlier YubiKey firmware exposes FIDO2 over the separate USB FIDO
-interface and therefore does not produce a FIDO2 slot in this module. FIDO over
-NFC also uses the smart-card binding, but NFC hardware behavior has not yet
-been validated by this project.
+interface and therefore does not produce a FIDO2 slot over USB in this module.
+FIDO over NFC also uses the smart-card binding. Applet selection,
+`authenticatorGetInfo`, and legacy PIN-token login have been validated with an
+earlier YubiKey over NFC on macOS.
 
 The module follows the CTAP ISO 7816 binding: it explicitly selects the FIDO2
 AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
