@@ -1,9 +1,31 @@
-use crate::{Error, CKR_DEVICE_ERROR};
-use minicbor::Decoder;
+use crate::{
+    is_multiple_of,
+    secure_channel_crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
+    Error, CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_LOCKED,
+    CKR_USER_PIN_NOT_INITIALIZED,
+};
+use hmac::{Hmac, Mac};
+use minicbor::{data::Type, Decoder, Encoder};
+use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
+use sha2::{Digest, Sha256};
 use std::rc::Rc;
+use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) const AUTHENTICATOR_GET_INFO: u8 = 0x04;
+pub(crate) const AUTHENTICATOR_CLIENT_PIN: u8 = 0x06;
+pub(crate) const AUTHENTICATOR_CREDENTIAL_MANAGEMENT: u8 = 0x0a;
+pub(crate) const AUTHENTICATOR_CREDENTIAL_MANAGEMENT_PREVIEW: u8 = 0x41;
 pub(crate) const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00, 0x01];
+
+const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
+const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
+const CTAP2_ERR_PIN_BLOCKED: u8 = 0x32;
+const CTAP2_ERR_PIN_AUTH_BLOCKED: u8 = 0x34;
+const CTAP2_ERR_PIN_NOT_SET: u8 = 0x35;
+const PIN_UV_AUTH_PROTOCOL_TWO: u8 = 2;
+const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
+const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
+const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
 
 #[derive(Debug)]
 pub(crate) enum CtapError {
@@ -16,6 +38,11 @@ impl CtapError {
     pub(crate) fn into_pkcs11(self) -> Error {
         match self {
             Self::Transport(error) => error,
+            Self::Status(CTAP2_ERR_PIN_INVALID) => CKR_PIN_INCORRECT.into(),
+            Self::Status(CTAP2_ERR_PIN_BLOCKED | CTAP2_ERR_PIN_AUTH_BLOCKED) => {
+                CKR_PIN_LOCKED.into()
+            }
+            Self::Status(CTAP2_ERR_PIN_NOT_SET) => CKR_USER_PIN_NOT_INITIALIZED.into(),
             Self::Status(status) => {
                 log!(1, "CTAP command failed with status {status:#04x}");
                 CKR_DEVICE_ERROR.into()
@@ -40,6 +67,12 @@ impl From<minicbor::decode::Error> for CtapError {
     }
 }
 
+impl From<minicbor::encode::Error<std::convert::Infallible>> for CtapError {
+    fn from(_error: minicbor::encode::Error<std::convert::Infallible>) -> Self {
+        Self::Malformed("CBOR encoding failed")
+    }
+}
+
 pub(crate) trait CtapTransport {
     /// Exchange one CTAP message, including its command/status byte.
     fn transact(&self, request: &[u8]) -> Result<Vec<u8>, Error>;
@@ -54,6 +87,49 @@ pub(crate) struct AuthenticatorInfo {
     pub(crate) max_msg_size: Option<u64>,
     pub(crate) pin_uv_auth_protocols: Vec<u64>,
     pub(crate) transports: Vec<String>,
+}
+
+impl AuthenticatorInfo {
+    pub(crate) fn option(&self, name: &str) -> bool {
+        self.options
+            .iter()
+            .any(|(candidate, enabled)| candidate == name && *enabled)
+    }
+
+    fn credential_management_command(&self) -> Option<u8> {
+        if self.option("credMgmt") {
+            Some(AUTHENTICATOR_CREDENTIAL_MANAGEMENT)
+        } else if self.option("credentialMgmtPreview") {
+            Some(AUTHENTICATOR_CREDENTIAL_MANAGEMENT_PREVIEW)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RelyingParty {
+    pub(crate) id: Option<String>,
+    pub(crate) name: Option<String>,
+    pub(crate) id_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoverableCredential {
+    pub(crate) relying_party: RelyingParty,
+    pub(crate) user_id: Vec<u8>,
+    pub(crate) user_name: Option<String>,
+    pub(crate) user_display_name: Option<String>,
+    pub(crate) credential_id: Vec<u8>,
+    pub(crate) public_key_cose: Vec<u8>,
+    pub(crate) cred_protect: Option<u64>,
+    pub(crate) third_party_payment: Option<bool>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CredentialAuthorization {
+    protocol: u8,
+    token: Zeroizing<Vec<u8>>,
 }
 
 pub(crate) struct Client {
@@ -71,28 +147,161 @@ impl Client {
         Self { transport }
     }
 
-    pub(crate) fn get_info(&self) -> Result<AuthenticatorInfo, CtapError> {
-        let response = self.transport.transact(&[AUTHENTICATOR_GET_INFO])?;
+    fn exchange(&self, command: u8, payload: &[u8]) -> Result<Vec<u8>, CtapError> {
+        let mut request = Vec::with_capacity(1 + payload.len());
+        request.push(command);
+        request.extend_from_slice(payload);
+        let response = self.transport.transact(&request)?;
         let (&status, data) = response
             .split_first()
             .ok_or(CtapError::Malformed("missing CTAP status"))?;
         if status != 0 {
             return Err(CtapError::Status(status));
         }
-        parse_authenticator_info(data)
+        Ok(data.to_vec())
+    }
+
+    pub(crate) fn get_info(&self) -> Result<AuthenticatorInfo, CtapError> {
+        let response = self.exchange(AUTHENTICATOR_GET_INFO, &[])?;
+        parse_authenticator_info(&response)
+    }
+
+    pub(crate) fn authorize_credential_enumeration(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+    ) -> Result<CredentialAuthorization, CtapError> {
+        if !info.option("clientPin") {
+            return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
+        }
+        if !info.pin_uv_auth_protocols.contains(&2) || !info.option("pinUvAuthToken") {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        let permission = if info.option("pcmr") {
+            PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY
+        } else {
+            PERMISSION_CREDENTIAL_MANAGEMENT
+        };
+
+        let response = self.exchange(
+            AUTHENTICATOR_CLIENT_PIN,
+            &encode_get_key_agreement_request()?,
+        )?;
+        let authenticator_key = parse_key_agreement_response(&response)?;
+        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
+        let pin_hash = Zeroizing::new(Sha256::digest(pin).to_vec());
+        let pin_hash_enc = protocol_two_encrypt(&shared_secret, &pin_hash[..16])?;
+        let request = encode_get_token_request(&platform_key, &pin_hash_enc, permission)?;
+        let mut response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
+        let encrypted_token = parse_pin_token_response(&response)?;
+        let token = Zeroizing::new(protocol_two_decrypt(&shared_secret, &encrypted_token)?);
+        shared_secret.zeroize();
+        response.zeroize();
+        if token.len() != 32 {
+            return Err(CtapError::Malformed("invalid PIN/UV auth token length"));
+        }
+        Ok(CredentialAuthorization {
+            protocol: PIN_UV_AUTH_PROTOCOL_TWO,
+            token,
+        })
+    }
+
+    pub(crate) fn enumerate_credentials(
+        &self,
+        info: &AuthenticatorInfo,
+        authorization: &CredentialAuthorization,
+    ) -> Result<Vec<DiscoverableCredential>, CtapError> {
+        let command = info
+            .credential_management_command()
+            .ok_or(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()))?;
+        let relying_parties = self.enumerate_relying_parties(command, authorization)?;
+        let mut credentials = Vec::new();
+        for relying_party in relying_parties {
+            credentials.extend(self.enumerate_credentials_for_rp(
+                command,
+                authorization,
+                &relying_party,
+            )?);
+            if credentials.len() > MAX_CTAP_COLLECTION_LENGTH {
+                return Err(CtapError::Malformed("credential count exceeds limit"));
+            }
+        }
+        Ok(credentials)
+    }
+
+    fn enumerate_relying_parties(
+        &self,
+        command: u8,
+        authorization: &CredentialAuthorization,
+    ) -> Result<Vec<RelyingParty>, CtapError> {
+        let first = match self.exchange(command, &encode_enumerate_rps_begin(authorization)?) {
+            Ok(response) => response,
+            Err(CtapError::Status(CTAP2_ERR_NO_CREDENTIALS)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let (first, total) = parse_relying_party_response(&first, true)?;
+        let total = bounded_count(total, "RP count exceeds limit")?;
+        let mut relying_parties = Vec::with_capacity(total);
+        relying_parties.push(first);
+        for _ in 1..total {
+            let response = self.exchange(command, &encode_management_next(0x03)?)?;
+            let (relying_party, _) = parse_relying_party_response(&response, false)?;
+            relying_parties.push(relying_party);
+        }
+        Ok(relying_parties)
+    }
+
+    fn enumerate_credentials_for_rp(
+        &self,
+        command: u8,
+        authorization: &CredentialAuthorization,
+        relying_party: &RelyingParty,
+    ) -> Result<Vec<DiscoverableCredential>, CtapError> {
+        let request = encode_enumerate_credentials_begin(authorization, &relying_party.id_hash)?;
+        let first = match self.exchange(command, &request) {
+            Ok(response) => response,
+            Err(CtapError::Status(CTAP2_ERR_NO_CREDENTIALS)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let (first, total) = parse_credential_response(&first, relying_party, true)?;
+        let total = bounded_count(total, "credential count exceeds limit")?;
+        let mut credentials = Vec::with_capacity(total);
+        credentials.push(first);
+        for _ in 1..total {
+            let response = self.exchange(command, &encode_management_next(0x05)?)?;
+            let (credential, _) = parse_credential_response(&response, relying_party, false)?;
+            credentials.push(credential);
+        }
+        Ok(credentials)
     }
 }
 
+fn bounded_count(value: u64, message: &'static str) -> Result<usize, CtapError> {
+    let value = usize::try_from(value).map_err(|_| CtapError::Malformed(message))?;
+    if !(1..=MAX_CTAP_COLLECTION_LENGTH).contains(&value) {
+        return Err(CtapError::Malformed(message));
+    }
+    Ok(value)
+}
+
 fn definite_map(decoder: &mut Decoder<'_>) -> Result<u64, CtapError> {
-    decoder
+    let count = decoder
         .map()?
-        .ok_or(CtapError::Malformed("indefinite CBOR map"))
+        .ok_or(CtapError::Malformed("indefinite CBOR map"))?;
+    if count > MAX_CTAP_COLLECTION_LENGTH as u64 {
+        return Err(CtapError::Malformed("CBOR map exceeds limit"));
+    }
+    Ok(count)
 }
 
 fn definite_array(decoder: &mut Decoder<'_>) -> Result<u64, CtapError> {
-    decoder
+    let count = decoder
         .array()?
-        .ok_or(CtapError::Malformed("indefinite CBOR array"))
+        .ok_or(CtapError::Malformed("indefinite CBOR array"))?;
+    if count > MAX_CTAP_COLLECTION_LENGTH as u64 {
+        return Err(CtapError::Malformed("CBOR array exceeds limit"));
+    }
+    Ok(count)
 }
 
 fn decode_string_array(decoder: &mut Decoder<'_>) -> Result<Vec<String>, CtapError> {
@@ -178,6 +387,450 @@ fn parse_authenticator_info(data: &[u8]) -> Result<AuthenticatorInfo, CtapError>
         pin_uv_auth_protocols,
         transports,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CoseKey {
+    x: [u8; 32],
+    y: [u8; 32],
+}
+
+fn parse_key_agreement_response(data: &[u8]) -> Result<CoseKey, CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut key = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            0x01 if key.is_none() => key = Some(parse_cose_key(&mut decoder)?),
+            0x01 => return Err(CtapError::Malformed("duplicate key agreement")),
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing key agreement data"));
+    }
+    key.ok_or(CtapError::Malformed("missing key agreement"))
+}
+
+fn parse_cose_key(decoder: &mut Decoder<'_>) -> Result<CoseKey, CtapError> {
+    let count = definite_map(decoder)?;
+    let mut kty = None;
+    let mut alg = None;
+    let mut curve = None;
+    let mut x = None;
+    let mut y = None;
+    for _ in 0..count {
+        let key = decoder.i64()?;
+        match key {
+            1 if kty.is_none() => kty = Some(decoder.u64()?),
+            3 if alg.is_none() => alg = Some(decoder.i64()?),
+            -1 if curve.is_none() => curve = Some(decoder.u64()?),
+            -2 if x.is_none() => {
+                x = Some(
+                    decoder
+                        .bytes()?
+                        .try_into()
+                        .map_err(|_| CtapError::Malformed("invalid COSE x coordinate"))?,
+                )
+            }
+            -3 if y.is_none() => {
+                y = Some(
+                    decoder
+                        .bytes()?
+                        .try_into()
+                        .map_err(|_| CtapError::Malformed("invalid COSE y coordinate"))?,
+                )
+            }
+            1 | 3 | -1 | -2 | -3 => return Err(CtapError::Malformed("duplicate COSE key field")),
+            _ => decoder.skip()?,
+        }
+    }
+    if kty != Some(2) || alg != Some(-25) || curve != Some(1) {
+        return Err(CtapError::Malformed("unsupported key agreement COSE key"));
+    }
+    Ok(CoseKey {
+        x: x.ok_or(CtapError::Malformed("missing COSE x coordinate"))?,
+        y: y.ok_or(CtapError::Malformed("missing COSE y coordinate"))?,
+    })
+}
+
+fn random_p256_secret() -> Result<SecretKey, CtapError> {
+    loop {
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        getrandom::fill(bytes.as_mut())
+            .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))?;
+        if let Ok(secret) = SecretKey::from_slice(bytes.as_ref()) {
+            return Ok(secret);
+        }
+    }
+}
+
+fn encapsulate(authenticator_key: &CoseKey) -> Result<(CoseKey, Zeroizing<Vec<u8>>), CtapError> {
+    let mut encoded = [0u8; 65];
+    encoded[0] = 0x04;
+    encoded[1..33].copy_from_slice(&authenticator_key.x);
+    encoded[33..].copy_from_slice(&authenticator_key.y);
+    let peer = PublicKey::from_sec1_bytes(&encoded)
+        .map_err(|_| CtapError::Malformed("invalid authenticator key agreement point"))?;
+    let secret = random_p256_secret()?;
+    let public = secret.public_key().to_sec1_point(false);
+    let public = public.as_bytes();
+    let platform_key = CoseKey {
+        x: public[1..33]
+            .try_into()
+            .map_err(|_| CtapError::Malformed("invalid platform x coordinate"))?,
+        y: public[33..65]
+            .try_into()
+            .map_err(|_| CtapError::Malformed("invalid platform y coordinate"))?,
+    };
+    let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+    let hkdf = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.raw_secret_bytes().as_ref());
+    let mut shared = Zeroizing::new(vec![0u8; 64]);
+    hkdf.expand(b"CTAP2 HMAC key", &mut shared[..32])
+        .map_err(|_| CtapError::Malformed("HMAC key derivation failed"))?;
+    hkdf.expand(b"CTAP2 AES key", &mut shared[32..])
+        .map_err(|_| CtapError::Malformed("AES key derivation failed"))?;
+    Ok((platform_key, shared))
+}
+
+fn protocol_two_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CtapError> {
+    if key.len() != 64 || !is_multiple_of(plaintext.len(), AES_BLOCK_SIZE) {
+        return Err(CtapError::Malformed(
+            "invalid protocol two encryption input",
+        ));
+    }
+    let mut iv = [0u8; AES_BLOCK_SIZE];
+    getrandom::fill(&mut iv).map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))?;
+    let ciphertext = aes_cbc(&key[32..], &iv, plaintext, Direction::Encrypt)?;
+    let mut output = Vec::with_capacity(iv.len() + ciphertext.len());
+    output.extend_from_slice(&iv);
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
+}
+
+fn protocol_two_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CtapError> {
+    if key.len() != 64
+        || ciphertext.len() < AES_BLOCK_SIZE * 2
+        || !is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE)
+    {
+        return Err(CtapError::Malformed("invalid protocol two ciphertext"));
+    }
+    aes_cbc(
+        &key[32..],
+        &ciphertext[..AES_BLOCK_SIZE],
+        &ciphertext[AES_BLOCK_SIZE..],
+        Direction::Decrypt,
+    )
+    .map_err(Into::into)
+}
+
+fn authenticate(token: &[u8], message: &[u8]) -> Result<[u8; 32], CtapError> {
+    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(token)
+        .map_err(|_| CtapError::Malformed("invalid PIN/UV auth token"))?;
+    mac.update(message);
+    let result = mac.finalize().into_bytes();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&result);
+    Ok(output)
+}
+
+fn encode_get_key_agreement_request() -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(2)?
+        .u8(0x01)?
+        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(0x02)?
+        .u8(0x02)?;
+    Ok(output)
+}
+
+fn encode_cose_key(encoder: &mut Encoder<&mut Vec<u8>>, key: &CoseKey) -> Result<(), CtapError> {
+    encoder
+        .map(5)?
+        .u8(1)?
+        .u8(2)?
+        .u8(3)?
+        .i8(-25)?
+        .i8(-1)?
+        .u8(1)?
+        .i8(-2)?
+        .bytes(&key.x)?
+        .i8(-3)?
+        .bytes(&key.y)?;
+    Ok(())
+}
+
+fn encode_get_token_request(
+    platform_key: &CoseKey,
+    pin_hash_enc: &[u8],
+    permission: u8,
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder
+        .map(5)?
+        .u8(0x01)?
+        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(0x02)?
+        .u8(0x09)?
+        .u8(0x03)?;
+    encode_cose_key(&mut encoder, platform_key)?;
+    encoder
+        .u8(0x06)?
+        .bytes(pin_hash_enc)?
+        .u8(0x09)?
+        .u8(permission)?;
+    Ok(output)
+}
+
+fn parse_pin_token_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut token = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            0x02 if token.is_none() => token = Some(decoder.bytes()?.to_vec()),
+            0x02 => return Err(CtapError::Malformed("duplicate PIN/UV auth token")),
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing PIN token response"));
+    }
+    token.ok_or(CtapError::Malformed("missing PIN/UV auth token"))
+}
+
+fn encode_enumerate_rps_begin(
+    authorization: &CredentialAuthorization,
+) -> Result<Vec<u8>, CtapError> {
+    let subcommand = 0x02;
+    let auth = authenticate(&authorization.token, &[subcommand])?;
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(3)?
+        .u8(0x01)?
+        .u8(subcommand)?
+        .u8(0x03)?
+        .u8(authorization.protocol)?
+        .u8(0x04)?
+        .bytes(&auth)?;
+    Ok(output)
+}
+
+fn encode_enumerate_credentials_begin(
+    authorization: &CredentialAuthorization,
+    rp_id_hash: &[u8; 32],
+) -> Result<Vec<u8>, CtapError> {
+    let subcommand = 0x04;
+    let mut params = Vec::new();
+    Encoder::new(&mut params)
+        .map(1)?
+        .u8(0x01)?
+        .bytes(rp_id_hash)?;
+    let mut message = Vec::with_capacity(1 + params.len());
+    message.push(subcommand);
+    message.extend_from_slice(&params);
+    let auth = authenticate(&authorization.token, &message)?;
+
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(4)?
+        .u8(0x01)?
+        .u8(subcommand)?
+        .u8(0x02)?
+        .map(1)?
+        .u8(0x01)?
+        .bytes(rp_id_hash)?
+        .u8(0x03)?
+        .u8(authorization.protocol)?
+        .u8(0x04)?
+        .bytes(&auth)?;
+    Ok(output)
+}
+
+fn encode_management_next(subcommand: u8) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    Encoder::new(&mut output).map(1)?.u8(0x01)?.u8(subcommand)?;
+    Ok(output)
+}
+
+fn parse_relying_party_response(
+    data: &[u8],
+    begin: bool,
+) -> Result<(RelyingParty, u64), CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut entity = None;
+    let mut id_hash = None;
+    let mut total = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            0x03 if entity.is_none() => entity = Some(parse_rp_entity(&mut decoder)?),
+            0x04 if id_hash.is_none() => {
+                id_hash = Some(
+                    decoder
+                        .bytes()?
+                        .try_into()
+                        .map_err(|_| CtapError::Malformed("invalid RP ID hash"))?,
+                )
+            }
+            0x05 if total.is_none() => total = Some(decoder.u64()?),
+            0x03..=0x05 => return Err(CtapError::Malformed("duplicate RP response field")),
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing RP response data"));
+    }
+    let (id, name) = entity.ok_or(CtapError::Malformed("missing RP entity"))?;
+    let relying_party = RelyingParty {
+        id,
+        name,
+        id_hash: id_hash.ok_or(CtapError::Malformed("missing RP ID hash"))?,
+    };
+    let total = match (begin, total) {
+        (true, Some(total)) => total,
+        (true, None) => return Err(CtapError::Malformed("missing total RP count")),
+        (false, Some(_)) => return Err(CtapError::Malformed("unexpected total RP count")),
+        (false, None) => 0,
+    };
+    Ok((relying_party, total))
+}
+
+fn parse_rp_entity(
+    decoder: &mut Decoder<'_>,
+) -> Result<(Option<String>, Option<String>), CtapError> {
+    let count = definite_map(decoder)?;
+    let mut id = None;
+    let mut name = None;
+    for _ in 0..count {
+        match decoder.str()? {
+            "id" if id.is_none() => id = Some(decoder.str()?.to_owned()),
+            "name" if name.is_none() => name = Some(decoder.str()?.to_owned()),
+            "id" | "name" => return Err(CtapError::Malformed("duplicate RP entity field")),
+            _ => decoder.skip()?,
+        }
+    }
+    Ok((id, name))
+}
+
+fn parse_credential_response(
+    data: &[u8],
+    relying_party: &RelyingParty,
+    begin: bool,
+) -> Result<(DiscoverableCredential, u64), CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut user = None;
+    let mut credential_id = None;
+    let mut public_key_cose = None;
+    let mut total = None;
+    let mut cred_protect = None;
+    let mut third_party_payment = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            0x06 if user.is_none() => user = Some(parse_user_entity(&mut decoder)?),
+            0x07 if credential_id.is_none() => {
+                credential_id = Some(parse_credential_descriptor(&mut decoder)?)
+            }
+            0x08 if public_key_cose.is_none() => {
+                if decoder.datatype()? != Type::Map {
+                    return Err(CtapError::Malformed("credential public key is not a map"));
+                }
+                let start = decoder.position();
+                let count = definite_map(&mut decoder)?;
+                for _ in 0..count {
+                    decoder.skip()?;
+                    decoder.skip()?;
+                }
+                public_key_cose = Some(data[start..decoder.position()].to_vec());
+            }
+            0x09 if total.is_none() => total = Some(decoder.u64()?),
+            0x0a if cred_protect.is_none() => cred_protect = Some(decoder.u64()?),
+            0x0c if third_party_payment.is_none() => third_party_payment = Some(decoder.bool()?),
+            0x06 | 0x07 | 0x08 | 0x09 | 0x0a | 0x0c => {
+                return Err(CtapError::Malformed("duplicate credential response field"))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing credential response data"));
+    }
+    let (user_id, user_name, user_display_name) =
+        user.ok_or(CtapError::Malformed("missing credential user"))?;
+    let total = match (begin, total) {
+        (true, Some(total)) => total,
+        (true, None) => return Err(CtapError::Malformed("missing total credential count")),
+        (false, Some(_)) => return Err(CtapError::Malformed("unexpected total credential count")),
+        (false, None) => 0,
+    };
+    Ok((
+        DiscoverableCredential {
+            relying_party: relying_party.clone(),
+            user_id,
+            user_name,
+            user_display_name,
+            credential_id: credential_id.ok_or(CtapError::Malformed("missing credential ID"))?,
+            public_key_cose: public_key_cose
+                .ok_or(CtapError::Malformed("missing credential public key"))?,
+            cred_protect,
+            third_party_payment,
+        },
+        total,
+    ))
+}
+
+type UserEntity = (Vec<u8>, Option<String>, Option<String>);
+
+fn parse_user_entity(decoder: &mut Decoder<'_>) -> Result<UserEntity, CtapError> {
+    let count = definite_map(decoder)?;
+    let mut id = None;
+    let mut name = None;
+    let mut display_name = None;
+    for _ in 0..count {
+        match decoder.str()? {
+            "id" if id.is_none() => id = Some(decoder.bytes()?.to_vec()),
+            "name" if name.is_none() => name = Some(decoder.str()?.to_owned()),
+            "displayName" if display_name.is_none() => {
+                display_name = Some(decoder.str()?.to_owned())
+            }
+            "id" | "name" | "displayName" => {
+                return Err(CtapError::Malformed("duplicate user entity field"))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    Ok((
+        id.ok_or(CtapError::Malformed("missing user ID"))?,
+        name,
+        display_name,
+    ))
+}
+
+fn parse_credential_descriptor(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, CtapError> {
+    let count = definite_map(decoder)?;
+    let mut type_ = None;
+    let mut id = None;
+    for _ in 0..count {
+        match decoder.str()? {
+            "type" if type_.is_none() => type_ = Some(decoder.str()?.to_owned()),
+            "id" if id.is_none() => id = Some(decoder.bytes()?.to_vec()),
+            "type" | "id" => {
+                return Err(CtapError::Malformed(
+                    "duplicate credential descriptor field",
+                ))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if type_.as_deref() != Some("public-key") {
+        return Err(CtapError::Malformed(
+            "unsupported credential descriptor type",
+        ));
+    }
+    id.ok_or(CtapError::Malformed("missing descriptor credential ID"))
 }
 
 #[cfg(test)]
@@ -271,5 +924,225 @@ mod tests {
             client.get_info(),
             Err(CtapError::Malformed("missing CTAP status"))
         ));
+    }
+
+    fn credential_management_info() -> AuthenticatorInfo {
+        AuthenticatorInfo {
+            versions: vec!["FIDO_2_1".to_owned()],
+            extensions: Vec::new(),
+            aaguid: [0; 16],
+            options: vec![
+                ("credMgmt".to_owned(), true),
+                ("clientPin".to_owned(), true),
+                ("pinUvAuthToken".to_owned(), true),
+                ("pcmr".to_owned(), true),
+            ],
+            max_msg_size: Some(1200),
+            pin_uv_auth_protocols: vec![2],
+            transports: vec!["usb".to_owned()],
+        }
+    }
+
+    fn rp_response() -> Vec<u8> {
+        let mut output = vec![0];
+        let mut encoder = Encoder::new(&mut output);
+        encoder
+            .map(3)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .map(2)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .str("example.com")
+            .unwrap()
+            .str("name")
+            .unwrap()
+            .str("Example")
+            .unwrap()
+            .u8(4)
+            .unwrap()
+            .bytes(&[0x11; 32])
+            .unwrap()
+            .u8(5)
+            .unwrap()
+            .u8(1)
+            .unwrap();
+        output
+    }
+
+    fn credential_response() -> Vec<u8> {
+        let mut output = vec![0];
+        let mut encoder = Encoder::new(&mut output);
+        encoder
+            .map(6)
+            .unwrap()
+            .u8(6)
+            .unwrap()
+            .map(3)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(b"user-id")
+            .unwrap()
+            .str("name")
+            .unwrap()
+            .str("alice")
+            .unwrap()
+            .str("displayName")
+            .unwrap()
+            .str("Alice")
+            .unwrap()
+            .u8(7)
+            .unwrap()
+            .map(2)
+            .unwrap()
+            .str("type")
+            .unwrap()
+            .str("public-key")
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(&[0x22; 32])
+            .unwrap()
+            .u8(8)
+            .unwrap()
+            .map(5)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .i8(-7)
+            .unwrap()
+            .i8(-1)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .i8(-2)
+            .unwrap()
+            .bytes(&[0x33; 32])
+            .unwrap()
+            .i8(-3)
+            .unwrap()
+            .bytes(&[0x44; 32])
+            .unwrap()
+            .u8(9)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .u8(10)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .u8(12)
+            .unwrap()
+            .bool(true)
+            .unwrap();
+        output
+    }
+
+    #[test]
+    fn credential_management_requests_match_protocol_vectors() {
+        assert_eq!(
+            encode_get_key_agreement_request().unwrap(),
+            [0xa2, 0x01, 0x02, 0x02, 0x02]
+        );
+        let authorization = CredentialAuthorization {
+            protocol: 2,
+            token: Zeroizing::new(vec![0; 32]),
+        };
+        let mut expected = vec![0xa3, 0x01, 0x02, 0x03, 0x02, 0x04, 0x58, 0x20];
+        expected.extend([
+            0x4e, 0xe7, 0xbe, 0x0c, 0x78, 0x72, 0x36, 0x0c, 0xa6, 0x74, 0x14, 0x60, 0x80, 0x81,
+            0xe9, 0xbd, 0x60, 0xfd, 0x58, 0x0a, 0x7b, 0xbd, 0x20, 0x97, 0x01, 0xd2, 0xa5, 0xa0,
+            0xb4, 0x31, 0x6d, 0x0d,
+        ]);
+        assert_eq!(
+            encode_enumerate_rps_begin(&authorization).unwrap(),
+            expected
+        );
+        assert_eq!(encode_management_next(3).unwrap(), [0xa1, 0x01, 0x03]);
+        assert_eq!(encode_management_next(5).unwrap(), [0xa1, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn mock_transport_enumerates_read_only_credentials() {
+        let transport = Rc::new(MockTransport::new(vec![
+            rp_response(),
+            credential_response(),
+        ]));
+        let client = Client::new(transport.clone());
+        let authorization = CredentialAuthorization {
+            protocol: 2,
+            token: Zeroizing::new(vec![0x55; 32]),
+        };
+        let credentials = client
+            .enumerate_credentials(&credential_management_info(), &authorization)
+            .unwrap();
+        assert_eq!(credentials.len(), 1);
+        let credential = &credentials[0];
+        assert_eq!(credential.relying_party.id.as_deref(), Some("example.com"));
+        assert_eq!(credential.relying_party.id_hash, [0x11; 32]);
+        assert_eq!(credential.user_id, b"user-id");
+        assert_eq!(credential.user_name.as_deref(), Some("alice"));
+        assert_eq!(credential.user_display_name.as_deref(), Some("Alice"));
+        assert_eq!(credential.credential_id, [0x22; 32]);
+        assert_eq!(credential.cred_protect, Some(3));
+        assert_eq!(credential.third_party_payment, Some(true));
+
+        let requests = transport.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0][0], AUTHENTICATOR_CREDENTIAL_MANAGEMENT);
+        assert_eq!(requests[1][0], AUTHENTICATOR_CREDENTIAL_MANAGEMENT);
+        let mut decoder = Decoder::new(&requests[1][1..]);
+        assert_eq!(decoder.map().unwrap(), Some(4));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 4);
+    }
+
+    #[test]
+    fn no_credentials_is_a_successful_empty_enumeration() {
+        let transport = Rc::new(MockTransport::new(vec![vec![CTAP2_ERR_NO_CREDENTIALS]]));
+        let client = Client::new(transport);
+        let authorization = CredentialAuthorization {
+            protocol: 2,
+            token: Zeroizing::new(vec![0x55; 32]),
+        };
+        assert!(client
+            .enumerate_credentials(&credential_management_info(), &authorization)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn malformed_credential_management_responses_are_rejected() {
+        let rp = RelyingParty {
+            id: Some("example.com".to_owned()),
+            name: None,
+            id_hash: [0x11; 32],
+        };
+        assert!(parse_relying_party_response(&[0xa1, 0x05, 0x01], true).is_err());
+        let mut trailing_rp = rp_response();
+        trailing_rp.remove(0);
+        trailing_rp.push(0);
+        assert!(parse_relying_party_response(&trailing_rp, true).is_err());
+
+        let missing_user_id = [
+            0xa4, 0x06, 0xa0, 0x07, 0xa2, 0x64, b't', b'y', b'p', b'e', 0x6a, b'p', b'u', b'b',
+            b'l', b'i', b'c', b'-', b'k', b'e', b'y', 0x62, b'i', b'd', 0x41, 1, 0x08, 0xa0, 0x09,
+            0x01,
+        ];
+        assert!(parse_credential_response(&missing_user_id, &rp, true).is_err());
+
+        let public_key_not_map = [
+            0xa4, 0x06, 0xa1, 0x62, b'i', b'd', 0x41, 1, 0x07, 0xa2, 0x64, b't', b'y', b'p', b'e',
+            0x6a, b'p', b'u', b'b', b'l', b'i', b'c', b'-', b'k', b'e', b'y', 0x62, b'i', b'd',
+            0x41, 2, 0x08, 0x40, 0x09, 0x01,
+        ];
+        assert!(parse_credential_response(&public_key_not_map, &rp, true).is_err());
     }
 }

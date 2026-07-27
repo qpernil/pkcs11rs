@@ -353,7 +353,7 @@ fn login_role(
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
     ctx.login_role = Some(role);
-    if role == LoginRole::User && ctx.get_slot(slot_id)?.is_yubihsm() {
+    if role == LoginRole::User && ctx.get_slot(slot_id)?.refresh_token_objects_after_login() {
         if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
             let _ = ctx._get_slot_mut(slot_id)?.logout();
             ctx.clear_login_state(slot_id);

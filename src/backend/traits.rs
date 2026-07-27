@@ -155,6 +155,9 @@ pub(crate) trait Slot {
     fn backend_token_objects(&self, _slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         Ok(Vec::new())
     }
+    fn refresh_token_objects_after_login(&self) -> bool {
+        false
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = self.profile_objects(slot_id);
         objects.extend(self.backend_token_objects(slot_id)?);
@@ -204,6 +207,10 @@ pub(crate) trait Slot {
         mechanisms
     }
     fn is_yubihsm(&self) -> bool {
+        false
+    }
+    #[cfg(any(test, feature = "abi-tests"))]
+    fn is_fido2(&self) -> bool {
         false
     }
     fn yubihsm_read_opaque(&self, _id: u16) -> Result<Vec<u8>, Error> {

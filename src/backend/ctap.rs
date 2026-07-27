@@ -1,5 +1,7 @@
 use super::ccid::PcscAppletSession;
+use crate::ctap::DiscoverableCredential;
 use crate::*;
+use minicbor::Encoder;
 
 const NFCCTAP_MSG: u8 = 0x10;
 const NFCCTAP_GETRESPONSE: u8 = 0x11;
@@ -58,17 +60,23 @@ impl CtapTransport for CcidCtapTransport {
 #[derive(Debug)]
 pub(crate) struct Fido2Slot {
     connector: Rc<dyn Connector>,
+    application_aid: Vec<u8>,
     client: CtapClient,
     info: RefCell<Option<AuthenticatorInfo>>,
+    credentials: RefCell<Vec<DiscoverableCredential>>,
+    authenticated: Cell<bool>,
 }
 
 impl Fido2Slot {
-    pub(crate) fn new(connector: Rc<dyn Connector>) -> Self {
+    pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
         let transport = Rc::new(CcidCtapTransport::new(connector.clone()));
         Self {
             connector,
+            application_aid,
             client: CtapClient::new(transport),
             info: RefCell::new(None),
+            credentials: RefCell::new(Vec::new()),
+            authenticated: Cell::new(false),
         }
     }
 
@@ -86,6 +94,117 @@ impl Fido2Slot {
             .ok()
             .and_then(|info| info.as_ref()?.versions.first().cloned())
     }
+}
+
+fn append_optional_text(
+    encoder: &mut Encoder<&mut Vec<u8>>,
+    key: u8,
+    value: Option<&str>,
+) -> Result<(), CtapError> {
+    if let Some(value) = value {
+        encoder.u8(key)?.str(value)?;
+    }
+    Ok(())
+}
+
+fn credential_metadata(credential: &DiscoverableCredential) -> Result<Vec<u8>, CtapError> {
+    let optional_count = [
+        credential.relying_party.id.as_ref().map(|_| ()),
+        credential.relying_party.name.as_ref().map(|_| ()),
+        credential.user_name.as_ref().map(|_| ()),
+        credential.user_display_name.as_ref().map(|_| ()),
+        credential.cred_protect.map(|_| ()),
+        credential.third_party_payment.map(|_| ()),
+    ]
+    .into_iter()
+    .flatten()
+    .count();
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder
+        .map((4 + optional_count) as u64)?
+        .u8(1)?
+        .bytes(&credential.relying_party.id_hash)?;
+    append_optional_text(&mut encoder, 2, credential.relying_party.id.as_deref())?;
+    append_optional_text(&mut encoder, 3, credential.relying_party.name.as_deref())?;
+    encoder.u8(4)?.bytes(&credential.user_id)?;
+    append_optional_text(&mut encoder, 5, credential.user_name.as_deref())?;
+    append_optional_text(&mut encoder, 6, credential.user_display_name.as_deref())?;
+    encoder
+        .u8(7)?
+        .bytes(&credential.credential_id)?
+        .u8(8)?
+        .bytes(&credential.public_key_cose)?;
+    if let Some(value) = credential.cred_protect {
+        encoder.u8(9)?.u64(value)?;
+    }
+    if let Some(value) = credential.third_party_payment {
+        encoder.u8(10)?.bool(value)?;
+    }
+    Ok(output)
+}
+
+fn hex(value: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(value.len() * 2);
+    for byte in value {
+        output.push(DIGITS[(byte >> 4) as usize] as char);
+        output.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn credential_label(credential: &DiscoverableCredential) -> String {
+    credential
+        .user_display_name
+        .as_ref()
+        .or(credential.user_name.as_ref())
+        .or(credential.relying_party.name.as_ref())
+        .or(credential.relying_party.id.as_ref())
+        .cloned()
+        .unwrap_or_else(|| {
+            let id = hex(&credential.credential_id);
+            format!("FIDO2 credential {}", &id[..id.len().min(16)])
+        })
+}
+
+fn fido2_token_objects(
+    slot_id: CK_SLOT_ID,
+    credentials: &[DiscoverableCredential],
+) -> Result<Vec<TokenObject>, Error> {
+    credentials
+        .iter()
+        .map(|credential| {
+            let rp_id_hash = hex(&credential.relying_party.id_hash);
+            let credential_id = hex(&credential.credential_id);
+            Ok(TokenObject {
+                slot_id: Some(slot_id),
+                unique_id: format!("fido2-credential:{rp_id_hash}:{credential_id}"),
+                class: CKO_DATA as CK_OBJECT_CLASS,
+                key_type: 0,
+                label: credential_label(credential),
+                id: credential.credential_id.clone(),
+                token: true,
+                private: true,
+                encrypt: false,
+                decrypt: false,
+                sign: false,
+                verify: false,
+                derive: false,
+                sensitive: false,
+                extractable: false,
+                always_sensitive: false,
+                never_extractable: false,
+                local: false,
+                key_gen_mechanism: None,
+                creator_session: None,
+                material: KeyMaterial::FidoCredential {
+                    rp_id_hash: credential.relying_party.id_hash,
+                    metadata: credential_metadata(credential).map_err(CtapError::into_pkcs11)?,
+                },
+            })
+        })
+        .collect()
 }
 
 impl Slot for Fido2Slot {
@@ -159,11 +278,43 @@ impl Slot for Fido2Slot {
         })
     }
 
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        let pin_text = std::str::from_utf8(pin).map_err(|_| Error::from(CKR_PIN_INVALID))?;
+        if pin.len() > 63 || pin_text.chars().count() < 4 {
+            return Err(CKR_PIN_LEN_RANGE.into());
+        }
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.connector.clear_secure_channel();
+        self.connector
+            .establish_secure_channel(&self.application_aid)?;
+        let result = (|| {
+            let info = self.discovered_info()?;
+            let authorization = self
+                .client
+                .authorize_credential_enumeration(&info, pin)
+                .map_err(CtapError::into_pkcs11)?;
+            self.client
+                .enumerate_credentials(&info, &authorization)
+                .map_err(CtapError::into_pkcs11)
+        })();
+        match result {
+            Ok(credentials) => {
+                *self.credentials.get_mut() = credentials;
+                self.authenticated.set(true);
+                Ok(())
+            }
+            Err(error) => {
+                self.connector.clear_secure_channel();
+                Err(error)
+            }
+        }
     }
 
     fn logout(&mut self) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.connector.clear_secure_channel();
         Ok(())
     }
 
@@ -191,20 +342,53 @@ impl Slot for Fido2Slot {
     }
 
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        let _ = self.discovered_info()?;
+        let discovered = self.discovered_info()?;
         self.format_token_info(info);
-        info.flags = CKF_TOKEN_INITIALIZED as CK_FLAGS;
-        info.ulMaxPinLen = 0;
-        info.ulMinPinLen = 0;
+        info.flags = (CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        if discovered.option("clientPin") {
+            info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
+        }
+        info.ulMaxPinLen = 63;
+        info.ulMinPinLen = 4;
         Ok(())
     }
 
     fn clear_session(&mut self) {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
         self.connector.clear_secure_channel();
+    }
+
+    fn login_is_active(&self) -> bool {
+        self.authenticated.get()
     }
 
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
+    }
+
+    fn mechanisms(&self) -> Vec<MechanismDetails> {
+        Vec::new()
+    }
+
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        if !self.authenticated.get() {
+            return Ok(Vec::new());
+        }
+        let credentials = self
+            .credentials
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        fido2_token_objects(slot_id, &credentials)
+    }
+
+    fn refresh_token_objects_after_login(&self) -> bool {
+        true
+    }
+
+    #[cfg(any(test, feature = "abi-tests"))]
+    fn is_fido2(&self) -> bool {
+        true
     }
 }
 
@@ -323,7 +507,7 @@ mod tests {
         response.extend([0; 16]);
         response.extend([0x09, 0x81, 0x63, b'u', b's', b'b', 0x90, 0x00]);
         let connector: Rc<dyn Connector> = Rc::new(ScriptedConnector::new(vec![response]));
-        let mut slot = Fido2Slot::new(connector);
+        let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
         slot.init_slot().unwrap();
 
         let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
@@ -341,7 +525,12 @@ mod tests {
             .label
             .windows(b"FIDO2 FIDO_2_1 #12345678".len())
             .any(|window| window == b"FIDO2 FIDO_2_1 #12345678"));
-        assert_eq!(token_info.flags, CKF_TOKEN_INITIALIZED as CK_FLAGS);
+        assert_eq!(
+            token_info.flags,
+            (CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS
+        );
+        assert_eq!(token_info.ulMinPinLen, 4);
+        assert_eq!(token_info.ulMaxPinLen, 63);
         assert!(slot.backend_mechanisms().is_empty());
     }
 
@@ -351,7 +540,7 @@ mod tests {
             vec![0x01, 0x90, 0x00],
             vec![0x01, 0x90, 0x00],
         ]));
-        let mut slot = Fido2Slot::new(connector);
+        let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
         let error = slot.init_slot().unwrap_err();
         slot.set_discovery_error(&error);
 
@@ -364,5 +553,48 @@ mod tests {
             .any(|window| window == b"FIDO2"));
         let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert!(slot.get_token_info(&mut token_info).is_err());
+    }
+
+    #[test]
+    fn discoverable_credentials_are_private_immutable_data_objects() {
+        let credential = DiscoverableCredential {
+            relying_party: crate::ctap::RelyingParty {
+                id: Some("example.com".to_owned()),
+                name: Some("Example".to_owned()),
+                id_hash: [0x11; 32],
+            },
+            user_id: b"user-id".to_vec(),
+            user_name: Some("alice".to_owned()),
+            user_display_name: Some("Alice".to_owned()),
+            credential_id: vec![0x22; 32],
+            public_key_cose: vec![0xa1, 0x01, 0x02],
+            cred_protect: Some(3),
+            third_party_payment: Some(true),
+        };
+        let objects = fido2_token_objects(7, &[credential]).unwrap();
+        let object = &objects[0];
+        assert_eq!(object.slot_id, Some(7));
+        assert_eq!(object.class, CKO_DATA as CK_OBJECT_CLASS);
+        assert_eq!(object.label, "Alice");
+        assert_eq!(object.id, [0x22; 32]);
+        assert!(object.private);
+        assert!(!object.sign);
+        assert!(object.is_immutable_object());
+        assert_eq!(
+            object.attribute_value(CKA_APPLICATION as CK_ATTRIBUTE_TYPE),
+            Some(b"FIDO2 discoverable credential".to_vec())
+        );
+        assert_eq!(
+            object.attribute_value(CKA_OBJECT_ID as CK_ATTRIBUTE_TYPE),
+            Some(vec![0x11; 32])
+        );
+
+        let metadata = object
+            .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+            .unwrap();
+        let mut decoder = minicbor::Decoder::new(&metadata);
+        assert_eq!(decoder.map().unwrap(), Some(10));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.bytes().unwrap(), &[0x11; 32]);
     }
 }
