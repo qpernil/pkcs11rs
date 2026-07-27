@@ -115,19 +115,9 @@ impl Drop for TestTrustEntry {
 }
 
 #[derive(Debug)]
-struct PeerSession {
-    sid: u8,
-    s_enc: [u8; 16],
-    s_mac: [u8; 16],
-    s_rmac: [u8; 16],
-    counter: [u8; 16],
-    mac_chaining_value: [u8; 16],
-    expected_host_cryptogram: [u8; 8],
-}
-
-#[derive(Debug)]
 pub(crate) struct ProtocolPeer {
-    session: RefCell<Option<PeerSession>>,
+    session: RefCell<Option<SecureSession>>,
+    expected_host_cryptogram: Cell<Option<[u8; MAC_LENGTH]>>,
     commands: RefCell<Vec<Vec<u8>>>,
     inner_commands: InnerCommands,
     objects: RefCell<Vec<u16>>,
@@ -181,6 +171,7 @@ impl ProtocolPeer {
         x25519_private_keys.insert(8, RFC7748_BOB_PRIVATE_KEY);
         Self {
             session: RefCell::new(None),
+            expected_host_cryptogram: Cell::new(None),
             commands: RefCell::new(Vec::new()),
             inner_commands: std::rc::Rc::new(RefCell::new(Vec::new())),
             objects: RefCell::new(vec![1]),
@@ -473,34 +464,16 @@ impl ProtocolPeer {
     }
 
     fn create_symmetric_session(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
-        let host_challenge: [u8; 8] = data[2..].try_into().unwrap();
-        let mut context = [0u8; 16];
-        context[..8].copy_from_slice(&host_challenge);
-        context[8..].copy_from_slice(&CARD_CHALLENGE);
-        let static_keys = crate::yubico_password_kdf(PASSWORD)?;
-        let s_enc = derive_key(&static_keys[..16], 0x04, &context)?;
-        let s_mac = derive_key(&static_keys[16..], 0x06, &context)?;
-        let s_rmac = derive_key(&static_keys[16..], 0x07, &context)?;
-        let expected_card_cryptogram = derive_cryptogram(&s_mac, 0x00, &context)?;
-        let expected_host_cryptogram = derive_cryptogram(&s_mac, 0x01, &context)?;
-        *self.session.borrow_mut() = Some(PeerSession {
-            sid: 7,
-            s_enc,
-            s_mac,
-            s_rmac,
-            counter: [0; 16],
-            mac_chaining_value: [0; 16],
-            expected_host_cryptogram,
-        });
-
-        let mut data = vec![7];
-        data.extend_from_slice(&CARD_CHALLENGE);
-        let mut card = expected_card_cryptogram;
+        let request = Frame::new(COMMAND_CREATE_SESSION, data.to_vec())?.encode();
+        let (session, expected_host_cryptogram, mut response) =
+            SecureSession::peer_begin_symmetric(&request, PASSWORD, 7, CARD_CHALLENGE)?;
+        *self.session.borrow_mut() = Some(session);
+        self.expected_host_cryptogram
+            .set(Some(expected_host_cryptogram));
         if self.corrupt_card_cryptogram {
-            card[0] ^= 0x80;
+            response[3 + 1 + CHALLENGE_LENGTH] ^= 0x80;
         }
-        data.extend_from_slice(&card);
-        Frame::new(COMMAND_CREATE_SESSION | RESPONSE_BIT, data).map(|frame| frame.encode())
+        Ok(response)
     }
 
     fn create_asymmetric_session(&self, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -521,21 +494,21 @@ impl ProtocolPeer {
 
         let mut counter = [0; AES_BLOCK_SIZE];
         increment_counter(&mut counter);
-        *self.session.borrow_mut() = Some(PeerSession {
-            sid: 7,
-            s_enc: session_keys[16..32]
+        *self.session.borrow_mut() = Some(SecureSession::new_peer(
+            7,
+            session_keys[16..32]
                 .try_into()
                 .map_err(|_| CKR_DEVICE_ERROR)?,
-            s_mac: session_keys[32..48]
+            session_keys[32..48]
                 .try_into()
                 .map_err(|_| CKR_DEVICE_ERROR)?,
-            s_rmac: session_keys[48..64]
+            session_keys[48..64]
                 .try_into()
                 .map_err(|_| CKR_DEVICE_ERROR)?,
             counter,
-            mac_chaining_value: receipt,
-            expected_host_cryptogram: [0; MAC_LENGTH],
-        });
+            receipt,
+        ));
+        self.expected_host_cryptogram.set(None);
 
         let mut response = vec![7];
         response.extend_from_slice(&device_ephemeral_public);
@@ -544,316 +517,185 @@ impl ProtocolPeer {
     }
 
     fn authenticate_session(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
-        let frame = Frame::parse(request)?;
         let mut session_slot = self.session.borrow_mut();
         let session = session_slot.as_mut().ok_or(CKR_DEVICE_ERROR)?;
-        if frame.data.len() != 1 + MAC_LENGTH + MAC_LENGTH || frame.data[0] != session.sid {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let payload_length = frame.data.len() - MAC_LENGTH;
-        let mut mac_input = session.mac_chaining_value.to_vec();
-        mac_input.extend_from_slice(&request[..3 + payload_length]);
-        let command_mac = aes_cmac(&session.s_mac, &mac_input)?;
-        if frame.data[1..9] != session.expected_host_cryptogram
-            || !bool::from(command_mac[..MAC_LENGTH].ct_eq(&frame.data[payload_length..]))
-        {
+        let expected = self
+            .expected_host_cryptogram
+            .get()
+            .ok_or(CKR_DEVICE_ERROR)?;
+        let response =
+            session.peer_authenticate_symmetric(request, &expected, &self.authenticate_payload)?;
+        self.expected_host_cryptogram.set(None);
+        if !session.is_valid() {
             *session_slot = None;
             self.closed_sessions.set(self.closed_sessions.get() + 1);
-            return Frame::new(COMMAND_ERROR, vec![0x04]).map(|frame| frame.encode());
         }
-        session.mac_chaining_value = command_mac;
-        increment_counter(&mut session.counter);
-        Frame::new(
-            COMMAND_AUTHENTICATE_SESSION | RESPONSE_BIT,
-            self.authenticate_payload.clone(),
-        )
-        .map(|frame| frame.encode())
+        Ok(response)
     }
 
     fn session_message(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
-        let frame = Frame::parse(request)?;
         let mut session_slot = self.session.borrow_mut();
         let session = session_slot.as_mut().ok_or(CKR_DEVICE_ERROR)?;
-        if frame.data.len() < 1 + AES_BLOCK_SIZE + MAC_LENGTH {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let payload_length = frame.data.len() - MAC_LENGTH;
-        let mut mac_input = session.mac_chaining_value.to_vec();
-        mac_input.extend_from_slice(&request[..3 + payload_length]);
-        let command_mac = aes_cmac(&session.s_mac, &mac_input)?;
-        if !bool::from(command_mac[..MAC_LENGTH].ct_eq(&frame.data[payload_length..])) {
-            *session_slot = None;
-            self.closed_sessions.set(self.closed_sessions.get() + 1);
-            return Frame::new(COMMAND_ERROR, vec![0x04]).map(|frame| frame.encode());
-        }
-        session.mac_chaining_value = command_mac;
-        if frame.data[0] != session.sid {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-
-        let iv = aes_block(&session.s_enc, &session.counter)?;
-        let clear = aes_cbc(
-            &session.s_enc,
-            &iv,
-            &frame.data[1..payload_length],
-            Direction::Decrypt,
-        )?;
-        let inner = Frame::parse(&unpad(clear)?)?;
-        self.inner_commands
-            .borrow_mut()
-            .push((inner.command, inner.data.clone()));
-        let closes_session = inner.command == CommandCode::CloseSession as u8;
-        let (response_command, response_data) = match inner.command {
-            value if value == CommandCode::GetStorageInfo as u8 => {
-                (inner.command | RESPONSE_BIT, vec![0xaa, 0xbb, 0xcc])
-            }
-            value if value == CommandCode::GetPseudoRandom as u8 => {
-                if inner.data.len() != 2 {
-                    return Err(CKR_DEVICE_ERROR.into());
+        let exchange = session.peer_exchange(request, |command, data| {
+            let inner = Frame::new(command, data.to_vec())?;
+            self.inner_commands
+                .borrow_mut()
+                .push((inner.command, inner.data.clone()));
+            let (response_command, response_data) = match inner.command {
+                value if value == CommandCode::GetStorageInfo as u8 => {
+                    (inner.command | RESPONSE_BIT, vec![0xaa, 0xbb, 0xcc])
                 }
-                (
-                    inner.command | RESPONSE_BIT,
-                    vec![0x5a; u16::from_be_bytes(inner.data.try_into().unwrap()) as usize],
-                )
-            }
-            value if value == CommandCode::CloseSession as u8 => {
-                (inner.command | RESPONSE_BIT, vec![])
-            }
-            value if value == CommandCode::ListObjects as u8 => {
-                let mut objects = Vec::new();
-                for id in self.listed_authkeys.borrow().iter() {
-                    objects.extend_from_slice(&id.to_be_bytes());
-                    objects.extend_from_slice(&[YUBIHSM_AUTHENTICATION_KEY, 1]);
+                value if value == CommandCode::GetPseudoRandom as u8 => {
+                    if inner.data.len() != 2 {
+                        return Err(CKR_DEVICE_ERROR.into());
+                    }
+                    (
+                        inner.command | RESPONSE_BIT,
+                        vec![0x5a; u16::from_be_bytes(inner.data.try_into().unwrap()) as usize],
+                    )
                 }
-                for id in self.objects.borrow().iter() {
-                    objects.extend_from_slice(&id.to_be_bytes());
-                    objects.extend_from_slice(&[3, 1]);
+                value if value == CommandCode::CloseSession as u8 => {
+                    (inner.command | RESPONSE_BIT, vec![])
                 }
-                for (id, (info, _)) in self.metadata_objects.borrow().iter() {
-                    objects.extend_from_slice(&id.to_be_bytes());
-                    objects.extend_from_slice(&[info.object_type, info.sequence]);
+                value if value == CommandCode::ListObjects as u8 => {
+                    let mut objects = Vec::new();
+                    for id in self.listed_authkeys.borrow().iter() {
+                        objects.extend_from_slice(&id.to_be_bytes());
+                        objects.extend_from_slice(&[YUBIHSM_AUTHENTICATION_KEY, 1]);
+                    }
+                    for id in self.objects.borrow().iter() {
+                        objects.extend_from_slice(&id.to_be_bytes());
+                        objects.extend_from_slice(&[3, 1]);
+                    }
+                    for (id, (info, _)) in self.metadata_objects.borrow().iter() {
+                        objects.extend_from_slice(&id.to_be_bytes());
+                        objects.extend_from_slice(&[info.object_type, info.sequence]);
+                    }
+                    (inner.command | RESPONSE_BIT, objects)
                 }
-                (inner.command | RESPONSE_BIT, objects)
-            }
-            value if value == CommandCode::GetObjectInfo as u8 => {
-                if inner.data.len() != 3 {
-                    return Err(CKR_DEVICE_ERROR.into());
-                }
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY {
-                    let domains = self
-                        .authkey_domains
+                value if value == CommandCode::GetObjectInfo as u8 => {
+                    if inner.data.len() != 3 {
+                        return Err(CKR_DEVICE_ERROR.into());
+                    }
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    if inner.data[2] == YUBIHSM_AUTHENTICATION_KEY {
+                        let domains = self
+                            .authkey_domains
+                            .borrow()
+                            .get(&id)
+                            .copied()
+                            .ok_or(CKR_DEVICE_ERROR)?;
+                        let info = ObjectInfo {
+                            capabilities: if self.authkeys_with_get_opaque.borrow().contains(&id) {
+                                crate::yubihsm_capabilities(&[0])
+                            } else {
+                                [0; 8]
+                            },
+                            id,
+                            length: 32,
+                            domains,
+                            object_type: YUBIHSM_AUTHENTICATION_KEY,
+                            algorithm: if self.asymmetric_authkeys.borrow().contains(&id) {
+                                YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION
+                            } else {
+                                YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION
+                            },
+                            sequence: 1,
+                            origin: 1,
+                            label: format!("authkey-{id}"),
+                            delegated_capabilities: [0; 8],
+                        };
+                        (inner.command | RESPONSE_BIT, encode_object_info(&info))
+                    } else if let Some((info, _)) = self
+                        .metadata_objects
                         .borrow()
                         .get(&id)
-                        .copied()
-                        .ok_or(CKR_DEVICE_ERROR)?;
-                    let info = ObjectInfo {
-                        capabilities: if self.authkeys_with_get_opaque.borrow().contains(&id) {
-                            crate::yubihsm_capabilities(&[0])
-                        } else {
-                            [0; 8]
-                        },
-                        id,
-                        length: 32,
-                        domains,
-                        object_type: YUBIHSM_AUTHENTICATION_KEY,
-                        algorithm: if self.asymmetric_authkeys.borrow().contains(&id) {
-                            YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION
-                        } else {
-                            YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION
-                        },
-                        sequence: 1,
-                        origin: 1,
-                        label: format!("authkey-{id}"),
-                        delegated_capabilities: [0; 8],
-                    };
-                    (inner.command | RESPONSE_BIT, encode_object_info(&info))
-                } else if let Some((info, _)) = self
-                    .metadata_objects
-                    .borrow()
-                    .get(&id)
-                    .filter(|(info, _)| info.object_type == inner.data[2])
-                {
-                    (inner.command | RESPONSE_BIT, encode_object_info(info))
-                } else if inner.data[2] != 3 {
-                    return Err(CKR_DEVICE_ERROR.into());
-                } else if self.x25519_private_keys.borrow().contains_key(&id) {
-                    let mut info = vec![0; 66];
-                    info[7 - 0x0b / 8] |= 1 << (0x0b % 8);
-                    info[8..10].copy_from_slice(&id.to_be_bytes());
-                    info[10..12].copy_from_slice(&32u16.to_be_bytes());
-                    info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
-                    info[14..18].copy_from_slice(&[3, 56, 1, 1]);
-                    info[18..26].copy_from_slice(b"test-x25");
-                    (inner.command | RESPONSE_BIT, info)
-                } else {
-                    let mut info = vec![0; 66];
-                    for bit in [0x05usize, 0x06, 0x09, 0x0a] {
-                        info[7 - bit / 8] |= 1 << (bit % 8);
-                    }
-                    info[8..10].copy_from_slice(&id.to_be_bytes());
-                    info[10..12].copy_from_slice(&256u16.to_be_bytes());
-                    info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
-                    info[14..18].copy_from_slice(&[3, 9, 1, 1]);
-                    info[18..26].copy_from_slice(b"test-rsa");
-                    (inner.command | RESPONSE_BIT, info)
-                }
-            }
-            value if value == CommandCode::GetOpaque as u8 => {
-                if inner.data.len() != 2 {
-                    return Err(CKR_DEVICE_ERROR.into());
-                }
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let value = self
-                    .metadata_objects
-                    .borrow()
-                    .get(&id)
-                    .map(|(_, value)| value.clone())
-                    .unwrap_or_else(|| inner.data.clone());
-                (inner.command | RESPONSE_BIT, value)
-            }
-            value if value == CommandCode::GetPublicKey as u8 => {
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let algorithm = self
-                    .metadata_objects
-                    .borrow()
-                    .get(&id)
-                    .map(|(info, _)| info.algorithm);
-                if algorithm == Some(YUBIHSM_ALGO_EC_P256) {
-                    let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
-                    let mut response = vec![YUBIHSM_ALGO_EC_P256];
-                    response.extend_from_slice(&p256_public_key(&private)?);
-                    (inner.command | RESPONSE_BIT, response)
-                } else if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
-                    let private_key = x25519_dalek::StaticSecret::from(*private_key);
-                    let mut key = vec![56];
-                    key.extend_from_slice(x25519_dalek::PublicKey::from(&private_key).as_bytes());
-                    (inner.command | RESPONSE_BIT, key)
-                } else {
-                    let mut key = vec![9, 0xc5];
-                    key.resize(257, 0xa5);
-                    key[256] |= 1;
-                    (inner.command | RESPONSE_BIT, key)
-                }
-            }
-            value
-                if value == CommandCode::SignAttestationCertificate as u8
-                    && inner.data.len() == 4 =>
-            {
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                (
-                    inner.command | RESPONSE_BIT,
-                    Self::attestation_certificate(id)?,
-                )
-            }
-            value
-                if value == CommandCode::GenerateAsymmetricKey as u8
-                    || value == CommandCode::PutAsymmetricKey as u8
-                    || value == CommandCode::GenerateWrapKey as u8
-                    || value == CommandCode::PutPublicWrapKey as u8 && inner.data.len() >= 61 =>
-            {
-                let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let id = if requested == 0 {
-                    (2..=u16::MAX)
-                        .find(|candidate| {
-                            !self.objects.borrow().contains(candidate)
-                                && !self.metadata_objects.borrow().contains_key(candidate)
-                        })
-                        .ok_or(CKR_DEVICE_MEMORY)?
-                } else {
-                    requested
-                };
-                if inner.command == CommandCode::GenerateAsymmetricKey as u8
-                    && inner.data.get(52) == Some(&56)
-                {
-                    let private_key = match id {
-                        7 => RFC7748_ALICE_PRIVATE_KEY,
-                        8 => RFC7748_BOB_PRIVATE_KEY,
-                        _ => {
-                            let mut private_key = [0; 32];
-                            getrandom::fill(&mut private_key)
-                                .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-                            private_key
+                        .filter(|(info, _)| info.object_type == inner.data[2])
+                    {
+                        (inner.command | RESPONSE_BIT, encode_object_info(info))
+                    } else if inner.data[2] != 3 {
+                        return Err(CKR_DEVICE_ERROR.into());
+                    } else if self.x25519_private_keys.borrow().contains_key(&id) {
+                        let mut info = vec![0; 66];
+                        info[7 - 0x0b / 8] |= 1 << (0x0b % 8);
+                        info[8..10].copy_from_slice(&id.to_be_bytes());
+                        info[10..12].copy_from_slice(&32u16.to_be_bytes());
+                        info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
+                        info[14..18].copy_from_slice(&[3, 56, 1, 1]);
+                        info[18..26].copy_from_slice(b"test-x25");
+                        (inner.command | RESPONSE_BIT, info)
+                    } else {
+                        let mut info = vec![0; 66];
+                        for bit in [0x05usize, 0x06, 0x09, 0x0a] {
+                            info[7 - bit / 8] |= 1 << (bit % 8);
                         }
-                    };
-                    self.x25519_private_keys
-                        .borrow_mut()
-                        .insert(id, private_key);
+                        info[8..10].copy_from_slice(&id.to_be_bytes());
+                        info[10..12].copy_from_slice(&256u16.to_be_bytes());
+                        info[12..14].copy_from_slice(&0xffffu16.to_be_bytes());
+                        info[14..18].copy_from_slice(&[3, 9, 1, 1]);
+                        info[18..26].copy_from_slice(b"test-rsa");
+                        (inner.command | RESPONSE_BIT, info)
+                    }
                 }
-                let object_type = match inner.command {
-                    value if value == CommandCode::GenerateWrapKey as u8 => YUBIHSM_WRAP_KEY,
-                    value if value == CommandCode::PutPublicWrapKey as u8 => {
-                        crate::YUBIHSM_PUBLIC_WRAP_KEY
+                value if value == CommandCode::GetOpaque as u8 => {
+                    if inner.data.len() != 2 {
+                        return Err(CKR_DEVICE_ERROR.into());
                     }
-                    _ => YUBIHSM_ASYMMETRIC_KEY,
-                };
-                let algorithm = *inner.data.get(52).ok_or(CKR_DATA_LEN_RANGE)?;
-                let length = if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
-                    inner.data.len().checked_sub(61).ok_or(CKR_DATA_LEN_RANGE)?
-                } else {
-                    match algorithm {
-                        YUBIHSM_ALGO_RSA_2048 => 256,
-                        YUBIHSM_ALGO_RSA_3072 => 384,
-                        YUBIHSM_ALGO_RSA_4096 => 512,
-                        _ => 32,
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let value = self
+                        .metadata_objects
+                        .borrow()
+                        .get(&id)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_else(|| inner.data.clone());
+                    (inner.command | RESPONSE_BIT, value)
+                }
+                value if value == CommandCode::GetPublicKey as u8 => {
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let algorithm = self
+                        .metadata_objects
+                        .borrow()
+                        .get(&id)
+                        .map(|(info, _)| info.algorithm);
+                    if algorithm == Some(YUBIHSM_ALGO_EC_P256) {
+                        let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY)?;
+                        let mut response = vec![YUBIHSM_ALGO_EC_P256];
+                        response.extend_from_slice(&p256_public_key(&private)?);
+                        (inner.command | RESPONSE_BIT, response)
+                    } else if let Some(private_key) = self.x25519_private_keys.borrow().get(&id) {
+                        let private_key = x25519_dalek::StaticSecret::from(*private_key);
+                        let mut key = vec![56];
+                        key.extend_from_slice(
+                            x25519_dalek::PublicKey::from(&private_key).as_bytes(),
+                        );
+                        (inner.command | RESPONSE_BIT, key)
+                    } else {
+                        let mut key = vec![9, 0xc5];
+                        key.resize(257, 0xa5);
+                        key[256] |= 1;
+                        (inner.command | RESPONSE_BIT, key)
                     }
-                };
-                let label = inner.data[2..42]
-                    .split(|byte| *byte == 0)
-                    .next()
-                    .and_then(|label| std::str::from_utf8(label).ok())
-                    .ok_or(CKR_DEVICE_ERROR)?
-                    .to_owned();
-                let delegated_capabilities = if matches!(
-                    object_type,
-                    YUBIHSM_WRAP_KEY | crate::YUBIHSM_PUBLIC_WRAP_KEY
-                ) {
-                    inner
-                        .data
-                        .get(53..61)
-                        .ok_or(CKR_DATA_LEN_RANGE)?
-                        .try_into()
-                        .unwrap()
-                } else {
-                    [0; 8]
-                };
-                self.metadata_objects.borrow_mut().insert(
-                    id,
+                }
+                value
+                    if value == CommandCode::SignAttestationCertificate as u8
+                        && inner.data.len() == 4 =>
+                {
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                     (
-                        ObjectInfo {
-                            capabilities: inner.data[44..52].try_into().unwrap(),
-                            id,
-                            length: length as u16,
-                            domains: u16::from_be_bytes(inner.data[42..44].try_into().unwrap()),
-                            object_type,
-                            algorithm,
-                            sequence: 1,
-                            origin: if inner.command == CommandCode::PutPublicWrapKey as u8 {
-                                2
-                            } else {
-                                1
-                            },
-                            label,
-                            delegated_capabilities,
-                        },
-                        if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
-                            inner.data[61..].to_vec()
-                        } else {
-                            Vec::new()
-                        },
-                    ),
-                );
-                (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
-            }
-            value if value == CommandCode::PutOpaque as u8 => {
-                if inner.data.len() < 53 {
-                    (inner.command | RESPONSE_BIT, inner.data)
-                } else if self.fail_next_put_opaque.replace(false) {
-                    (COMMAND_ERROR, vec![0x0b])
-                } else {
+                        inner.command | RESPONSE_BIT,
+                        Self::attestation_certificate(id)?,
+                    )
+                }
+                value
+                    if value == CommandCode::GenerateAsymmetricKey as u8
+                        || value == CommandCode::PutAsymmetricKey as u8
+                        || value == CommandCode::GenerateWrapKey as u8
+                        || value == CommandCode::PutPublicWrapKey as u8
+                            && inner.data.len() >= 61 =>
+                {
                     let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
                     let id = if requested == 0 {
-                        (1..=u16::MAX)
+                        (2..=u16::MAX)
                             .find(|candidate| {
                                 !self.objects.borrow().contains(candidate)
                                     && !self.metadata_objects.borrow().contains_key(candidate)
@@ -862,139 +704,198 @@ impl ProtocolPeer {
                     } else {
                         requested
                     };
+                    if inner.command == CommandCode::GenerateAsymmetricKey as u8
+                        && inner.data.get(52) == Some(&56)
+                    {
+                        let private_key = match id {
+                            7 => RFC7748_ALICE_PRIVATE_KEY,
+                            8 => RFC7748_BOB_PRIVATE_KEY,
+                            _ => {
+                                let mut private_key = [0; 32];
+                                getrandom::fill(&mut private_key)
+                                    .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+                                private_key
+                            }
+                        };
+                        self.x25519_private_keys
+                            .borrow_mut()
+                            .insert(id, private_key);
+                    }
+                    let object_type = match inner.command {
+                        value if value == CommandCode::GenerateWrapKey as u8 => YUBIHSM_WRAP_KEY,
+                        value if value == CommandCode::PutPublicWrapKey as u8 => {
+                            crate::YUBIHSM_PUBLIC_WRAP_KEY
+                        }
+                        _ => YUBIHSM_ASYMMETRIC_KEY,
+                    };
+                    let algorithm = *inner.data.get(52).ok_or(CKR_DATA_LEN_RANGE)?;
+                    let length = if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
+                        inner.data.len().checked_sub(61).ok_or(CKR_DATA_LEN_RANGE)?
+                    } else {
+                        match algorithm {
+                            YUBIHSM_ALGO_RSA_2048 => 256,
+                            YUBIHSM_ALGO_RSA_3072 => 384,
+                            YUBIHSM_ALGO_RSA_4096 => 512,
+                            _ => 32,
+                        }
+                    };
                     let label = inner.data[2..42]
                         .split(|byte| *byte == 0)
                         .next()
                         .and_then(|label| std::str::from_utf8(label).ok())
                         .ok_or(CKR_DEVICE_ERROR)?
                         .to_owned();
-                    let value = inner.data[53..].to_vec();
+                    let delegated_capabilities = if matches!(
+                        object_type,
+                        YUBIHSM_WRAP_KEY | crate::YUBIHSM_PUBLIC_WRAP_KEY
+                    ) {
+                        inner
+                            .data
+                            .get(53..61)
+                            .ok_or(CKR_DATA_LEN_RANGE)?
+                            .try_into()
+                            .unwrap()
+                    } else {
+                        [0; 8]
+                    };
                     self.metadata_objects.borrow_mut().insert(
                         id,
                         (
                             ObjectInfo {
                                 capabilities: inner.data[44..52].try_into().unwrap(),
                                 id,
-                                length: value.len() as u16,
+                                length: length as u16,
                                 domains: u16::from_be_bytes(inner.data[42..44].try_into().unwrap()),
-                                object_type: YUBIHSM_OPAQUE,
-                                algorithm: inner.data[52],
+                                object_type,
+                                algorithm,
                                 sequence: 1,
-                                origin: 2,
+                                origin: if inner.command == CommandCode::PutPublicWrapKey as u8 {
+                                    2
+                                } else {
+                                    1
+                                },
                                 label,
-                                delegated_capabilities: [0; 8],
+                                delegated_capabilities,
                             },
-                            value,
+                            if object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY {
+                                inner.data[61..].to_vec()
+                            } else {
+                                Vec::new()
+                            },
                         ),
                     );
                     (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
                 }
-            }
-            value if value == CommandCode::DeleteObject as u8 => {
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let object_type = inner.data[2];
-                if object_type == YUBIHSM_OPAQUE && self.fail_delete_opaque.borrow().contains(&id) {
-                    (COMMAND_ERROR, vec![0x0b])
-                } else {
-                    self.objects
-                        .borrow_mut()
-                        .retain(|candidate| *candidate != id);
-                    let remove_metadata = self
-                        .metadata_objects
-                        .borrow()
-                        .get(&id)
-                        .is_some_and(|(info, _)| info.object_type == object_type);
-                    if remove_metadata {
-                        self.metadata_objects.borrow_mut().remove(&id);
-                    }
-                    (inner.command | RESPONSE_BIT, vec![])
-                }
-            }
-            value
-                if value == CommandCode::ExportWrapped as u8 && inner.data.len() >= 5
-                    || (value == CommandCode::GetRsaWrappedKey as u8
-                        || value == CommandCode::ExportRsaWrapped as u8)
-                        && inner.data.len() >= 28 =>
-            {
-                let missing_public_wrap_key = if inner.command
-                    == CommandCode::ExportRsaWrapped as u8
-                {
-                    let wrapping_key_id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                    !self
-                        .metadata_objects
-                        .borrow()
-                        .get(&wrapping_key_id)
-                        .is_some_and(|(info, _)| info.object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY)
-                } else {
-                    false
-                };
-                if missing_public_wrap_key {
-                    (COMMAND_ERROR, vec![0x0b])
-                } else {
-                    let target_type = inner.data[2];
-                    let target_id = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
-                    if let Some((info, _)) = self
-                        .metadata_objects
-                        .borrow()
-                        .get(&target_id)
-                        .filter(|(info, _)| info.object_type == target_type)
-                    {
-                        *self.last_wrapped_object.borrow_mut() = Some(info.clone());
-                    }
-                    let mut wrapped = b"wrapped-object:".to_vec();
-                    wrapped.push(inner.command);
-                    wrapped.extend_from_slice(&inner.data);
-                    (inner.command | RESPONSE_BIT, wrapped)
-                }
-            }
-            value if value == CommandCode::ImportWrapped as u8 && inner.data.len() > 2 => {
-                if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
-                    info.sequence = info.sequence.wrapping_add(1);
-                    info.origin = 2;
-                    self.metadata_objects
-                        .borrow_mut()
-                        .insert(info.id, (info.clone(), Vec::new()));
-                    let [high, low] = info.id.to_be_bytes();
-                    (
-                        inner.command | RESPONSE_BIT,
-                        [info.object_type, high, low].to_vec(),
-                    )
-                } else {
-                    let id = 20;
-                    self.metadata_objects.borrow_mut().insert(
-                        id,
-                        (
-                            ObjectInfo {
-                                capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
-                                id,
-                                length: 16,
-                                domains: 0xffff,
-                                object_type: YUBIHSM_SYMMETRIC_KEY,
-                                algorithm: YUBIHSM_ALGO_AES128,
-                                sequence: 1,
-                                origin: 2,
-                                label: "AES-CCM unwrapped".to_owned(),
-                                delegated_capabilities: [0; 8],
-                            },
-                            Vec::new(),
-                        ),
-                    );
-                    (
-                        inner.command | RESPONSE_BIT,
-                        [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
-                    )
-                }
-            }
-            value if value == CommandCode::ImportRsaWrapped as u8 && inner.data.len() > 25 => {
-                if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
-                    let collision = self
-                        .metadata_objects
-                        .borrow()
-                        .get(&info.id)
-                        .is_some_and(|(existing, _)| existing.object_type == info.object_type);
-                    if collision {
+                value if value == CommandCode::PutOpaque as u8 => {
+                    if inner.data.len() < 53 {
+                        (inner.command | RESPONSE_BIT, inner.data)
+                    } else if self.fail_next_put_opaque.replace(false) {
                         (COMMAND_ERROR, vec![0x0b])
                     } else {
+                        let requested = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                        let id = if requested == 0 {
+                            (1..=u16::MAX)
+                                .find(|candidate| {
+                                    !self.objects.borrow().contains(candidate)
+                                        && !self.metadata_objects.borrow().contains_key(candidate)
+                                })
+                                .ok_or(CKR_DEVICE_MEMORY)?
+                        } else {
+                            requested
+                        };
+                        let label = inner.data[2..42]
+                            .split(|byte| *byte == 0)
+                            .next()
+                            .and_then(|label| std::str::from_utf8(label).ok())
+                            .ok_or(CKR_DEVICE_ERROR)?
+                            .to_owned();
+                        let value = inner.data[53..].to_vec();
+                        self.metadata_objects.borrow_mut().insert(
+                            id,
+                            (
+                                ObjectInfo {
+                                    capabilities: inner.data[44..52].try_into().unwrap(),
+                                    id,
+                                    length: value.len() as u16,
+                                    domains: u16::from_be_bytes(
+                                        inner.data[42..44].try_into().unwrap(),
+                                    ),
+                                    object_type: YUBIHSM_OPAQUE,
+                                    algorithm: inner.data[52],
+                                    sequence: 1,
+                                    origin: 2,
+                                    label,
+                                    delegated_capabilities: [0; 8],
+                                },
+                                value,
+                            ),
+                        );
+                        (inner.command | RESPONSE_BIT, id.to_be_bytes().to_vec())
+                    }
+                }
+                value if value == CommandCode::DeleteObject as u8 => {
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let object_type = inner.data[2];
+                    if object_type == YUBIHSM_OPAQUE
+                        && self.fail_delete_opaque.borrow().contains(&id)
+                    {
+                        (COMMAND_ERROR, vec![0x0b])
+                    } else {
+                        self.objects
+                            .borrow_mut()
+                            .retain(|candidate| *candidate != id);
+                        let remove_metadata = self
+                            .metadata_objects
+                            .borrow()
+                            .get(&id)
+                            .is_some_and(|(info, _)| info.object_type == object_type);
+                        if remove_metadata {
+                            self.metadata_objects.borrow_mut().remove(&id);
+                        }
+                        (inner.command | RESPONSE_BIT, vec![])
+                    }
+                }
+                value
+                    if value == CommandCode::ExportWrapped as u8 && inner.data.len() >= 5
+                        || (value == CommandCode::GetRsaWrappedKey as u8
+                            || value == CommandCode::ExportRsaWrapped as u8)
+                            && inner.data.len() >= 28 =>
+                {
+                    let missing_public_wrap_key =
+                        if inner.command == CommandCode::ExportRsaWrapped as u8 {
+                            let wrapping_key_id =
+                                u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                            !self
+                                .metadata_objects
+                                .borrow()
+                                .get(&wrapping_key_id)
+                                .is_some_and(|(info, _)| {
+                                    info.object_type == crate::YUBIHSM_PUBLIC_WRAP_KEY
+                                })
+                        } else {
+                            false
+                        };
+                    if missing_public_wrap_key {
+                        (COMMAND_ERROR, vec![0x0b])
+                    } else {
+                        let target_type = inner.data[2];
+                        let target_id = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
+                        if let Some((info, _)) = self
+                            .metadata_objects
+                            .borrow()
+                            .get(&target_id)
+                            .filter(|(info, _)| info.object_type == target_type)
+                        {
+                            *self.last_wrapped_object.borrow_mut() = Some(info.clone());
+                        }
+                        let mut wrapped = b"wrapped-object:".to_vec();
+                        wrapped.push(inner.command);
+                        wrapped.extend_from_slice(&inner.data);
+                        (inner.command | RESPONSE_BIT, wrapped)
+                    }
+                }
+                value if value == CommandCode::ImportWrapped as u8 && inner.data.len() > 2 => {
+                    if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
                         info.sequence = info.sequence.wrapping_add(1);
                         info.origin = 2;
                         self.metadata_objects
@@ -1005,158 +906,199 @@ impl ProtocolPeer {
                             inner.command | RESPONSE_BIT,
                             [info.object_type, high, low].to_vec(),
                         )
-                    }
-                } else {
-                    let id = 21;
-                    self.metadata_objects.borrow_mut().insert(
-                        id,
+                    } else {
+                        let id = 20;
+                        self.metadata_objects.borrow_mut().insert(
+                            id,
+                            (
+                                ObjectInfo {
+                                    capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
+                                    id,
+                                    length: 16,
+                                    domains: 0xffff,
+                                    object_type: YUBIHSM_SYMMETRIC_KEY,
+                                    algorithm: YUBIHSM_ALGO_AES128,
+                                    sequence: 1,
+                                    origin: 2,
+                                    label: "AES-CCM unwrapped".to_owned(),
+                                    delegated_capabilities: [0; 8],
+                                },
+                                Vec::new(),
+                            ),
+                        );
                         (
-                            ObjectInfo {
-                                capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
-                                id,
-                                length: 16,
-                                domains: 0xffff,
-                                object_type: YUBIHSM_SYMMETRIC_KEY,
-                                algorithm: YUBIHSM_ALGO_AES128,
-                                sequence: 1,
-                                origin: 2,
-                                label: "RSA unwrapped object".to_owned(),
-                                delegated_capabilities: [0; 8],
-                            },
-                            Vec::new(),
-                        ),
-                    );
+                            inner.command | RESPONSE_BIT,
+                            [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
+                        )
+                    }
+                }
+                value if value == CommandCode::ImportRsaWrapped as u8 && inner.data.len() > 25 => {
+                    if let Some(mut info) = self.last_wrapped_object.borrow().clone() {
+                        let collision =
+                            self.metadata_objects.borrow().get(&info.id).is_some_and(
+                                |(existing, _)| existing.object_type == info.object_type,
+                            );
+                        if collision {
+                            (COMMAND_ERROR, vec![0x0b])
+                        } else {
+                            info.sequence = info.sequence.wrapping_add(1);
+                            info.origin = 2;
+                            self.metadata_objects
+                                .borrow_mut()
+                                .insert(info.id, (info.clone(), Vec::new()));
+                            let [high, low] = info.id.to_be_bytes();
+                            (
+                                inner.command | RESPONSE_BIT,
+                                [info.object_type, high, low].to_vec(),
+                            )
+                        }
+                    } else {
+                        let id = 21;
+                        self.metadata_objects.borrow_mut().insert(
+                            id,
+                            (
+                                ObjectInfo {
+                                    capabilities: crate::yubihsm_capabilities(&[0x32, 0x33]),
+                                    id,
+                                    length: 16,
+                                    domains: 0xffff,
+                                    object_type: YUBIHSM_SYMMETRIC_KEY,
+                                    algorithm: YUBIHSM_ALGO_AES128,
+                                    sequence: 1,
+                                    origin: 2,
+                                    label: "RSA unwrapped object".to_owned(),
+                                    delegated_capabilities: [0; 8],
+                                },
+                                Vec::new(),
+                            ),
+                        );
+                        (
+                            inner.command | RESPONSE_BIT,
+                            [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
+                        )
+                    }
+                }
+                value if value == CommandCode::PutRsaWrappedKey as u8 && inner.data.len() >= 58 => {
+                    let object_type = inner.data[2];
+                    let requested = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
+                    let id = if requested == 0 { 22 } else { requested };
+                    let label = inner.data[5..45]
+                        .split(|byte| *byte == 0)
+                        .next()
+                        .and_then(|label| std::str::from_utf8(label).ok())
+                        .ok_or(CKR_DEVICE_ERROR)?
+                        .to_owned();
+                    let info = ObjectInfo {
+                        capabilities: inner.data[47..55].try_into().unwrap(),
+                        id,
+                        length: match inner.data[55] {
+                            YUBIHSM_ALGO_AES128 => 16,
+                            YUBIHSM_ALGO_AES192 => 24,
+                            YUBIHSM_ALGO_AES256 => 32,
+                            YUBIHSM_ALGO_RSA_2048 => 256,
+                            YUBIHSM_ALGO_RSA_3072 => 384,
+                            YUBIHSM_ALGO_RSA_4096 => 512,
+                            _ => 32,
+                        },
+                        domains: u16::from_be_bytes(inner.data[45..47].try_into().unwrap()),
+                        object_type,
+                        algorithm: inner.data[55],
+                        sequence: 1,
+                        origin: 2,
+                        label,
+                        delegated_capabilities: [0; 8],
+                    };
+                    self.metadata_objects
+                        .borrow_mut()
+                        .insert(id, (info, Vec::new()));
+                    let [high, low] = id.to_be_bytes();
                     (
                         inner.command | RESPONSE_BIT,
-                        [YUBIHSM_SYMMETRIC_KEY, 0, id as u8].to_vec(),
+                        [object_type, high, low].to_vec(),
                     )
                 }
-            }
-            value if value == CommandCode::PutRsaWrappedKey as u8 && inner.data.len() >= 58 => {
-                let object_type = inner.data[2];
-                let requested = u16::from_be_bytes(inner.data[3..5].try_into().unwrap());
-                let id = if requested == 0 { 22 } else { requested };
-                let label = inner.data[5..45]
-                    .split(|byte| *byte == 0)
-                    .next()
-                    .and_then(|label| std::str::from_utf8(label).ok())
-                    .ok_or(CKR_DEVICE_ERROR)?
-                    .to_owned();
-                let info = ObjectInfo {
-                    capabilities: inner.data[47..55].try_into().unwrap(),
-                    id,
-                    length: match inner.data[55] {
-                        YUBIHSM_ALGO_AES128 => 16,
-                        YUBIHSM_ALGO_AES192 => 24,
-                        YUBIHSM_ALGO_AES256 => 32,
-                        YUBIHSM_ALGO_RSA_2048 => 256,
-                        YUBIHSM_ALGO_RSA_3072 => 384,
-                        YUBIHSM_ALGO_RSA_4096 => 512,
-                        _ => 32,
-                    },
-                    domains: u16::from_be_bytes(inner.data[45..47].try_into().unwrap()),
-                    object_type,
-                    algorithm: inner.data[55],
-                    sequence: 1,
-                    origin: 2,
-                    label,
-                    delegated_capabilities: [0; 8],
-                };
-                self.metadata_objects
-                    .borrow_mut()
-                    .insert(id, (info, Vec::new()));
-                let [high, low] = id.to_be_bytes();
-                (
-                    inner.command | RESPONSE_BIT,
-                    [object_type, high, low].to_vec(),
-                )
-            }
-            value if value == CommandCode::SignPkcs1 as u8 => {
-                (inner.command | RESPONSE_BIT, vec![0x5a; 256])
-            }
-            value if value == CommandCode::DecryptPkcs1 as u8 => {
-                (inner.command | RESPONSE_BIT, b"plaintext".to_vec())
-            }
-            value if value == CommandCode::DeriveEcdh as u8 => {
-                if inner.data.len() == 34 {
+                value if value == CommandCode::SignPkcs1 as u8 => {
+                    (inner.command | RESPONSE_BIT, vec![0x5a; 256])
+                }
+                value if value == CommandCode::DecryptPkcs1 as u8 => {
+                    (inner.command | RESPONSE_BIT, b"plaintext".to_vec())
+                }
+                value if value == CommandCode::DeriveEcdh as u8 => {
+                    if inner.data.len() == 34 {
+                        let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                        (
+                            inner.command | RESPONSE_BIT,
+                            self.x25519_derive(id, &inner.data[2..])?,
+                        )
+                    } else {
+                        (inner.command | RESPONSE_BIT, vec![0x42; 32])
+                    }
+                }
+                value
+                    if value == CommandCode::EncryptEcb as u8
+                        || value == CommandCode::DecryptEcb as u8 =>
+                {
+                    if inner.data.len() < 2 || !crate::is_multiple_of(inner.data.len() - 2, 16) {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
                     let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let mode = if value == CommandCode::EncryptEcb as u8 {
+                        Direction::Encrypt
+                    } else {
+                        Direction::Decrypt
+                    };
                     (
                         inner.command | RESPONSE_BIT,
-                        self.x25519_derive(id, &inner.data[2..])?,
+                        aes_ecb(Self::aes_key(id), &inner.data[2..], mode)?,
                     )
-                } else {
-                    (inner.command | RESPONSE_BIT, vec![0x42; 32])
                 }
-            }
-            value
-                if value == CommandCode::EncryptEcb as u8
-                    || value == CommandCode::DecryptEcb as u8 =>
-            {
-                if inner.data.len() < 2 || !crate::is_multiple_of(inner.data.len() - 2, 16) {
-                    return Err(CKR_DATA_LEN_RANGE.into());
+                value
+                    if value == CommandCode::EncryptCbc as u8
+                        || value == CommandCode::DecryptCbc as u8 =>
+                {
+                    if inner.data.len() < 18 || !crate::is_multiple_of(inner.data.len() - 18, 16) {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                    let mode = if value == CommandCode::EncryptCbc as u8 {
+                        Direction::Encrypt
+                    } else {
+                        Direction::Decrypt
+                    };
+                    (
+                        inner.command | RESPONSE_BIT,
+                        aes_cbc(
+                            Self::aes_key(id),
+                            &inner.data[2..18],
+                            &inner.data[18..],
+                            mode,
+                        )?,
+                    )
                 }
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let mode = if value == CommandCode::EncryptEcb as u8 {
-                    Direction::Encrypt
-                } else {
-                    Direction::Decrypt
-                };
-                (
-                    inner.command | RESPONSE_BIT,
-                    aes_ecb(Self::aes_key(id), &inner.data[2..], mode)?,
-                )
-            }
-            value
-                if value == CommandCode::EncryptCbc as u8
-                    || value == CommandCode::DecryptCbc as u8 =>
-            {
-                if inner.data.len() < 18 || !crate::is_multiple_of(inner.data.len() - 18, 16) {
-                    return Err(CKR_DATA_LEN_RANGE.into());
+                value if value == CommandCode::ResetDevice as u8 && inner.data == [0xde] => {
+                    (COMMAND_ERROR, vec![0x0b])
                 }
-                let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
-                let mode = if value == CommandCode::EncryptCbc as u8 {
-                    Direction::Encrypt
-                } else {
-                    Direction::Decrypt
-                };
-                (
-                    inner.command | RESPONSE_BIT,
-                    aes_cbc(
-                        Self::aes_key(id),
-                        &inner.data[2..18],
-                        &inner.data[18..],
-                        mode,
-                    )?,
-                )
+                _ => (inner.command | RESPONSE_BIT, inner.data),
+            };
+            Ok((response_command, response_data))
+        });
+        let response = match exchange {
+            Ok(response) => response,
+            Err(error) => {
+                *session_slot = None;
+                self.closed_sessions.set(self.closed_sessions.get() + 1);
+                return Err(error);
             }
-            value if value == CommandCode::ResetDevice as u8 && inner.data == [0xde] => {
-                (COMMAND_ERROR, vec![0x0b])
-            }
-            _ => (inner.command | RESPONSE_BIT, inner.data),
         };
-        let clear_response = Frame::new(response_command, response_data)?.encode();
-        let ciphertext = aes_cbc(
-            &session.s_enc,
-            &iv,
-            &pad(&clear_response),
-            Direction::Encrypt,
-        )?;
-        let mut response_data = vec![session.sid];
-        response_data.extend_from_slice(&ciphertext);
-
-        let mut response = Vec::with_capacity(3 + response_data.len() + MAC_LENGTH);
-        response.push(COMMAND_SESSION_MESSAGE | RESPONSE_BIT);
-        response.extend_from_slice(&((response_data.len() + MAC_LENGTH) as u16).to_be_bytes());
-        response.extend_from_slice(&response_data);
-        let mut rmac_input = session.mac_chaining_value.to_vec();
-        rmac_input.extend_from_slice(&response);
-        let mut response_mac = aes_cmac(&session.s_rmac, &rmac_input)?;
+        let mut response = response;
         if self.corrupt_response_mac.replace(false) {
-            response_mac[0] ^= 0x80;
+            let first_mac_byte = response
+                .len()
+                .checked_sub(MAC_LENGTH)
+                .ok_or(CKR_DEVICE_ERROR)?;
+            response[first_mac_byte] ^= 0x80;
         }
-        response.extend_from_slice(&response_mac[..MAC_LENGTH]);
-        increment_counter(&mut session.counter);
-        if closes_session {
+        if !session.is_valid() {
             *session_slot = None;
             self.closed_sessions.set(self.closed_sessions.get() + 1);
         }
@@ -3771,6 +3713,206 @@ fn authenticates_and_exchanges_encrypted_session_messages() {
         .send_command(&peer, &Command::close_session())
         .unwrap();
     assert_eq!(peer.commands.borrow().len(), 5);
+}
+
+fn wire_bytes(encoded: &str) -> Vec<u8> {
+    encoded
+        .split_ascii_whitespace()
+        .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+        .collect()
+}
+
+#[derive(Debug)]
+struct SecureSessionHostVectorConnector {
+    exchanges: RefCell<Vec<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl Connector for SecureSessionHostVectorConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn manufacturer(&self) -> &str {
+        "PKCS11RS"
+    }
+
+    fn product(&self) -> &str {
+        "YubiHSM vector"
+    }
+
+    fn serial(&self) -> &str {
+        "VECTOR"
+    }
+
+    fn major(&self) -> u8 {
+        2
+    }
+
+    fn minor(&self) -> u8 {
+        4
+    }
+
+    fn is_present(&self) -> bool {
+        true
+    }
+
+    fn buffer_size(&self) -> usize {
+        4096
+    }
+
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        _timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        let (expected, response) = self.exchanges.borrow_mut().remove(0);
+        assert_eq!(send_buffer, expected);
+        receive_buffer[..response.len()].copy_from_slice(&response);
+        Ok(&receive_buffer[..response.len()])
+    }
+}
+
+fn symmetric_secure_session_wire_vectors() -> Vec<(Vec<u8>, Vec<u8>)> {
+    [
+        (
+            "03 00 0a 00 01 01 02 03 04 05 06 07 08",
+            "83 00 11 07 10 11 12 13 14 15 16 17 51 4e 41 ae a5 fd f2 71",
+        ),
+        (
+            "04 00 11 07 57 a0 04 06 52 9b 6f e7 92 0a ce 23 a5 b3 0a 98",
+            "84 00 00",
+        ),
+        (
+            "05 00 19 07 c3 87 1b bc 77 0e bc 7b c6 20 9a af 87 c9 7e cc 9a 5d 39 8b ab 1d 50 ae",
+            "85 00 19 07 d2 5b 41 8c 06 df bd 5d da 32 6f 1d db f9 86 28 5b 6f e1 39 7a 01 32 ac",
+        ),
+        (
+            "05 00 19 07 5a df ce b4 16 42 a3 65 12 e5 00 9f 19 3e 9e 57 6a cc a1 e8 ff 25 a2 b4",
+            "85 00 19 07 f8 65 e5 5f bb 04 1c ac fe 0d 36 81 bf 26 8d 97 8c 3e d6 ae 95 1b 62 2a",
+        ),
+        (
+            "05 00 19 07 59 44 33 8f 05 cd f3 79 07 5e f6 38 00 d4 73 21 6e c6 d8 39 54 ae 23 68",
+            "85 00 19 07 e8 b8 99 5f 82 1a 9c f5 68 02 cc 43 cd fc 3a 1a 99 81 e5 05 00 84 10 9b",
+        ),
+    ]
+    .into_iter()
+    .map(|(request, response)| (wire_bytes(request), wire_bytes(response)))
+    .collect()
+}
+
+#[test]
+fn host_secure_session_matches_fixed_wire_vectors() {
+    let exchanges = symmetric_secure_session_wire_vectors();
+    let connector = SecureSessionHostVectorConnector {
+        exchanges: RefCell::new(exchanges),
+    };
+    let mut session =
+        SecureSession::authenticate_with_challenge(&connector, 1, PASSWORD, HOST_CHALLENGE)
+            .unwrap();
+    assert_eq!(
+        session
+            .send_command(&connector, &Command::get_storage_info())
+            .unwrap(),
+        [0xaa, 0xbb, 0xcc]
+    );
+    assert_eq!(
+        session
+            .send_command(&connector, &Command::get_pseudo_random(8))
+            .unwrap(),
+        [0x5a; 8]
+    );
+    session
+        .send_command(&connector, &Command::close_session())
+        .unwrap();
+    assert!(connector.exchanges.borrow().is_empty());
+}
+
+#[test]
+fn device_secure_session_matches_fixed_wire_vectors() {
+    let exchanges = symmetric_secure_session_wire_vectors();
+    let (mut session, host_cryptogram, create_response) =
+        SecureSession::peer_begin_symmetric(&exchanges[0].0, PASSWORD, 7, CARD_CHALLENGE).unwrap();
+    assert_eq!(create_response, exchanges[0].1);
+    assert_eq!(
+        host_cryptogram,
+        wire_bytes("57 a0 04 06 52 9b 6f e7").as_slice()
+    );
+    assert_eq!(
+        session
+            .peer_authenticate_symmetric(&exchanges[1].0, &host_cryptogram, &[])
+            .unwrap(),
+        exchanges[1].1
+    );
+    assert_eq!(
+        session
+            .peer_exchange(&exchanges[2].0, |command, data| {
+                assert_eq!(command, CommandCode::GetStorageInfo as u8);
+                assert!(data.is_empty());
+                Ok((command | RESPONSE_BIT, vec![0xaa, 0xbb, 0xcc]))
+            })
+            .unwrap(),
+        exchanges[2].1
+    );
+    assert_eq!(
+        session
+            .peer_exchange(&exchanges[3].0, |command, data| {
+                assert_eq!(command, CommandCode::GetPseudoRandom as u8);
+                assert_eq!(data, [0, 8]);
+                Ok((command | RESPONSE_BIT, vec![0x5a; 8]))
+            })
+            .unwrap(),
+        exchanges[3].1
+    );
+    assert_eq!(
+        session
+            .peer_exchange(&exchanges[4].0, |command, data| {
+                assert_eq!(command, CommandCode::CloseSession as u8);
+                assert!(data.is_empty());
+                Ok((command | RESPONSE_BIT, Vec::new()))
+            })
+            .unwrap(),
+        exchanges[4].1
+    );
+    assert!(!session.is_valid());
+}
+
+#[test]
+fn device_secure_session_rejects_invalid_authentication_mac() {
+    let exchanges = symmetric_secure_session_wire_vectors();
+    let (mut session, host_cryptogram, _) =
+        SecureSession::peer_begin_symmetric(&exchanges[0].0, PASSWORD, 7, CARD_CHALLENGE).unwrap();
+    let mut authentication = exchanges[1].0.clone();
+    *authentication.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        session
+            .peer_authenticate_symmetric(&authentication, &host_cryptogram, &[])
+            .unwrap(),
+        wire_bytes("7f 00 01 04")
+    );
+    assert!(!session.is_valid());
+}
+
+#[test]
+fn device_secure_session_rejects_invalid_session_message_mac() {
+    let exchanges = symmetric_secure_session_wire_vectors();
+    let (mut session, host_cryptogram, _) =
+        SecureSession::peer_begin_symmetric(&exchanges[0].0, PASSWORD, 7, CARD_CHALLENGE).unwrap();
+    session
+        .peer_authenticate_symmetric(&exchanges[1].0, &host_cryptogram, &[])
+        .unwrap();
+    let mut request = exchanges[2].0.clone();
+    *request.last_mut().unwrap() ^= 1;
+    let handled = Cell::new(false);
+    assert!(matches!(
+        session.peer_exchange(&request, |command, _| {
+            handled.set(true);
+            Ok((command | RESPONSE_BIT, Vec::new()))
+        }),
+        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as _
+    ));
+    assert!(!handled.get());
+    assert!(!session.is_valid());
 }
 
 #[test]

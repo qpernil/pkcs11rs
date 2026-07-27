@@ -243,6 +243,164 @@ impl std::fmt::Debug for SecureSession {
 }
 
 impl SecureSession {
+    #[cfg(any(test, feature = "abi-tests"))]
+    pub(crate) fn peer_begin_symmetric(
+        encoded: &[u8],
+        password: &[u8],
+        sid: u8,
+        card_challenge: [u8; CHALLENGE_LENGTH],
+    ) -> Result<(Self, [u8; MAC_LENGTH], Vec<u8>), Error> {
+        let frame = Frame::parse(encoded)?;
+        if frame.command != COMMAND_CREATE_SESSION || frame.data.len() != 2 + CHALLENGE_LENGTH {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        let mut context = [0; CHALLENGE_LENGTH * 2];
+        context[..CHALLENGE_LENGTH].copy_from_slice(&frame.data[2..]);
+        context[CHALLENGE_LENGTH..].copy_from_slice(&card_challenge);
+        let static_keys = crate::yubico_password_kdf(password)?;
+        let s_enc = derive_key(&static_keys[..16], 0x04, &context)?;
+        let s_mac = derive_key(&static_keys[16..], 0x06, &context)?;
+        let s_rmac = derive_key(&static_keys[16..], 0x07, &context)?;
+        let card_cryptogram = derive_cryptogram(&s_mac, 0x00, &context)?;
+        let host_cryptogram = derive_cryptogram(&s_mac, 0x01, &context)?;
+        let session = Self::new_peer(
+            sid,
+            s_enc,
+            s_mac,
+            s_rmac,
+            [0; AES_BLOCK_SIZE],
+            [0; AES_BLOCK_SIZE],
+        );
+        let mut response = Vec::with_capacity(1 + CHALLENGE_LENGTH + MAC_LENGTH);
+        response.push(sid);
+        response.extend_from_slice(&card_challenge);
+        response.extend_from_slice(&card_cryptogram);
+        Ok((
+            session,
+            host_cryptogram,
+            Frame::new(COMMAND_CREATE_SESSION | RESPONSE_BIT, response)?.encode(),
+        ))
+    }
+
+    #[cfg(any(test, feature = "abi-tests"))]
+    pub(crate) fn new_peer(
+        sid: u8,
+        s_enc: [u8; AES_BLOCK_SIZE],
+        s_mac: [u8; AES_BLOCK_SIZE],
+        s_rmac: [u8; AES_BLOCK_SIZE],
+        counter: [u8; AES_BLOCK_SIZE],
+        mac_chaining_value: [u8; AES_BLOCK_SIZE],
+    ) -> Self {
+        Self {
+            sid,
+            s_enc: Zeroizing::new(s_enc),
+            s_mac: Zeroizing::new(s_mac),
+            s_rmac: Zeroizing::new(s_rmac),
+            counter,
+            mac_chaining_value,
+            valid: true,
+        }
+    }
+
+    #[cfg(any(test, feature = "abi-tests"))]
+    fn peer_request(&mut self, encoded: &[u8], command: u8) -> Result<Vec<u8>, Error> {
+        if !self.valid {
+            return Err(CKR_SESSION_CLOSED.into());
+        }
+        let frame = Frame::parse(encoded)?;
+        if frame.command != command || frame.data.len() < MAC_LENGTH {
+            self.valid = false;
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let payload_length = frame.data.len() - MAC_LENGTH;
+        let mut mac_input = Vec::with_capacity(AES_BLOCK_SIZE + 3 + payload_length);
+        mac_input.extend_from_slice(&self.mac_chaining_value);
+        mac_input.extend_from_slice(&encoded[..3 + payload_length]);
+        let command_mac = aes_cmac(&self.s_mac[..], &mac_input)?;
+        if !bool::from(command_mac[..MAC_LENGTH].ct_eq(&frame.data[payload_length..])) {
+            self.valid = false;
+            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+        }
+        self.mac_chaining_value = command_mac;
+        Ok(frame.data[..payload_length].to_vec())
+    }
+
+    #[cfg(any(test, feature = "abi-tests"))]
+    pub(crate) fn peer_authenticate_symmetric(
+        &mut self,
+        encoded: &[u8],
+        expected_host_cryptogram: &[u8; MAC_LENGTH],
+        response_data: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let payload = match self.peer_request(encoded, COMMAND_AUTHENTICATE_SESSION) {
+            Ok(payload) => payload,
+            Err(_) => {
+                self.valid = false;
+                return Ok(Frame::new(COMMAND_ERROR, vec![0x04])?.encode());
+            }
+        };
+        let valid = payload.len() == 1 + MAC_LENGTH
+            && payload[0] == self.sid
+            && bool::from(payload[1..].ct_eq(expected_host_cryptogram));
+        if !valid {
+            self.valid = false;
+            return Ok(Frame::new(COMMAND_ERROR, vec![0x04])?.encode());
+        }
+        increment_counter(&mut self.counter);
+        Frame::new(
+            COMMAND_AUTHENTICATE_SESSION | RESPONSE_BIT,
+            response_data.to_vec(),
+        )
+        .map(|frame| frame.encode())
+    }
+
+    #[cfg(any(test, feature = "abi-tests"))]
+    pub(crate) fn peer_exchange(
+        &mut self,
+        encoded: &[u8],
+        handler: impl FnOnce(u8, &[u8]) -> Result<(u8, Vec<u8>), Error>,
+    ) -> Result<Vec<u8>, Error> {
+        let payload = self.peer_request(encoded, COMMAND_SESSION_MESSAGE)?;
+        if payload.len() < 1 + AES_BLOCK_SIZE
+            || payload[0] != self.sid
+            || !crate::is_multiple_of(payload.len() - 1, AES_BLOCK_SIZE)
+        {
+            self.valid = false;
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+
+        let iv = aes_block(&self.s_enc[..], &self.counter)?;
+        let clear = aes_cbc(&self.s_enc[..], &iv, &payload[1..], Direction::Decrypt)?;
+        let request = Frame::parse(&unpad(clear)?)?;
+        let closes_session = request.command == CommandCode::CloseSession as u8;
+        let (response_command, response_data) = handler(request.command, &request.data)?;
+        let clear_response = Frame::new(response_command, response_data)?.encode();
+        let ciphertext = aes_cbc(
+            &self.s_enc[..],
+            &iv,
+            &pad(&clear_response),
+            Direction::Encrypt,
+        )?;
+
+        let mut response_data = Vec::with_capacity(1 + ciphertext.len() + MAC_LENGTH);
+        response_data.push(self.sid);
+        response_data.extend_from_slice(&ciphertext);
+        let mut response = Vec::with_capacity(3 + response_data.len() + MAC_LENGTH);
+        response.push(COMMAND_SESSION_MESSAGE | RESPONSE_BIT);
+        response.extend_from_slice(&((response_data.len() + MAC_LENGTH) as u16).to_be_bytes());
+        response.extend_from_slice(&response_data);
+        let mut rmac_input = Vec::with_capacity(AES_BLOCK_SIZE + response.len());
+        rmac_input.extend_from_slice(&self.mac_chaining_value);
+        rmac_input.extend_from_slice(&response);
+        let response_mac = aes_cmac(&self.s_rmac[..], &rmac_input)?;
+        response.extend_from_slice(&response_mac[..MAC_LENGTH]);
+        increment_counter(&mut self.counter);
+        if closes_session {
+            self.valid = false;
+        }
+        Ok(response)
+    }
+
     pub(crate) fn authenticate_direct(
         connector: &dyn Connector,
         authkey_id: u16,
