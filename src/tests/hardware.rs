@@ -1105,7 +1105,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 mod fido2_hardware {
     use super::*;
 
-    const PROVISION_PIN_ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_FIDO2_PIN";
+    const CURRENT_PIN_ENV: &str = "PKCS11RS_FIDO2_TEST_PIN";
     const NEW_PIN_ENV: &str = "PKCS11RS_FIDO2_NEW_PIN";
 
     fn fido2_slot_id() -> CK_SLOT_ID {
@@ -1215,17 +1215,11 @@ mod fido2_hardware {
     #[test]
     #[ignore = "sets and verifies the initial persistent FIDO2 PIN on a live authenticator"]
     fn provisions_initial_fido2_pin() {
-        if std::env::var(PROVISION_PIN_ENABLE_ENV).as_deref() != Ok("1") {
-            eprintln!(
-                "skipped persistent FIDO2 PIN provisioning; set {PROVISION_PIN_ENABLE_ENV}=1 to enable it"
-            );
+        let Ok(new_pin) = std::env::var(NEW_PIN_ENV) else {
+            eprintln!("skipped persistent FIDO2 PIN provisioning; set {NEW_PIN_ENV} to enable it");
             return;
-        }
-        let mut new_pin = zeroize::Zeroizing::new(
-            std::env::var(NEW_PIN_ENV)
-                .unwrap_or_else(|_| panic!("{NEW_PIN_ENV} is required when provisioning"))
-                .into_bytes(),
-        );
+        };
+        let mut new_pin = zeroize::Zeroizing::new(new_pin.into_bytes());
         assert!(
             (4..=63).contains(&new_pin.len()),
             "{NEW_PIN_ENV} must contain 4 through 63 printable ASCII characters"
@@ -1269,10 +1263,13 @@ mod fido2_hardware {
             ),
             CKR_OK as CK_RV
         );
+        // GUI PKCS #11 clients commonly pass a pointer to an empty string
+        // rather than NULL_PTR for the uninitialized old PIN.
+        let mut empty_old_pin = [0_u8];
         assert_eq!(
             crate::api::C_SetPIN(
                 session,
-                std::ptr::null_mut(),
+                empty_old_pin.as_mut_ptr(),
                 0,
                 new_pin.as_mut_ptr(),
                 new_pin.len() as CK_ULONG,
@@ -1306,6 +1303,95 @@ mod fido2_hardware {
         eprintln!(
             "provisioned and verified the initial FIDO2 PIN through C_SetPIN and C_Login on slot {slot_id}; minimum PIN length {}",
             after.ulMinPinLen
+        );
+    }
+
+    #[test]
+    #[ignore = "changes and verifies the persistent FIDO2 PIN on a live authenticator"]
+    fn changes_existing_fido2_pin() {
+        let (Ok(current_pin), Ok(new_pin)) =
+            (std::env::var(CURRENT_PIN_ENV), std::env::var(NEW_PIN_ENV))
+        else {
+            eprintln!(
+                "skipped persistent FIDO2 PIN change; set both {CURRENT_PIN_ENV} and {NEW_PIN_ENV} to enable it"
+            );
+            return;
+        };
+        let mut current_pin = zeroize::Zeroizing::new(current_pin.into_bytes());
+        let mut new_pin = zeroize::Zeroizing::new(new_pin.into_bytes());
+        for (name, pin) in [
+            (CURRENT_PIN_ENV, current_pin.as_slice()),
+            (NEW_PIN_ENV, new_pin.as_slice()),
+        ] {
+            assert!(
+                (4..=63).contains(&pin.len()),
+                "{name} must contain 4 through 63 printable ASCII characters"
+            );
+            assert!(
+                pin.iter().all(|byte| (0x20..=0x7e).contains(byte)),
+                "{name} must contain only printable ASCII so it is unambiguously NFC-normalized"
+            );
+        }
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let slot_id = fido2_slot_id();
+        let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+        assert_eq!(
+            crate::api::C_GetTokenInfo(slot_id, &mut token_info),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(
+            token_info.flags & CKF_USER_PIN_INITIALIZED as CK_FLAGS,
+            0,
+            "refusing to change: the selected FIDO2 authenticator reports no configured PIN"
+        );
+        assert!(
+            new_pin.len() >= token_info.ulMinPinLen as usize,
+            "{NEW_PIN_ENV} is shorter than the authenticator's reported minimum of {} characters",
+            token_info.ulMinPinLen
+        );
+
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_SetPIN(
+                session,
+                current_pin.as_mut_ptr(),
+                current_pin.len() as CK_ULONG,
+                new_pin.as_mut_ptr(),
+                new_pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV,
+            "FIDO2 PIN change through C_SetPIN failed"
+        );
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                new_pin.as_mut_ptr(),
+                new_pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV,
+            "C_Login could not authenticate with the changed FIDO2 PIN"
+        );
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        eprintln!(
+            "changed and verified the FIDO2 PIN through C_SetPIN and C_Login on slot {slot_id}"
         );
     }
 }

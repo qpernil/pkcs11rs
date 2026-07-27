@@ -551,3 +551,18 @@ pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
     log!(2, "C_Logout called with {:?}", session_handle);
     map(logout(session_handle))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_null_zero_length_pin_is_an_empty_pin() {
+        let empty_string = [0_u8];
+        with_pin(empty_string.as_ptr(), 0, |pin| {
+            assert!(pin.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+}
