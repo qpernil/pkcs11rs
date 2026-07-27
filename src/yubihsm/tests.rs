@@ -4,7 +4,7 @@ use crate::{
     Slot, TokenObject, YubiHsmPublicDiscoveryCredential, YubiHsmSessionRole, YubiHsmSlot,
     CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER,
     CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
-    CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, YUBIHSM_ALGO_AES128,
+    CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO, YUBIHSM_ALGO_AES128,
     YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
     YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
     YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
@@ -2206,6 +2206,19 @@ fn yubihsm_without_public_discovery_configuration_exposes_provider_profiles_only
     assert!(objects
         .iter()
         .all(|object| object.class == CKO_PROFILE as CK_OBJECT_CLASS));
+}
+
+#[test]
+fn yubihsm_token_pin_bounds_cover_split_and_packed_login_forms() {
+    let slot = YubiHsmSlot::new(
+        Rc::new(ProtocolPeer::new()),
+        (2, 4, 1),
+        vec![YUBIHSM_ALGO_RSA_2048],
+    );
+    let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+    Slot::get_token_info(&slot, &mut token_info).unwrap();
+    assert_eq!(token_info.ulMinPinLen, 0);
+    assert_eq!(token_info.ulMaxPinLen, 215);
 }
 
 fn assert_lazy_cache_lifecycle(public_discovery: bool) {

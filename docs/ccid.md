@@ -99,7 +99,10 @@ record's KID/KVN `CKA_ID`; preceding certificates use indexed IDs.
 
 The slot does not advertise ordinary PKCS #11 cryptographic mechanisms. It
 supports random generation through the applet's `GET CHALLENGE` command and
-uses `C_Login` to establish the configured secure channel. Ordinary PKCS #11
+uses `C_Login` with a zero-length PIN to establish the configured secure
+channel. Both a null pointer and a nonnull pointer are accepted when the length
+is zero; nonempty input is rejected because no caller-supplied PIN is verified.
+The token consequently reports a 0-through-0 PIN range. Ordinary PKCS #11
 object operations remain read-only. SCP03 key-set provisioning and deletion
 and typed SCP11 key and trust management are available through the explicit
 administration ABI in `pkcs11rs.h`. Raw Security Domain data storage and reset

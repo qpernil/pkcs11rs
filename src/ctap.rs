@@ -334,7 +334,7 @@ impl Client {
         if !info.pin_uv_auth_protocols.contains(&2) {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
-        let pin = normalize_pin(info, pin, true)?;
+        let pin = normalize_pin(info, pin, false)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
@@ -1655,6 +1655,23 @@ mod tests {
         assert_eq!(decoder.u8().unwrap(), 6);
         assert_eq!(decoder.bytes().unwrap().len(), 32);
         assert_eq!(decoder.position(), requests[1].len() - 1);
+    }
+
+    #[test]
+    fn authorization_accepts_existing_pin_below_current_creation_policy() {
+        let transport = Rc::new(MockTransport::new(vec![
+            key_agreement_response(),
+            vec![0, 0xa0],
+        ]));
+        let client = Client::new(transport.clone());
+        let mut info = credential_management_info();
+        info.min_pin_length = Some(8);
+
+        assert!(matches!(
+            client.authorize_credential_enumeration(&info, b"1234"),
+            Err(CtapError::Malformed("missing PIN/UV auth token"))
+        ));
+        assert_eq!(transport.requests.borrow().len(), 2);
     }
 
     #[test]

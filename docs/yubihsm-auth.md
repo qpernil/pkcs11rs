@@ -255,6 +255,13 @@ password through pinentry while retaining the username as the authentication
 selector. A nonnull pointer with zero length remains an explicitly empty
 password.
 
+The YubiHSM token reports a stable 0-through-215-byte PIN envelope. The minimum
+comes from a separated `C_LoginUser` YubiHSM Auth credential password, which
+may be empty. The maximum covers the legacy packed `C_Login` form with its
+largest authentication selector and credential password. Exact direct,
+YubiHSM Auth, split, and packed parsers remain authoritative within that broad
+envelope.
+
 The module asks the YubiHSM Auth applet to calculate the session keys and keeps
 those keys in zeroizing memory only for the life of the authenticated YubiHSM
 session. Credential passwords are not cached. The direct YubiHSM login forms
@@ -323,8 +330,10 @@ material. The authentication key used for login must grant the
 The YubiHSM Auth slot uses `C_Login` roles as follows:
 
 - `CKU_USER` establishes the configured CCID SCP03 or SCP11 transport, if any.
-  The supplied PIN is otherwise unused because individual credential passwords
-  are provided only while opening a YubiHSM session.
+  Because individual credential passwords are provided only while opening a
+  YubiHSM session, this whole-slot login accepts only a zero-length PIN. Both a
+  null pointer with zero length and a nonnull pointer with zero length are
+  accepted; nonempty input is rejected instead of being silently ignored.
 - `CKU_SO` establishes the same transport and interprets the supplied PIN as
   the YubiHSM Auth management password. The resulting 16-byte management key
   is retained in zeroizing per-slot memory until logout, device removal,
@@ -332,7 +341,7 @@ The YubiHSM Auth slot uses `C_Login` roles as follows:
 
 With pinentry configured, `C_Login` with `CKU_SO`, a null PIN pointer, and zero
 PIN length obtains the management password through pinentry. `CKU_USER` never
-prompts because its PIN is intentionally unused.
+prompts because it has no PIN of its own.
 
 Yubico's password input convention is used for both management and credential
 passwords. A printable UTF-8 value of at most 16 bytes is padded on the right

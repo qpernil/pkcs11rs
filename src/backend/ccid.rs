@@ -257,7 +257,10 @@ impl Slot for HsmAuthSlot {
     fn hsmauth_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         Some(self.connector.clone())
     }
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if !pin.is_empty() {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
         self.management_key.get_mut().take();
         self.connector
             .establish_secure_channel(&self.application_aid)?;
@@ -589,7 +592,10 @@ impl Slot for IssuerSecurityDomainSlot {
     fn security_domain_provisioning_connector(&self) -> Option<Rc<dyn Connector>> {
         Some(self.connector.clone())
     }
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        if !pin.is_empty() {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         self.authenticated.set(true);

@@ -651,6 +651,49 @@ fn hsmauth_so_login_uses_pinentry_for_an_omitted_management_password() {
 }
 
 #[test]
+fn hsmauth_user_login_accepts_only_zero_length_pin_arguments() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let (connector, session) = install_hsmauth_admin_slot();
+
+    let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
+    assert_eq!(
+        crate::api::C_GetTokenInfo(HSMAUTH_ADMIN_SLOT_ID, &mut token_info),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(token_info.ulMinPinLen, 0);
+    assert_eq!(token_info.ulMaxPinLen, 32);
+
+    let mut nonempty = *b"ignored";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            nonempty.as_mut_ptr(),
+            nonempty.len() as CK_ULONG,
+        ),
+        CKR_PIN_INCORRECT as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(session, CKU_USER as CK_USER_TYPE, ::std::ptr::null_mut(), 0,),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    let mut ignored = [0xff];
+    assert_eq!(
+        crate::api::C_Login(session, CKU_USER as CK_USER_TYPE, ignored.as_mut_ptr(), 0,),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(connector.secure_channel_starts.get(), 2);
+
+    finalize_for_test();
+}
+
+#[test]
 fn hsmauth_so_login_authorizes_password_derived_administration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
