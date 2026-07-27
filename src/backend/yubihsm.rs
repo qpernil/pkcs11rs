@@ -337,7 +337,7 @@ pub(crate) struct YubiHsmPublicDiscoveryCredential {
 impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("YubiHsmPublicDiscoveryCredential")
-            .field("username", &"[CONFIGURED SELECTOR]")
+            .field("username", &String::from_utf8_lossy(&self.username))
             .field("authkey_id", &format_args!("{:04x}", self.authkey_id))
             .field("password", &"[REDACTED]")
             .finish()
