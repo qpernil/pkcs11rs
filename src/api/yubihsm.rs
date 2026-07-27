@@ -103,9 +103,9 @@ pub(crate) fn yubihsm_enroll_device(
         }
 
         let installed = match enrollment {
-            YubiHsmEnrollment::PublicKey => {
-                crate::yubihsm::trust::install_public_key(&device_public_key, trust_prefix)?
-            }
+            YubiHsmEnrollment::PublicKey => ctx
+                .trust_store
+                .install_public_key(&device_public_key, trust_prefix)?,
             YubiHsmEnrollment::Attestation { key_id, validation } => {
                 let attestation = session
                     .yubihsm_command(&YubiHsmCommand::sign_attestation_certificate(0, key_id))?;
@@ -113,7 +113,7 @@ pub(crate) fn yubihsm_enroll_device(
                     YubiHsmCommandCode::GetOpaque,
                     key_id,
                 )?)?;
-                crate::yubihsm::trust::install_attestation(
+                ctx.trust_store.install_attestation(
                     &device_public_key,
                     &attestation,
                     &device_certificate,

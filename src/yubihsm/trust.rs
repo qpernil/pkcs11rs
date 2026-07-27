@@ -23,7 +23,104 @@ const YUBICO_INTERMEDIATE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem"
 ));
-static NEXT_TEMPORARY_FILE: AtomicU64 = AtomicU64::new(1);
+pub(crate) struct TrustStore {
+    next_temporary_file: AtomicU64,
+}
+
+impl TrustStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            next_temporary_file: AtomicU64::new(1),
+        }
+    }
+
+    pub(crate) fn install_public_key(
+        &self,
+        encoded_public_point: &[u8],
+        prefix: Option<&OsStr>,
+    ) -> Result<[u8; 32], Error> {
+        let key = PublicKey::from_sec1_bytes(encoded_public_point)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let pem = key
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        self.install_pem(encoded_public_point, pem.as_bytes(), prefix, false)
+    }
+
+    pub(crate) fn install_attestation(
+        &self,
+        encoded_public_point: &[u8],
+        attestation: &[u8],
+        device_certificate: &[u8],
+        validation: AttestationValidation,
+        prefix: Option<&OsStr>,
+    ) -> Result<[u8; 32], Error> {
+        let attestation = crate::certificate_chain::decode(attestation)?;
+        let device_certificate = crate::certificate_chain::decode(device_certificate)?;
+        match validation {
+            AttestationValidation::ExplicitSigner => {
+                crate::certificate_chain::verify_signed_by(&attestation, &device_certificate)
+                    .map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
+            }
+            AttestationValidation::Yubico => {
+                let intermediate = crate::certificate_chain::decode(YUBICO_INTERMEDIATE)?;
+                let root = crate::certificate_chain::decode(YUBICO_ROOT)?;
+                crate::certificate_chain::validate_p256_public_point(
+                    &[intermediate, device_certificate, attestation.clone()],
+                    &[root],
+                )?;
+            }
+        }
+        if !bool::from(
+            device_spki(encoded_public_point)?
+                .ct_eq(&crate::certificate_chain::public_key_info(&attestation)?),
+        ) {
+            return Err(CKR_PIN_INCORRECT.into());
+        }
+        let pem = crate::certificate_chain::encode_pem(&attestation)?;
+        self.install_pem(encoded_public_point, pem.as_bytes(), prefix, true)
+    }
+
+    fn install_pem(
+        &self,
+        encoded_public_point: &[u8],
+        pem: &[u8],
+        prefix: Option<&OsStr>,
+        replace_matching_entry: bool,
+    ) -> Result<[u8; 32], Error> {
+        let path = entry_path(encoded_public_point, prefix)?;
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            validate_device_public_key(encoded_public_point, prefix)?;
+            if !replace_matching_entry {
+                return fingerprint_bytes(encoded_public_point);
+            }
+        }
+
+        let id = self.next_temporary_file.fetch_add(1, Ordering::Relaxed);
+        let mut temporary_name = path.as_os_str().to_os_string();
+        temporary_name.push(format!(".tmp-{}-{id}", std::process::id()));
+        let temporary = PathBuf::from(temporary_name);
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            file.write_all(pem)
+                .and_then(|_| file.sync_all())
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            fs::rename(&temporary, &path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            fingerprint_bytes(encoded_public_point)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AttestationValidation {
@@ -99,18 +196,15 @@ pub(crate) fn public_key_from_pem(pem: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
+#[cfg(test)]
 pub(crate) fn install_public_key(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    let key = PublicKey::from_sec1_bytes(encoded_public_point)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let pem = key
-        .to_public_key_pem(LineEnding::LF)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    install_pem(encoded_public_point, pem.as_bytes(), prefix, false)
+    TrustStore::new().install_public_key(encoded_public_point, prefix)
 }
 
+#[cfg(test)]
 pub(crate) fn install_attestation(
     encoded_public_point: &[u8],
     attestation: &[u8],
@@ -118,69 +212,13 @@ pub(crate) fn install_attestation(
     validation: AttestationValidation,
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    let attestation = crate::certificate_chain::decode(attestation)?;
-    let device_certificate = crate::certificate_chain::decode(device_certificate)?;
-    match validation {
-        AttestationValidation::ExplicitSigner => {
-            crate::certificate_chain::verify_signed_by(&attestation, &device_certificate)
-                .map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
-        }
-        AttestationValidation::Yubico => {
-            let intermediate = crate::certificate_chain::decode(YUBICO_INTERMEDIATE)?;
-            let root = crate::certificate_chain::decode(YUBICO_ROOT)?;
-            crate::certificate_chain::validate_p256_public_point(
-                &[intermediate, device_certificate, attestation.clone()],
-                &[root],
-            )?;
-        }
-    }
-    if !bool::from(
-        device_spki(encoded_public_point)?
-            .ct_eq(&crate::certificate_chain::public_key_info(&attestation)?),
-    ) {
-        return Err(CKR_PIN_INCORRECT.into());
-    }
-    let pem = crate::certificate_chain::encode_pem(&attestation)?;
-    install_pem(encoded_public_point, pem.as_bytes(), prefix, true)
-}
-
-fn install_pem(
-    encoded_public_point: &[u8],
-    pem: &[u8],
-    prefix: Option<&OsStr>,
-    replace_matching_entry: bool,
-) -> Result<[u8; 32], Error> {
-    let path = entry_path(encoded_public_point, prefix)?;
-    if let Ok(metadata) = fs::symlink_metadata(&path) {
-        if metadata.file_type().is_symlink() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        validate_device_public_key(encoded_public_point, prefix)?;
-        if !replace_matching_entry {
-            return fingerprint_bytes(encoded_public_point);
-        }
-    }
-
-    let id = NEXT_TEMPORARY_FILE.fetch_add(1, Ordering::Relaxed);
-    let mut temporary_name = path.as_os_str().to_os_string();
-    temporary_name.push(format!(".tmp-{}-{id}", std::process::id()));
-    let temporary = PathBuf::from(temporary_name);
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        file.write_all(pem)
-            .and_then(|_| file.sync_all())
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        fs::rename(&temporary, &path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        fingerprint_bytes(encoded_public_point)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    TrustStore::new().install_attestation(
+        encoded_public_point,
+        attestation,
+        device_certificate,
+        validation,
+        prefix,
+    )
 }
 
 pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error> {

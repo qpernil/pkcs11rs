@@ -703,8 +703,6 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        crate::initialize_debug_logging().expect("invalid PKCS11RS_DEBUG level");
-
         let protocol = std::env::var("PKCS11RS_CCID_SECURE_CHANNEL")
             .expect("PKCS11RS_CCID_SECURE_CHANNEL must configure an OCE-authenticated channel");
         assert!(
@@ -853,8 +851,6 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        crate::initialize_debug_logging().expect("invalid PKCS11RS_DEBUG level");
-
         let authkey_id = hex_u16(
             case.authkey_id_env,
             &std::env::var(case.authkey_id_env).unwrap_or_else(|_| {

@@ -331,6 +331,7 @@ pub(crate) struct YubiHsmPublicDiscoveryCredential {
     pub(crate) username: Vec<u8>,
     pub(crate) authkey_id: u16,
     pub(crate) password: Mutex<Option<Zeroizing<Vec<u8>>>>,
+    pub(crate) pinentry: Arc<pinentry::Pinentry>,
 }
 
 impl std::fmt::Debug for YubiHsmPublicDiscoveryCredential {
@@ -356,7 +357,7 @@ impl YubiHsmPublicDiscoveryCredential {
         let password = {
             let mut password = self.password.lock().map_err(|_| CKR_MUTEX_BAD)?;
             if password.is_none() {
-                let entered = pinentry::request(prompt)?;
+                let entered = self.pinentry.request(prompt)?;
                 match parse_yubihsm_login_username(&self.username)? {
                     YubiHsmLoginUsername::Direct(_) if !(8..=64).contains(&entered.len()) => {
                         return Err(CKR_PIN_INCORRECT.into());
@@ -384,9 +385,25 @@ pub(crate) struct YubiHsmObjectCache {
     pub(crate) objects: Vec<TokenObject>,
 }
 
-#[cfg_attr(feature = "abi-tests", allow(dead_code))]
+#[cfg(any(test, feature = "abi-tests"))]
 pub(crate) fn configured_yubihsm_public_discovery_credential(
     credential: Option<std::ffi::OsString>,
+) -> Result<Option<Arc<YubiHsmPublicDiscoveryCredential>>, Error> {
+    #[cfg(test)]
+    let pinentry = match crate::lock_context_read() {
+        Ok(module) => module.as_ref().map(|context| context.pinentry.clone()),
+        Err(_) => None,
+    }
+    .unwrap_or(Arc::new(pinentry::Pinentry::from_environment()?));
+    #[cfg(not(test))]
+    let pinentry = Arc::new(pinentry::Pinentry::from_environment()?);
+    configured_yubihsm_public_discovery_credential_with_pinentry(credential, pinentry)
+}
+
+#[cfg_attr(feature = "abi-tests", allow(dead_code))]
+pub(crate) fn configured_yubihsm_public_discovery_credential_with_pinentry(
+    credential: Option<std::ffi::OsString>,
+    pinentry: Arc<pinentry::Pinentry>,
 ) -> Result<Option<Arc<YubiHsmPublicDiscoveryCredential>>, Error> {
     let Some(credential) = credential else {
         return Ok(None);
@@ -415,13 +432,14 @@ pub(crate) fn configured_yubihsm_public_discovery_credential(
         YubiHsmLoginUsername::Direct(_) => password.filter(|password| !password.is_empty()),
         YubiHsmLoginUsername::HsmAuth(_) => password,
     };
-    if password.is_none() && !pinentry::is_configured() {
+    if password.is_none() && !pinentry.is_configured() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     Ok(Some(Arc::new(YubiHsmPublicDiscoveryCredential {
         username: username.to_vec(),
         authkey_id,
         password: Mutex::new(password.map(|password| Zeroizing::new(password.to_vec()))),
+        pinentry,
     })))
 }
 
@@ -2276,6 +2294,17 @@ impl Slot for YubiHsmSlot {
             );
             return self.login_user(username, password);
         }
+        Err(CKR_ARGUMENTS_BAD.into())
+    }
+    fn login_with_pinentry(
+        &mut self,
+        pin: &[u8],
+        pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
+        let (username, password) = split_yubihsm_login(pin)?;
+        if let Some(password) = password {
+            return self.login_user(username, password);
+        }
         let YubiHsmLoginUsername::HsmAuth(login) = parse_yubihsm_login_username(username)? else {
             return Err(CKR_PIN_INCORRECT.into());
         };
@@ -2287,7 +2316,7 @@ impl Slot for YubiHsmSlot {
             ))
         })?;
         let description = format!("Enter the authentication password for {:?}.", login.label);
-        let password = pinentry::request(pinentry::Prompt {
+        let password = pinentry.request(pinentry::Prompt {
             title: &title,
             description: &description,
             label: "Authentication password:",
@@ -2347,11 +2376,15 @@ impl Slot for YubiHsmSlot {
     fn supports_login_user(&self) -> bool {
         true
     }
-    fn login_user_without_pin(&mut self, username: &[u8]) -> Result<(), Error> {
+    fn login_user_without_pin(
+        &mut self,
+        username: &[u8],
+        pinentry: &pinentry::Pinentry,
+    ) -> Result<(), Error> {
         let title = self.label();
         let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
         let description = format!("Enter the authentication password for {username} on {title}.");
-        let pin = pinentry::request(pinentry::Prompt {
+        let pin = pinentry.request(pinentry::Prompt {
             title: &title,
             description: &description,
             label: "Authentication password:",

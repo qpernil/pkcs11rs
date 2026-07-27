@@ -10,9 +10,6 @@ pub(super) fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) 
 
 #[no_mangle]
 pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
-    if let Err(rv) = initialize_debug_logging() {
-        return rv;
-    }
     log!(2, "C_Initialize called with {:?}", init_args);
     if let Err(rv) = validate_initialize_args(init_args) {
         return rv;
@@ -97,8 +94,6 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
                     }
                 }
                 *guard = None;
-                reset_object_handles();
-                reset_session_handles();
                 if logout_failed {
                     CKR_FUNCTION_FAILED as CK_RV
                 } else {
@@ -218,7 +213,11 @@ pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO)
 fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
     let info = as_mut(info_ptr)?;
     with_slot_context_mut(slotID, |ctx| {
-        ctx.get_present_slot(slotID)?.get_token_info(info)?;
+        let slot = ctx.get_present_slot(slotID)?;
+        slot.get_token_info(info)?;
+        if ctx.pinentry.is_configured() && slot.supports_protected_authentication_path() {
+            info.flags |= CKF_PROTECTED_AUTHENTICATION_PATH as CK_FLAGS;
+        }
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = ctx
             .sessions
