@@ -63,12 +63,12 @@ slot name with `PKCS11RS_FIDO2_TEST_SOURCE`.
 
 `C_Login(CKU_USER)` accepts the configured FIDO2 PIN. This phase supports only
 PIN/UV protocol 2 and obtains a permission-scoped PIN/UV auth token. It requests
-the persistent-credential-management-read-only permission when the
-authenticator reports `pcmr`; otherwise it requests the standard credential
-management permission but sends only enumeration subcommands. The PIN and auth
-token are never exposed through PKCS #11. The auth token is zeroized after the
-one login-time enumeration, and cached credential metadata is cleared at
-logout.
+the persistent-credential-management-read-only (`pcmr`) permission when the
+authenticator reports `perCredMgmtRO`; otherwise it requests the standard
+credential management permission but sends only enumeration subcommands. The
+PIN and auth token are never exposed through PKCS #11. The auth token is
+zeroized after the one login-time enumeration, and cached credential metadata
+is cleared at logout.
 
 The implementation issues only:
 
@@ -146,7 +146,7 @@ Validation remains necessary for:
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one
   reader, and multiple simultaneous YubiKeys;
 - the exact GetInfo option combinations for `credMgmt`,
-  `credentialMgmtPreview`, `pinUvAuthToken`, and `pcmr`;
+  `credentialMgmtPreview`, `pinUvAuthToken`, and `perCredMgmtRO`;
 - PIN retry, temporary block, permanent block, and no-PIN status mapping;
 - credential responses with long or truncated RP/user fields, multiple RPs,
   empty stores, and firmware-added fields;

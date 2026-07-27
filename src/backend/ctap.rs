@@ -92,7 +92,7 @@ impl Fido2Slot {
         self.info
             .try_borrow()
             .ok()
-            .and_then(|info| info.as_ref()?.versions.first().cloned())
+            .and_then(|info| Some(info.as_ref()?.primary_version()?.to_owned()))
     }
 }
 
