@@ -966,7 +966,6 @@ impl ModuleContext {
         {
             return Ok(());
         }
-        let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         #[cfg(feature = "mock-yubikey")]
         {
             let connector = Rc::new(MockYubiKeyConnector::new()?);
@@ -982,7 +981,12 @@ impl ModuleContext {
                 self.pinentry.clone(),
                 self.trust_store.clone(),
             )?;
+            // A mock build is a deterministic, self-contained PKCS #11
+            // artifact. Do not mix its synthetic slot with USB, HTTP, or
+            // PC/SC hardware discovery.
+            return Ok(());
         }
+        let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {

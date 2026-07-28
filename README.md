@@ -338,6 +338,22 @@ slot, management key, and PIN with `PKCS11RS_TEST_PIV_X25519_CKA_ID`,
 The `abi-tests` Cargo feature adds synthetic slots used by the test suite. It
 is not intended for a normal module build.
 
+## In-process mock YubiKey
+
+The `mock-yubikey` Cargo feature builds a deterministic PKCS #11 module with
+one in-process YubiKey FIDO2 applet and disables USB, HTTP, and PC/SC hardware
+discovery. The mock is visible only through pkcs11rs; it does not install a
+virtual reader or card.
+
+```sh
+cargo build --release --features mock-yubikey
+pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
+```
+
+The initial PIN is `123456`. Mock state, including PIN changes, currently lasts
+only for the lifetime of the loaded module and resets when the client process
+unloads or reinitializes it.
+
 ## Persistence boundary
 
 The crate exposes a `StorageProvider` boundary and a local implementation for
