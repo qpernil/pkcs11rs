@@ -366,7 +366,6 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) connector: Rc<dyn Connector>,
     pub(crate) session: Rc<RefCell<YubiHsmSessionState>>,
     pub(crate) public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
-    pub(crate) public_discovery_password: RefCell<Option<Zeroizing<Vec<u8>>>>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
@@ -1027,7 +1026,6 @@ impl YubiHsmSlot {
             connector,
             session: Rc::new(RefCell::new(YubiHsmSessionState::LoggedOut)),
             public_discovery_config: None,
-            public_discovery_password: RefCell::new(None),
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
             object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
@@ -1063,11 +1061,6 @@ impl YubiHsmSlot {
     ) -> Self {
         let mut slot =
             Self::with_hsmauth_providers(connector, version, algorithms, hsmauth_providers);
-        slot.public_discovery_password = RefCell::new(
-            public_discovery_config
-                .as_ref()
-                .and_then(|config| config.configured_password.clone()),
-        );
         slot.public_discovery_config = public_discovery_config;
         slot
     }
@@ -1486,12 +1479,7 @@ impl YubiHsmSlot {
                 format!("Enter the authentication password for {:?}.", login.label)
             }
         };
-        if let Some(password) = self
-            .public_discovery_password
-            .try_borrow()
-            .map_err(|_| Error::from(CKR_CANT_LOCK))?
-            .as_ref()
-        {
+        if let Some(password) = config.configured_password.as_ref() {
             return self.authenticate_parsed_login(config.login(), password);
         }
         let entered = self.pinentry.request(pinentry::Prompt {
@@ -1508,11 +1496,7 @@ impl YubiHsmSlot {
             }
             _ => {}
         }
-        let authenticated = self.authenticate_parsed_login(config.login(), entered.as_slice())?;
-        self.public_discovery_password
-            .try_borrow_mut()?
-            .replace(entered);
-        Ok(authenticated)
+        self.authenticate_parsed_login(config.login(), entered.as_slice())
     }
 
     fn has_session_role(&self, role: YubiHsmSessionRole) -> bool {
