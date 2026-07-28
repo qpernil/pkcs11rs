@@ -1,9 +1,10 @@
 //! Canonical metadata for a key backed by hardware or provider-specific state.
 //!
 //! A record describes the relationship between one backing key and its
-//! potential PKCS #11 public, private, or secret-key aspects. Storage location
-//! is deliberately outside the record: the same bytes can be held by any
-//! [`crate::storage::StorageProvider`].
+//! potential PKCS #11 public, private, or secret-key aspects. Physical
+//! persistence is deliberately outside the record: a backend may keep the
+//! canonical bytes in a [`crate::storage::StorageProvider`] or translate them
+//! to a backend-native companion-object representation.
 
 use crate::pkcs11::*;
 use minicbor::{data::Type, Decoder, Encoder};

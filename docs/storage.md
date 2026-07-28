@@ -110,51 +110,38 @@ aliases, garbage collection, or reference tracking. References between future
 schema objects can use the algorithm-tagged content reference, but the provider
 does not interpret or traverse them.
 
-## YubiHSM provider
+## YubiHSM backend metadata
 
-`YubiHsmSlot` implements the same provider over internal opaque-data companion
-objects. Its provider-owned backing identifies the native object by type, ID,
-sequence, and domains, and records the primary PKCS #11 key class. These fields
-are checked against the live target object and the companion label before a
-record is accepted. A stale record cannot attach to a newly created object that
-reuses the same ID.
+YubiHSM uses the canonical `pkcs11rs.backed-key` record model but does not
+implement `StorageProvider`. Its opaque-data companions are mutable logical
+records addressed by a back-pointer to a native object, which is a different
+lifecycle from immutable content-addressed blobs.
 
-`list` and `get` expose canonical backed-key records and content references,
-not the physical opaque-object encoding. Legacy `MDB1` key metadata is decoded
-and returned as canonical `pkcs11rs.backed-key` CBOR without rewriting the
-device merely because it was read. The legacy public-key behavior is preserved
-as an explicit public aspect during this conversion. Certificate and other
-non-key companion metadata remains outside this provider.
+The provider-owned backing inside the canonical record identifies the native
+object by type, ID, sequence, and domains and records its primary PKCS #11 key
+class. These fields are checked against the live target and companion label
+before a record is accepted. A stale record cannot attach to a newly created
+object that reuses the same ID.
 
-`put` accepts canonical YubiHSM-backed records, validates them against the live
-target, deduplicates identical logical content, and creates the companion with
-YubiHSM object-ID auto-allocation. When the record contains exactly the sparse
-private/public `CKA_ID` and `CKA_LABEL` state understood by older pkcs11rs
-versions, the provider stores an `MDB1` physical value for downgrade
-compatibility. It does so only after decoding that value back to canonical
-metadata and proving that the resulting bytes exactly equal the submitted
-record. Empty public aspects and the old implicit public projection semantics
-are included in this test. Records containing newer attributes or semantics
-are stored physically as canonical CBOR. MDB1 objects retain the interoperable
-`Meta object for 0x...` label. Canonical objects instead use
-`pkcs11rs metadata 0x...`, because Yubico's PKCS #11 module recognizes the
-former prefix as MDB1 metadata before inspecting its contents. The separate
-namespace also makes ownership clear in `yubihsm-shell` object listings.
+Legacy `MDB1` key metadata is decoded into the canonical logical model without
+rewriting the device merely because it was read. When a new logical record can
+be represented exactly by MDB1, the backend retains that physical encoding for
+downgrade compatibility. It proves this by decoding the candidate MDB1 bytes
+back to canonical metadata and comparing the complete logical record. Records
+with newer attributes or semantics are stored physically as canonical CBOR.
 
-The content reference always hashes the canonical logical bytes, and `get`
-returns those exact bytes regardless of the physical representation. `delete`
-removes every physical companion whose logical content has the requested
-reference. Mutating operations require a secure session with the applicable
-YubiHSM capabilities.
+MDB1 objects retain the interoperable `Meta object for 0x...` label. Canonical
+objects instead use `pkcs11rs metadata 0x...`, because Yubico's PKCS #11 module
+recognizes the former prefix as MDB1 metadata before inspecting its contents.
+The separate namespace also makes ownership clear in `yubihsm-shell` object
+listings.
 
-The existing PKCS #11 metadata path now writes through this canonical logical
-model. Its current sparse records use the compatible `MDB1` physical encoding,
-so older pkcs11rs versions can continue to consume them. It still projects only
-its currently supported sparse `CKA_ID` and `CKA_LABEL` overrides; the generic
-record model can represent additional supported key attributes for later
-lifecycle work. Replacement remains failure-safe: the new companion is written
-before old companions are removed, and a later update repairs ambiguity left
-by a failed deletion.
+Metadata updates are backend-native operations requiring a secure session with
+the applicable YubiHSM capabilities. Replacement remains failure-safe: the new
+companion is written before old companions are removed, and a later update
+repairs ambiguity left by a failed deletion. The current PKCS #11 path projects
+only sparse `CKA_ID` and `CKA_LABEL` overrides, while the shared canonical model
+can represent additional supported key attributes for later lifecycle work.
 
 ## Current integration boundary
 

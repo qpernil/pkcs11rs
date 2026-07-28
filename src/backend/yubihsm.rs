@@ -1,10 +1,7 @@
-use crate::*;
-use crate::{
-    key_metadata::{
-        BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking, KeyMetadataError,
-    },
-    storage::{ContentReference, StorageError, StorageProvider},
+use crate::key_metadata::{
+    BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking, KeyMetadataError,
 };
+use crate::*;
 use minicbor::{Decoder, Encoder};
 
 const YUBIHSM_BACKING_PROVIDER: &str = "pkcs11rs.yubihsm";
@@ -2334,9 +2331,7 @@ impl YubiHsmSlot {
         {
             return Ok(());
         }
-        let (_, new_id) = self
-            .put_backed_key_metadata(&value, false)
-            .map_err(yubihsm_storage_error)?;
+        let new_id = self.write_backed_key_metadata(&value)?;
         let old_objects = old_objects
             .into_iter()
             .filter(|(id, _)| *id != new_id)
@@ -2344,92 +2339,15 @@ impl YubiHsmSlot {
         self.delete_metadata_objects(&old_objects)
     }
 
-    fn stored_key_metadata(&self) -> Result<Vec<(YubiHsmObjectInfo, Vec<u8>)>, Error> {
-        self.ensure_read_session()?;
-        let listed = send_yubihsm_secure_command(
-            self.connector.as_ref(),
-            self.session.as_ref(),
-            &YubiHsmCommand::list_objects(&[])?,
-        )?;
-        let listed = parse_yubihsm_object_list(&listed)?;
-        let mut metadata = Vec::new();
-        for entry in listed {
-            if entry.object_type != YUBIHSM_OPAQUE {
-                continue;
-            }
-            let info = self.listed_object_info(
-                self.session.as_ref(),
-                entry.id,
-                entry.object_type,
-                entry.sequence,
-            )?;
-            if info.algorithm != YUBIHSM_ALGO_OPAQUE_DATA
-                || yubihsm_metadata_label_target(&info.label).is_none()
-            {
-                continue;
-            }
-            let value = self.read_opaque_with_session(&info, self.session.as_ref())?;
-            if let Some(canonical) = self.canonical_key_metadata(&info, &value)? {
-                metadata.push((info, canonical));
-            }
-        }
-        Ok(metadata)
-    }
-
-    fn canonical_key_metadata(
-        &self,
-        metadata_object: &YubiHsmObjectInfo,
-        value: &[u8],
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let (format, label_target) =
-            yubihsm_metadata_label(&metadata_object.label).ok_or(CKR_DATA_INVALID)?;
-        let target =
-            self.object_info_with_session(self.session.as_ref(), label_target.2, label_target.1)?;
-        if target.sequence != label_target.0 || target.domains != metadata_object.domains {
+    fn write_backed_key_metadata(&self, object: &[u8]) -> Result<u16, Error> {
+        let record = BackedKeyMetadata::from_cbor(object).map_err(key_metadata_error)?;
+        if record.backing().provider() != YUBIHSM_BACKING_PROVIDER {
             return Err(CKR_DATA_INVALID.into());
         }
-        let primary_class = yubihsm_object_class(&target);
-        if !is_key_class(primary_class) {
-            return Ok(None);
-        }
-        match format {
-            YubiHsmMetadataPhysicalFormat::LegacyMdb1 if value.starts_with(b"MDB1") => {
-                let legacy = parse_yubihsm_pkcs11_metadata(metadata_object, value)?;
-                return legacy
-                    .to_backed_key(&target, true)?
-                    .to_cbor()
-                    .map(Some)
-                    .map_err(key_metadata_error);
-            }
-            YubiHsmMetadataPhysicalFormat::CanonicalCbor if !value.starts_with(b"MDB1") => {}
-            YubiHsmMetadataPhysicalFormat::LegacyMdb1
-            | YubiHsmMetadataPhysicalFormat::CanonicalCbor => {
-                return Err(CKR_DATA_INVALID.into());
-            }
-        }
-        let record = BackedKeyMetadata::from_cbor(value).map_err(key_metadata_error)?;
-        validate_yubihsm_backed_key(metadata_object, &target, &record)?;
-        Ok(Some(value.to_vec()))
-    }
-
-    fn put_backed_key_metadata(
-        &self,
-        object: &[u8],
-        deduplicate: bool,
-    ) -> Result<(ContentReference, u16), StorageError> {
-        let record = BackedKeyMetadata::from_cbor(object)
-            .map_err(|error| StorageError::Provider(error.to_string()))?;
-        if record.backing().provider() != YUBIHSM_BACKING_PROVIDER {
-            return Err(StorageError::Provider(
-                "backed key does not target YubiHSM".to_owned(),
-            ));
-        }
-        let backing = decode_yubihsm_key_backing(record.backing().data_cbor())
-            .map_err(storage_backend_error)?;
-        self.ensure_read_session().map_err(storage_backend_error)?;
-        let target = self
-            .object_info_with_session(self.session.as_ref(), backing.id, backing.object_type)
-            .map_err(storage_backend_error)?;
+        let backing = decode_yubihsm_key_backing(record.backing().data_cbor())?;
+        self.ensure_read_session()?;
+        let target =
+            self.object_info_with_session(self.session.as_ref(), backing.id, backing.object_type)?;
         let synthetic_metadata_info = YubiHsmObjectInfo {
             capabilities: [0; 8],
             id: 0,
@@ -2445,21 +2363,8 @@ impl YubiHsmSlot {
             ),
             delegated_capabilities: [0; 8],
         };
-        validate_yubihsm_backed_key(&synthetic_metadata_info, &target, &record)
-            .map_err(storage_backend_error)?;
-        let reference = ContentReference::for_object(object);
-        if deduplicate {
-            if let Some((info, _)) = self
-                .stored_key_metadata()
-                .map_err(storage_backend_error)?
-                .into_iter()
-                .find(|(_, value)| ContentReference::for_object(value) == reference)
-            {
-                return Ok((reference, info.id));
-            }
-        }
-        let legacy_physical_object =
-            encode_legacy_yubihsm_key_metadata(&record, &target).map_err(storage_backend_error)?;
+        validate_yubihsm_backed_key(&synthetic_metadata_info, &target, &record)?;
+        let legacy_physical_object = encode_legacy_yubihsm_key_metadata(&record, &target)?;
         let (physical_format, physical_object) = match legacy_physical_object {
             Some(legacy) => (YubiHsmMetadataPhysicalFormat::LegacyMdb1, legacy),
             None => (
@@ -2486,14 +2391,11 @@ impl YubiHsmSlot {
                     algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
                 },
                 &physical_object,
-            )
-            .map_err(storage_backend_error)?,
-        )
-        .map_err(storage_backend_error)?;
-        let id = parse_yubihsm_object_id(&response).map_err(storage_backend_error)?;
-        self.forget_cached_object(id, YUBIHSM_OPAQUE)
-            .map_err(storage_backend_error)?;
-        Ok((reference, id))
+            )?,
+        )?;
+        let id = parse_yubihsm_object_id(&response)?;
+        self.forget_cached_object(id, YUBIHSM_OPAQUE)?;
+        Ok(id)
     }
 }
 
@@ -2527,70 +2429,6 @@ fn validate_yubihsm_backed_key(
         return Err(CKR_DATA_INVALID.into());
     }
     Ok(())
-}
-
-fn yubihsm_storage_error(error: StorageError) -> Error {
-    match error {
-        StorageError::Unavailable => CKR_TOKEN_WRITE_PROTECTED.into(),
-        StorageError::InvalidCbor
-        | StorageError::InvalidReference
-        | StorageError::Integrity
-        | StorageError::Conflict
-        | StorageError::UnsupportedHashAlgorithm(_) => CKR_DATA_INVALID.into(),
-        StorageError::Io(_) | StorageError::Provider(_) => CKR_DEVICE_ERROR.into(),
-    }
-}
-
-fn storage_backend_error(error: Error) -> StorageError {
-    StorageError::Provider(format!("{error:?}"))
-}
-
-impl StorageProvider for YubiHsmSlot {
-    fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
-        let mut references = self
-            .stored_key_metadata()
-            .map_err(storage_backend_error)?
-            .into_iter()
-            .map(|(_, value)| ContentReference::for_object(&value))
-            .collect::<Vec<_>>();
-        references.sort();
-        references.dedup();
-        Ok(references)
-    }
-
-    fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
-        for (_, value) in self.stored_key_metadata().map_err(storage_backend_error)? {
-            if ContentReference::for_object(&value) == *reference {
-                return Ok(Some(value));
-            }
-        }
-        Ok(None)
-    }
-
-    fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
-        self.put_backed_key_metadata(object, true)
-            .map(|(reference, _)| reference)
-    }
-
-    fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError> {
-        let objects = self.stored_key_metadata().map_err(storage_backend_error)?;
-        let mut deleted = false;
-        for (info, value) in objects {
-            if ContentReference::for_object(&value) != *reference {
-                continue;
-            }
-            send_yubihsm_secure_command(
-                self.connector.as_ref(),
-                self.session.as_ref(),
-                &YubiHsmCommand::delete_object(info.id, YUBIHSM_OPAQUE),
-            )
-            .map_err(storage_backend_error)?;
-            self.forget_cached_object(info.id, YUBIHSM_OPAQUE)
-                .map_err(storage_backend_error)?;
-            deleted = true;
-        }
-        Ok(deleted)
-    }
 }
 
 pub(crate) trait YubiHsmSessionCell {
