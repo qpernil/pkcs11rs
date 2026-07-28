@@ -47,7 +47,7 @@ impl Default for MockYubiKeyState {
             fido_selected: false,
             chained_command: Vec::new(),
             pending_response: Vec::new(),
-            pin: None,
+            pin: Some(Zeroizing::new(b"123456".to_vec())),
             key_agreement: None,
             pin_uv_auth_token: Zeroizing::new([0x5a; 32]),
         }
@@ -638,18 +638,16 @@ mod tests {
         assert_eq!(info.versions, ["FIDO_2_1"]);
         assert_eq!(info.extensions, ["previewSign"]);
         assert!(info.option("rk"));
-        assert!(!info.option("clientPin"));
+        assert!(info.option("clientPin"));
     }
 
     #[test]
-    fn mock_pin_can_be_initialized_verified_and_changed_through_ctap() {
+    fn mock_default_pin_can_be_verified_and_changed_through_ctap() {
         let connector = Rc::new(MockYubiKeyConnector::new().unwrap());
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
 
-        let mut info = client.get_info().unwrap();
-        client.set_initial_pin(&info, b"123456").unwrap();
-        info = client.get_info().unwrap();
+        let info = client.get_info().unwrap();
         assert!(info.option("clientPin"));
 
         let authorization = client
