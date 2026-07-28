@@ -41,10 +41,10 @@ case-insensitive and duplicates are ignored.
 
 The YubiKey Management applet is probed once per PC/SC device before applet
 discovery. Its device-wide serial number, firmware version, hardware part
-number, capabilities, and configuration metadata are cached on the shared
-connector and are not exposed as a separate PKCS #11 slot. The part number is
-reported as the PKCS #11 token model. Applet-specific metadata overrides the
-shared device identity when an applet supplies it.
+number, capabilities, and configuration metadata are cached in the shared
+physical-device context and are not exposed as a separate PKCS #11 slot. The
+part number is reported as the PKCS #11 token model. Applet-specific serials
+remain local to their applet slot and do not overwrite the physical identity.
 
 ## Secure channels
 
@@ -58,14 +58,14 @@ The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,
 OpenPGP, or YubiHSM Auth.
 
-## FIDO2 compatibility probe
+## FIDO2 smart-card binding
 
-Pre-release YubiKey firmware exposes FIDO2 through the USB CCID smart-card
-interface. Earlier production YubiKey firmware exposes FIDO2 over the separate
-USB FIDO interface and therefore does not produce a FIDO2 slot over USB in
-this module. FIDO over NFC also uses the smart-card binding. Applet selection,
-`authenticatorGetInfo`, legacy PIN-token login, and read-only credential
-enumeration have been validated with an earlier YubiKey over NFC on macOS.
+Pre-release YubiKey firmware may expose FIDO2 through the USB CCID smart-card
+interface. Production YubiKeys normally expose FIDO2 over the separate USB
+FIDO HID interface, which pkcs11rs discovers independently. FIDO over NFC uses
+the smart-card binding. Applet selection, `authenticatorGetInfo`, legacy
+PIN-token login, and read-only credential enumeration have also been validated
+with an earlier YubiKey over NFC on macOS.
 
 The module follows the CTAP ISO 7816 binding: it explicitly selects the FIDO2
 AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
@@ -82,9 +82,10 @@ token-information calls continue to report the failure. When GetInfo succeeds,
 the primary CTAP version is included in the PKCS #11 slot description and
 token label. The device manufacturer, model, serial number, hardware version,
 and firmware version use the shared YubiKey metadata. Set
-`PKCS11RS_CCID_APPLICATIONS=fido2` to probe only FIDO2 and `PKCS11RS_DEBUG=2`
-to print the complete reported versions, extensions, AAGUID, options, maximum
-message size, PIN/UV protocols, and transports.
+`PKCS11RS_CCID_APPLICATIONS=fido2` to restrict the PC/SC applet probe; it does
+not disable native FIDO HID discovery. Set `PKCS11RS_DEBUG=2` to print the
+complete reported versions, extensions, AAGUID, options, maximum message size,
+PIN/UV protocols, and transports.
 
 Read-only resident-credential enumeration is available after FIDO2 PIN login.
 It creates private, immutable data objects and, where lossless, linked

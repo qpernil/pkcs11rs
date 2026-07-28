@@ -1,8 +1,14 @@
 # FIDO2 support
 
-## Verified transport boundary
+## Verified transport boundaries
 
-FIDO CTAP defines a smart-card binding with application identifier
+FIDO CTAP defines both USB HID and smart-card bindings. USB HID uses Usage
+Page `0xF1D0`, Usage `0x01`, 64-byte reports, and a channel allocated with
+`CTAPHID_INIT`. CTAP CBOR requests are carried by `CTAPHID_CBOR`; keepalive and
+error frames are consumed by the transport before the `status byte || CBOR`
+response reaches the common CTAP client.
+
+The smart-card binding uses application identifier
 `A0 00 00 06 47 2F 00 01`. Selection uses `00 A4 04 00`; a selected FIDO
 application normally returns `U2F_V2`. CTAP CBOR messages use
 `80 10 80 00`, with the CTAP command byte followed by its CBOR parameters.
@@ -12,28 +18,24 @@ by `80 11 00 00` GET RESPONSE. The transport waits 100 ms between keepalive
 polls, matching Yubico's maintained `SmartCardCtapDevice` behavior and leaving
 time for user-presence interaction.
 
-Yubico's current documentation and implementation confirm that pre-release
-YubiKey firmware exposes this binding over the USB CCID interface. Earlier
-production YubiKey firmware uses the USB FIDO/HID interface for FIDO2 and
-cannot produce this module's FIDO2 CCID slot. FIDO over NFC also uses the
-smart-card binding. Applet selection, `authenticatorGetInfo`, legacy PIN-token
-login, and read-only resident-credential enumeration have been validated over
-NFC on an earlier YubiKey.
+Yubico's documentation and maintained implementation confirm that pre-release
+YubiKey firmware may expose the smart-card binding over USB CCID. Production
+YubiKeys normally expose FIDO over native USB HID, while NFC uses the
+smart-card binding. pkcs11rs implements these two CTAP device transports
+directly; it does not add a platform WebAuthn transport.
 
 Primary references:
 
 - [FIDO Alliance CTAP 2.2 proposed standard](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html)
+- [FIDO Alliance CTAP 2.1 standard](https://fidoalliance.org/specs/fido-v2.1-rd-20210309/fido-client-to-authenticator-protocol-v2.1-rd-20210309.html)
 - [Yubico `SmartCardCtapDevice` source](https://developers.yubico.com/yubikey-manager/API_Documentation/_modules/yubikit/core/fido.html)
 - [Yubico hardware interfaces](https://developers.yubico.com/Developer_Program/Guides/YubiKey_Hardware.html)
 - [Yubico `Fido2Session` transport documentation](https://docs.yubico.com/yesdk/yubikey-api/Yubico.YubiKey.Fido2.Fido2Session.html)
 
-pkcs11rs implements only that CCID binding. It deliberately contains no FIDO
-HID, platform WebAuthn, or alternative-transport placeholder.
-
 ## Slot discovery and compatibility probe
 
-Set these variables to limit discovery to the FIDO application and enable
-diagnostics:
+Native FIDO HID discovery is automatic. To reduce the independent PC/SC probe
+to the FIDO smart-card application and enable diagnostics:
 
 ```sh
 export PKCS11RS_CCID_APPLICATIONS=fido2
@@ -48,6 +50,21 @@ CCID applets, the slot remains registered if subsequent initialization or
 reports the reader, YubiKey identity, firmware, and the FIDO2 application
 label; `C_GetTokenInfo` reports the stored discovery failure.
 
+For USB HID, a slot is created after the HID interface can be opened, a
+CTAPHID channel can be allocated, and the CBOR capability is advertised. The
+endpoint can reopen the same HID path and allocate a new channel after device
+reinsertion. New HID devices and new smart-card applets are not added after
+the initial discovery snapshot; reinitialize the module to rescan.
+
+Yubico's read-only configuration command supplies the physical serial used to
+correlate a YubiKey exposed through both USB interfaces. When both endpoints
+have the same validated physical serial, native HID replaces an unsecured
+CCID FIDO slot. A CCID FIDO slot with an explicitly configured secure channel
+instead takes precedence because HID cannot provide SCP03 or SCP11. If a
+stable physical identity is unavailable, both endpoints remain visible rather
+than risking an incorrect merge. Applet-specific serials are not used as
+physical-device identities.
+
 When GetInfo succeeds, the primary CTAP version is included in the slot
 description and token label. Debug level 2 prints the reported versions,
 extensions, AAGUID, options, maximum message size, PIN/UV protocols, and
@@ -60,8 +77,7 @@ registration, derivation, and signing mechanisms described in
 The ignored compatibility test is another local probe:
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
-  cargo test fido2_ccid_compatibility_probe -- --ignored --nocapture
+cargo test fido2_hid_read_only_get_info -- --ignored --nocapture
 ```
 
 If multiple compatible keys are attached, select one by serial number or full
@@ -218,7 +234,6 @@ for unchanged credentials.
 The ignored enumeration test is read-only but requires the FIDO2 PIN:
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
 PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   cargo test fido2_read_only_resident_credential_enumeration \
   -- --ignored --nocapture
@@ -253,7 +268,6 @@ ID. It then calls the exported `C_Login(CKU_USER)` path and requires the same
 credential ID and display name to appear as a read-only PKCS #11 object.
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
 PKCS11RS_FIDO2_TEST_PIN='your PIN' \
   cargo test creates_and_rediscovers_synthetic_fido2_credential \
   -- --ignored --nocapture
@@ -308,7 +322,6 @@ point, verifies `CKF_USER_PIN_INITIALIZED`, then authenticates through
 variable is the mutation gate:
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
 PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
   cargo test provisions_initial_fido2_pin -- --ignored --nocapture
 ```
@@ -326,7 +339,6 @@ The separate ignored change test calls `C_SetPIN` with the current and new PIN,
 then verifies the new PIN through `C_Login(CKU_USER)`:
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
 PKCS11RS_FIDO2_TEST_PIN='current test PIN' \
 PKCS11RS_FIDO2_NEW_PIN='new test PIN' \
   cargo test changes_existing_fido2_pin -- --ignored --nocapture
@@ -346,23 +358,21 @@ Rust implementation with an allocation feature and no Serde data-model
 translation. This keeps integer CTAP map keys, raw embedded COSE keys, duplicate
 field checks, and response bounds explicit.
 
-## Deferred hardware and firmware questions
+## Hardware validation and remaining questions
 
-The initial implementation was completed without hardware. The compatibility
-probe has since succeeded against a YubiKey 5C NFC running firmware 5.4.3 and
-reporting `FIDO_2_0` over NFC, and against pre-release YubiKeys reporting
-`FIDO_2_3` over macOS PC/SC. The 5.4.3 key exercises the legacy `getPINToken`
-plus `credentialMgmtPreview` login path. On pre-release hardware, the exported
-`C_SetPIN` entry point successfully provisioned the initial PIN from a non-null
-zero-length old-PIN buffer and `C_Login(CKU_USER)` verified it. The test-only
-makeCredential fixture then created a persistent discoverable credential, and
-both its immediate PKCS #11 check and the standalone read-only enumeration test
-rediscovered that object. Existing-PIN `changePIN` through `C_SetPIN` and
-subsequent `C_Login` verification with the replacement PIN have also succeeded
-on pre-release hardware. Additional robustness validation remains useful for:
+The implementation has been exercised over NFC, native USB HID, and
+pre-release USB CCID hardware. The hardware coverage includes CTAPHID channel
+allocation and reconnect, `authenticatorGetInfo`, PIN/UV protocols 1 and 2,
+PIN initialization and change through `C_SetPIN`, `C_Login`, resident
+credential creation through the gated fixture, read-only enumeration, and a
+one-shot GetAssertion. A dual-interface YubiKey has also verified that the
+validated physical serial collapses unsecured CCID and HID views to one HID
+slot. Additional robustness validation remains useful for:
 
 - USB CCID selection and the `U2F_V2` selection response on each pre-release,
   FIPS, and Security Key model of interest;
+- HID report behavior on Linux and Windows, and more removal/reinsertion
+  sequences;
 - PC/SC behavior and APDU response sizes on macOS, Linux, and Windows;
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one
   reader, and multiple simultaneous YubiKeys;

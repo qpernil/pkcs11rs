@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/qpernil/pkcs11rs/actions/workflows/ci.yml/badge.svg)](https://github.com/qpernil/pkcs11rs/actions/workflows/ci.yml)
 
-`pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID applets and YubiHSM
-devices. It exposes hardware-backed keys and certificates through the standard
-Cryptoki API while keeping private key operations on the device.
+`pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
+applications and YubiHSM devices. It exposes hardware-backed keys and
+certificates through the standard Cryptoki API while keeping private key
+operations on the device.
 
 The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
@@ -25,13 +26,13 @@ The minimum supported Rust version is 1.85.
   authenticate sessions on local or remote YubiHSM slots.
 - **Issuer SD** discovery with read-only key metadata, CA identifiers, CPLC,
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
-- **FIDO2** discovery over the CTAP smart-card binding: over USB CCID on
-  YubiKey firmware that exposes it there, and over NFC on compatible
-  YubiKeys. This includes PIN provisioning and changes, read-only
-  resident-credential metadata, software public-key operations, and an
-  explicit one-shot GetAssertion mechanism after context-specific PIN login,
-  with an experimental opt-in previewSign registration, offline derivation,
-  and hardware-signing lifecycle on devices advertising that extension.
+- **FIDO2** discovery over native USB HID and the CTAP smart-card binding over
+  NFC or USB CCID where available. This includes PIN provisioning and changes,
+  read-only resident-credential metadata, software public-key operations, and
+  an explicit one-shot GetAssertion mechanism after context-specific PIN
+  login, with an experimental opt-in previewSign registration, offline
+  derivation, and hardware-signing lifecycle on devices advertising that
+  extension.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
@@ -115,8 +116,12 @@ Building requires a Rust toolchain plus the development files for:
 
 - PC/SC
 - libusb 1.0
+- libudev on Linux
 
 The exact package names depend on the operating system and package manager.
+The `hidapi` Rust dependency compiles its bundled hidraw backend on Linux and
+its bundled IOKit backend on macOS; Windows uses its native Windows HID
+backend. No separately installed `libhidapi` is required.
 Remote YubiHSM Connector HTTPS uses rustls and does not require OpenSSL or
 libcurl.
 
@@ -235,8 +240,9 @@ Limit discovery to selected applets with:
 export PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 ```
 
-See [FIDO2 over CCID](docs/fido2.md) for the firmware boundary, PIN-management
-mapping, read-only credential mapping, and compatibility-test commands.
+See [FIDO2 support](docs/fido2.md) for the USB HID and smart-card transport
+boundaries, PIN-management mapping, read-only credential mapping, and
+compatibility-test commands.
 
 Enable secure messaging for selected applets with one of:
 

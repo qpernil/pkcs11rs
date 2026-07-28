@@ -74,7 +74,7 @@ while all facades share:
 
 - the card connection and complete APDU-exchange lock;
 - the current selected AID and APDU capabilities;
-- the device identity and connection epoch;
+- a connection-epoch-scoped physical `DeviceContext`;
 - the active secure-channel state and relevant certificate caches.
 
 Logical work on different applet slots may proceed concurrently, but a
@@ -87,6 +87,35 @@ Discovery is a snapshot. Only applets selected during the first
 `C_GetSlotList` after initialization become slots. Existing slots can reconnect
 and reselect their AID after card removal, but the slot registry does not
 morph to match a replacement card. See [CCID applet configuration](ccid.md).
+
+## FIDO transports
+
+`Fido2Slot` owns a transport-independent FIDO endpoint and the shared CTAP
+client. A CCID endpoint wraps the ISO 7816 CTAP binding and its optional secure
+channel. A USB HID endpoint wraps a CTAPHID channel over `hidapi`. Both deliver
+the same `command byte || CBOR` request and `status byte || CBOR` response to
+the CTAP client, so PIN/UV, credential-management, assertion, previewSign, and
+object-projection code is shared.
+
+USB HID discovery selects Usage Page `0xF1D0`, Usage `0x01`, allocates a
+channel with `CTAPHID_INIT`, requires the CBOR capability, and then runs
+`authenticatorGetInfo`. Yubico device information is read through the
+read-only vendor command before the slot is registered. If the same serial is
+already represented by a successfully selected smart-card FIDO applet, native
+HID replaces the unsecured CCID view. An explicitly configured CCID secure
+channel reverses that preference because HID cannot provide SCP03 or SCP11.
+Unknown or unvalidated identities remain separate rather than being merged.
+Applet serials remain applet metadata and cannot overwrite the physical
+device identity used for correlation. A HID authenticator absent from the
+initial discovery snapshot creates no slot; a previously discovered endpoint
+can reopen the same device and allocate a fresh channel after reinsertion.
+
+CTAPHID report exchange is serialized inside the FIDO slot. A response on an
+invalid channel causes one fresh channel allocation and retry because the
+authenticator rejected the original request. I/O failures and timeouts are not
+retried, since a mutating or signing operation may have executed before the
+connection failed. HID has no SCP03 or SCP11 layer; configured CCID secure
+channels apply only to the smart-card endpoint.
 
 ## YubiHSM transports and caches
 
