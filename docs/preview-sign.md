@@ -224,7 +224,6 @@ advertises `previewSign`. It is additionally gated by the presence of
 authenticator with no PIN:
 
 ```sh
-PKCS11RS_CCID_APPLICATIONS=fido2 \
 PKCS11RS_FIDO2_TEST_PIN='' \
   cargo test creates_preview_sign_registration -- --ignored --nocapture
 ```
