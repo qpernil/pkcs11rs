@@ -11,6 +11,14 @@ const YUBIHSM_BACKING_PROVIDER: &str = "pkcs11rs.yubihsm";
 const YUBIHSM_BACKING_SCHEMA: &str = "pkcs11rs.yubihsm.object";
 const YUBIHSM_BACKING_SCHEMA_VERSION: u64 = 1;
 const YUBIHSM_LEGACY_METADATA_MAX_ATTRIBUTE_LENGTH: usize = 256;
+const YUBIHSM_LEGACY_METADATA_LABEL_PREFIX: &str = "Meta object for 0x";
+const YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX: &str = "pkcs11rs metadata 0x";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum YubiHsmMetadataPhysicalFormat {
+    LegacyMdb1,
+    CanonicalCbor,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct HsmAuthProvider {
@@ -716,8 +724,11 @@ impl YubiHsmPkcs11Metadata {
             return Err(CKR_DATA_INVALID.into());
         }
         let backing = decode_yubihsm_key_backing(record.backing().data_cbor())?;
-        let label_target =
-            yubihsm_metadata_label_target(&metadata_object.label).ok_or(CKR_DATA_INVALID)?;
+        let (format, label_target) =
+            yubihsm_metadata_label(&metadata_object.label).ok_or(CKR_DATA_INVALID)?;
+        if format != YubiHsmMetadataPhysicalFormat::CanonicalCbor {
+            return Err(CKR_DATA_INVALID.into());
+        }
         if label_target != (backing.sequence, backing.object_type, backing.id)
             || metadata_object.domains != backing.domains
         {
@@ -878,10 +889,7 @@ fn encode_legacy_yubihsm_key_metadata(
         algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
         sequence: 0,
         origin: 0,
-        label: format!(
-            "Meta object for 0x{:02x}{:02x}{:04x}",
-            target.sequence, target.object_type, target.id
-        ),
+        label: yubihsm_metadata_label_for_target(target, YubiHsmMetadataPhysicalFormat::LegacyMdb1),
         delegated_capabilities: [0; 8],
     };
     let round_trip = parse_yubihsm_pkcs11_metadata(&metadata_info, &encoded)?
@@ -2389,8 +2397,8 @@ impl YubiHsmSlot {
         metadata_object: &YubiHsmObjectInfo,
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        let label_target =
-            yubihsm_metadata_label_target(&metadata_object.label).ok_or(CKR_DATA_INVALID)?;
+        let (format, label_target) =
+            yubihsm_metadata_label(&metadata_object.label).ok_or(CKR_DATA_INVALID)?;
         let target =
             self.object_info_with_session(self.session.as_ref(), label_target.2, label_target.1)?;
         if target.sequence != label_target.0 || target.domains != metadata_object.domains {
@@ -2400,13 +2408,20 @@ impl YubiHsmSlot {
         if !is_key_class(primary_class) {
             return Ok(None);
         }
-        if value.starts_with(b"MDB1") {
-            let legacy = parse_yubihsm_pkcs11_metadata(metadata_object, value)?;
-            return legacy
-                .to_backed_key(&target, true)?
-                .to_cbor()
-                .map(Some)
-                .map_err(key_metadata_error);
+        match format {
+            YubiHsmMetadataPhysicalFormat::LegacyMdb1 if value.starts_with(b"MDB1") => {
+                let legacy = parse_yubihsm_pkcs11_metadata(metadata_object, value)?;
+                return legacy
+                    .to_backed_key(&target, true)?
+                    .to_cbor()
+                    .map(Some)
+                    .map_err(key_metadata_error);
+            }
+            YubiHsmMetadataPhysicalFormat::CanonicalCbor if !value.starts_with(b"MDB1") => {}
+            YubiHsmMetadataPhysicalFormat::LegacyMdb1
+            | YubiHsmMetadataPhysicalFormat::CanonicalCbor => {
+                return Err(CKR_DATA_INVALID.into());
+            }
         }
         let record = BackedKeyMetadata::from_cbor(value).map_err(key_metadata_error)?;
         validate_yubihsm_backed_key(metadata_object, &target, &record)?;
@@ -2440,9 +2455,9 @@ impl YubiHsmSlot {
             algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
             sequence: 0,
             origin: 0,
-            label: format!(
-                "Meta object for 0x{:02x}{:02x}{:04x}",
-                target.sequence, target.object_type, target.id
+            label: yubihsm_metadata_label_for_target(
+                &target,
+                YubiHsmMetadataPhysicalFormat::CanonicalCbor,
             ),
             delegated_capabilities: [0; 8],
         };
@@ -2459,9 +2474,16 @@ impl YubiHsmSlot {
                 return Ok((reference, info.id));
             }
         }
-        let physical_object = encode_legacy_yubihsm_key_metadata(&record, &target)
-            .map_err(storage_backend_error)?
-            .unwrap_or_else(|| object.to_vec());
+        let legacy_physical_object =
+            encode_legacy_yubihsm_key_metadata(&record, &target).map_err(storage_backend_error)?;
+        let (physical_format, physical_object) = match legacy_physical_object {
+            Some(legacy) => (YubiHsmMetadataPhysicalFormat::LegacyMdb1, legacy),
+            None => (
+                YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+                object.to_vec(),
+            ),
+        };
+        let physical_label = yubihsm_metadata_label_for_target(&target, physical_format);
         let capabilities = if yubihsm_capability(&target.capabilities, 0x10) {
             yubihsm_capabilities(&[0x10])
         } else {
@@ -2474,7 +2496,7 @@ impl YubiHsmSlot {
                 YubiHsmCommandCode::PutOpaque,
                 &YubiHsmObjectParameters {
                     id: 0,
-                    label: &synthetic_metadata_info.label,
+                    label: &physical_label,
                     domains: target.domains,
                     capabilities,
                     algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
@@ -2791,16 +2813,45 @@ pub(crate) fn yubihsm_object_has_public_key(info: &YubiHsmObjectInfo) -> bool {
     ) || (info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm))
 }
 
-pub(crate) fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
-    let encoded = label.strip_prefix("Meta object for 0x")?;
+fn yubihsm_metadata_label(label: &str) -> Option<(YubiHsmMetadataPhysicalFormat, (u8, u8, u16))> {
+    let (format, encoded) =
+        if let Some(encoded) = label.strip_prefix(YUBIHSM_LEGACY_METADATA_LABEL_PREFIX) {
+            (YubiHsmMetadataPhysicalFormat::LegacyMdb1, encoded)
+        } else {
+            (
+                YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+                label.strip_prefix(YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX)?,
+            )
+        };
     if encoded.len() != 8 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     Some((
-        u8::from_str_radix(&encoded[..2], 16).ok()?,
-        u8::from_str_radix(&encoded[2..4], 16).ok()?,
-        u16::from_str_radix(&encoded[4..], 16).ok()?,
+        format,
+        (
+            u8::from_str_radix(&encoded[..2], 16).ok()?,
+            u8::from_str_radix(&encoded[2..4], 16).ok()?,
+            u16::from_str_radix(&encoded[4..], 16).ok()?,
+        ),
     ))
+}
+
+fn yubihsm_metadata_label_for_target(
+    target: &YubiHsmObjectInfo,
+    format: YubiHsmMetadataPhysicalFormat,
+) -> String {
+    let prefix = match format {
+        YubiHsmMetadataPhysicalFormat::LegacyMdb1 => YUBIHSM_LEGACY_METADATA_LABEL_PREFIX,
+        YubiHsmMetadataPhysicalFormat::CanonicalCbor => YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX,
+    };
+    format!(
+        "{prefix}{:02x}{:02x}{:04x}",
+        target.sequence, target.object_type, target.id
+    )
+}
+
+pub(crate) fn yubihsm_metadata_label_target(label: &str) -> Option<(u8, u8, u16)> {
+    yubihsm_metadata_label(label).map(|(_, target)| target)
 }
 
 pub(crate) fn parse_yubihsm_pkcs11_metadata(
@@ -2810,10 +2861,17 @@ pub(crate) fn parse_yubihsm_pkcs11_metadata(
     if info.object_type != YUBIHSM_OPAQUE || info.algorithm != YUBIHSM_ALGO_OPAQUE_DATA {
         return Err(CKR_DATA_INVALID.into());
     }
-    let label_target = yubihsm_metadata_label_target(&info.label).ok_or(CKR_DATA_INVALID)?;
-    if !value.starts_with(b"MDB1") {
-        let record = BackedKeyMetadata::from_cbor(value).map_err(key_metadata_error)?;
-        return YubiHsmPkcs11Metadata::from_backed_key(info, &record);
+    let (format, label_target) = yubihsm_metadata_label(&info.label).ok_or(CKR_DATA_INVALID)?;
+    match format {
+        YubiHsmMetadataPhysicalFormat::CanonicalCbor if !value.starts_with(b"MDB1") => {
+            let record = BackedKeyMetadata::from_cbor(value).map_err(key_metadata_error)?;
+            return YubiHsmPkcs11Metadata::from_backed_key(info, &record);
+        }
+        YubiHsmMetadataPhysicalFormat::LegacyMdb1 if value.starts_with(b"MDB1") => {}
+        YubiHsmMetadataPhysicalFormat::LegacyMdb1
+        | YubiHsmMetadataPhysicalFormat::CanonicalCbor => {
+            return Err(CKR_DATA_INVALID.into());
+        }
     }
     if value.len() < 8 {
         return Err(CKR_DATA_INVALID.into());

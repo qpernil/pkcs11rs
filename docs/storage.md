@@ -135,7 +135,11 @@ compatibility. It does so only after decoding that value back to canonical
 metadata and proving that the resulting bytes exactly equal the submitted
 record. Empty public aspects and the old implicit public projection semantics
 are included in this test. Records containing newer attributes or semantics
-are stored physically as canonical CBOR.
+are stored physically as canonical CBOR. MDB1 objects retain the interoperable
+`Meta object for 0x...` label. Canonical objects instead use
+`pkcs11rs metadata 0x...`, because Yubico's PKCS #11 module recognizes the
+former prefix as MDB1 metadata before inspecting its contents. The separate
+namespace also makes ownership clear in `yubihsm-shell` object listings.
 
 The content reference always hashes the canonical logical bytes, and `get`
 returns those exact bytes regardless of the physical representation. `delete`
