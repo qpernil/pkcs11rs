@@ -195,10 +195,6 @@ impl Connector for MockYubiKeyConnector {
         "Mock YubiKey FIDO2"
     }
 
-    fn serial(&self) -> &str {
-        "MOCK0001"
-    }
-
     fn major(&self) -> u8 {
         0
     }

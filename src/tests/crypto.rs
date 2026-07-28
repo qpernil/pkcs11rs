@@ -1484,6 +1484,7 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
     ));
     let slot = crate::PivSlot {
         connector: std::rc::Rc::new(FailingConnector),
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),

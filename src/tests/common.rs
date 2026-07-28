@@ -584,9 +584,6 @@ impl crate::Connector for HsmAuthAdminConnector {
     fn product(&self) -> &str {
         "YubiHSM Auth test"
     }
-    fn serial(&self) -> &str {
-        "HSMAUTH1"
-    }
     fn major(&self) -> u8 {
         5
     }
@@ -5652,6 +5649,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let piv = crate::PivSlot {
         connector: connector.clone(),
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -5685,6 +5683,7 @@ fn piv_and_openpgp_edwards_and_montgomery_mechanisms_report_field_sizes() {
 
     let openpgp = crate::OpenPgpSlot {
         connector,
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: Vec::new(),
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: (0, 0),
@@ -5731,6 +5730,7 @@ fn piv_general_data_objects_expose_pkcs11_data_attributes() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let piv = crate::PivSlot {
         connector,
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: crate::piv::PIV_AID.to_vec(),
         slot_description: None,
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
@@ -6268,10 +6268,6 @@ impl crate::Connector for FailingConnector {
         "Failing connector"
     }
 
-    fn serial(&self) -> &str {
-        "FAIL0001"
-    }
-
     fn major(&self) -> u8 {
         1
     }
@@ -6323,10 +6319,6 @@ impl crate::Connector for RecordingConnector {
         "Recording connector"
     }
 
-    fn serial(&self) -> &str {
-        "RECORD0001"
-    }
-
     fn major(&self) -> u8 {
         1
     }
@@ -6368,8 +6360,8 @@ impl crate::Connector for SelectableConnector {
         "Selectable connector"
     }
 
-    fn serial(&self) -> &str {
-        self.serial
+    fn name(&self) -> String {
+        format!("Selectable connector {}", self.serial)
     }
 
     fn major(&self) -> u8 {
@@ -6427,10 +6419,6 @@ impl crate::Connector for CountingConnector {
 
     fn product(&self) -> &str {
         "Counting connector"
-    }
-
-    fn serial(&self) -> &str {
-        "COUNT0001"
     }
 
     fn major(&self) -> u8 {

@@ -176,6 +176,8 @@ use hsmauth::{
 };
 
 mod ctap;
+mod ctap_hid;
+mod device;
 use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport, FIDO2_AID};
 
 pub mod key_metadata;

@@ -7,10 +7,17 @@ use crate::{
 #[derive(Debug)]
 pub enum Error {
     Generic(CK_RV),
+    Hid(hidapi::HidError),
     Usb(rusb::Error),
     Pcsc(pcsc::Error),
     Http(ureq::Error),
     Io(std::io::Error),
+}
+
+impl From<hidapi::HidError> for Error {
+    fn from(e: hidapi::HidError) -> Self {
+        Self::Hid(e)
+    }
 }
 
 impl From<rusb::Error> for Error {
@@ -61,6 +68,7 @@ impl From<Error> for CK_RV {
         log!(2, "{:?}", error);
         match error {
             Error::Generic(rv) => rv,
+            Error::Hid(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Http(_) => CKR_DEVICE_REMOVED as CK_RV,

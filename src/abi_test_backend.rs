@@ -174,8 +174,8 @@ impl Connector for AbiPivConnector {
         "YubiKey"
     }
 
-    fn serial(&self) -> &str {
-        "PIV00001"
+    fn name(&self) -> String {
+        String::from("PKCS11RS YubiKey PIV00001")
     }
 
     fn major(&self) -> u8 {
@@ -257,7 +257,16 @@ pub(super) fn abi_test_piv_slot() -> Result<PivSlot, Error> {
         .clone();
     let certificate_data = piv::encode_certificate_object(&certificate)?;
     let connector: Rc<dyn Connector> = Rc::new(AbiPivConnector { certificate_data });
-    let mut slot = PivSlot::new(connector, piv::PIV_AID.to_vec());
+    let device = Arc::new(crate::device::DeviceContext::new(
+        crate::device::DeviceIdentity {
+            manufacturer: String::from("PKCS11RS"),
+            product: String::from("YubiKey"),
+            serial: String::from("PIV00001"),
+            hardware_version: None,
+            firmware_version: Some((5, 7, 0)),
+        },
+    ));
+    let mut slot = PivSlot::new_with_device(connector, piv::PIV_AID.to_vec(), device);
     Slot::init_slot(&mut slot)?;
     Ok(slot)
 }
@@ -283,14 +292,6 @@ impl Connector for AbiScp03Connector {
             "ABI SCP03"
         } else {
             "ABI SCP11"
-        }
-    }
-
-    fn serial(&self) -> &str {
-        if self.protocol == "SCP03" {
-            "SCP03001"
-        } else {
-            "SCP11001"
         }
     }
 
@@ -440,7 +441,11 @@ impl Slot for AbiScp03Slot {
     }
 
     fn serial(&self) -> &str {
-        self.connector.serial()
+        if self.protocol == "SCP03" {
+            "SCP03001"
+        } else {
+            "SCP11001"
+        }
     }
 
     fn major(&self) -> u8 {

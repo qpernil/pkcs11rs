@@ -49,9 +49,6 @@ impl Connector for ScriptedConnector {
     fn product(&self) -> &str {
         "YubiKey"
     }
-    fn serial(&self) -> &str {
-        "1"
-    }
     fn major(&self) -> u8 {
         5
     }

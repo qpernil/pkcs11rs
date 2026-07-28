@@ -26,9 +26,6 @@ impl Connector for ScriptedConnector {
     fn product(&self) -> &str {
         "SCP03"
     }
-    fn serial(&self) -> &str {
-        "1"
-    }
     fn major(&self) -> u8 {
         1
     }
@@ -76,9 +73,6 @@ impl Connector for SharedScriptedConnector {
     }
     fn product(&self) -> &str {
         "SCP03"
-    }
-    fn serial(&self) -> &str {
-        "1"
     }
     fn major(&self) -> u8 {
         1

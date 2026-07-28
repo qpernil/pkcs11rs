@@ -623,14 +623,24 @@ fn openpgp_slot_uses_shared_serial_before_metadata_is_loaded() {
         serial: "12345678",
     });
     let aid = vec![0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
+    let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+    reader
+        .device
+        .replace(
+            0,
+            crate::device::DeviceIdentity {
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiKey"),
+                serial: String::from("12345678"),
+                hardware_version: None,
+                firmware_version: Some((5, 7, 0)),
+            },
+        )
+        .unwrap();
+    let device = reader.device.clone();
     let connector: std::rc::Rc<dyn crate::Connector> =
-        std::rc::Rc::new(crate::PcscAppletConnector::new(
-            base,
-            &aid,
-            None,
-            std::sync::Arc::new(crate::PcscReaderState::default()),
-        ));
-    let slot = crate::OpenPgpSlot::new(connector, aid);
+        std::rc::Rc::new(crate::PcscAppletConnector::new(base, &aid, None, reader));
+    let slot = crate::OpenPgpSlot::new_with_device(connector, aid, device);
 
     assert_eq!(crate::Slot::serial(&slot), "12345678");
 }
@@ -670,6 +680,7 @@ fn openpgp_attestation_key_matches_private_key_visibility_without_capabilities()
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot {
         connector,
+        device: std::sync::Arc::new(crate::device::DeviceContext::test()),
         application_aid: Vec::new(),
         authenticated: std::rc::Rc::new(std::cell::Cell::new(false)),
         version: (3, 4),
@@ -1001,14 +1012,24 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
         serial: "12345678",
     });
     let aid = crate::piv::PIV_AID.to_vec();
+    let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+    reader
+        .device
+        .replace(
+            0,
+            crate::device::DeviceIdentity {
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiKey"),
+                serial: String::from("12345678"),
+                hardware_version: None,
+                firmware_version: Some((5, 7, 0)),
+            },
+        )
+        .unwrap();
+    let device = reader.device.clone();
     let connector: std::rc::Rc<dyn crate::Connector> =
-        std::rc::Rc::new(crate::PcscAppletConnector::new(
-            base,
-            &aid,
-            None,
-            std::sync::Arc::new(crate::PcscReaderState::default()),
-        ));
-    let slot = crate::PivSlot::new(connector, aid);
+        std::rc::Rc::new(crate::PcscAppletConnector::new(base, &aid, None, reader));
+    let slot = crate::PivSlot::new_with_device(connector, aid, device);
 
     assert_eq!(crate::Slot::serial(&slot), "12345678");
     let mut slot_info = unsafe { ::std::mem::zeroed::<CK_SLOT_INFO>() };
@@ -1035,14 +1056,24 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
         serial: "SELECT0001",
     });
     let aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
+    let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+    reader
+        .device
+        .replace(
+            0,
+            crate::device::DeviceIdentity {
+                manufacturer: String::from("Test"),
+                product: String::from("Selectable connector"),
+                serial: String::from("SELECT0001"),
+                hardware_version: None,
+                firmware_version: Some((5, 7, 0)),
+            },
+        )
+        .unwrap();
+    let device = reader.device.clone();
     let connector: std::rc::Rc<dyn crate::Connector> =
-        std::rc::Rc::new(crate::PcscAppletConnector::new(
-            base,
-            &aid,
-            None,
-            std::sync::Arc::new(crate::PcscReaderState::default()),
-        ));
-    let mut slot = crate::IssuerSecurityDomainSlot::new(connector, aid);
+        std::rc::Rc::new(crate::PcscAppletConnector::new(base, &aid, None, reader));
+    let mut slot = crate::IssuerSecurityDomainSlot::new_with_device(connector, aid, device);
 
     let mut token_info = unsafe { ::std::mem::zeroed::<CK_TOKEN_INFO>() };
     assert!(crate::Slot::get_token_info(&slot, &mut token_info).is_ok());

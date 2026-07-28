@@ -804,9 +804,6 @@ mod tests {
         fn product(&self) -> &str {
             "YubiKey"
         }
-        fn serial(&self) -> &str {
-            "123"
-        }
         fn major(&self) -> u8 {
             5
         }

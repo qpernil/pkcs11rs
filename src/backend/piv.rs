@@ -1,8 +1,10 @@
+use crate::device::DeviceContext;
 use crate::*;
 
 #[derive(Debug)]
 pub(crate) struct PivSlot {
     pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) device: Arc<DeviceContext>,
     pub(crate) application_aid: Vec<u8>,
     pub(crate) slot_description: Option<String>,
     pub(crate) authenticated: Rc<Cell<bool>>,
@@ -309,9 +311,14 @@ pub(crate) fn piv_sign_mechanism_supported(
 }
 
 impl PivSlot {
-    pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
-        let version = connector
-            .firmware_version()
+    pub(crate) fn new_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        let identity = device.identity(connector.connection_epoch());
+        let version = identity
+            .firmware_version
             .map(|(major, minor, patch)| piv::Version {
                 major,
                 minor,
@@ -322,9 +329,10 @@ impl PivSlot {
                 minor: 0,
                 patch: 0,
             });
-        let serial = connector.serial().to_owned();
+        let serial = identity.serial;
         Self {
             connector,
+            device,
             application_aid,
             slot_description: None,
             authenticated: Rc::new(Cell::new(false)),
@@ -348,10 +356,6 @@ impl PivSlot {
     fn update_device_info(&mut self, info: PivDeviceInfo) {
         self.version = info.version;
         let serial = info.serial.map(|serial| serial.to_string());
-        self.connector.set_device_identity(
-            Some((info.version.major, info.version.minor, info.version.patch)),
-            serial.as_deref(),
-        );
         if let Some(serial) = serial {
             self.serial = serial;
         }
@@ -438,11 +442,7 @@ impl Slot for PivSlot {
         format!("PIV #{}", self.serial())
     }
     fn serial(&self) -> &str {
-        if self.serial == "0" || self.serial.is_empty() {
-            self.connector.serial()
-        } else {
-            &self.serial
-        }
+        &self.serial
     }
     fn major(&self) -> u8 {
         self.version.major
@@ -675,10 +675,8 @@ impl Slot for PivSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        str_pad(
-            &self.connector.identity().manufacturer,
-            &mut info.manufacturerID,
-        );
+        let identity = self.device.identity(self.connector.connection_epoch());
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
         let version = self.reported_version();
         info.firmwareVersion.major = version.major;
         info.firmwareVersion.minor = version.minor.saturating_mul(10) + version.patch;
@@ -686,7 +684,7 @@ impl Slot for PivSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        let identity = self.connector.identity();
+        let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
         str_pad(&identity.product, &mut info.model);
         info.ulMaxPinLen = 64;

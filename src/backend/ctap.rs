@@ -1,5 +1,6 @@
-use crate::connector::ConnectorIdentity;
 use crate::ctap::{CredentialAuthorization, DiscoverableCredential};
+use crate::ctap_hid::{CtapHidInit, CtapHidTransport, HidDeviceDescriptor};
+use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::*;
 #[cfg(test)]
 use minicbor::Encoder;
@@ -75,8 +76,8 @@ pub(crate) trait FidoEndpoint: std::fmt::Debug {
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         None
     }
-    fn identity(&self) -> ConnectorIdentity {
-        ConnectorIdentity {
+    fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
             manufacturer: self.manufacturer().to_owned(),
             product: self.product().to_owned(),
             serial: self.serial().to_owned(),
@@ -101,15 +102,24 @@ pub(crate) trait FidoEndpoint: std::fmt::Debug {
 #[derive(Debug)]
 struct CcidFidoEndpoint {
     connector: Rc<dyn Connector>,
+    device: Arc<DeviceContext>,
+    serial: String,
     application_aid: Vec<u8>,
     transport: Rc<CcidCtapTransport>,
 }
 
 impl CcidFidoEndpoint {
-    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+    fn new(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        let serial = device.identity(connector.connection_epoch()).serial;
         Self {
             transport: Rc::new(CcidCtapTransport::new(connector.clone())),
             connector,
+            device,
+            serial,
             application_aid,
         }
     }
@@ -133,7 +143,7 @@ impl FidoEndpoint for CcidFidoEndpoint {
     }
 
     fn serial(&self) -> &str {
-        self.connector.serial()
+        &self.serial
     }
 
     fn major(&self) -> u8 {
@@ -152,8 +162,8 @@ impl FidoEndpoint for CcidFidoEndpoint {
         self.connector.firmware_version()
     }
 
-    fn identity(&self) -> ConnectorIdentity {
-        self.connector.identity()
+    fn identity(&self) -> DeviceIdentity {
+        self.device.identity(self.connector.connection_epoch())
     }
 
     fn is_present(&self) -> bool {
@@ -195,6 +205,151 @@ impl FidoEndpoint for CcidFidoEndpoint {
 }
 
 #[derive(Debug)]
+pub(crate) struct HidFidoEndpoint {
+    descriptor: HidDeviceDescriptor,
+    transport: Rc<CtapHidTransport>,
+    present: Cell<bool>,
+    serial: String,
+    firmware_version: (u8, u8, u8),
+}
+
+impl HidFidoEndpoint {
+    pub(crate) fn new(
+        descriptor: HidDeviceDescriptor,
+        transport: Rc<CtapHidTransport>,
+        init: CtapHidInit,
+        device_info: Option<&crate::yubikey::DeviceInfo>,
+    ) -> Self {
+        let serial = device_info
+            .and_then(|info| info.serial.clone())
+            .or_else(|| descriptor.serial().map(str::to_owned))
+            .unwrap_or_else(|| "0".to_owned());
+        let firmware_version = device_info
+            .and_then(|info| info.version)
+            .unwrap_or(init.firmware_version);
+        Self {
+            descriptor,
+            transport,
+            present: Cell::new(true),
+            serial,
+            firmware_version,
+        }
+    }
+}
+
+impl FidoEndpoint for HidFidoEndpoint {
+    fn transport(&self) -> Rc<dyn CtapTransport> {
+        self.transport.clone()
+    }
+
+    fn name(&self) -> String {
+        self.descriptor.name()
+    }
+
+    fn manufacturer(&self) -> &str {
+        self.descriptor.manufacturer()
+    }
+
+    fn product(&self) -> &str {
+        self.descriptor.product()
+    }
+
+    fn serial(&self) -> &str {
+        &self.serial
+    }
+
+    fn major(&self) -> u8 {
+        self.firmware_version.0
+    }
+
+    fn minor(&self) -> u8 {
+        self.firmware_version
+            .1
+            .saturating_mul(10)
+            .saturating_add(self.firmware_version.2)
+    }
+
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        Some(self.firmware_version)
+    }
+
+    fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
+            manufacturer: if self.descriptor.is_yubico() {
+                String::from("Yubico")
+            } else {
+                self.manufacturer().to_owned()
+            },
+            product: self.product().to_owned(),
+            serial: self.serial().to_owned(),
+            hardware_version: None,
+            firmware_version: Some(self.firmware_version),
+        }
+    }
+
+    fn is_present(&self) -> bool {
+        self.present.get() && self.transport.is_connected()
+    }
+
+    fn refresh(&self) -> Result<(), Error> {
+        if self.transport.is_connected() {
+            self.present.set(true);
+            return Ok(());
+        }
+        match self.descriptor.open() {
+            Ok(io) => match self.transport.reconnect(Box::new(io)) {
+                Ok(_) => {
+                    self.present.set(true);
+                    Ok(())
+                }
+                Err(error) => {
+                    self.present.set(false);
+                    self.transport.disconnect();
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                self.present.set(false);
+                self.transport.disconnect();
+                Err(error)
+            }
+        }
+    }
+
+    fn prepare(&self) -> Result<(), Error> {
+        self.refresh()
+    }
+
+    fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
+        Box::new(Fido2Session { slot_id, flags })
+    }
+}
+
+#[derive(Debug)]
+struct Fido2Session {
+    slot_id: CK_SLOT_ID,
+    flags: CK_FLAGS,
+}
+
+impl BackendSession for Fido2Session {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        self.flags
+    }
+
+    fn get_session_info(&self) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct Fido2Slot {
     endpoint: Rc<dyn FidoEndpoint>,
     client: CtapClient,
@@ -205,8 +360,22 @@ pub(crate) struct Fido2Slot {
 }
 
 impl Fido2Slot {
+    #[cfg(test)]
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
-        Self::new_with_endpoint(Rc::new(CcidFidoEndpoint::new(connector, application_aid)))
+        let device = Arc::new(DeviceContext::from_endpoint(connector.as_ref()));
+        Self::new_with_device(connector, application_aid, device)
+    }
+
+    pub(crate) fn new_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        Self::new_with_endpoint(Rc::new(CcidFidoEndpoint::new(
+            connector,
+            application_aid,
+            device,
+        )))
     }
 
     pub(crate) fn new_with_endpoint(endpoint: Rc<dyn FidoEndpoint>) -> Self {
@@ -234,6 +403,10 @@ impl Fido2Slot {
             .try_borrow()
             .ok()
             .and_then(|info| Some(info.as_ref()?.primary_version()?.to_owned()))
+    }
+
+    pub(crate) fn physical_device_key(&self) -> Option<PhysicalDeviceKey> {
+        self.endpoint.identity().physical_key()
     }
 }
 
@@ -893,9 +1066,6 @@ mod tests {
         fn product(&self) -> &str {
             "YubiKey"
         }
-        fn serial(&self) -> &str {
-            "12345678"
-        }
         fn major(&self) -> u8 {
             5
         }
@@ -1062,7 +1232,14 @@ mod tests {
         response.extend([0; 16]);
         response.extend([0x09, 0x81, 0x63, b'u', b's', b'b', 0x90, 0x00]);
         let connector: Rc<dyn Connector> = Rc::new(ScriptedConnector::new(vec![response]));
-        let mut slot = Fido2Slot::new(connector, FIDO2_AID.to_vec());
+        let device = Arc::new(DeviceContext::new(DeviceIdentity {
+            manufacturer: String::from("Yubico"),
+            product: String::from("YubiKey"),
+            serial: String::from("12345678"),
+            hardware_version: None,
+            firmware_version: Some((5, 8, 0)),
+        }));
+        let mut slot = Fido2Slot::new_with_device(connector, FIDO2_AID.to_vec(), device);
         slot.init_slot().unwrap();
 
         let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
