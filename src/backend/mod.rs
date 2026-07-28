@@ -20,7 +20,7 @@ pub(crate) use crypto::{
     validate_ec_public_point, verify_ecdsa, verify_ed25519, verify_rsa_pss, yubihsm_ec_curve,
     EcCurve,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "mock-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
 pub(crate) use ctap::Fido2Slot;
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
