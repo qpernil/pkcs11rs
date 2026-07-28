@@ -317,6 +317,15 @@ own environment-variable gate; the FIDO2 tests are documented in
 [FIDO2 support](docs/fido2.md), and YubiHSM Auth and SCP11 provisioning tests
 are documented in their backend guides.
 
+The read-only FIDO cross-interface diagnostic deliberately overlaps HID and
+CCID operations on the same serial-numbered YubiKey and reports whether the
+interfaces interfere:
+
+```sh
+cargo test diagnoses_yubikey_hid_ccid_cross_interface_concurrency \
+  -- --ignored --nocapture
+```
+
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048
 wrap key, restores the wrapped target, and removes both keys before returning:

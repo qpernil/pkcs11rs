@@ -277,9 +277,67 @@ This test requires user presence, permanently writes a credential, and does
 not delete it. The PIN variable itself is the execution gate. Repeated runs use
 the same RP and user identifiers so authenticators that replace an existing
 discoverable credential for that account need not consume another logical
-account entry. The test has passed on the pre-release `FIDO_2_3` hardware
-described below, and the standalone read-only enumeration test subsequently
-found the resulting object.
+account entry. The test has passed on the pre-release hardware described below,
+and the standalone read-only enumeration test subsequently found the resulting
+object.
+
+## HID and CCID concurrency diagnostic
+
+YubiKeys can expose HID FIDO and CCID through separate USB interfaces, but that
+does not imply that applications inside one physical key can execute
+concurrently. An ignored diagnostic deliberately bypasses the normal FIDO
+transport deduplication and overlaps raw operations on endpoints whose
+Yubico-reported serial numbers match:
+
+```sh
+cargo test diagnoses_yubikey_hid_ccid_cross_interface_concurrency \
+  -- --ignored --nocapture
+```
+
+The diagnostic performs 50 synchronized, read-only rounds of HID
+`authenticatorGetInfo` against each CCID application that can be selected:
+Management, PIV, and FIDO. After each phase it opens both interfaces again and
+requires sequential health checks to succeed. It never submits a PIN and does
+not create, modify, or delete any device object. If several dual-interface
+keys are attached, select one by serial or endpoint name with
+`PKCS11RS_FIDO2_TEST_SOURCE`.
+
+Concurrent-operation failures are reported rather than treated as a failed
+test when both interfaces recover afterward. This distinguishes unsupported
+overlap from lasting transport damage. The output records the firmware
+reported by the selected key, host platform, per-interface success counts,
+timing, and grouped errors.
+
+One run against an attached pre-release YubiKey on macOS produced:
+
+| Concurrent operations | HID successes | CCID successes |
+| --- | ---: | ---: |
+| HID GetInfo / CCID Management | 50/50 | 0/50 |
+| HID GetInfo / CCID PIV | 50/50 | 0/50 |
+| HID GetInfo / CCID FIDO | 4/50 | 46/50 |
+
+The CCID side returned device errors in the first two phases. Concurrent access
+to FIDO through both transports produced device errors, device-removal
+indications, and a PC/SC `NotTransacted` result. Every sequential post-overlap
+health check succeeded. This is evidence for serializing pkcs11rs operations
+across HID and CCID slots belonging to the same validated physical YubiKey; it
+is not a compatibility claim for other firmware, operating systems, or
+readers.
+
+A second run against an older production YubiKey on the same host produced:
+
+| Concurrent operations | HID successes | CCID successes |
+| --- | ---: | ---: |
+| HID GetInfo / CCID Management | 50/50 | 50/50 |
+| HID GetInfo / CCID PIV | 50/50 | 50/50 |
+| HID GetInfo / CCID FIDO | unsupported | unsupported |
+
+Both supported phases and every sequential health check succeeded. The
+contrast demonstrates that cross-interface behavior varies between YubiKey
+generations. It does not establish that arbitrary stateful operations can
+safely overlap on the older key; the production boundary therefore remains
+conservative unless broader testing and a documented device guarantee justify
+a narrower policy.
 
 ## PIN management through PKCS #11
 
