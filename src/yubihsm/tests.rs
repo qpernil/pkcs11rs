@@ -1953,6 +1953,28 @@ fn yubihsm_sparse_metadata_is_valid() {
 }
 
 #[test]
+fn yubihsm_metadata_labels_are_namespaced_by_physical_format() {
+    let legacy_info = ObjectInfo {
+        capabilities: [0; 8],
+        id: 0x7000,
+        length: 0,
+        domains: 1,
+        object_type: YUBIHSM_OPAQUE,
+        algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 1,
+        origin: 2,
+        label: "Meta object for 0x01031234".to_owned(),
+        delegated_capabilities: [0; 8],
+    };
+    let legacy_value = b"MDB1\x03\x12\x34\x01";
+    assert!(parse_yubihsm_pkcs11_metadata(&legacy_info, legacy_value).is_ok());
+
+    let mut wrongly_namespaced = legacy_info.clone();
+    wrongly_namespaced.label = "pkcs11rs metadata 0x01031234".to_owned();
+    assert!(parse_yubihsm_pkcs11_metadata(&wrongly_namespaced, legacy_value).is_err());
+}
+
+#[test]
 fn yubihsm_metadata_rejects_duplicate_and_truncated_attributes() {
     let info = ObjectInfo {
         capabilities: [0; 8],
@@ -2113,7 +2135,7 @@ fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
         peer.metadata_objects
             .borrow()
             .values()
-            .filter(|(info, _)| info.label == "Meta object for 0x01030001")
+            .filter(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
             .count(),
         1
     );
@@ -2238,7 +2260,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
         peer.metadata_objects
             .borrow()
             .values()
-            .filter(|(info, _)| info.label == "Meta object for 0x01030001")
+            .filter(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
             .count(),
         1
     );
@@ -2325,11 +2347,14 @@ fn yubihsm_storage_provider_migrates_legacy_key_metadata_on_read() {
     let canonical_only = canonical_only.to_cbor().unwrap();
     let canonical_only_reference = StorageProvider::put(&slot, &canonical_only).unwrap();
     assert_ne!(canonical_only_reference, reference);
-    assert!(peer
+    let canonical_physical = peer
         .metadata_objects
         .borrow()
         .values()
-        .any(|(_, value)| value == &canonical_only));
+        .find(|(_, value)| value == &canonical_only)
+        .cloned()
+        .unwrap();
+    assert_eq!(canonical_physical.0.label, "pkcs11rs metadata 0x01030001");
     assert_eq!(
         StorageProvider::get(&slot, &canonical_only_reference).unwrap(),
         Some(canonical_only)

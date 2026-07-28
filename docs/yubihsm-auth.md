@@ -216,7 +216,11 @@ implements the common `StorageProvider` interface over these companions.
 Legacy `MDB1` key metadata is converted to canonical logical records on the
 fly. New logical records that can be represented exactly as `MDB1` retain that
 physical encoding for compatibility with older pkcs11rs versions; records with
-newer attributes use canonical CBOR physically. See
+newer attributes use canonical CBOR physically. Physical labels also identify
+the format: MDB1 records retain Yubico's `Meta object for 0x...` convention,
+whereas canonical records use `pkcs11rs metadata 0x...`. This prevents
+Yubico's PKCS #11 module from treating unfamiliar canonical CBOR as MDB1 and
+makes pkcs11rs-owned objects apparent in `yubihsm-shell` listings. See
 [Content-addressed CBOR storage](storage.md#yubihsm-provider) for the schema and
 provider behavior.
 

@@ -366,8 +366,12 @@ immutable, content-addressed CBOR blobs. The YubiHSM backend validates this
 design by exposing its internal key-metadata companions through the same
 boundary. It exposes canonical backed-key CBOR logically, reads legacy
 metadata, and retains the legacy physical encoding when it can represent a
-record exactly for downgrade compatibility. FIDO persistence is not yet
-connected to a PKCS #11 slot or configuration variable. The experimental
+record exactly for downgrade compatibility. Legacy `MDB1` companions retain
+Yubico's `Meta object for ...` label, while canonical-CBOR companions use a
+distinct `pkcs11rs metadata ...` label so other YubiHSM tooling neither
+misparses them as MDB1 nor obscures their ownership from an administrator.
+FIDO persistence is not yet connected to a PKCS #11 slot or configuration
+variable. The experimental
 `previewSign` model defines canonical registration and derived-key records and
 exposes an initial session/module-local PKCS #11 signing flow, but does not
 automatically persist or restore those objects. See
