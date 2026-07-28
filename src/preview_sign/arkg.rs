@@ -535,6 +535,9 @@ fn concatenate(parts: &[&[u8]]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use signature::hazmat::{PrehashSigner, PrehashVerifier};
+    use subtle::ConstantTimeEq;
 
     const BLINDING_PUBLIC_KEY: &str =
         "046d3bdf31d0db48988f16d47048fdd24123cd286e42d0512daa9f726b4ecf18df\
@@ -549,6 +552,12 @@ mod tests {
     const EXPECTED_TICKET_A: &str = "27987995f184a44cfa548d104b0a461d\
          0487fc739dbcdabc293ac5469221da91b220e04c681074ec4692a76ffacb9043dec\
          2847ea9060fd42da267f66852e63589f0c00dc88f290d660c65a65a50c86361";
+    const BLINDING_PRIVATE_KEY: &str =
+        "d959500a78ccf850ce46c80a8c5043c9a2e33844232b3829df37d05b3069f455";
+    const KEM_PRIVATE_KEY: &str =
+        "74e0a4cd81ca2d24246ff75bfd6d4fb7f9dfc938372627feb2c2348f8b1493b5";
+    const EXPECTED_PRIVATE_KEY_A: &str =
+        "775d7fe9a6dfba43ce671cb38afca3d272c4d14aff97bd67559eb500a092e5e7";
     const CONTEXT_A: &[u8] = b"ARKG-P256.test vectors";
     const IKM_B: &str = "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f";
     const EXPECTED_PUBLIC_KEY_B: &str =
@@ -568,6 +577,80 @@ mod tests {
         "04b79b65d6bbb419ff97006a1bd52e3f4ad53042173992423e06e52987a037cb61\
          dd82b126b162e4e7e8dc5c9fd86e82769d402a1968c7c547ef53ae4f96e10b0e";
 
+    /// Test-only model of the ARKG private side implemented by the
+    /// authenticator. Keeping this beside the protocol vectors prevents
+    /// private-seed operations from becoming part of the production API.
+    struct MockPreviewSignAuthenticator {
+        blinding_private_key: Scalar,
+        kem_private_key: Scalar,
+    }
+
+    impl MockPreviewSignAuthenticator {
+        fn from_vector() -> Self {
+            Self {
+                blinding_private_key: scalar_from_hex(BLINDING_PRIVATE_KEY),
+                kem_private_key: scalar_from_hex(KEM_PRIVATE_KEY),
+            }
+        }
+
+        fn derive_signing_key(
+            &self,
+            signing_arguments_cbor: &[u8],
+        ) -> Result<SigningKey, &'static str> {
+            let (ticket, context) = decode_mock_signing_arguments(signing_arguments_cbor)?;
+            let ephemeral_public_key =
+                PublicKey::from_sec1_bytes(&ticket[16..]).map_err(|_| "invalid ticket point")?;
+            let shared_point = ephemeral_public_key.to_projective() * self.kem_private_key;
+            let shared_point =
+                projective_to_uncompressed(shared_point).map_err(|_| "invalid shared point")?;
+            let mut shared_secret = Zeroizing::new([0u8; 32]);
+            shared_secret.copy_from_slice(&shared_point[1..33]);
+
+            let context_length =
+                u8::try_from(context.len()).map_err(|_| "context length overflow")?;
+            if context.len() > MAX_CONTEXT_LENGTH {
+                return Err("context is too long");
+            }
+            let mut context_prime = Vec::with_capacity(1 + context.len());
+            context_prime.push(context_length);
+            context_prime.extend_from_slice(&context);
+            let context_kem = concatenate(&[DERIVE_KEY_KEM_LABEL, &context_prime]);
+            let mac_info = concatenate(&[KEM_MAC_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
+            let mac_key = hkdf_sha256(&shared_secret[..], &mac_info).map_err(|_| "HKDF failed")?;
+            let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&mac_key[..])
+                .map_err(|_| "invalid HMAC key")?;
+            mac.update(&ticket[16..]);
+            let expected_tag = mac.finalize().into_bytes();
+            if !bool::from(ticket[..16].ct_eq(&expected_tag[..16])) {
+                return Err("ticket authentication failed");
+            }
+
+            let shared_info = concatenate(&[KEM_SHARED_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
+            let blinding_input =
+                hkdf_sha256(&shared_secret[..], &shared_info).map_err(|_| "HKDF failed")?;
+            let context_bl = concatenate(&[DERIVE_KEY_BL_LABEL, &context_prime]);
+            let blinding_dst = concatenate(&[BLINDING_PRF_LABEL, &context_bl]);
+            let tau =
+                hash_to_scalar(&blinding_input[..], &blinding_dst).map_err(|_| "PRF failed")?;
+            let private_key = self.blinding_private_key + tau;
+            if bool::from(private_key.is_zero()) {
+                return Err("derived private key is zero");
+            }
+
+            SigningKey::from_bytes(&private_key.to_bytes()).map_err(|_| "invalid signing key")
+        }
+
+        fn sign_digest(
+            &self,
+            signing_arguments_cbor: &[u8],
+            digest: &[u8; 32],
+        ) -> Result<Signature, &'static str> {
+            self.derive_signing_key(signing_arguments_cbor)?
+                .sign_prehash(digest)
+                .map_err(|_| "signing failed")
+        }
+    }
+
     fn decode_hex(input: &str) -> Vec<u8> {
         let compact: String = input
             .chars()
@@ -582,6 +665,66 @@ mod tests {
                 u8::try_from((high << 4) | low).unwrap()
             })
             .collect()
+    }
+
+    fn scalar_from_hex(input: &str) -> Scalar {
+        let bytes: [u8; 32] = decode_hex(input).try_into().unwrap();
+        Option::<Scalar>::from(Scalar::from_repr(bytes.into())).unwrap()
+    }
+
+    fn decode_mock_signing_arguments(
+        encoded: &[u8],
+    ) -> Result<([u8; ARKG_TICKET_LENGTH], Vec<u8>), &'static str> {
+        let mut decoder = Decoder::new(encoded);
+        let count = decoder
+            .map()
+            .map_err(|_| "invalid signing arguments")?
+            .ok_or("indefinite signing arguments")?;
+        let mut algorithm = None;
+        let mut ticket = None;
+        let mut context = None;
+        for _ in 0..count {
+            match decoder.i64().map_err(|_| "invalid signing argument key")? {
+                3 if algorithm.is_none() => {
+                    algorithm = Some(
+                        decoder
+                            .i64()
+                            .map_err(|_| "invalid signing argument algorithm")?,
+                    )
+                }
+                -1 if ticket.is_none() => {
+                    ticket = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid signing ticket")?
+                            .try_into()
+                            .map_err(|_| "invalid signing ticket length")?,
+                    )
+                }
+                -2 if context.is_none() => {
+                    context = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| "invalid signing context")?
+                            .to_vec(),
+                    )
+                }
+                3 | -1 | -2 => return Err("duplicate signing argument"),
+                _ => decoder
+                    .skip()
+                    .map_err(|_| "invalid unknown signing argument")?,
+            }
+        }
+        if decoder.position() != encoded.len() {
+            return Err("trailing signing argument data");
+        }
+        if algorithm != Some(ARKG_P256_ESP256_ALGORITHM) {
+            return Err("wrong signing algorithm");
+        }
+        Ok((
+            ticket.ok_or("missing signing ticket")?,
+            context.ok_or("missing signing context")?,
+        ))
     }
 
     fn encode_ec2(point: &[u8], coordinate_length: usize) -> Vec<u8> {
@@ -697,6 +840,82 @@ mod tests {
             let derived = seed.derive_with_ikm(&decode_hex(ikm), context).unwrap();
             assert_eq!(derived.public_key_sec1().as_slice(), decode_hex(expected));
         }
+    }
+
+    #[test]
+    fn mock_private_side_matches_draft_private_key_and_signs() {
+        let seed = ArkgP256PublicSeed::from_cose(&vector_seed_cose()).unwrap();
+        let derived = seed.derive_with_ikm(&decode_hex(IKM_A), CONTEXT_A).unwrap();
+        let authenticator = MockPreviewSignAuthenticator::from_vector();
+        let signing_key = authenticator
+            .derive_signing_key(derived.signing_arguments_cbor())
+            .unwrap();
+
+        assert_eq!(
+            signing_key.to_bytes().as_slice(),
+            decode_hex(EXPECTED_PRIVATE_KEY_A)
+        );
+        assert_eq!(
+            signing_key.verifying_key().to_sec1_point(false).as_bytes(),
+            derived.public_key_sec1()
+        );
+
+        let digest: [u8; 32] = Sha256::digest(b"pkcs11rs previewSign mock").into();
+        let signature = authenticator
+            .sign_digest(derived.signing_arguments_cbor(), &digest)
+            .unwrap();
+        let verifying_key = VerifyingKey::from_sec1_bytes(derived.public_key_sec1()).unwrap();
+        assert!(verifying_key.verify_prehash(&digest, &signature).is_ok());
+    }
+
+    #[test]
+    fn mock_private_side_opens_random_tickets_for_context_boundaries() {
+        let seed = ArkgP256PublicSeed::from_cose(&vector_seed_cose()).unwrap();
+        let authenticator = MockPreviewSignAuthenticator::from_vector();
+        let maximum_context = [0x55; MAX_CONTEXT_LENGTH];
+        let contexts: [&[u8]; 3] = [b"", b"pkcs11rs", &maximum_context];
+
+        for context in contexts {
+            let derived = seed.derive(context).unwrap();
+            let digest: [u8; 32] = Sha256::digest(context).into();
+            let signature = authenticator
+                .sign_digest(derived.signing_arguments_cbor(), &digest)
+                .unwrap();
+            let verifying_key = VerifyingKey::from_sec1_bytes(derived.public_key_sec1()).unwrap();
+            assert!(verifying_key.verify_prehash(&digest, &signature).is_ok());
+        }
+    }
+
+    #[test]
+    fn mock_private_side_rejects_tampered_ticket_and_context() {
+        let seed = ArkgP256PublicSeed::from_cose(&vector_seed_cose()).unwrap();
+        let derived = seed.derive_with_ikm(&decode_hex(IKM_A), CONTEXT_A).unwrap();
+        let authenticator = MockPreviewSignAuthenticator::from_vector();
+
+        let mut tampered_ticket = *derived.ticket();
+        tampered_ticket[0] ^= 0x80;
+        let tampered_ticket_arguments =
+            encode_signing_arguments(&tampered_ticket, derived.context()).unwrap();
+        assert_eq!(
+            authenticator.derive_signing_key(&tampered_ticket_arguments),
+            Err("ticket authentication failed")
+        );
+
+        let wrong_context_arguments =
+            encode_signing_arguments(derived.ticket(), b"wrong context").unwrap();
+        assert_eq!(
+            authenticator.derive_signing_key(&wrong_context_arguments),
+            Err("ticket authentication failed")
+        );
+
+        let mut malformed_point_ticket = *derived.ticket();
+        malformed_point_ticket[16..].fill(0);
+        let malformed_point_arguments =
+            encode_signing_arguments(&malformed_point_ticket, derived.context()).unwrap();
+        assert_eq!(
+            authenticator.derive_signing_key(&malformed_point_arguments),
+            Err("invalid ticket point")
+        );
     }
 
     #[test]

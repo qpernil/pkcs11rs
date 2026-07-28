@@ -127,6 +127,11 @@ regression vectors for the baseline derivation, independent input keying
 material, and independent contexts. They also reproduce the COSE_Sign_Args
 vector published in the current
 [ARKG Internet-Draft](https://datatracker.ietf.org/doc/draft-bradleylundberg-cfrg-arkg/).
+A test-only authenticator mock holds the draft's private seed, authenticates and
+opens generated tickets, reproduces the draft's exact derived private scalar,
+and signs digests that are verified against the production-derived public key.
+It also rejects modified tags, contexts, and malformed ephemeral points. No
+private-seed operation is compiled into the production API.
 
 ## Hardware status
 
