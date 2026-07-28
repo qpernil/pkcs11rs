@@ -168,8 +168,11 @@ The FIDO slot advertises these vendor mechanisms only when
 | `CKM_PKCS11RS_PREVIEW_SIGN_DERIVE` | `CKM_VENDOR_DEFINED \| 0x50530002` | derive a public key, ticket, and context offline |
 | `CKM_PKCS11RS_PREVIEW_SIGN` | `CKM_VENDOR_DEFINED \| 0x50530003` | request the extension signature through GetAssertion |
 
-`C_Login` obtains a PIN/UV token scoped to the dedicated previewSign RP with
-make-credential and get-assertion permissions. It is zeroized on logout, PIN
+`C_Login` uses the authenticator's preferred supported PIN/UV protocol. When
+permissioned PIN/UV tokens are available, it requests one scoped to the
+dedicated previewSign RP with make-credential and get-assertion permissions.
+The legacy `getPINToken` path is necessarily unscoped, but pkcs11rs uses it
+only for those previewSign operations. The token is zeroized on logout, PIN
 change, session-state reset, and reconnect.
 
 The initial lifecycle is:

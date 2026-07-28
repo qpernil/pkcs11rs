@@ -35,12 +35,129 @@ const CTAP2_ERR_PIN_NOT_SET: u8 = 0x35;
 const CTAP2_ERR_PIN_POLICY_VIOLATION: u8 = 0x37;
 const CLIENT_PIN_GET_PIN_TOKEN: u8 = 0x05;
 const CLIENT_PIN_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS: u8 = 0x09;
+const PIN_UV_AUTH_PROTOCOL_ONE: u8 = 1;
 const PIN_UV_AUTH_PROTOCOL_TWO: u8 = 2;
 const PERMISSION_MAKE_CREDENTIAL: u8 = 0x01;
 const PERMISSION_GET_ASSERTION: u8 = 0x02;
 const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
 const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PinUvAuthProtocol {
+    One,
+    Two,
+}
+
+impl PinUvAuthProtocol {
+    fn select(info: &AuthenticatorInfo) -> Result<Self, CtapError> {
+        info.pin_uv_auth_protocols
+            .iter()
+            .find_map(|protocol| match *protocol {
+                1 => Some(Self::One),
+                2 => Some(Self::Two),
+                _ => None,
+            })
+            .ok_or_else(|| CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()))
+    }
+
+    fn id(self) -> u8 {
+        match self {
+            Self::One => PIN_UV_AUTH_PROTOCOL_ONE,
+            Self::Two => PIN_UV_AUTH_PROTOCOL_TWO,
+        }
+    }
+
+    fn derive_shared_secret(self, ecdh_x: &[u8]) -> Result<Zeroizing<Vec<u8>>, CtapError> {
+        match self {
+            Self::One => Ok(Zeroizing::new(Sha256::digest(ecdh_x).to_vec())),
+            Self::Two => {
+                let hkdf = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), ecdh_x);
+                let mut shared = Zeroizing::new(vec![0u8; 64]);
+                hkdf.expand(b"CTAP2 HMAC key", &mut shared[..32])
+                    .map_err(|_| CtapError::Malformed("HMAC key derivation failed"))?;
+                hkdf.expand(b"CTAP2 AES key", &mut shared[32..])
+                    .map_err(|_| CtapError::Malformed("AES key derivation failed"))?;
+                Ok(shared)
+            }
+        }
+    }
+
+    fn encrypt(self, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CtapError> {
+        if !is_multiple_of(plaintext.len(), AES_BLOCK_SIZE) {
+            return Err(CtapError::Malformed("invalid PIN/UV encryption input"));
+        }
+        match self {
+            Self::One if key.len() == 32 => {
+                aes_cbc(key, &[0u8; AES_BLOCK_SIZE], plaintext, Direction::Encrypt)
+                    .map_err(Into::into)
+            }
+            Self::Two if key.len() == 64 => {
+                let mut iv = [0u8; AES_BLOCK_SIZE];
+                getrandom::fill(&mut iv)
+                    .map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))?;
+                let ciphertext = aes_cbc(&key[32..], &iv, plaintext, Direction::Encrypt)?;
+                let mut output = Vec::with_capacity(iv.len() + ciphertext.len());
+                output.extend_from_slice(&iv);
+                output.extend_from_slice(&ciphertext);
+                Ok(output)
+            }
+            _ => Err(CtapError::Malformed("invalid PIN/UV encryption key")),
+        }
+    }
+
+    fn decrypt(self, key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CtapError> {
+        match self {
+            Self::One
+                if key.len() == 32
+                    && !ciphertext.is_empty()
+                    && is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE) =>
+            {
+                aes_cbc(key, &[0u8; AES_BLOCK_SIZE], ciphertext, Direction::Decrypt)
+                    .map_err(Into::into)
+            }
+            Self::Two
+                if key.len() == 64
+                    && ciphertext.len() >= AES_BLOCK_SIZE * 2
+                    && is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE) =>
+            {
+                aes_cbc(
+                    &key[32..],
+                    &ciphertext[..AES_BLOCK_SIZE],
+                    &ciphertext[AES_BLOCK_SIZE..],
+                    Direction::Decrypt,
+                )
+                .map_err(Into::into)
+            }
+            _ => Err(CtapError::Malformed("invalid PIN/UV ciphertext")),
+        }
+    }
+
+    fn authenticate(self, key: &[u8], message: &[u8]) -> Result<Vec<u8>, CtapError> {
+        if !match self {
+            Self::One => matches!(key.len(), 16 | 32),
+            Self::Two => key.len() == 32,
+        } {
+            return Err(CtapError::Malformed("invalid PIN/UV authentication key"));
+        }
+        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(key)
+            .map_err(|_| CtapError::Malformed("invalid PIN/UV authentication key"))?;
+        mac.update(message);
+        let result = mac.finalize().into_bytes();
+        let length = match self {
+            Self::One => 16,
+            Self::Two => 32,
+        };
+        Ok(result[..length].to_vec())
+    }
+
+    fn valid_token_length(self, length: usize) -> bool {
+        match self {
+            Self::One => matches!(length, 16 | 32),
+            Self::Two => length == 32,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum CtapError {
@@ -172,7 +289,7 @@ pub(crate) struct DiscoverableCredential {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CredentialAuthorization {
-    protocol: u8,
+    protocol: PinUvAuthProtocol,
     token: Zeroizing<Vec<u8>>,
 }
 
@@ -238,22 +355,21 @@ impl Client {
         if info.option("clientPin") {
             return Err(CtapError::Transport(CKR_PIN_INVALID.into()));
         }
-        if !info.pin_uv_auth_protocols.contains(&2) {
-            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
-        }
+        let protocol = PinUvAuthProtocol::select(info)?;
         let new_pin = normalize_pin(info, new_pin, true)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
-            &encode_get_key_agreement_request()?,
+            &encode_get_key_agreement_request(protocol)?,
         )?;
         let authenticator_key = parse_key_agreement_response(&response)?;
-        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
+        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key, protocol)?;
         let mut padded_pin = Zeroizing::new(vec![0; 64]);
         padded_pin[..new_pin.len()].copy_from_slice(&new_pin);
-        let mut new_pin_enc = protocol_two_encrypt(&shared_secret, &padded_pin)?;
-        let pin_uv_auth_param = authenticate(&shared_secret[..32], &new_pin_enc)?;
-        let request = encode_set_pin_request(&platform_key, &pin_uv_auth_param, &new_pin_enc)?;
+        let mut new_pin_enc = protocol.encrypt(&shared_secret, &padded_pin)?;
+        let pin_uv_auth_param = protocol.authenticate(&shared_secret[..32], &new_pin_enc)?;
+        let request =
+            encode_set_pin_request(protocol, &platform_key, &pin_uv_auth_param, &new_pin_enc)?;
         let response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
         shared_secret.zeroize();
         new_pin_enc.zeroize();
@@ -272,29 +388,28 @@ impl Client {
         if !info.option("clientPin") {
             return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
         }
-        if !info.pin_uv_auth_protocols.contains(&2) {
-            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
-        }
+        let protocol = PinUvAuthProtocol::select(info)?;
         let current_pin = normalize_pin(info, current_pin, false)?;
         let new_pin = normalize_pin(info, new_pin, true)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
-            &encode_get_key_agreement_request()?,
+            &encode_get_key_agreement_request(protocol)?,
         )?;
         let authenticator_key = parse_key_agreement_response(&response)?;
-        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
+        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key, protocol)?;
         let mut padded_pin = Zeroizing::new(vec![0; 64]);
         padded_pin[..new_pin.len()].copy_from_slice(&new_pin);
-        let mut new_pin_enc = protocol_two_encrypt(&shared_secret, &padded_pin)?;
+        let mut new_pin_enc = protocol.encrypt(&shared_secret, &padded_pin)?;
         let current_pin_hash = Zeroizing::new(Sha256::digest(&*current_pin).to_vec());
-        let mut pin_hash_enc = protocol_two_encrypt(&shared_secret, &current_pin_hash[..16])?;
+        let mut pin_hash_enc = protocol.encrypt(&shared_secret, &current_pin_hash[..16])?;
         let mut authenticated =
             Zeroizing::new(Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len()));
         authenticated.extend_from_slice(&new_pin_enc);
         authenticated.extend_from_slice(&pin_hash_enc);
-        let pin_uv_auth_param = authenticate(&shared_secret[..32], &authenticated)?;
+        let pin_uv_auth_param = protocol.authenticate(&shared_secret[..32], &authenticated)?;
         let request = encode_change_pin_request(
+            protocol,
             &platform_key,
             &pin_uv_auth_param,
             &new_pin_enc,
@@ -333,36 +448,37 @@ impl Client {
         if !info.option("clientPin") {
             return Err(CtapError::Status(CTAP2_ERR_PIN_NOT_SET));
         }
-        if !info.pin_uv_auth_protocols.contains(&2) {
-            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
-        }
+        let protocol = PinUvAuthProtocol::select(info)?;
         let pin = normalize_pin(info, pin, false)?;
 
         let response = self.exchange(
             AUTHENTICATOR_CLIENT_PIN,
-            &encode_get_key_agreement_request()?,
+            &encode_get_key_agreement_request(protocol)?,
         )?;
         let authenticator_key = parse_key_agreement_response(&response)?;
-        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key)?;
+        let (platform_key, mut shared_secret) = encapsulate(&authenticator_key, protocol)?;
         let pin_hash = Zeroizing::new(Sha256::digest(&*pin).to_vec());
-        let pin_hash_enc = protocol_two_encrypt(&shared_secret, &pin_hash[..16])?;
+        let pin_hash_enc = protocol.encrypt(&shared_secret, &pin_hash[..16])?;
         let request = if info.option("pinUvAuthToken") {
-            encode_get_permissioned_token_request(&platform_key, &pin_hash_enc, permission, rp_id)?
+            encode_get_permissioned_token_request(
+                protocol,
+                &platform_key,
+                &pin_hash_enc,
+                permission,
+                rp_id,
+            )?
         } else {
-            encode_get_pin_token_request(&platform_key, &pin_hash_enc)?
+            encode_get_pin_token_request(protocol, &platform_key, &pin_hash_enc)?
         };
         let mut response = self.exchange(AUTHENTICATOR_CLIENT_PIN, &request)?;
         let encrypted_token = parse_pin_token_response(&response)?;
-        let token = Zeroizing::new(protocol_two_decrypt(&shared_secret, &encrypted_token)?);
+        let token = Zeroizing::new(protocol.decrypt(&shared_secret, &encrypted_token)?);
         shared_secret.zeroize();
         response.zeroize();
-        if token.len() != 32 {
+        if !protocol.valid_token_length(token.len()) {
             return Err(CtapError::Malformed("invalid PIN/UV auth token length"));
         }
-        Ok(CredentialAuthorization {
-            protocol: PIN_UV_AUTH_PROTOCOL_TWO,
-            token,
-        })
+        Ok(CredentialAuthorization { protocol, token })
     }
 
     pub(crate) fn authorize_preview_sign(
@@ -405,11 +521,13 @@ impl Client {
         client_data_hasher.update(b"pkcs11rs previewSign registration v1");
         client_data_hasher.update(nonce);
         let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
-        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let pin_uv_auth_param = authorization
+            .protocol
+            .authenticate(&authorization.token, &client_data_hash)?;
         let request = encode_preview_sign_make_credential_request(
             &client_data_hash,
             &nonce,
-            Some((&pin_uv_auth_param, authorization.protocol)),
+            Some((&pin_uv_auth_param, authorization.protocol.id())),
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
         crate::preview_sign::PreviewSignRegistration::new(
@@ -438,14 +556,16 @@ impl Client {
         client_data_hasher.update(b"pkcs11rs previewSign assertion v1");
         client_data_hasher.update(to_be_signed);
         let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
-        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let pin_uv_auth_param = authorization
+            .protocol
+            .authenticate(&authorization.token, &client_data_hash)?;
         let request = encode_preview_sign_get_assertion_request(
             registration,
             &client_data_hash,
             to_be_signed,
             additional_args_cbor,
             &pin_uv_auth_param,
-            authorization.protocol,
+            authorization.protocol.id(),
         )?;
         let response = self.exchange(AUTHENTICATOR_GET_ASSERTION, &request)?;
         parse_preview_sign_assertion_response(&response)
@@ -458,13 +578,15 @@ impl Client {
         credential_id: &[u8],
         client_data_hash: &[u8; 32],
     ) -> Result<Vec<u8>, CtapError> {
-        let pin_uv_auth_param = authenticate(&authorization.token, client_data_hash)?;
+        let pin_uv_auth_param = authorization
+            .protocol
+            .authenticate(&authorization.token, client_data_hash)?;
         let request = encode_get_assertion_request(
             rp_id,
             credential_id,
             client_data_hash,
             &pin_uv_auth_param,
-            authorization.protocol,
+            authorization.protocol.id(),
         )?;
         let response = self.exchange(AUTHENTICATOR_GET_ASSERTION, &request)?;
         validate_get_assertion_response(&response, rp_id, credential_id)?;
@@ -488,11 +610,13 @@ impl Client {
         )?;
         let client_data_hash: [u8; 32] =
             Sha256::digest(b"pkcs11rs synthetic FIDO2 hardware credential").into();
-        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let pin_uv_auth_param = authorization
+            .protocol
+            .authenticate(&authorization.token, &client_data_hash)?;
         let request = encode_test_make_credential_request(
             &client_data_hash,
             &pin_uv_auth_param,
-            authorization.protocol,
+            authorization.protocol.id(),
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
         parse_make_credential_response(&response)
@@ -535,8 +659,10 @@ impl Client {
         let pin_uv_auth = authorization
             .as_ref()
             .map(|authorization| {
-                authenticate(&authorization.token, &client_data_hash)
-                    .map(|parameter| (parameter, authorization.protocol))
+                authorization
+                    .protocol
+                    .authenticate(&authorization.token, &client_data_hash)
+                    .map(|parameter| (parameter, authorization.protocol.id()))
             })
             .transpose()?;
         let request = encode_preview_sign_make_credential_request(
@@ -830,7 +956,10 @@ fn random_p256_secret() -> Result<SecretKey, CtapError> {
     }
 }
 
-fn encapsulate(authenticator_key: &CoseKey) -> Result<(CoseKey, Zeroizing<Vec<u8>>), CtapError> {
+fn encapsulate(
+    authenticator_key: &CoseKey,
+    protocol: PinUvAuthProtocol,
+) -> Result<(CoseKey, Zeroizing<Vec<u8>>), CtapError> {
     let mut encoded = [0u8; 65];
     encoded[0] = 0x04;
     encoded[1..33].copy_from_slice(&authenticator_key.x);
@@ -849,70 +978,25 @@ fn encapsulate(authenticator_key: &CoseKey) -> Result<(CoseKey, Zeroizing<Vec<u8
             .map_err(|_| CtapError::Malformed("invalid platform y coordinate"))?,
     };
     let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
-    let hkdf = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.raw_secret_bytes().as_ref());
-    let mut shared = Zeroizing::new(vec![0u8; 64]);
-    hkdf.expand(b"CTAP2 HMAC key", &mut shared[..32])
-        .map_err(|_| CtapError::Malformed("HMAC key derivation failed"))?;
-    hkdf.expand(b"CTAP2 AES key", &mut shared[32..])
-        .map_err(|_| CtapError::Malformed("AES key derivation failed"))?;
+    let shared = protocol.derive_shared_secret(z.raw_secret_bytes().as_ref())?;
     Ok((platform_key, shared))
 }
 
-fn protocol_two_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CtapError> {
-    if key.len() != 64 || !is_multiple_of(plaintext.len(), AES_BLOCK_SIZE) {
-        return Err(CtapError::Malformed(
-            "invalid protocol two encryption input",
-        ));
-    }
-    let mut iv = [0u8; AES_BLOCK_SIZE];
-    getrandom::fill(&mut iv).map_err(|_| CtapError::Transport(CKR_DEVICE_ERROR.into()))?;
-    let ciphertext = aes_cbc(&key[32..], &iv, plaintext, Direction::Encrypt)?;
-    let mut output = Vec::with_capacity(iv.len() + ciphertext.len());
-    output.extend_from_slice(&iv);
-    output.extend_from_slice(&ciphertext);
-    Ok(output)
-}
-
-fn protocol_two_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CtapError> {
-    if key.len() != 64
-        || ciphertext.len() < AES_BLOCK_SIZE * 2
-        || !is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE)
-    {
-        return Err(CtapError::Malformed("invalid protocol two ciphertext"));
-    }
-    aes_cbc(
-        &key[32..],
-        &ciphertext[..AES_BLOCK_SIZE],
-        &ciphertext[AES_BLOCK_SIZE..],
-        Direction::Decrypt,
-    )
-    .map_err(Into::into)
-}
-
-fn authenticate(token: &[u8], message: &[u8]) -> Result<[u8; 32], CtapError> {
-    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(token)
-        .map_err(|_| CtapError::Malformed("invalid PIN/UV auth token"))?;
-    mac.update(message);
-    let result = mac.finalize().into_bytes();
-    let mut output = [0u8; 32];
-    output.copy_from_slice(&result);
-    Ok(output)
-}
-
-fn encode_get_key_agreement_request() -> Result<Vec<u8>, CtapError> {
+fn encode_get_key_agreement_request(protocol: PinUvAuthProtocol) -> Result<Vec<u8>, CtapError> {
     let mut output = Vec::new();
     Encoder::new(&mut output)
         .map(2)?
         .u8(0x01)?
-        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(protocol.id())?
         .u8(0x02)?
         .u8(0x02)?;
     Ok(output)
 }
 
 fn encode_set_pin_request(
+    protocol: PinUvAuthProtocol,
     platform_key: &CoseKey,
-    pin_uv_auth_param: &[u8; 32],
+    pin_uv_auth_param: &[u8],
     new_pin_enc: &[u8],
 ) -> Result<Vec<u8>, CtapError> {
     let mut output = Vec::new();
@@ -920,7 +1004,7 @@ fn encode_set_pin_request(
     encoder
         .map(5)?
         .u8(0x01)?
-        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(protocol.id())?
         .u8(0x02)?
         .u8(0x03)?
         .u8(0x03)?;
@@ -934,8 +1018,9 @@ fn encode_set_pin_request(
 }
 
 fn encode_change_pin_request(
+    protocol: PinUvAuthProtocol,
     platform_key: &CoseKey,
-    pin_uv_auth_param: &[u8; 32],
+    pin_uv_auth_param: &[u8],
     new_pin_enc: &[u8],
     pin_hash_enc: &[u8],
 ) -> Result<Vec<u8>, CtapError> {
@@ -944,7 +1029,7 @@ fn encode_change_pin_request(
     encoder
         .map(6)?
         .u8(0x01)?
-        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(protocol.id())?
         .u8(0x02)?
         .u8(0x04)?
         .u8(0x03)?;
@@ -976,6 +1061,7 @@ fn encode_cose_key(encoder: &mut Encoder<&mut Vec<u8>>, key: &CoseKey) -> Result
 }
 
 fn encode_get_permissioned_token_request(
+    protocol: PinUvAuthProtocol,
     platform_key: &CoseKey,
     pin_hash_enc: &[u8],
     permission: u8,
@@ -986,7 +1072,7 @@ fn encode_get_permissioned_token_request(
     encoder
         .map(if rp_id.is_some() { 6 } else { 5 })?
         .u8(0x01)?
-        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(protocol.id())?
         .u8(0x02)?
         .u8(CLIENT_PIN_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS)?
         .u8(0x03)?;
@@ -1003,6 +1089,7 @@ fn encode_get_permissioned_token_request(
 }
 
 fn encode_get_pin_token_request(
+    protocol: PinUvAuthProtocol,
     platform_key: &CoseKey,
     pin_hash_enc: &[u8],
 ) -> Result<Vec<u8>, CtapError> {
@@ -1011,7 +1098,7 @@ fn encode_get_pin_token_request(
     encoder
         .map(4)?
         .u8(0x01)?
-        .u8(PIN_UV_AUTH_PROTOCOL_TWO)?
+        .u8(protocol.id())?
         .u8(0x02)?
         .u8(CLIENT_PIN_GET_PIN_TOKEN)?
         .u8(0x03)?;
@@ -1023,7 +1110,7 @@ fn encode_get_pin_token_request(
 #[cfg(test)]
 fn encode_test_make_credential_request(
     client_data_hash: &[u8; 32],
-    pin_uv_auth_param: &[u8; 32],
+    pin_uv_auth_param: &[u8],
     protocol: u8,
 ) -> Result<Vec<u8>, CtapError> {
     let mut output = Vec::new();
@@ -1366,14 +1453,16 @@ fn encode_enumerate_rps_begin(
     authorization: &CredentialAuthorization,
 ) -> Result<Vec<u8>, CtapError> {
     let subcommand = 0x02;
-    let auth = authenticate(&authorization.token, &[subcommand])?;
+    let auth = authorization
+        .protocol
+        .authenticate(&authorization.token, &[subcommand])?;
     let mut output = Vec::new();
     Encoder::new(&mut output)
         .map(3)?
         .u8(0x01)?
         .u8(subcommand)?
         .u8(0x03)?
-        .u8(authorization.protocol)?
+        .u8(authorization.protocol.id())?
         .u8(0x04)?
         .bytes(&auth)?;
     Ok(output)
@@ -1392,7 +1481,9 @@ fn encode_enumerate_credentials_begin(
     let mut message = Vec::with_capacity(1 + params.len());
     message.push(subcommand);
     message.extend_from_slice(&params);
-    let auth = authenticate(&authorization.token, &message)?;
+    let auth = authorization
+        .protocol
+        .authenticate(&authorization.token, &message)?;
 
     let mut output = Vec::new();
     Encoder::new(&mut output)
@@ -1404,7 +1495,7 @@ fn encode_enumerate_credentials_begin(
         .u8(0x01)?
         .bytes(rp_id_hash)?
         .u8(0x03)?
-        .u8(authorization.protocol)?
+        .u8(authorization.protocol.id())?
         .u8(0x04)?
         .bytes(&auth)?;
     Ok(output)
@@ -1914,11 +2005,11 @@ mod tests {
     #[test]
     fn credential_management_requests_match_protocol_vectors() {
         assert_eq!(
-            encode_get_key_agreement_request().unwrap(),
+            encode_get_key_agreement_request(PinUvAuthProtocol::Two).unwrap(),
             [0xa2, 0x01, 0x02, 0x02, 0x02]
         );
         let authorization = CredentialAuthorization {
-            protocol: 2,
+            protocol: PinUvAuthProtocol::Two,
             token: Zeroizing::new(vec![0; 32]),
         };
         let mut expected = vec![0xa3, 0x01, 0x02, 0x03, 0x02, 0x04, 0x58, 0x20];
@@ -1933,6 +2024,86 @@ mod tests {
         );
         assert_eq!(encode_management_next(3).unwrap(), [0xa1, 0x01, 0x03]);
         assert_eq!(encode_management_next(5).unwrap(), [0xa1, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn protocol_one_matches_pin_uv_crypto_and_request_vectors() {
+        let ecdh_x: Vec<u8> = (0u8..32).collect();
+        assert_eq!(
+            PinUvAuthProtocol::One
+                .derive_shared_secret(&ecdh_x)
+                .unwrap()
+                .as_slice(),
+            [
+                0x63, 0x0d, 0xcd, 0x29, 0x66, 0xc4, 0x33, 0x66, 0x91, 0x12, 0x54, 0x48, 0xbb, 0xb2,
+                0x5b, 0x4f, 0xf4, 0x12, 0xa4, 0x9c, 0x73, 0x2d, 0xb2, 0xc8, 0xab, 0xc1, 0xb8, 0x58,
+                0x1b, 0xd7, 0x10, 0xdd,
+            ]
+        );
+
+        let key: Vec<u8> = (0u8..32).collect();
+        let plaintext = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let ciphertext = PinUvAuthProtocol::One.encrypt(&key, &plaintext).unwrap();
+        assert_eq!(
+            ciphertext,
+            [
+                0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49,
+                0x60, 0x89,
+            ]
+        );
+        assert_eq!(
+            PinUvAuthProtocol::One.decrypt(&key, &ciphertext).unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            PinUvAuthProtocol::One
+                .authenticate(&[0x0b; 32], b"Hi There")
+                .unwrap(),
+            [
+                0x19, 0x8a, 0x60, 0x7e, 0xb4, 0x4b, 0xfb, 0xc6, 0x99, 0x03, 0xa0, 0xf1, 0xcf, 0x2b,
+                0xbd, 0xc5,
+            ]
+        );
+        assert_eq!(
+            encode_get_key_agreement_request(PinUvAuthProtocol::One).unwrap(),
+            [0xa2, 0x01, PIN_UV_AUTH_PROTOCOL_ONE, 0x02, 0x02]
+        );
+        assert!(PinUvAuthProtocol::One
+            .decrypt(&key[..31], &ciphertext)
+            .is_err());
+        assert!(PinUvAuthProtocol::One.decrypt(&key, &[]).is_err());
+        assert!(PinUvAuthProtocol::One
+            .decrypt(&key, &ciphertext[..15])
+            .is_err());
+        assert!(PinUvAuthProtocol::One
+            .authenticate(&[0u8; 15], b"message")
+            .is_err());
+        assert!(PinUvAuthProtocol::One.valid_token_length(16));
+        assert!(PinUvAuthProtocol::One.valid_token_length(32));
+        assert!(!PinUvAuthProtocol::One.valid_token_length(24));
+    }
+
+    #[test]
+    fn pin_uv_protocol_selection_follows_authenticator_preference() {
+        let mut info = credential_management_info();
+        info.pin_uv_auth_protocols = vec![1, 2];
+        assert_eq!(
+            PinUvAuthProtocol::select(&info).unwrap(),
+            PinUvAuthProtocol::One
+        );
+        info.pin_uv_auth_protocols = vec![99, 2, 1];
+        assert_eq!(
+            PinUvAuthProtocol::select(&info).unwrap(),
+            PinUvAuthProtocol::Two
+        );
+        info.pin_uv_auth_protocols = vec![99];
+        assert!(matches!(
+            PinUvAuthProtocol::select(&info),
+            Err(CtapError::Transport(_))
+        ));
     }
 
     #[test]
@@ -2049,6 +2220,7 @@ mod tests {
             y: [0x44; 32],
         };
         let request = encode_get_permissioned_token_request(
+            PinUvAuthProtocol::Two,
             &key,
             &[0x55; 32],
             PERMISSION_MAKE_CREDENTIAL,
@@ -2078,7 +2250,8 @@ mod tests {
             x: [0x33; 32],
             y: [0x44; 32],
         };
-        let request = encode_get_pin_token_request(&key, &[0x55; 32]).unwrap();
+        let request =
+            encode_get_pin_token_request(PinUvAuthProtocol::Two, &key, &[0x55; 32]).unwrap();
         let mut decoder = Decoder::new(&request);
         assert_eq!(decoder.map().unwrap(), Some(4));
         assert_eq!(decoder.u8().unwrap(), 1);
@@ -2222,6 +2395,43 @@ mod tests {
     }
 
     #[test]
+    fn set_pin_uses_protocol_one_zero_iv_and_truncated_authentication() {
+        let transport = Rc::new(MockTransport::new(vec![key_agreement_response(), vec![0]]));
+        let client = Client::new(transport.clone());
+        let mut info = credential_management_info();
+        info.options
+            .retain(|(name, _)| name.as_str() != "clientPin");
+        info.pin_uv_auth_protocols = vec![1];
+        client.set_initial_pin(&info, b"test-PIN").unwrap();
+
+        let requests = transport.requests.borrow();
+        assert_eq!(
+            requests[0],
+            [
+                AUTHENTICATOR_CLIENT_PIN,
+                0xa2,
+                0x01,
+                PIN_UV_AUTH_PROTOCOL_ONE,
+                0x02,
+                0x02
+            ]
+        );
+        let mut decoder = Decoder::new(&requests[1][1..]);
+        assert_eq!(decoder.map().unwrap(), Some(5));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), PIN_UV_AUTH_PROTOCOL_ONE);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        parse_cose_key(&mut decoder).unwrap();
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.bytes().unwrap().len(), 16);
+        assert_eq!(decoder.u8().unwrap(), 5);
+        assert_eq!(decoder.bytes().unwrap().len(), 64);
+        assert_eq!(decoder.position(), requests[1].len() - 1);
+    }
+
+    #[test]
     fn set_pin_rejects_unsafe_inputs_and_malformed_success_data() {
         let transport = Rc::new(MockTransport::new(Vec::new()));
         let client = Client::new(transport.clone());
@@ -2283,6 +2493,33 @@ mod tests {
         assert_eq!(decoder.bytes().unwrap().len(), 80);
         assert_eq!(decoder.u8().unwrap(), 6);
         assert_eq!(decoder.bytes().unwrap().len(), 32);
+        assert_eq!(decoder.position(), requests[1].len() - 1);
+    }
+
+    #[test]
+    fn change_pin_uses_protocol_one_zero_iv_and_truncated_authentication() {
+        let transport = Rc::new(MockTransport::new(vec![key_agreement_response(), vec![0]]));
+        let client = Client::new(transport.clone());
+        let mut info = credential_management_info();
+        info.min_pin_length = Some(8);
+        info.pin_uv_auth_protocols = vec![1];
+        client.change_pin(&info, b"old!", b"new-PIN!").unwrap();
+
+        let requests = transport.requests.borrow();
+        let mut decoder = Decoder::new(&requests[1][1..]);
+        assert_eq!(decoder.map().unwrap(), Some(6));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), PIN_UV_AUTH_PROTOCOL_ONE);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.u8().unwrap(), 3);
+        parse_cose_key(&mut decoder).unwrap();
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.bytes().unwrap().len(), 16);
+        assert_eq!(decoder.u8().unwrap(), 5);
+        assert_eq!(decoder.bytes().unwrap().len(), 64);
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.bytes().unwrap().len(), 16);
         assert_eq!(decoder.position(), requests[1].len() - 1);
     }
 
@@ -2364,7 +2601,7 @@ mod tests {
         let transport = Rc::new(MockTransport::new(vec![rp_response(), credential_response]));
         let client = Client::new(transport.clone());
         let authorization = CredentialAuthorization {
-            protocol: 2,
+            protocol: PinUvAuthProtocol::Two,
             token: Zeroizing::new(vec![0x55; 32]),
         };
         let credentials = client
@@ -2508,7 +2745,7 @@ mod tests {
         let transport = Rc::new(MockTransport::new(vec![vec![CTAP2_ERR_NO_CREDENTIALS]]));
         let client = Client::new(transport);
         let authorization = CredentialAuthorization {
-            protocol: 2,
+            protocol: PinUvAuthProtocol::Two,
             token: Zeroizing::new(vec![0x55; 32]),
         };
         assert!(client
