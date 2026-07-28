@@ -128,16 +128,29 @@ non-key companion metadata remains outside this provider.
 
 `put` accepts canonical YubiHSM-backed records, validates them against the live
 target, deduplicates identical logical content, and creates the companion with
-YubiHSM object-ID auto-allocation. `delete` removes every physical companion
-whose logical content has the requested reference. Mutating operations require
-a secure session with the applicable YubiHSM capabilities.
+YubiHSM object-ID auto-allocation. When the record contains exactly the sparse
+private/public `CKA_ID` and `CKA_LABEL` state understood by older pkcs11rs
+versions, the provider stores an `MDB1` physical value for downgrade
+compatibility. It does so only after decoding that value back to canonical
+metadata and proving that the resulting bytes exactly equal the submitted
+record. Empty public aspects and the old implicit public projection semantics
+are included in this test. Records containing newer attributes or semantics
+are stored physically as canonical CBOR.
 
-The existing PKCS #11 metadata path now writes this canonical format. It still
-projects only its currently supported sparse `CKA_ID` and `CKA_LABEL`
-overrides; the generic record model can represent additional supported key
-attributes for later lifecycle work. Replacement remains failure-safe: the new
-companion is written before old companions are removed, and a later update
-repairs ambiguity left by a failed deletion.
+The content reference always hashes the canonical logical bytes, and `get`
+returns those exact bytes regardless of the physical representation. `delete`
+removes every physical companion whose logical content has the requested
+reference. Mutating operations require a secure session with the applicable
+YubiHSM capabilities.
+
+The existing PKCS #11 metadata path now writes through this canonical logical
+model. Its current sparse records use the compatible `MDB1` physical encoding,
+so older pkcs11rs versions can continue to consume them. It still projects only
+its currently supported sparse `CKA_ID` and `CKA_LABEL` overrides; the generic
+record model can represent additional supported key attributes for later
+lifecycle work. Replacement remains failure-safe: the new companion is written
+before old companions are removed, and a later update repairs ambiguity left
+by a failed deletion.
 
 ## Current integration boundary
 

@@ -359,11 +359,12 @@ unloads or reinitializes it.
 The crate exposes a `StorageProvider` boundary and a local implementation for
 immutable, content-addressed CBOR blobs. The YubiHSM backend validates this
 design by exposing its internal key-metadata companions through the same
-boundary, writing canonical backed-key CBOR and converting legacy metadata on
-read. FIDO persistence is not yet connected to a PKCS #11 slot or
-configuration variable. The experimental `previewSign` model defines canonical
-registration and derived-key records, but does not automatically persist them
-or expose PKCS #11 signing objects. See
+boundary. It exposes canonical backed-key CBOR logically, reads legacy
+metadata, and retains the legacy physical encoding when it can represent a
+record exactly for downgrade compatibility. FIDO persistence is not yet
+connected to a PKCS #11 slot or configuration variable. The experimental
+`previewSign` model defines canonical registration and derived-key records, but
+does not automatically persist them or expose PKCS #11 signing objects. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.

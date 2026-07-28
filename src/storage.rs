@@ -1,11 +1,11 @@
 //! Persistence primitives intended for a future hybrid FIDO
 //! hardware/software slot.
 //!
-//! Providers store opaque, immutable CBOR data items without decoding or
-//! re-encoding them. The schema layer is responsible for producing canonical
-//! CBOR; providers preserve those exact bytes and address them by an
-//! algorithm-tagged digest. This keeps local-directory and future remote
-//! providers behind the same boundary without coupling storage to CTAP.
+//! Providers expose opaque, immutable canonical-CBOR data items and address
+//! those logical bytes by an algorithm-tagged digest. A provider may use a
+//! different physical encoding only when it can reproduce the submitted
+//! canonical bytes exactly. This keeps local-directory, device, and future
+//! remote providers behind the same boundary without coupling storage to CTAP.
 //!
 //! This module is not yet connected to PKCS #11 slot discovery, configuration,
 //! FIDO credential registration, key derivation, or signing.
@@ -225,10 +225,10 @@ pub trait StorageProvider {
     /// Retrieve and verify an object, returning `None` when it is absent.
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError>;
 
-    /// Store exact canonical-CBOR bytes idempotently and return their reference.
+    /// Store canonical-CBOR logical bytes idempotently and return their reference.
     ///
-    /// The provider checks that `object` is one well-formed CBOR data item but
-    /// deliberately does not decode, re-encode, or canonicalize it.
+    /// `get` must return the exact submitted bytes. A provider may choose a
+    /// lossless backend-specific physical representation.
     fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError>;
 
     /// Delete an object, returning whether it was present.
