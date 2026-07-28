@@ -1,5 +1,6 @@
 use crate::ctap::{
-    AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_CREDENTIAL_MANAGEMENT, AUTHENTICATOR_GET_INFO,
+    AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_CREDENTIAL_MANAGEMENT, AUTHENTICATOR_GET_ASSERTION,
+    AUTHENTICATOR_GET_INFO, AUTHENTICATOR_MAKE_CREDENTIAL,
 };
 use crate::{
     is_multiple_of,
@@ -39,6 +40,14 @@ struct MockYubiKeyState {
     pin: Option<Zeroizing<Vec<u8>>>,
     key_agreement: Option<SecretKey>,
     pin_uv_auth_token: Zeroizing<[u8; 32]>,
+    preview_credential: Option<MockPreviewCredential>,
+}
+
+#[derive(Debug)]
+struct MockPreviewCredential {
+    rp_id: String,
+    credential_id: Vec<u8>,
+    signing_key_handle: Vec<u8>,
 }
 
 impl Default for MockYubiKeyState {
@@ -50,6 +59,7 @@ impl Default for MockYubiKeyState {
             pin: Some(Zeroizing::new(b"123456".to_vec())),
             key_agreement: None,
             pin_uv_auth_token: Zeroizing::new([0x5a; 32]),
+            preview_credential: None,
         }
     }
 }
@@ -204,9 +214,433 @@ fn ctap_exchange(state: &mut MockYubiKeyState, request: &[u8]) -> Result<Vec<u8>
     match command {
         AUTHENTICATOR_GET_INFO if payload.is_empty() => authenticator_get_info(state),
         AUTHENTICATOR_CLIENT_PIN => authenticator_client_pin(state, payload),
+        AUTHENTICATOR_MAKE_CREDENTIAL => authenticator_make_credential(state, payload),
+        AUTHENTICATOR_GET_ASSERTION => authenticator_get_assertion(state, payload),
         AUTHENTICATOR_CREDENTIAL_MANAGEMENT => Ok(vec![CTAP2_ERR_NO_CREDENTIALS]),
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
+}
+
+#[derive(Default)]
+struct PreviewRequest {
+    rp_id: Option<String>,
+    client_data_hash: Option<Vec<u8>>,
+    credential_id: Option<Vec<u8>>,
+    signing_key_handle: Option<Vec<u8>>,
+    to_be_signed: Option<Vec<u8>>,
+    additional_args: Option<Vec<u8>>,
+    pin_uv_auth: Option<Vec<u8>>,
+    protocol: Option<u8>,
+}
+
+fn decode_text_id_map(decoder: &mut minicbor::Decoder<'_>) -> Result<String, u8> {
+    let count = decoder
+        .map()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+    let mut id = None;
+    for _ in 0..count {
+        match decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+            "id" if id.is_none() => {
+                id = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_owned(),
+                )
+            }
+            _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+        }
+    }
+    id.ok_or(CTAP2_ERR_MISSING_PARAMETER)
+}
+
+fn decode_allow_list(decoder: &mut minicbor::Decoder<'_>) -> Result<Vec<u8>, u8> {
+    if decoder
+        .array()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?
+        != 1
+    {
+        return Err(CTAP2_ERR_INVALID_CBOR);
+    }
+    let count = decoder
+        .map()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+    let mut id = None;
+    for _ in 0..count {
+        match decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+            "id" if id.is_none() => {
+                id = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_vec(),
+                )
+            }
+            _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+        }
+    }
+    id.ok_or(CTAP2_ERR_MISSING_PARAMETER)
+}
+
+fn decode_preview_extension(
+    decoder: &mut minicbor::Decoder<'_>,
+    request: &mut PreviewRequest,
+) -> Result<(), u8> {
+    let count = decoder
+        .map()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+    for _ in 0..count {
+        let name = decoder.str().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
+        if name != "previewSign" {
+            decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
+            continue;
+        }
+        let count = decoder
+            .map()
+            .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+            .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+        for _ in 0..count {
+            match decoder.u8().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+                2 if request.signing_key_handle.is_none() => {
+                    request.signing_key_handle = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                            .to_vec(),
+                    )
+                }
+                6 if request.to_be_signed.is_none() => {
+                    request.to_be_signed = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                            .to_vec(),
+                    )
+                }
+                7 if request.additional_args.is_none() => {
+                    request.additional_args = Some(
+                        decoder
+                            .bytes()
+                            .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                            .to_vec(),
+                    )
+                }
+                _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_preview_request(payload: &[u8], assertion: bool) -> Result<PreviewRequest, u8> {
+    let mut decoder = minicbor::Decoder::new(payload);
+    let count = decoder
+        .map()
+        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+        .ok_or(CTAP2_ERR_INVALID_CBOR)?;
+    let mut request = PreviewRequest::default();
+    for _ in 0..count {
+        match decoder.u8().map_err(|_| CTAP2_ERR_INVALID_CBOR)? {
+            1 if assertion && request.rp_id.is_none() => {
+                request.rp_id = Some(
+                    decoder
+                        .str()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_owned(),
+                )
+            }
+            1 if !assertion && request.client_data_hash.is_none() => {
+                request.client_data_hash = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_vec(),
+                )
+            }
+            2 if assertion && request.client_data_hash.is_none() => {
+                request.client_data_hash = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_vec(),
+                )
+            }
+            2 if !assertion && request.rp_id.is_none() => {
+                request.rp_id = Some(decode_text_id_map(&mut decoder)?)
+            }
+            3 if assertion && request.credential_id.is_none() => {
+                request.credential_id = Some(decode_allow_list(&mut decoder)?)
+            }
+            4 if assertion => decode_preview_extension(&mut decoder, &mut request)?,
+            6 if !assertion => decode_preview_extension(&mut decoder, &mut request)?,
+            6 if assertion && request.pin_uv_auth.is_none() => {
+                request.pin_uv_auth = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_vec(),
+                )
+            }
+            7 if assertion => {
+                decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?;
+            }
+            8 if !assertion && request.pin_uv_auth.is_none() => {
+                request.pin_uv_auth = Some(
+                    decoder
+                        .bytes()
+                        .map_err(|_| CTAP2_ERR_INVALID_CBOR)?
+                        .to_vec(),
+                )
+            }
+            9 if !assertion && request.protocol.is_none() => {
+                request.protocol = Some(decoder.u8().map_err(|_| CTAP2_ERR_INVALID_CBOR)?)
+            }
+            _ => decoder.skip().map_err(|_| CTAP2_ERR_INVALID_CBOR)?,
+        }
+    }
+    if decoder.position() != payload.len() {
+        return Err(CTAP2_ERR_INVALID_CBOR);
+    }
+    Ok(request)
+}
+
+fn encode_mock_ec2(public: &[u8]) -> Result<Vec<u8>, Error> {
+    if public.len() != 65 || public[0] != 4 {
+        return Err(CKR_DEVICE_ERROR.into());
+    }
+    let mut encoded = Vec::new();
+    Encoder::new(&mut encoded)
+        .map(5)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .i8(-7)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .i8(-1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .i8(-2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&public[1..33])
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .i8(-3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&public[33..])
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(encoded)
+}
+
+fn mock_authenticator_data(
+    rp_id: &str,
+    credential_id: &[u8],
+    public_key_cose: &[u8],
+    extension_output: &[u8],
+    counter: u32,
+) -> Result<Vec<u8>, Error> {
+    let mut data = Sha256::digest(rp_id.as_bytes()).to_vec();
+    data.push(0xc5);
+    data.extend_from_slice(&counter.to_be_bytes());
+    data.extend_from_slice(&[0x50; 16]);
+    data.extend_from_slice(
+        &u16::try_from(credential_id.len())
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .to_be_bytes(),
+    );
+    data.extend_from_slice(credential_id);
+    data.extend_from_slice(public_key_cose);
+    let mut extensions = Vec::new();
+    let mut encoder = Encoder::new(&mut extensions);
+    encoder
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("previewSign")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    encoder.writer_mut().extend_from_slice(extension_output);
+    data.extend_from_slice(&extensions);
+    Ok(data)
+}
+
+fn authenticator_make_credential(
+    state: &mut MockYubiKeyState,
+    payload: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let request = match decode_preview_request(payload, false) {
+        Ok(request) => request,
+        Err(status) => return Ok(vec![status]),
+    };
+    let client_data_hash = request
+        .client_data_hash
+        .as_deref()
+        .ok_or(CKR_DEVICE_ERROR)?;
+    if !authenticate(
+        state.pin_uv_auth_token.as_ref(),
+        client_data_hash,
+        request.pin_uv_auth.as_deref(),
+    ) {
+        return Ok(vec![CTAP2_ERR_PIN_INVALID]);
+    }
+    let rp_id = request.rp_id.ok_or(CKR_DEVICE_ERROR)?;
+    let credential_id = vec![0xa5; 32];
+    let signing_key_handle = vec![0x5a; 48];
+    let parent_secret = random_secret()?;
+    let parent_public = parent_secret.public_key().to_sec1_point(false);
+    let parent_cose = encode_mock_ec2(parent_public.as_bytes())?;
+    let mut algorithm_output = Vec::new();
+    Encoder::new(&mut algorithm_output)
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .i64(-65_539)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let outer_auth_data =
+        mock_authenticator_data(&rp_id, &credential_id, &parent_cose, &algorithm_output, 0)?;
+
+    let seed = crate::preview_sign::mock_preview_sign_seed_cose()
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut policy_output = Vec::new();
+    Encoder::new(&mut policy_output)
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(4)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let inner_auth_data =
+        mock_authenticator_data(&rp_id, &signing_key_handle, &seed, &policy_output, 0)?;
+    let mut attestation = Vec::new();
+    Encoder::new(&mut attestation)
+        .map(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("none")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&inner_auth_data)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(0)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut response = vec![CTAP2_OK];
+    Encoder::new(&mut response)
+        .map(4)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("none")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&outer_auth_data)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(0)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(6)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("previewSign")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(7)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&attestation)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    state.preview_credential = Some(MockPreviewCredential {
+        rp_id,
+        credential_id,
+        signing_key_handle,
+    });
+    Ok(response)
+}
+
+fn authenticator_get_assertion(
+    state: &mut MockYubiKeyState,
+    payload: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let request = match decode_preview_request(payload, true) {
+        Ok(request) => request,
+        Err(status) => return Ok(vec![status]),
+    };
+    let client_data_hash = request
+        .client_data_hash
+        .as_deref()
+        .ok_or(CKR_DEVICE_ERROR)?;
+    if !authenticate(
+        state.pin_uv_auth_token.as_ref(),
+        client_data_hash,
+        request.pin_uv_auth.as_deref(),
+    ) {
+        return Ok(vec![CTAP2_ERR_PIN_INVALID]);
+    }
+    let credential = state.preview_credential.as_ref().ok_or(CKR_DEVICE_ERROR)?;
+    if request.rp_id.as_deref() != Some(credential.rp_id.as_str())
+        || request.credential_id.as_deref() != Some(credential.credential_id.as_slice())
+        || request.signing_key_handle.as_deref() != Some(credential.signing_key_handle.as_slice())
+    {
+        return Ok(vec![CTAP2_ERR_NO_CREDENTIALS]);
+    }
+    let signature = crate::preview_sign::mock_preview_sign(
+        request.additional_args.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+        request.to_be_signed.as_deref().ok_or(CKR_DEVICE_ERROR)?,
+    )
+    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut extensions = Vec::new();
+    Encoder::new(&mut extensions)
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("previewSign")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(6)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&signature)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut auth_data = Sha256::digest(credential.rp_id.as_bytes()).to_vec();
+    auth_data.push(0x85);
+    auth_data.extend_from_slice(&1_u32.to_be_bytes());
+    auth_data.extend_from_slice(&extensions);
+    let mut response = vec![CTAP2_OK];
+    Encoder::new(&mut response)
+        .map(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(1)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .map(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("id")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&credential.credential_id)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("type")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .str("public-key")
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(2)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&auth_data)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .u8(3)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .bytes(&[0; 64])
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(response)
 }
 
 fn authenticator_get_info(state: &MockYubiKeyState) -> Result<Vec<u8>, Error> {

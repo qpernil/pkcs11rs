@@ -318,6 +318,26 @@ const CKA_YUBICO_PIN_POLICY: CK_ATTRIBUTE_TYPE =
 const CKA_PKCS11RS_PIV_OBJECT_TAG: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5056;
 
+/// Generate a FIDO credential carrying an experimental previewSign
+/// registration.
+pub const CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0001;
+/// Derive one software-described previewSign verification/signing key.
+pub const CKM_PKCS11RS_PREVIEW_SIGN_DERIVE: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0002;
+/// Sign caller-supplied bytes through a previewSign GetAssertion operation.
+pub const CKM_PKCS11RS_PREVIEW_SIGN: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0003;
+/// Key type used by the importable previewSign registration object.
+pub const CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_KEY_TYPE =
+    CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0001;
+/// Canonical `PreviewSignRegistration` CBOR wrapper.
+pub const CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0001;
+/// Canonical `PreviewSignDerivedKeyRecord` CBOR wrapper.
+pub const CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0002;
+
 fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(
         key_type,

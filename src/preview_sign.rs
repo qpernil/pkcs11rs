@@ -2,8 +2,8 @@
 //! extension.
 //!
 //! This module models protocol material and performs offline ARKG-P256 public
-//! key derivation. It does not register a PKCS #11 slot, advertise a
-//! mechanism, derive an ARKG private key, or invoke a signing operation.
+//! key derivation. The FIDO backend maps those records to experimental
+//! PKCS #11 mechanisms; private-key reconstruction remains authenticator-side.
 
 use crate::storage::{ContentReference, StorageError};
 use minicbor::{data::Type, Decoder, Encoder};
@@ -12,6 +12,8 @@ use std::fmt;
 
 mod arkg;
 
+#[cfg(feature = "mock-yubikey")]
+pub(crate) use arkg::{mock_preview_sign, mock_preview_sign_seed_cose};
 pub use arkg::{
     ArkgP256DerivedKey, ArkgP256PublicSeed, ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM,
     ARKG_PUBLIC_KEY_TYPE, ESP256_ALGORITHM,
@@ -340,6 +342,12 @@ impl PreviewSignRegistration {
     /// allow-list.
     pub fn credential_id(&self) -> &[u8] {
         &self.material.credential.credential_id
+    }
+
+    /// Return the ordinary parent credential public key in its original
+    /// COSE_Key encoding.
+    pub fn credential_public_key_cose(&self) -> &[u8] {
+        &self.material.credential.public_key_cose
     }
 
     /// Return the generated signing key handle supplied inside the

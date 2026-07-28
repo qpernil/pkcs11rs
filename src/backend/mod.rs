@@ -22,7 +22,7 @@ pub(crate) use crypto::{
 };
 #[cfg(all(test, feature = "mock-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
-pub(crate) use ctap::Fido2Slot;
+pub(crate) use ctap::{project_cose_public_key, Fido2Slot};
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
 pub(crate) use piv::{
     piv_algorithm_from_certificate, piv_ec_coordinate_length, piv_ec_parameters,

@@ -269,6 +269,54 @@ fn generate_key_pair(
             mechanism.mechanism,
             CKF_GENERATE_KEY_PAIR as CK_FLAGS,
         )?;
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Fido2) {
+            if mechanism.mechanism != CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN
+                || !mechanism.pParameter.is_null()
+                || mechanism.ulParameterLen != 0
+            {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let mut public_object = key_pair_object(
+                public_template,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                CKK_EC as CK_KEY_TYPE,
+            )?;
+            let mut private_object = key_pair_object(
+                private_template,
+                CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                CKK_EC as CK_KEY_TYPE,
+            )?;
+            if !public_object.token || !private_object.token {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            public_object.verify = false;
+            private_object.sign = false;
+            private_object.derive = false;
+            validate_new_object_access(&public_object, flags, logged_in)?;
+            validate_new_object_access(&private_object, flags, logged_in)?;
+            let registration = ctx
+                ._get_slot_mut(slot_id)?
+                .fido_preview_sign_registration()?;
+            let projected = project_cose_public_key(registration.credential_public_key_cose())
+                .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
+                .ok_or(CKR_DEVICE_ERROR)?;
+            public_object.material = KeyMaterial::FidoKey {
+                public_key: projected.public_key.clone(),
+            };
+            private_object.material = KeyMaterial::FidoPreviewCredential {
+                public_key: projected.public_key,
+                registration,
+            };
+            public_object.local = true;
+            private_object.local = true;
+            public_object.key_gen_mechanism = Some(mechanism.mechanism);
+            private_object.key_gen_mechanism = Some(mechanism.mechanism);
+            public_object.set_creator(session_handle, slot_id);
+            private_object.set_creator(session_handle, slot_id);
+            *public_handle = ctx.insert_object(public_object)?;
+            *private_handle = ctx.insert_object(private_object)?;
+            return Ok(());
+        }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
             let generation =
                 piv_generate_key_pair_parameters(mechanism, public_template, private_template)?;
@@ -1012,6 +1060,77 @@ fn derive_key(
 ) -> Result<(), Error> {
     let key_handle = as_mut(key)?;
     let mechanism = _as_ref(mechanism)?;
+    if mechanism.mechanism == CKM_PKCS11RS_PREVIEW_SIGN_DERIVE {
+        let context = from_raw_parts(
+            mechanism.pParameter as *const u8,
+            mechanism.ulParameterLen as usize,
+        )?
+        .to_vec();
+        let templ = from_raw_parts(templ, attribute_count as usize)?;
+        validate_unique_template(templ)?;
+        return with_session_context_mut(session_handle, |ctx| {
+            let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+            require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
+            let base = ctx
+                .resolve_object(base_key)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            if !base.derive {
+                return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+            }
+            let registration = match base.material {
+                KeyMaterial::PreviewSignRegistration { registration } => registration,
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            };
+            let mut parsed = TokenObjectTemplate {
+                class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+                key_type: Some(CKK_EC as CK_KEY_TYPE),
+                token: false,
+                private: true,
+                sensitive: Some(true),
+                extractable: Some(false),
+                ..TokenObjectTemplate::default()
+            };
+            for attribute in templ {
+                parsed.apply_attribute(attribute).map_err(Error::from)?;
+            }
+            let mut object = parsed.into_object().map_err(Error::from)?;
+            if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                || object.key_type != CKK_EC as CK_KEY_TYPE
+                || object.token
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            object.sign = true;
+            object.derive = false;
+            validate_new_object_access(&object, flags, logged_in)?;
+            let derived = registration
+                .derive_arkg_p256(&context)
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            let projected = project_cose_public_key(derived.verification_key_cose())
+                .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
+                .ok_or(CKR_DEVICE_ERROR)?;
+            let registration_cbor = registration
+                .to_cbor()
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            let record = derived
+                .into_record(
+                    crate::storage::ContentReference::for_object(&registration_cbor),
+                    (!object.label.is_empty()).then(|| object.label.clone()),
+                )
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            object.material = KeyMaterial::PreviewSignDerived {
+                public_key: projected.public_key,
+                registration,
+                derived: record,
+            };
+            object.local = true;
+            object.key_gen_mechanism = Some(mechanism.mechanism);
+            object.set_creator(session_handle, slot_id);
+            *key_handle = ctx.insert_object(object)?;
+            Ok(())
+        });
+    }
     if mechanism.mechanism != CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE
         && mechanism.mechanism != CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE
     {
