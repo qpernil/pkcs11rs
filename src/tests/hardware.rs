@@ -1109,10 +1109,295 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 #[cfg(not(feature = "abi-tests"))]
 mod fido2_hardware {
     use super::*;
+    use crate::Connector;
     use sha2::Digest;
+    use std::collections::BTreeMap;
+    use std::ffi::CString;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     const CURRENT_PIN_ENV: &str = "PKCS11RS_FIDO2_TEST_PIN";
     const NEW_PIN_ENV: &str = "PKCS11RS_FIDO2_NEW_PIN";
+    const CROSS_INTERFACE_ITERATIONS: usize = 50;
+
+    #[derive(Clone)]
+    struct HidCandidate {
+        descriptor: crate::ctap_hid::HidDeviceDescriptor,
+        serial: String,
+        firmware: (u8, u8, u8),
+    }
+
+    #[derive(Clone)]
+    struct PcscCandidate {
+        reader: CString,
+        name: String,
+        serial: String,
+    }
+
+    struct CrossInterfaceFixture {
+        hid: HidCandidate,
+        pcsc: PcscCandidate,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CcidProbe {
+        Management,
+        Piv,
+        Fido,
+    }
+
+    impl CcidProbe {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Management => "Management",
+                Self::Piv => "PIV",
+                Self::Fido => "FIDO-over-CCID",
+            }
+        }
+
+        fn run(self, connector: &crate::PcscConnector) -> Result<(), crate::Error> {
+            match self {
+                Self::Management => crate::YubiKeyClient.discover(connector).map(|_| ()),
+                Self::Piv => crate::piv::Client
+                    .select(connector, &crate::piv::PIV_AID)
+                    .map(|_| ()),
+                Self::Fido => fido_ccid_get_info(connector),
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ProbeStats {
+        attempts: usize,
+        successes: usize,
+        errors: BTreeMap<String, usize>,
+        elapsed: Duration,
+    }
+
+    impl ProbeStats {
+        fn observe<T, E: std::fmt::Debug>(&mut self, result: Result<T, E>) {
+            self.attempts += 1;
+            match result {
+                Ok(_) => self.successes += 1,
+                Err(error) => {
+                    *self.errors.entry(format!("{error:?}")).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    fn normalize_yubico_serial(serial: &str) -> Option<String> {
+        let serial = serial.trim_start_matches('0');
+        (!serial.is_empty()).then(|| serial.to_owned())
+    }
+
+    fn discover_hid_candidates() -> Vec<HidCandidate> {
+        crate::ctap_hid::enumerate_fido_devices()
+            .expect("failed to enumerate FIDO HID devices")
+            .into_iter()
+            .filter(|descriptor| descriptor.is_yubico())
+            .filter_map(|descriptor| {
+                let io = descriptor.open().ok()?;
+                let (transport, init) =
+                    crate::ctap_hid::CtapHidTransport::connect(Box::new(io)).ok()?;
+                let transport = Rc::new(transport);
+                let device_info = crate::YubiKeyClient
+                    .discover_from_config_pages(Some(init.firmware_version), |page| {
+                        transport.command(0x42, &[page])
+                    })
+                    .ok();
+                let serial = device_info
+                    .as_ref()
+                    .and_then(|info| info.serial.as_deref())
+                    .or_else(|| descriptor.serial())
+                    .and_then(normalize_yubico_serial)?;
+                let firmware = device_info
+                    .and_then(|info| info.version)
+                    .unwrap_or(init.firmware_version);
+                Some(HidCandidate {
+                    descriptor,
+                    serial,
+                    firmware,
+                })
+            })
+            .collect()
+    }
+
+    fn open_pcsc_connector(reader: CString) -> Result<crate::PcscConnector, crate::Error> {
+        let context = pcsc::Context::establish(pcsc::Scope::System)?;
+        let connector = crate::PcscConnector {
+            reader,
+            context,
+            state: std::sync::Arc::new(Default::default()),
+        };
+        connector.refresh()?;
+        Ok(connector)
+    }
+
+    fn discover_pcsc_candidates() -> Vec<PcscCandidate> {
+        let context =
+            pcsc::Context::establish(pcsc::Scope::System).expect("failed to establish PC/SC");
+        context
+            .list_readers_owned()
+            .expect("failed to list PC/SC readers")
+            .into_iter()
+            .filter_map(|reader| {
+                let name = reader.to_string_lossy().into_owned();
+                let connector = crate::PcscConnector {
+                    reader: reader.clone(),
+                    context: context.clone(),
+                    state: std::sync::Arc::new(Default::default()),
+                };
+                connector.refresh().ok()?;
+                let info = crate::YubiKeyClient.discover(&connector).ok()?;
+                let serial = normalize_yubico_serial(info.serial.as_deref()?)?;
+                Some(PcscCandidate {
+                    reader,
+                    name,
+                    serial,
+                })
+            })
+            .collect()
+    }
+
+    fn cross_interface_fixture() -> CrossInterfaceFixture {
+        let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
+        let hid = discover_hid_candidates();
+        let pcsc = discover_pcsc_candidates();
+        let mut paired = Vec::new();
+        for hid in hid {
+            for pcsc in pcsc.iter().filter(|pcsc| pcsc.serial == hid.serial) {
+                paired.push(CrossInterfaceFixture {
+                    hid: hid.clone(),
+                    pcsc: pcsc.clone(),
+                });
+            }
+        }
+        let mut matches = paired.into_iter().filter(|fixture| {
+            selector.as_ref().is_none_or(|selector| {
+                selector == &fixture.hid.serial
+                    || selector == &fixture.hid.descriptor.name()
+                    || selector == &fixture.pcsc.name
+            })
+        });
+        let fixture = matches.next().unwrap_or_else(|| {
+            panic!(
+                "no YubiKey with the same validated serial was found over both HID and CCID; selector {selector:?}"
+            )
+        });
+        assert!(
+            matches.next().is_none(),
+            "multiple dual-interface YubiKeys matched; set PKCS11RS_FIDO2_TEST_SOURCE"
+        );
+        fixture
+    }
+
+    fn hid_get_info(descriptor: &crate::ctap_hid::HidDeviceDescriptor) -> Result<(), crate::Error> {
+        let io = descriptor.open()?;
+        let (transport, _) = crate::ctap_hid::CtapHidTransport::connect(Box::new(io))?;
+        crate::CtapClient::new(Rc::new(transport))
+            .get_info()
+            .map(|_| ())
+            .map_err(crate::CtapError::into_pkcs11)
+    }
+
+    fn fido_ccid_get_info(connector: &crate::PcscConnector) -> Result<(), crate::Error> {
+        crate::select_application(connector, &crate::FIDO2_AID)?;
+        let command = crate::CommandApdu {
+            cla: 0x80,
+            ins: 0x10,
+            p1: 0x80,
+            p2: 0,
+            data: vec![crate::ctap::AUTHENTICATOR_GET_INFO],
+            le: Some(256),
+            extended: false,
+        };
+        let response = connector.send_apdu(&command)?.require_success(&command)?;
+        match response.data.split_first() {
+            Some((&0, cbor)) if !cbor.is_empty() => Ok(()),
+            _ => Err(CKR_DEVICE_ERROR.into()),
+        }
+    }
+
+    fn run_cross_interface_phase(
+        fixture: &CrossInterfaceFixture,
+        ccid_probe: CcidProbe,
+    ) -> (ProbeStats, ProbeStats) {
+        let iteration_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let setup_barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let setup_ok = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        std::thread::scope(|scope| {
+            let hid_descriptor = fixture.hid.descriptor.clone();
+            let hid_iteration_barrier = iteration_barrier.clone();
+            let hid_setup_barrier = setup_barrier.clone();
+            let hid_setup_ok = setup_ok.clone();
+            let hid_worker = scope.spawn(move || {
+                let setup = (|| {
+                    let io = hid_descriptor
+                        .open()
+                        .map_err(|error| format!("{error:?}"))?;
+                    let (transport, _) = crate::ctap_hid::CtapHidTransport::connect(Box::new(io))
+                        .map_err(|error| format!("{error:?}"))?;
+                    Ok::<_, String>(crate::CtapClient::new(Rc::new(transport)))
+                })();
+                if setup.is_err() {
+                    hid_setup_ok.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                hid_setup_barrier.wait();
+                if !hid_setup_ok.load(std::sync::atomic::Ordering::Relaxed) {
+                    return setup
+                        .map(|_| ProbeStats::default())
+                        .and_then(|_| Err(String::from("CCID worker setup failed")));
+                }
+                let client = setup?;
+                let started = Instant::now();
+                let mut stats = ProbeStats::default();
+                for _ in 0..CROSS_INTERFACE_ITERATIONS {
+                    hid_iteration_barrier.wait();
+                    stats.observe(client.get_info());
+                }
+                stats.elapsed = started.elapsed();
+                Ok(stats)
+            });
+
+            let pcsc_reader = fixture.pcsc.reader.clone();
+            let ccid_iteration_barrier = iteration_barrier;
+            let ccid_setup_barrier = setup_barrier.clone();
+            let ccid_setup_ok = setup_ok.clone();
+            let ccid_worker = scope.spawn(move || {
+                let setup = open_pcsc_connector(pcsc_reader).map_err(|error| format!("{error:?}"));
+                if setup.is_err() {
+                    ccid_setup_ok.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                ccid_setup_barrier.wait();
+                if !ccid_setup_ok.load(std::sync::atomic::Ordering::Relaxed) {
+                    return setup
+                        .map(|_| ProbeStats::default())
+                        .and_then(|_| Err(String::from("HID worker setup failed")));
+                }
+                let connector = setup?;
+                let started = Instant::now();
+                let mut stats = ProbeStats::default();
+                for _ in 0..CROSS_INTERFACE_ITERATIONS {
+                    ccid_iteration_barrier.wait();
+                    stats.observe(ccid_probe.run(&connector));
+                }
+                stats.elapsed = started.elapsed();
+                Ok(stats)
+            });
+
+            setup_barrier.wait();
+            let hid = hid_worker
+                .join()
+                .expect("HID probe worker panicked")
+                .expect("HID probe worker could not initialize");
+            let ccid = ccid_worker
+                .join()
+                .expect("CCID probe worker panicked")
+                .expect("CCID probe worker could not initialize");
+            (hid, ccid)
+        })
+    }
 
     fn fido2_slot_id() -> CK_SLOT_ID {
         let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
@@ -1190,6 +1475,82 @@ mod fido2_hardware {
             Ok(())
         })
         .expect("selected FIDO HID authenticator did not complete authenticatorGetInfo");
+    }
+
+    #[test]
+    #[ignore = "deliberately overlaps raw HID and CCID operations on one physical YubiKey"]
+    fn diagnoses_yubikey_hid_ccid_cross_interface_concurrency() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let fixture = cross_interface_fixture();
+        eprintln!(
+            "cross-interface diagnostic uses serial {}, HID endpoint {:?}, PC/SC reader {:?}, firmware {}.{}.{}, host {}-{}",
+            fixture.hid.serial,
+            fixture.hid.descriptor.name(),
+            fixture.pcsc.name,
+            fixture.hid.firmware.0,
+            fixture.hid.firmware.1,
+            fixture.hid.firmware.2,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        );
+
+        hid_get_info(&fixture.hid.descriptor)
+            .expect("sequential HID authenticatorGetInfo baseline failed");
+        let management_connector = open_pcsc_connector(fixture.pcsc.reader.clone())
+            .expect("sequential PC/SC baseline connection failed");
+        CcidProbe::Management
+            .run(&management_connector)
+            .expect("sequential CCID Management baseline failed");
+        drop(management_connector);
+
+        let mut supported = vec![CcidProbe::Management];
+        for probe in [CcidProbe::Piv, CcidProbe::Fido] {
+            let connector = open_pcsc_connector(fixture.pcsc.reader.clone())
+                .expect("PC/SC capability probe connection failed");
+            match probe.run(&connector) {
+                Ok(()) => supported.push(probe),
+                Err(error) => eprintln!(
+                    "skipping HID versus {} phase because its sequential baseline failed: {error:?}",
+                    probe.label()
+                ),
+            }
+        }
+
+        for probe in supported {
+            let (hid, ccid) = run_cross_interface_phase(&fixture, probe);
+            eprintln!(
+                "HID GetInfo versus {}: HID {}/{} successful in {:?}, CCID {}/{} successful in {:?}",
+                probe.label(),
+                hid.successes,
+                hid.attempts,
+                hid.elapsed,
+                ccid.successes,
+                ccid.attempts,
+                ccid.elapsed,
+            );
+            if !hid.errors.is_empty() {
+                eprintln!("  HID errors: {:?}", hid.errors);
+            }
+            if !ccid.errors.is_empty() {
+                eprintln!("  CCID errors: {:?}", ccid.errors);
+            }
+
+            hid_get_info(&fixture.hid.descriptor).unwrap_or_else(|error| {
+                panic!(
+                    "HID failed its sequential health check after overlap with {}: {error:?}",
+                    probe.label()
+                )
+            });
+            let connector = open_pcsc_connector(fixture.pcsc.reader.clone())
+                .expect("PC/SC post-overlap health-check connection failed");
+            probe.run(&connector).unwrap_or_else(|error| {
+                panic!(
+                    "{} failed its sequential health check after overlap: {error:?}",
+                    probe.label()
+                )
+            });
+        }
     }
 
     #[test]
