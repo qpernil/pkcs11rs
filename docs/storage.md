@@ -155,16 +155,18 @@ by a failed deletion.
 ## Current integration boundary
 
 No storage path is read from configuration, and constructing a provider does
-not create a PKCS #11 slot. The FIDO2 backend continues to expose only
-credential-management response bytes obtained from an inserted authenticator
-after PIN login. It does not persist those responses or registration material.
+not create a PKCS #11 slot. The FIDO2 backend exposes credential-management
+response bytes after PIN login and can create session/module-local previewSign
+registration and derived-key objects. It does not persist or restore those
+objects.
 
 There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-Future previewSign integration must still define configuration, ownership and
-deletion semantics, token binding, private-data protection, and the PKCS #11
-mapping before stored FIDO registration material can become a token or session
-object.
+Future previewSign storage integration must still define configuration,
+ownership and deletion semantics, token binding, private-data protection, and
+restoration before stored FIDO registration material can become a durable
+token object. The current PKCS #11 mapping is documented in
+[Experimental FIDO previewSign boundary](preview-sign.md).

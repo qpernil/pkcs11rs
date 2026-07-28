@@ -29,7 +29,9 @@ The minimum supported Rust version is 1.85.
   YubiKey firmware that exposes it there, and over NFC on compatible
   YubiKeys. This includes PIN provisioning and changes plus read-only
   resident-credential metadata and non-operational key projections after PIN
-  login.
+  login, with an experimental opt-in previewSign registration, offline
+  derivation, and hardware-signing lifecycle on devices advertising that
+  extension.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
@@ -352,7 +354,10 @@ pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 
 The initial PIN is `123456`. Mock state, including PIN changes, currently lasts
 only for the lifetime of the loaded module and resets when the client process
-unloads or reinitializes it.
+unloads or reinitializes it. The mock also implements the complete experimental
+previewSign PKCS #11 flow: credential registration, registration-attribute
+export/import, offline ARKG derivation, GetAssertion signing, and verification
+with the derived public key.
 
 ## Persistence boundary
 
@@ -363,8 +368,9 @@ boundary. It exposes canonical backed-key CBOR logically, reads legacy
 metadata, and retains the legacy physical encoding when it can represent a
 record exactly for downgrade compatibility. FIDO persistence is not yet
 connected to a PKCS #11 slot or configuration variable. The experimental
-`previewSign` model defines canonical registration and derived-key records, but
-does not automatically persist them or expose PKCS #11 signing objects. See
+`previewSign` model defines canonical registration and derived-key records and
+exposes an initial session/module-local PKCS #11 signing flow, but does not
+automatically persist or restore those objects. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.

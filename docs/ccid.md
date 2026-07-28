@@ -60,10 +60,10 @@ OpenPGP, or YubiHSM Auth.
 
 ## FIDO2 compatibility probe
 
-YubiKey firmware 5.8 and later exposes FIDO2 through the USB CCID smart-card
-interface. Earlier YubiKey firmware exposes FIDO2 over the separate USB FIDO
-interface and therefore does not produce a FIDO2 slot over USB in this module.
-FIDO over NFC also uses the smart-card binding. Applet selection,
+Pre-release YubiKey firmware exposes FIDO2 through the USB CCID smart-card
+interface. Earlier production YubiKey firmware exposes FIDO2 over the separate
+USB FIDO interface and therefore does not produce a FIDO2 slot over USB in
+this module. FIDO over NFC also uses the smart-card binding. Applet selection,
 `authenticatorGetInfo`, legacy PIN-token login, and read-only credential
 enumeration have been validated with an earlier YubiKey over NFC on macOS.
 
@@ -72,8 +72,10 @@ AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
 `04`, and follows `91 00` status updates with `80 11 00 00` GET RESPONSE
 commands. A successfully selected applet is exposed as a mechanism-free PKCS
 #11 slot even if `authenticatorGetInfo` later fails, consistent with the other
-CCID applets. Its credential objects remain read-only; `C_SetPIN` separately
-supports PIN initialization and changes when GetInfo succeeds. Preserving the
+CCID applets. Its enumerated credential objects remain read-only; `C_SetPIN`
+separately supports PIN initialization and changes when GetInfo succeeds.
+Devices advertising the experimental `previewSign` extension expose explicit
+vendor registration, derivation, and signing mechanisms. Preserving the
 selected slot makes discovery failures visible to diagnostics, and
 token-information calls continue to report the failure. When GetInfo succeeds,
 the primary CTAP version is included in the PKCS #11 slot description and
@@ -85,9 +87,10 @@ message size, PIN/UV protocols, and transports.
 
 Read-only resident-credential enumeration is available after FIDO2 PIN login.
 It creates private, immutable data objects and, where lossless, linked
-non-operational public/private key projections. It does not expose signing or
-credential mutation. See [`fido2.md`](fido2.md) for the object mapping, local
-hardware probes, and deferred firmware questions.
+non-operational public/private key projections. Those objects do not expose
+signing or credential mutation. See [`fido2.md`](fido2.md) for the object
+mapping and local hardware probes, and [`preview-sign.md`](preview-sign.md) for
+the separate experimental lifecycle.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those
 credentials are also available as authentication providers to each ordinary
