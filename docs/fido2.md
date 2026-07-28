@@ -12,13 +12,13 @@ by `80 11 00 00` GET RESPONSE. The transport waits 100 ms between keepalive
 polls, matching Yubico's maintained `SmartCardCtapDevice` behavior and leaving
 time for user-presence interaction.
 
-Yubico's current documentation and implementation confirm that YubiKey
-firmware 5.8 and later exposes this binding over the USB CCID interface.
-Earlier YubiKey firmware uses the USB FIDO/HID interface for FIDO2 and cannot
-produce this module's FIDO2 CCID slot. FIDO over NFC also uses the smart-card
-binding. Applet selection, `authenticatorGetInfo`, legacy PIN-token login, and
-read-only resident-credential enumeration have been validated over NFC on an
-earlier YubiKey.
+Yubico's current documentation and implementation confirm that pre-release
+YubiKey firmware exposes this binding over the USB CCID interface. Earlier
+production YubiKey firmware uses the USB FIDO/HID interface for FIDO2 and
+cannot produce this module's FIDO2 CCID slot. FIDO over NFC also uses the
+smart-card binding. Applet selection, `authenticatorGetInfo`, legacy PIN-token
+login, and read-only resident-credential enumeration have been validated over
+NFC on an earlier YubiKey.
 
 Primary references:
 
@@ -51,7 +51,10 @@ label; `C_GetTokenInfo` reports the stored discovery failure.
 When GetInfo succeeds, the primary CTAP version is included in the slot
 description and token label. Debug level 2 prints the reported versions,
 extensions, AAGUID, options, maximum message size, PIN/UV protocols, and
-transports. The slot advertises no PKCS #11 cryptographic mechanisms.
+transports. A normal FIDO2 slot is mechanism-free. A device advertising the
+experimental `previewSign` extension instead exposes the explicit vendor
+registration, derivation, and signing mechanisms described in
+[previewSign mapping](preview-sign.md).
 
 The ignored compatibility test is another local probe:
 
@@ -98,7 +101,7 @@ This mapping follows the distinction between
 and FIDO's
 [authenticator-wide ClientPIN verification](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html).
 
-The production backend issues only:
+The resident-credential discovery and PIN-management paths issue only:
 
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
@@ -112,9 +115,12 @@ The production backend issues only:
   `enumerateCredentialsBegin` and
   `enumerateCredentialsGetNextCredential`.
 
-It never sends make-credential, get-assertion, update-user-information,
+They never send make-credential, get-assertion, update-user-information,
 delete-credential, authenticator-configuration, reset, or signing commands.
-Discoverable credentials and their metadata remain read-only.
+Discoverable credentials and their metadata remain read-only. The separate,
+application-selected previewSign vendor mechanisms do send MakeCredential and
+GetAssertion; those operations cannot be reached through ordinary credential
+enumeration or projected credential objects.
 
 Each sufficiently complete response becomes a private, token-resident,
 immutable `CKO_DATA` object:
@@ -161,11 +167,12 @@ The projected public key exposes its standard EC or RSA parameters and
 key objects have `CKA_ENCRYPT`, `CKA_DECRYPT`, `CKA_SIGN`, `CKA_VERIFY`, and
 `CKA_DERIVE` set to false and advertise no allowed mechanisms. In particular,
 authenticator support for the experimental `previewSign` extension does not
-show that an enumerated credential is one of its derived signing keys, and
-pkcs11rs does not yet implement the corresponding signing operation.
-The separate [previewSign protocol model](preview-sign.md) parses registration
-material and defines canonical persistence records, but is not connected to
-these resident-credential objects.
+show that an arbitrary enumerated credential carries saved registration
+metadata. previewSign registrations created through the vendor
+`C_GenerateKeyPair` mechanism are therefore augmented in memory rather than
+inferred from credential-management output. The separate
+[previewSign mapping](preview-sign.md) defines the explicit registration,
+import, derivation, and signing lifecycle.
 
 An object is not created unless the RP ID hash, user ID, credential ID, and
 encoded public key are all available. Object handles are reconciled from the
@@ -183,10 +190,12 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
 
 ## Synthetic discoverable-credential hardware fixture
 
-Production code never sends `authenticatorMakeCredential`. A test-only hook,
-compiled only into Rust test builds, can create one persistent discoverable
-credential so the read-only PKCS #11 mapping can be exercised against a
-nonempty authenticator.
+The ordinary resident-credential path never sends
+`authenticatorMakeCredential`. A test-only hook, compiled only into Rust test
+builds, can create one persistent discoverable credential so the read-only
+PKCS #11 mapping can be exercised against a nonempty authenticator. The
+explicit previewSign key-pair mechanism has its own production
+MakeCredential operation and is unrelated to this fixture.
 
 The fixture uses deliberately synthetic values:
 
@@ -315,8 +324,8 @@ rediscovered that object. Existing-PIN `changePIN` through `C_SetPIN` and
 subsequent `C_Login` verification with the replacement PIN have also succeeded
 on pre-release hardware. Additional robustness validation remains useful for:
 
-- USB CCID selection and the `U2F_V2` selection response on each YubiKey 5.8+
-  production, pre-release, FIPS, and Security Key model of interest;
+- USB CCID selection and the `U2F_V2` selection response on each pre-release,
+  FIPS, and Security Key model of interest;
 - PC/SC behavior and APDU response sizes on macOS, Linux, and Windows;
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one
   reader, and multiple simultaneous YubiKeys;
@@ -327,19 +336,21 @@ on pre-release hardware. Additional robustness validation remains useful for:
   empty stores, and firmware-added fields;
 - persistent PIN/UV auth-token lifetime and invalidation. This implementation
   intentionally does not retain a PPUAT across PKCS #11 logins;
-- `encCredStoreState` behavior on 5.8 firmware and whether it should later be
-  used only as a cache-invalidation hint;
+- `encCredStoreState` behavior on pre-release firmware and whether it should
+  later be used only as a cache-invalidation hint;
 - interaction with configured SCP03/SCP11 channels. Yubico documents FIDO2 SCP
-  over USB CCID for firmware 5.8+, but it has not been exercised here.
+  over USB CCID for pre-release firmware, but it has not been exercised here.
 
 Yubico SDK 1.17 added the WebAuthn `previewSign` extension and explicitly warns
 that the associated ARKG preview code is experimental, not production
 cryptographic guidance. pkcs11rs now has an isolated request encoder,
 structural registration parser, canonical
 [previewSign persistence model](preview-sign.md), protocol vectors, and an
-ignored capability-gated registration test. It still creates no PKCS #11
-signing objects or mechanisms, performs no ARKG derivation or signing, and does
-not write to the [content-addressed CBOR storage boundary](storage.md).
+ignored capability-gated registration test. It also exposes an experimental
+vendor PKCS #11 flow and a complete in-process mock. Registration and derived
+metadata are not yet written to the
+[content-addressed CBOR storage boundary](storage.md), so restoration after
+module finalization remains deferred.
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

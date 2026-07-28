@@ -4,9 +4,9 @@
 signing seed with an ordinary FIDO credential and later asking the
 authenticator to sign with a key derived from that seed. The implementation in
 this repository includes protocol encoding, structural response validation,
-canonical persistence records, and offline ARKG-P256 public-key derivation. It
-does not yet expose a PKCS #11 slot, object, derivation mechanism, or signing
-mechanism.
+canonical persistence records, offline ARKG-P256 public-key derivation, and an
+initial PKCS #11 mapping. The mapping is deliberately session/module-local:
+there is still no configured FIDO storage provider or automatic restoration.
 
 The protocol design is based on Yubico's
 [previewSign extension specification](https://yubicolabs.github.io/webauthn-sign-extension/4/)
@@ -18,8 +18,7 @@ cryptographic API.
 ## Registration wire format
 
 The extension identifier is `previewSign`. The
-`authenticatorMakeCredential` extension input used by the ignored hardware
-test is:
+`authenticatorMakeCredential` extension input is:
 
 ```text
 {
@@ -39,6 +38,23 @@ The request creates a resident parent credential for the dedicated RP ID
 make-credential permission token bound to that RP ID and sends
 `pinUvAuthParam` and `pinUvAuthProtocol`. No PIN fields are sent for an
 authenticator without a configured PIN.
+
+Signing uses `authenticatorGetAssertion` with the parent credential ID in the
+ordinary allow-list and this exact extension input:
+
+```text
+{
+  2: signing-key-handle,
+  6: bytes-to-sign,
+  7: bstr .cbor COSE_Sign_Args
+}
+```
+
+The signed authenticator extension output is `{6: signature}`. The parent
+credential ID and key `2` are intentionally different values. The CTAP parser
+extracts key `6` only from authenticator data carrying the extension-data flag;
+the ordinary WebAuthn assertion signature is not returned as the PKCS #11
+signature.
 
 A successful previewSign registration must contain both:
 
@@ -137,7 +153,57 @@ A test-only authenticator mock holds the draft's private seed, authenticates and
 opens generated tickets, reproduces the draft's exact derived private scalar,
 and signs digests that are verified against the production-derived public key.
 It also rejects modified tags, contexts, and malformed ephemeral points. No
-private-seed operation is compiled into the production API.
+private-seed operation is compiled into a normal hardware build. The
+`mock-yubikey` feature includes that private side specifically to provide a
+self-contained test authenticator.
+
+## PKCS #11 mapping
+
+The FIDO slot advertises these vendor mechanisms only when
+`authenticatorGetInfo` advertises `previewSign`:
+
+| Constant | Numeric value | Purpose |
+| --- | ---: | --- |
+| `CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN` | `CKM_VENDOR_DEFINED \| 0x50530001` | register the parent credential and signing seed |
+| `CKM_PKCS11RS_PREVIEW_SIGN_DERIVE` | `CKM_VENDOR_DEFINED \| 0x50530002` | derive a public key, ticket, and context offline |
+| `CKM_PKCS11RS_PREVIEW_SIGN` | `CKM_VENDOR_DEFINED \| 0x50530003` | request the extension signature through GetAssertion |
+
+`C_Login` obtains a PIN/UV token scoped to the dedicated previewSign RP with
+make-credential and get-assertion permissions. It is zeroized on logout, PIN
+change, session-state reset, and reconnect.
+
+The initial lifecycle is:
+
+1. `C_GenerateKeyPair` with the vendor key-pair mechanism calls
+   MakeCredential. The returned public object projects the ordinary parent
+   credential public key. The private credential object is non-signing and
+   exposes the canonical registration through
+   `CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION`.
+2. The application reads that attribute and calls `C_CreateObject` to import a
+   session-only private registration object with key type
+   `CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION`. It is derivation-capable but not
+   signing-capable.
+3. `C_DeriveKey` on the registration object performs ARKG public derivation in
+   software. The mechanism parameter is the raw public context, from zero to
+   64 bytes. The result is a session-only P-256 private-key object whose public
+   key is available through standard public-key information and whose complete
+   wrappers are readable as
+   `CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION` and
+   `CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY`.
+4. `C_Sign` with `CKM_PKCS11RS_PREVIEW_SIGN` sends the parent credential ID,
+   signing-key handle, 32-byte ESP256 digest, and preserved COSE_Sign_Args to
+   GetAssertion. It returns the 64-byte raw P-256 `r || s` signature.
+
+The generated credential objects are marked as token objects so they outlive
+the creating session, but without a storage provider their previewSign
+metadata lasts only for the initialized module instance. Imported registration
+objects and derived signing keys are intentionally session objects in this
+phase. No operation creates, modifies, or deletes persisted metadata.
+
+The in-process mock exercises this complete flow through the exported PKCS #11
+entry points: login with the initial PIN `123456`, GenerateKeyPair, read and
+re-import the registration attribute, DeriveKey, Sign, and ordinary software
+verification with the derived public key.
 
 ## Hardware status
 
@@ -162,6 +228,6 @@ PKCS11RS_FIDO2_TEST_PIN='' \
 
 Open hardware questions include positive registration vectors from a
 compatible pre-release device, attestation verification and trust policy,
-end-to-end ARKG derivation interoperability, ticket lifetime and replay
-properties, whether token serial is sufficient routing metadata, and the
-eventual PKCS #11 mechanism and object model.
+end-to-end ARKG derivation/signing interoperability, ticket lifetime and replay
+properties, whether token serial is sufficient routing metadata, and storage
+provider configuration and restoration.
