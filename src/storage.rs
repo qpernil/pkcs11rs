@@ -168,6 +168,8 @@ impl ContentReference {
 /// Failures produced by a storage provider.
 #[derive(Debug)]
 pub enum StorageError {
+    /// No persistence provider is configured for the logical token.
+    Unavailable,
     /// A filesystem operation failed.
     Io(io::Error),
     /// A content reference was malformed.
@@ -187,6 +189,7 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unavailable => formatter.write_str("storage provider is unavailable"),
             Self::Io(error) => write!(formatter, "storage I/O failed: {error}"),
             Self::InvalidReference => formatter.write_str("invalid storage content reference"),
             Self::Integrity => formatter.write_str("stored object failed its integrity check"),
@@ -219,6 +222,15 @@ impl From<io::Error> for StorageError {
 
 /// Persistence boundary for immutable, content-addressed CBOR objects.
 pub trait StorageProvider {
+    /// Return whether this provider can attempt persistent mutations.
+    ///
+    /// Callers use this to reject an operation before an irreversible hardware
+    /// action when persistence is known to be unavailable. A positive result
+    /// does not guarantee that a later write will succeed.
+    fn supports_mutation(&self) -> bool {
+        true
+    }
+
     /// List all valid objects currently available, in reference order.
     fn list(&self) -> Result<Vec<ContentReference>, StorageError>;
 
@@ -233,6 +245,35 @@ pub trait StorageProvider {
 
     /// Delete an object, returning whether it was present.
     fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError>;
+}
+
+/// A provider installed when a logical token has no persistence configuration.
+///
+/// Every operation fails explicitly so an unavailable provider cannot be
+/// mistaken for a healthy but empty store.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnavailableStorageProvider;
+
+impl StorageProvider for UnavailableStorageProvider {
+    fn supports_mutation(&self) -> bool {
+        false
+    }
+
+    fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn get(&self, _reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn put(&self, _object: &[u8]) -> Result<ContentReference, StorageError> {
+        Err(StorageError::Unavailable)
+    }
+
+    fn delete(&self, _reference: &ContentReference) -> Result<bool, StorageError> {
+        Err(StorageError::Unavailable)
+    }
 }
 
 /// A local provider backed by immutable files in an `objects` directory.
@@ -446,6 +487,26 @@ fn lower_hex_value(value: u8) -> Result<u8, StorageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_provider_never_looks_like_an_empty_store() {
+        let provider = UnavailableStorageProvider;
+        let reference = ContentReference::for_object(&[0xa0]);
+        assert!(!provider.supports_mutation());
+        assert!(matches!(provider.list(), Err(StorageError::Unavailable)));
+        assert!(matches!(
+            provider.get(&reference),
+            Err(StorageError::Unavailable)
+        ));
+        assert!(matches!(
+            provider.put(&[0xa0]),
+            Err(StorageError::Unavailable)
+        ));
+        assert!(matches!(
+            provider.delete(&reference),
+            Err(StorageError::Unavailable)
+        ));
+    }
     use std::sync::Arc;
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
