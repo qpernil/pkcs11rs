@@ -5,7 +5,7 @@ use crate::{
     parse_yubihsm_pkcs11_metadata,
     storage::StorageProvider,
     KeyMaterial, Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmObjectKey,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot, CKA_ID, CKA_LABEL,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot, CKA_ID, CKA_LABEL, CKA_SIGN,
     CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKO_SECRET_KEY,
     CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
     CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
@@ -2303,7 +2303,36 @@ fn yubihsm_storage_provider_migrates_legacy_key_metadata_on_read() {
     assert_eq!(restored, reference);
     assert_eq!(
         StorageProvider::get(&slot, &reference).unwrap(),
-        Some(canonical)
+        Some(canonical.clone())
+    );
+    assert!(peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .any(|(_, value)| value.starts_with(b"MDB1\x03\x00\x01\x01")));
+
+    let mut private = KeyAttributes::new();
+    private
+        .insert(u64::from(CKA_SIGN), KeyAttributeValue::Boolean(true))
+        .unwrap();
+    let mut canonical_only = BackedKeyMetadata::new(record.backing().clone());
+    canonical_only
+        .insert_aspect(u64::from(CKO_PRIVATE_KEY), private)
+        .unwrap();
+    canonical_only
+        .insert_aspect(u64::from(CKO_PUBLIC_KEY), KeyAttributes::new())
+        .unwrap();
+    let canonical_only = canonical_only.to_cbor().unwrap();
+    let canonical_only_reference = StorageProvider::put(&slot, &canonical_only).unwrap();
+    assert_ne!(canonical_only_reference, reference);
+    assert!(peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .any(|(_, value)| value == &canonical_only));
+    assert_eq!(
+        StorageProvider::get(&slot, &canonical_only_reference).unwrap(),
+        Some(canonical_only)
     );
 }
 

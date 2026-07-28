@@ -10,6 +10,7 @@ use minicbor::{Decoder, Encoder};
 const YUBIHSM_BACKING_PROVIDER: &str = "pkcs11rs.yubihsm";
 const YUBIHSM_BACKING_SCHEMA: &str = "pkcs11rs.yubihsm.object";
 const YUBIHSM_BACKING_SCHEMA_VERSION: u64 = 1;
+const YUBIHSM_LEGACY_METADATA_MAX_ATTRIBUTE_LENGTH: usize = 256;
 
 #[derive(Clone, Debug)]
 pub(crate) struct HsmAuthProvider {
@@ -810,6 +811,87 @@ fn sparse_identity(attributes: &KeyAttributes) -> Result<(Option<Vec<u8>>, Optio
         }
     }
     Ok((id, label))
+}
+
+fn encode_legacy_yubihsm_key_metadata(
+    record: &BackedKeyMetadata,
+    target: &YubiHsmObjectInfo,
+) -> Result<Option<Vec<u8>>, Error> {
+    let primary_class = yubihsm_object_class(target);
+    let Some(primary) = record.aspect(primary_class) else {
+        return Ok(None);
+    };
+    let Ok((id, label)) = sparse_identity(primary) else {
+        return Ok(None);
+    };
+    let legacy_projects_public =
+        primary_class != u64::from(CKO_PUBLIC_KEY) && yubihsm_object_has_public_key(target);
+    let projected_public = if primary_class == u64::from(CKO_PUBLIC_KEY) {
+        None
+    } else {
+        record.aspect(u64::from(CKO_PUBLIC_KEY))
+    };
+    if projected_public.is_some() != legacy_projects_public {
+        return Ok(None);
+    }
+    let (public_id, public_label) = match projected_public {
+        Some(attributes) => {
+            let Ok(identity) = sparse_identity(attributes) else {
+                return Ok(None);
+            };
+            identity
+        }
+        None => (None, None),
+    };
+
+    let mut encoded = b"MDB1".to_vec();
+    encoded.push(target.object_type);
+    encoded.extend_from_slice(&target.id.to_be_bytes());
+    encoded.push(target.sequence);
+    for (tag, value) in [
+        (1, id.as_deref()),
+        (2, label.as_deref().map(str::as_bytes)),
+        (3, public_id.as_deref()),
+        (4, public_label.as_deref().map(str::as_bytes)),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        if value.len() > YUBIHSM_LEGACY_METADATA_MAX_ATTRIBUTE_LENGTH {
+            return Ok(None);
+        }
+        encoded.push(tag);
+        encoded.extend_from_slice(
+            &u16::try_from(value.len())
+                .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?
+                .to_be_bytes(),
+        );
+        encoded.extend_from_slice(value);
+    }
+
+    let metadata_info = YubiHsmObjectInfo {
+        capabilities: [0; 8],
+        id: 0,
+        length: u16::try_from(encoded.len()).unwrap_or(u16::MAX),
+        domains: target.domains,
+        object_type: YUBIHSM_OPAQUE,
+        algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+        sequence: 0,
+        origin: 0,
+        label: format!(
+            "Meta object for 0x{:02x}{:02x}{:04x}",
+            target.sequence, target.object_type, target.id
+        ),
+        delegated_capabilities: [0; 8],
+    };
+    let round_trip = parse_yubihsm_pkcs11_metadata(&metadata_info, &encoded)?
+        .to_backed_key(target, true)?
+        .to_cbor()
+        .map_err(key_metadata_error)?;
+    if round_trip != record.to_cbor().map_err(key_metadata_error)? {
+        return Ok(None);
+    }
+    Ok(Some(encoded))
 }
 
 fn encode_yubihsm_key_backing(
@@ -2377,6 +2459,9 @@ impl YubiHsmSlot {
                 return Ok((reference, info.id));
             }
         }
+        let physical_object = encode_legacy_yubihsm_key_metadata(&record, &target)
+            .map_err(storage_backend_error)?
+            .unwrap_or_else(|| object.to_vec());
         let capabilities = if yubihsm_capability(&target.capabilities, 0x10) {
             yubihsm_capabilities(&[0x10])
         } else {
@@ -2394,7 +2479,7 @@ impl YubiHsmSlot {
                     capabilities,
                     algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
                 },
-                object,
+                &physical_object,
             )
             .map_err(storage_backend_error)?,
         )
