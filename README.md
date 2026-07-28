@@ -362,16 +362,18 @@ with the derived public key.
 ## Persistence boundary
 
 The crate exposes a `StorageProvider` boundary and a local implementation for
-immutable, content-addressed CBOR blobs. The YubiHSM backend validates this
-design by exposing its internal key-metadata companions through the same
-boundary. It exposes canonical backed-key CBOR logically, reads legacy
-metadata, and retains the legacy physical encoding when it can represent a
-record exactly for downgrade compatibility. Legacy `MDB1` companions retain
-Yubico's `Meta object for ...` label, while canonical-CBOR companions use a
-distinct `pkcs11rs metadata ...` label so other YubiHSM tooling neither
-misparses them as MDB1 nor obscures their ownership from an administrator.
+immutable, content-addressed CBOR blobs. It is intended for FIDO and other
+backends where content-addressed external persistence fits the hardware model;
 FIDO persistence is not yet connected to a PKCS #11 slot or configuration
-variable. The experimental
+variable.
+
+YubiHSM metadata persistence is instead private to that backend. It uses the
+same canonical backed-key CBOR data model, reads legacy metadata, and retains
+the legacy physical encoding when it can represent a record exactly for
+downgrade compatibility. Legacy `MDB1` companions retain Yubico's
+`Meta object for ...` label, while canonical-CBOR companions use a distinct
+`pkcs11rs metadata ...` label so other YubiHSM tooling neither misparses them
+as MDB1 nor obscures their ownership from an administrator. The experimental
 `previewSign` model defines canonical registration and derived-key records and
 exposes an initial session/module-local PKCS #11 signing flow, but does not
 automatically persist or restore those objects. See
