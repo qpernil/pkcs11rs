@@ -1,9 +1,13 @@
 use super::*;
 use crate::{
-    configured_yubihsm_public_discovery_credential, parse_yubihsm_pkcs11_metadata, KeyMaterial,
-    Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig,
-    YubiHsmSessionRole, YubiHsmSlot, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
-    CKO_PUBLIC_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
+    configured_yubihsm_public_discovery_credential,
+    key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
+    parse_yubihsm_pkcs11_metadata,
+    storage::StorageProvider,
+    KeyMaterial, Slot, TokenObject, YubiHsmDiscoveryCache, YubiHsmObjectKey,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot, CKA_ID, CKA_LABEL,
+    CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKO_SECRET_KEY,
+    CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
     CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
     YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
     YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
@@ -1972,6 +1976,71 @@ fn yubihsm_metadata_rejects_duplicate_and_truncated_attributes() {
     assert!(parse_yubihsm_pkcs11_metadata(&info, &truncated).is_err());
 }
 
+#[test]
+fn yubihsm_canonical_metadata_rejects_a_mismatched_primary_class() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+
+    let mut backing = Vec::new();
+    minicbor::Encoder::new(&mut backing)
+        .map(7)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .str("pkcs11rs.yubihsm.object")
+        .unwrap()
+        .u8(2)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .u8(3)
+        .unwrap()
+        .u8(YUBIHSM_ASYMMETRIC_KEY)
+        .unwrap()
+        .u8(4)
+        .unwrap()
+        .u16(1)
+        .unwrap()
+        .u8(5)
+        .unwrap()
+        .u8(1)
+        .unwrap()
+        .u8(6)
+        .unwrap()
+        .u16(0xffff)
+        .unwrap()
+        .u8(7)
+        .unwrap()
+        .u64(u64::from(CKO_SECRET_KEY))
+        .unwrap();
+    let mut attributes = KeyAttributes::new();
+    attributes
+        .insert(
+            u64::from(CKA_LABEL),
+            KeyAttributeValue::Text("wrong class".to_owned()),
+        )
+        .unwrap();
+    let mut record = BackedKeyMetadata::new(KeyBacking::new("pkcs11rs.yubihsm", backing).unwrap());
+    record
+        .insert_aspect(u64::from(CKO_SECRET_KEY), attributes)
+        .unwrap();
+    let value = record.to_cbor().unwrap();
+    {
+        let mut metadata_objects = peer.metadata_objects.borrow_mut();
+        let (_, stored) = metadata_objects.get_mut(&101).unwrap();
+        *stored = value;
+    }
+
+    let mut slot = cache_test_slot(peer, false);
+    Slot::login(&mut slot, b"0001password").unwrap();
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.label, "test-rsa");
+}
+
 fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
@@ -2183,6 +2252,59 @@ fn yubihsm_metadata_replacement_is_failure_safe_with_public_discovery_credential
 #[test]
 fn yubihsm_metadata_replacement_is_failure_safe_without_public_discovery_credential() {
     assert_metadata_replacement_is_failure_safe(false);
+}
+
+#[test]
+fn yubihsm_storage_provider_migrates_legacy_key_metadata_on_read() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let mut slot = cache_test_slot(peer.clone(), false);
+    let _ = Slot::token_objects(&slot, 7).unwrap();
+    Slot::login(&mut slot, b"0001password").unwrap();
+
+    let references = StorageProvider::list(&slot).unwrap();
+    assert_eq!(references.len(), 1);
+    let reference = references[0].clone();
+    let canonical = StorageProvider::get(&slot, &reference).unwrap().unwrap();
+    assert!(!canonical.starts_with(b"MDB1"));
+    let record = BackedKeyMetadata::from_cbor(&canonical).unwrap();
+    assert_eq!(record.backing().provider(), "pkcs11rs.yubihsm");
+    let private = record.aspect(u64::from(CKO_PRIVATE_KEY)).unwrap();
+    assert_eq!(
+        private.get(u64::from(CKA_ID)),
+        Some(&KeyAttributeValue::Bytes(b"shared-id".to_vec()))
+    );
+    assert_eq!(
+        private.get(u64::from(CKA_LABEL)),
+        Some(&KeyAttributeValue::Text("metadata private key".to_owned()))
+    );
+    let public = record.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap();
+    assert_eq!(
+        public.get(u64::from(CKA_ID)),
+        Some(&KeyAttributeValue::Bytes(b"shared-id".to_vec()))
+    );
+    assert_eq!(
+        public.get(u64::from(CKA_LABEL)),
+        Some(&KeyAttributeValue::Text("metadata public key".to_owned()))
+    );
+
+    let puts_before = inner_command_count(peer.as_ref(), CommandCode::PutOpaque);
+    assert_eq!(StorageProvider::put(&slot, &canonical).unwrap(), reference);
+    assert_eq!(
+        inner_command_count(peer.as_ref(), CommandCode::PutOpaque),
+        puts_before
+    );
+
+    assert!(StorageProvider::delete(&slot, &reference).unwrap());
+    assert!(StorageProvider::get(&slot, &reference).unwrap().is_none());
+    assert!(!StorageProvider::delete(&slot, &reference).unwrap());
+
+    let restored = StorageProvider::put(&slot, &canonical).unwrap();
+    assert_eq!(restored, reference);
+    assert_eq!(
+        StorageProvider::get(&slot, &reference).unwrap(),
+        Some(canonical)
+    );
 }
 
 fn assert_invalid_metadata_is_replaced(public_discovery: bool) {

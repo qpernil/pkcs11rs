@@ -1,31 +1,38 @@
 # Content-addressed CBOR storage
 
-The public `storage` module defines persistence infrastructure intended for a
-future hybrid FIDO hardware/software slot. It is usable as a standalone Rust
-API today, but it is not connected to PKCS #11 slot discovery, an environment
+The public `storage` module defines persistence infrastructure for backed key
+metadata. It is usable as a standalone Rust API through the local provider, and
+the YubiHSM backend uses the same boundary for its internal opaque metadata
+objects. It is not yet connected to FIDO slot discovery, an environment
 variable, resident-credential enumeration, or any signing mechanism.
 
 ## Provider boundary
 
-`StorageProvider` is a `Send + Sync` trait with four operations:
+`StorageProvider` has four operations:
 
 - `list` returns all valid content references in stable order;
 - `get` retrieves an object and verifies its content hash;
 - `put` stores one CBOR item idempotently and returns its reference;
 - `delete` removes one referenced object and reports whether it existed.
 
-Providers treat object bytes as opaque. `put` verifies that the input contains
-exactly one well-formed CBOR data item, but does not decode, re-encode,
-deduplicate fields, or impose a schema. A future schema layer must produce any
-required canonical representation before storing it. The exact submitted bytes
-are what the content hash identifies and what `get` returns.
+Content references always identify the exact logical bytes returned by `get`.
+The local provider treats object bytes as opaque and checks only that they
+contain exactly one well-formed CBOR item. A device-specific provider may
+additionally validate its own backing schema or translate a legacy physical
+representation to canonical logical bytes. Providers do not re-encode
+canonical records submitted to `put`.
+
+The trait has no `Send` or `Sync` supertrait. A provider follows its owning
+backend's concurrency model: the local provider is independently thread-safe,
+while the YubiHSM provider is reached through the module and slot locks that
+already serialize access to its single secure-session state.
 
 ## Backed-key metadata
 
 The public `key_metadata` module defines the provider-neutral canonical schema
 for one backing key and its potential PKCS #11 key aspects. Storage location is
 not part of the record, so identical model bytes can be held by a local
-provider, a future YubiHSM opaque-object provider, or a future FIDO large-blob
+provider, the YubiHSM opaque-object provider, or a future FIDO large-blob
 provider.
 
 The outer canonical CBOR map is:
@@ -103,6 +110,35 @@ aliases, garbage collection, or reference tracking. References between future
 schema objects can use the algorithm-tagged content reference, but the provider
 does not interpret or traverse them.
 
+## YubiHSM provider
+
+`YubiHsmSlot` implements the same provider over internal opaque-data companion
+objects. Its provider-owned backing identifies the native object by type, ID,
+sequence, and domains, and records the primary PKCS #11 key class. These fields
+are checked against the live target object and the companion label before a
+record is accepted. A stale record cannot attach to a newly created object that
+reuses the same ID.
+
+`list` and `get` expose canonical backed-key records and content references,
+not the physical opaque-object encoding. Legacy `MDB1` key metadata is decoded
+and returned as canonical `pkcs11rs.backed-key` CBOR without rewriting the
+device merely because it was read. The legacy public-key behavior is preserved
+as an explicit public aspect during this conversion. Certificate and other
+non-key companion metadata remains outside this provider.
+
+`put` accepts canonical YubiHSM-backed records, validates them against the live
+target, deduplicates identical logical content, and creates the companion with
+YubiHSM object-ID auto-allocation. `delete` removes every physical companion
+whose logical content has the requested reference. Mutating operations require
+a secure session with the applicable YubiHSM capabilities.
+
+The existing PKCS #11 metadata path now writes this canonical format. It still
+projects only its currently supported sparse `CKA_ID` and `CKA_LABEL`
+overrides; the generic record model can represent additional supported key
+attributes for later lifecycle work. Replacement remains failure-safe: the new
+companion is written before old companions are removed, and a later update
+repairs ambiguity left by a failed deletion.
+
 ## Current integration boundary
 
 No storage path is read from configuration, and constructing a provider does
@@ -118,6 +154,4 @@ no Git operations and defines no synchronization or merge policy.
 Future previewSign integration must still define configuration, ownership and
 deletion semantics, token binding, private-data protection, and the PKCS #11
 mapping before stored FIDO registration material can become a token or session
-object. YubiHSM integration will use the same backed-key schema for metadata
-opaque objects and translate legacy `MDB1` values to the canonical schema when
-they are read.
+object.

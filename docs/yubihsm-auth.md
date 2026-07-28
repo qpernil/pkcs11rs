@@ -209,6 +209,15 @@ encoded by the native YubiHSM object. New metadata uses YubiHSM
 auto-allocation. Destroying the main object also deletes every linked metadata
 companion.
 
+New companions contain canonical `pkcs11rs.backed-key` CBOR. The
+provider-owned backing also binds the target domains and primary key class, and
+private/public aspects hold their sparse attributes. The YubiHSM slot
+implements the common `StorageProvider` interface over these companions.
+Legacy `MDB1` key metadata remains readable and is converted to canonical
+logical records on the fly; the device is rewritten only by a later metadata
+mutation. See [Content-addressed CBOR storage](storage.md#yubihsm-provider) for
+the schema and provider behavior.
+
 ## YubiHSM login
 
 An ordinary YubiHSM slot supports two `C_Login` PIN forms:
