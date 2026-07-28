@@ -41,7 +41,9 @@ struct MockYubiKeyState {
     pending_response: Vec<u8>,
     pin: Option<Zeroizing<Vec<u8>>>,
     key_agreement: Option<SecretKey>,
-    pin_uv_auth_token: Zeroizing<[u8; 32]>,
+    pin_uv_auth_token: Zeroizing<Vec<u8>>,
+    pin_uv_auth_protocols: Vec<u8>,
+    permissioned_pin_uv_auth_tokens: bool,
     resident_credential: MockResidentCredential,
     preview_credential: Option<MockPreviewCredential>,
 }
@@ -88,7 +90,9 @@ impl MockYubiKeyState {
             pending_response: Vec::new(),
             pin: Some(Zeroizing::new(b"123456".to_vec())),
             key_agreement: None,
-            pin_uv_auth_token: Zeroizing::new([0x5a; 32]),
+            pin_uv_auth_token: Zeroizing::new(vec![0x5a; 32]),
+            pin_uv_auth_protocols: vec![2, 1],
+            permissioned_pin_uv_auth_tokens: true,
             resident_credential,
             preview_credential: None,
         })
@@ -106,6 +110,17 @@ impl MockYubiKeyConnector {
     pub(crate) fn new() -> Result<Self, Error> {
         Ok(Self {
             state: Mutex::new(MockYubiKeyState::new()?),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn protocol_one_only() -> Result<Self, Error> {
+        let mut state = MockYubiKeyState::new()?;
+        state.pin_uv_auth_protocols = vec![1];
+        state.pin_uv_auth_token = Zeroizing::new(vec![0x5a; 16]);
+        state.permissioned_pin_uv_auth_tokens = false;
+        Ok(Self {
+            state: Mutex::new(state),
         })
     }
 
@@ -610,7 +625,10 @@ fn authenticator_credential_management(
     };
     match request.subcommand {
         2 | 4 => {
-            if request.protocol != Some(2) {
+            let Some(protocol) = request.protocol else {
+                return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+            };
+            if !state.pin_uv_auth_protocols.contains(&protocol) {
                 return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
             }
             let mut authenticated = vec![request.subcommand];
@@ -618,6 +636,7 @@ fn authenticator_credential_management(
                 authenticated.extend_from_slice(parameters);
             }
             if !authenticate(
+                protocol,
                 state.pin_uv_auth_token.as_ref(),
                 &authenticated,
                 request.auth.as_deref(),
@@ -720,7 +739,14 @@ fn authenticator_make_credential(
         .client_data_hash
         .as_deref()
         .ok_or(CKR_DEVICE_ERROR)?;
+    let Some(protocol) = request.protocol else {
+        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+    };
+    if !state.pin_uv_auth_protocols.contains(&protocol) {
+        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+    }
     if !authenticate(
+        protocol,
         state.pin_uv_auth_token.as_ref(),
         client_data_hash,
         request.pin_uv_auth.as_deref(),
@@ -820,15 +846,19 @@ fn authenticator_get_assertion(
         .client_data_hash
         .as_deref()
         .ok_or(CKR_DEVICE_ERROR)?;
+    let Some(protocol) = request.protocol else {
+        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+    };
+    if !state.pin_uv_auth_protocols.contains(&protocol) {
+        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+    }
     if !authenticate(
+        protocol,
         state.pin_uv_auth_token.as_ref(),
         client_data_hash,
         request.pin_uv_auth.as_deref(),
     ) {
         return Ok(vec![CTAP2_ERR_PIN_INVALID]);
-    }
-    if request.protocol != Some(2) {
-        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
     }
     if request.signing_key_handle.is_none() {
         let credential = &mut state.resident_credential;
@@ -929,7 +959,8 @@ fn authenticator_get_assertion(
 
 fn authenticator_get_info(state: &MockYubiKeyState) -> Result<Vec<u8>, Error> {
     let mut response = vec![CTAP2_OK];
-    Encoder::new(&mut response)
+    let mut encoder = Encoder::new(&mut response);
+    encoder
         .map(8)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(1)
@@ -962,7 +993,7 @@ fn authenticator_get_info(state: &MockYubiKeyState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("pinUvAuthToken")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .bool(true)
+        .bool(state.permissioned_pin_uv_auth_tokens)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .str("credMgmt")
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
@@ -982,10 +1013,17 @@ fn authenticator_get_info(state: &MockYubiKeyState) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .u8(6)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .array(1)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
-        .u8(2)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .array(
+            u64::try_from(state.pin_uv_auth_protocols.len())
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
+        )
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    for protocol in &state.pin_uv_auth_protocols {
+        encoder
+            .u8(*protocol)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    }
+    encoder
         .u8(9)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
         .array(1)
@@ -1017,14 +1055,17 @@ fn authenticator_client_pin(
         Ok(request) => request,
         Err(status) => return Ok(vec![status]),
     };
-    if request.protocol != Some(2) {
+    let Some(protocol) = request.protocol else {
+        return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
+    };
+    if !state.pin_uv_auth_protocols.contains(&protocol) {
         return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
     }
     match request.subcommand {
         Some(2) => key_agreement_response(state),
         Some(3) => set_pin(state, request),
         Some(4) => change_pin(state, request),
-        Some(9) => pin_token(state, request),
+        Some(5 | 9) => pin_token(state, request),
         _ => Ok(vec![CTAP1_ERR_INVALID_COMMAND]),
     }
 }
@@ -1140,7 +1181,8 @@ fn set_pin(state: &mut MockYubiKeyState, request: ClientPinRequest) -> Result<Ve
     if state.pin.is_some() {
         return Ok(vec![CTAP2_ERR_PIN_POLICY_VIOLATION]);
     }
-    let shared = match shared_secret(state, request.peer.as_ref()) {
+    let protocol = request.protocol.ok_or(CKR_DEVICE_ERROR)?;
+    let shared = match shared_secret(state, request.peer.as_ref(), protocol) {
         Ok(shared) => shared,
         Err(status) => return Ok(vec![status]),
     };
@@ -1148,10 +1190,10 @@ fn set_pin(state: &mut MockYubiKeyState, request: ClientPinRequest) -> Result<Ve
         Some(value) => value,
         None => return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]),
     };
-    if !authenticate(&shared[..32], &encrypted, request.auth.as_deref()) {
+    if !authenticate(protocol, &shared[..32], &encrypted, request.auth.as_deref()) {
         return Ok(vec![CTAP2_ERR_PIN_INVALID]);
     }
-    let plaintext = match decrypt(&shared[..], &encrypted) {
+    let plaintext = match decrypt(protocol, &shared, &encrypted) {
         Ok(value) => value,
         Err(status) => return Ok(vec![status]),
     };
@@ -1167,7 +1209,8 @@ fn change_pin(state: &mut MockYubiKeyState, request: ClientPinRequest) -> Result
     let Some(current) = state.pin.as_ref() else {
         return Ok(vec![CTAP2_ERR_PIN_NOT_SET]);
     };
-    let shared = match shared_secret(state, request.peer.as_ref()) {
+    let protocol = request.protocol.ok_or(CKR_DEVICE_ERROR)?;
+    let shared = match shared_secret(state, request.peer.as_ref(), protocol) {
         Ok(shared) => shared,
         Err(status) => return Ok(vec![status]),
     };
@@ -1177,12 +1220,16 @@ fn change_pin(state: &mut MockYubiKeyState, request: ClientPinRequest) -> Result
     };
     let mut authenticated = new_pin.clone();
     authenticated.extend_from_slice(&old_hash);
-    if !authenticate(&shared[..32], &authenticated, request.auth.as_deref())
-        || !pin_hash_matches(&shared[..], &old_hash, current)
+    if !authenticate(
+        protocol,
+        &shared[..32],
+        &authenticated,
+        request.auth.as_deref(),
+    ) || !pin_hash_matches(protocol, &shared, &old_hash, current)
     {
         return Ok(vec![CTAP2_ERR_PIN_INVALID]);
     }
-    let plaintext = match decrypt(&shared[..], &new_pin) {
+    let plaintext = match decrypt(protocol, &shared, &new_pin) {
         Ok(value) => value,
         Err(status) => return Ok(vec![status]),
     };
@@ -1198,17 +1245,18 @@ fn pin_token(state: &mut MockYubiKeyState, request: ClientPinRequest) -> Result<
     let Some(pin) = state.pin.as_ref() else {
         return Ok(vec![CTAP2_ERR_PIN_NOT_SET]);
     };
-    let shared = match shared_secret(state, request.peer.as_ref()) {
+    let protocol = request.protocol.ok_or(CKR_DEVICE_ERROR)?;
+    let shared = match shared_secret(state, request.peer.as_ref(), protocol) {
         Ok(shared) => shared,
         Err(status) => return Ok(vec![status]),
     };
     let Some(hash) = request.pin_hash else {
         return Ok(vec![CTAP2_ERR_MISSING_PARAMETER]);
     };
-    if !pin_hash_matches(&shared[..], &hash, pin) {
+    if !pin_hash_matches(protocol, &shared, &hash, pin) {
         return Ok(vec![CTAP2_ERR_PIN_INVALID]);
     }
-    let encrypted = encrypt(&shared[..], state.pin_uv_auth_token.as_ref())?;
+    let encrypted = encrypt(protocol, &shared, state.pin_uv_auth_token.as_ref())?;
     let mut response = vec![CTAP2_OK];
     Encoder::new(&mut response)
         .map(1)
@@ -1234,20 +1282,29 @@ fn random_secret() -> Result<SecretKey, Error> {
 fn shared_secret(
     state: &MockYubiKeyState,
     peer: Option<&PublicKey>,
-) -> Result<Zeroizing<[u8; 64]>, u8> {
+    protocol: u8,
+) -> Result<Zeroizing<Vec<u8>>, u8> {
     let secret = state
         .key_agreement
         .as_ref()
         .ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
     let peer = peer.ok_or(CTAP2_ERR_MISSING_PARAMETER)?;
     let z = diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
-    let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.raw_secret_bytes().as_ref());
-    let mut output = Zeroizing::new([0u8; 64]);
-    hkdf.expand(b"CTAP2 HMAC key", &mut output[..32])
-        .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
-    hkdf.expand(b"CTAP2 AES key", &mut output[32..])
-        .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
-    Ok(output)
+    match protocol {
+        1 => Ok(Zeroizing::new(
+            Sha256::digest(z.raw_secret_bytes()).to_vec(),
+        )),
+        2 => {
+            let hkdf = Hkdf::<Sha256>::new(Some(&[0u8; 32]), z.raw_secret_bytes().as_ref());
+            let mut output = Zeroizing::new(vec![0u8; 64]);
+            hkdf.expand(b"CTAP2 HMAC key", &mut output[..32])
+                .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
+            hkdf.expand(b"CTAP2 AES key", &mut output[32..])
+                .map_err(|_| CTAP2_ERR_PIN_INVALID)?;
+            Ok(output)
+        }
+        _ => Err(CTAP2_ERR_MISSING_PARAMETER),
+    }
 }
 
 fn encode_cose_key(encoder: &mut Encoder<&mut Vec<u8>>, x: &[u8], y: &[u8]) -> Result<(), Error> {
@@ -1277,36 +1334,51 @@ fn encode_cose_key(encoder: &mut Encoder<&mut Vec<u8>>, x: &[u8], y: &[u8]) -> R
     Ok(())
 }
 
-fn decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
-    if key.len() != 64
-        || ciphertext.len() < AES_BLOCK_SIZE * 2
-        || !is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE)
-    {
-        return Err(CTAP2_ERR_INVALID_CBOR);
-    }
-    aes_cbc(
-        &key[32..],
-        &ciphertext[..AES_BLOCK_SIZE],
-        &ciphertext[AES_BLOCK_SIZE..],
-        Direction::Decrypt,
-    )
-    .map(Zeroizing::new)
-    .map_err(|_| CTAP2_ERR_PIN_INVALID)
+fn decrypt(protocol: u8, key: &[u8], ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, u8> {
+    let result = match protocol {
+        1 if key.len() == 32
+            && !ciphertext.is_empty()
+            && is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE) =>
+        {
+            aes_cbc(key, &[0u8; AES_BLOCK_SIZE], ciphertext, Direction::Decrypt)
+        }
+        2 if key.len() == 64
+            && ciphertext.len() >= AES_BLOCK_SIZE * 2
+            && is_multiple_of(ciphertext.len(), AES_BLOCK_SIZE) =>
+        {
+            aes_cbc(
+                &key[32..],
+                &ciphertext[..AES_BLOCK_SIZE],
+                &ciphertext[AES_BLOCK_SIZE..],
+                Direction::Decrypt,
+            )
+        }
+        _ => return Err(CTAP2_ERR_INVALID_CBOR),
+    };
+    result
+        .map(Zeroizing::new)
+        .map_err(|_| CTAP2_ERR_PIN_INVALID)
 }
 
-fn encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    if key.len() != 64 || !is_multiple_of(plaintext.len(), AES_BLOCK_SIZE) {
+fn encrypt(protocol: u8, key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, Error> {
+    if !is_multiple_of(plaintext.len(), AES_BLOCK_SIZE) {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    let mut iv = [0u8; AES_BLOCK_SIZE];
-    getrandom::fill(&mut iv).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let ciphertext = aes_cbc(&key[32..], &iv, plaintext, Direction::Encrypt)?;
-    let mut output = iv.to_vec();
-    output.extend_from_slice(&ciphertext);
-    Ok(output)
+    match protocol {
+        1 if key.len() == 32 => aes_cbc(key, &[0u8; AES_BLOCK_SIZE], plaintext, Direction::Encrypt),
+        2 if key.len() == 64 => {
+            let mut iv = [0u8; AES_BLOCK_SIZE];
+            getrandom::fill(&mut iv).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            let ciphertext = aes_cbc(&key[32..], &iv, plaintext, Direction::Encrypt)?;
+            let mut output = iv.to_vec();
+            output.extend_from_slice(&ciphertext);
+            Ok(output)
+        }
+        _ => Err(CKR_DEVICE_ERROR.into()),
+    }
 }
 
-fn authenticate(key: &[u8], message: &[u8], supplied: Option<&[u8]>) -> bool {
+fn authenticate(protocol: u8, key: &[u8], message: &[u8], supplied: Option<&[u8]>) -> bool {
     let Some(supplied) = supplied else {
         return false;
     };
@@ -1314,7 +1386,13 @@ fn authenticate(key: &[u8], message: &[u8], supplied: Option<&[u8]>) -> bool {
         return false;
     };
     mac.update(message);
-    bool::from(mac.finalize().into_bytes().as_slice().ct_eq(supplied))
+    let output = mac.finalize().into_bytes();
+    let expected = match protocol {
+        1 => &output[..16],
+        2 => output.as_slice(),
+        _ => return false,
+    };
+    bool::from(expected.ct_eq(supplied))
 }
 
 fn padded_pin(plaintext: &[u8]) -> Option<Vec<u8>> {
@@ -1330,8 +1408,8 @@ fn padded_pin(plaintext: &[u8]) -> Option<Vec<u8>> {
     Some(pin.to_vec())
 }
 
-fn pin_hash_matches(shared: &[u8], encrypted: &[u8], pin: &[u8]) -> bool {
-    let Ok(mut supplied) = decrypt(shared, encrypted) else {
+fn pin_hash_matches(protocol: u8, shared: &[u8], encrypted: &[u8], pin: &[u8]) -> bool {
+    let Ok(mut supplied) = decrypt(protocol, shared, encrypted) else {
         return false;
     };
     let expected = Sha256::digest(pin);
@@ -1359,9 +1437,7 @@ mod tests {
         assert!(info.option("clientPin"));
     }
 
-    #[test]
-    fn mock_default_pin_can_be_verified_and_changed_through_ctap() {
-        let connector = Rc::new(MockYubiKeyConnector::new().unwrap());
+    fn exercise_pin_and_credential_management(connector: Rc<MockYubiKeyConnector>) {
         select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
         let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
 
@@ -1377,6 +1453,21 @@ mod tests {
             credentials[0].relying_party.id.as_deref(),
             Some("example.com")
         );
+        let assertion_authorization = client
+            .authorize_assertion(&info, b"123456", "example.com")
+            .unwrap();
+        client
+            .get_assertion(
+                &assertion_authorization,
+                "example.com",
+                &credentials[0].credential_id,
+                &[0x33; 32],
+            )
+            .unwrap();
+        let preview_authorization = client.authorize_preview_sign(&info, b"123456").unwrap();
+        client
+            .create_preview_sign_registration(&preview_authorization, Some("MOCK0001".to_owned()))
+            .unwrap();
 
         client.change_pin(&info, b"123456", b"654321").unwrap();
         assert!(client
@@ -1384,6 +1475,33 @@ mod tests {
             .is_err());
         client
             .authorize_credential_enumeration(&info, b"654321")
+            .unwrap();
+    }
+
+    #[test]
+    fn mock_default_pin_can_be_verified_and_changed_through_ctap() {
+        exercise_pin_and_credential_management(Rc::new(MockYubiKeyConnector::new().unwrap()));
+    }
+
+    #[test]
+    fn protocol_one_only_mock_supports_legacy_pin_and_credential_management() {
+        exercise_pin_and_credential_management(Rc::new(
+            MockYubiKeyConnector::protocol_one_only().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn protocol_one_only_mock_supports_initial_pin_provisioning() {
+        let connector = Rc::new(MockYubiKeyConnector::protocol_one_only().unwrap());
+        connector.state.lock().unwrap().pin = None;
+        select_application(connector.as_ref(), &crate::ctap::FIDO2_AID).unwrap();
+        let client = CtapClient::new(Rc::new(CcidCtapTransport::new(connector)));
+        let info = client.get_info().unwrap();
+        assert!(!info.option("clientPin"));
+        client.set_initial_pin(&info, b"123456").unwrap();
+        let info = client.get_info().unwrap();
+        client
+            .authorize_credential_enumeration(&info, b"123456")
             .unwrap();
     }
 }

@@ -69,8 +69,16 @@ slot name with `PKCS11RS_FIDO2_TEST_SOURCE`.
 
 ## Resident-credential enumeration
 
-`C_Login(CKU_USER)` accepts the configured FIDO2 PIN. This phase supports only
-PIN/UV protocol 2. On authenticators reporting `pinUvAuthToken`, it obtains a
+`C_Login(CKU_USER)` accepts the configured FIDO2 PIN. This phase supports
+PIN/UV protocols 1 and 2. The client selects the first implementation it
+supports from the authenticator's `pinUvAuthProtocols` list, which GetInfo
+orders by decreasing authenticator preference. Protocol 1 derives one
+SHA-256 key from the ECDH x-coordinate, uses AES-256-CBC with an all-zero IV,
+and truncates HMAC-SHA-256 authentication parameters to 16 bytes. Protocol 2
+uses separate HKDF-derived HMAC and AES keys, a fresh transmitted IV, and
+32-byte authentication parameters.
+
+On authenticators reporting `pinUvAuthToken`, the selected protocol obtains a
 permission-scoped token and requests the
 persistent-credential-management-read-only (`pcmr`) permission when the
 authenticator reports `perCredMgmtRO`; otherwise it requests the standard
@@ -237,8 +245,9 @@ The fixture uses deliberately synthetic values:
 | Algorithm | ES256 (`-7`) |
 | Discoverable | `rk=true` |
 
-The test obtains a protocol-2 PIN/UV token with only the RP-bound `mc`
-permission, authenticates a fixed synthetic client-data hash, sends
+The test obtains a PIN/UV token using the authenticator's preferred supported
+protocol with only the RP-bound `mc` permission, authenticates a fixed
+synthetic client-data hash, sends
 `authenticatorMakeCredential`, and validates the returned attested credential
 ID. It then calls the exported `C_Login(CKU_USER)` path and requires the same
 credential ID and display name to appear as a read-only PKCS #11 object.
@@ -358,7 +367,8 @@ on pre-release hardware. Additional robustness validation remains useful for:
 - keepalive timing, cancellation, removal, reinsertion, multiple applets on one
   reader, and multiple simultaneous YubiKeys;
 - additional GetInfo option combinations for `credMgmt`,
-  `credentialMgmtPreview`, `pinUvAuthToken`, and `perCredMgmtRO`;
+  `credentialMgmtPreview`, `pinUvAuthToken`, `perCredMgmtRO`, and mixed or
+  unknown PIN/UV protocol preference lists;
 - PIN retry, temporary block, permanent block, and no-PIN status mapping;
 - credential responses with long or truncated RP/user fields, multiple RPs,
   empty stores, and firmware-added fields;
