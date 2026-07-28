@@ -3296,7 +3296,7 @@ fn yubihsm_public_discovery_supports_asymmetric_yubihsm_auth_credentials() {
 
 #[cfg(unix)]
 #[test]
-fn yubihsm_auth_public_discovery_caches_prompted_password_per_slot() {
+fn yubihsm_auth_public_discovery_does_not_retain_prompted_password() {
     let _guard = crate::test::TEST_LOCK.lock().unwrap();
     let _pinentry = crate::test::TestPinentry::new("password");
     let direct_config = configured_yubihsm_public_discovery_credential(Some("0001".into()))
@@ -3332,7 +3332,6 @@ fn yubihsm_auth_public_discovery_caches_prompted_password_per_slot() {
         )
     }));
     assert_eq!(peer.create_session_count(), 1);
-    assert!(slot.public_discovery_password.borrow().is_some());
     assert!(config.configured_password.is_none());
 
     let second_peer = Rc::new(ProtocolPeer::new());
@@ -3345,7 +3344,7 @@ fn yubihsm_auth_public_discovery_caches_prompted_password_per_slot() {
         (2, 4, 1),
         vec![YUBIHSM_ALGO_RSA_2048],
         second_providers,
-        Some(config),
+        Some(config.clone()),
     );
     second_slot.set_pinentry(Arc::new(
         crate::pinentry::Pinentry::from_environment().unwrap(),
@@ -3361,7 +3360,7 @@ fn yubihsm_auth_public_discovery_caches_prompted_password_per_slot() {
             )
         }));
     assert_eq!(second_peer.create_session_count(), 1);
-    assert!(second_slot.public_discovery_password.borrow().is_some());
+    assert!(config.configured_password.is_none());
 }
 
 #[test]
