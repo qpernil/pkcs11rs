@@ -20,10 +20,48 @@ deduplicate fields, or impose a schema. A future schema layer must produce any
 required canonical representation before storing it. The exact submitted bytes
 are what the content hash identifies and what `get` returns.
 
+## Backed-key metadata
+
+The public `key_metadata` module defines the provider-neutral canonical schema
+for one backing key and its potential PKCS #11 key aspects. Storage location is
+not part of the record, so identical model bytes can be held by a local
+provider, a future YubiHSM opaque-object provider, or a future FIDO large-blob
+provider.
+
+The outer canonical CBOR map is:
+
+| Key | Value |
+| --- | --- |
+| `1` | schema string `pkcs11rs.backed-key` |
+| `2` | schema version `1` |
+| `3` | provider identifier |
+| `4` | exact provider-owned backing CBOR, wrapped as a byte string |
+| `5` | map from `CKO_PUBLIC_KEY`, `CKO_PRIVATE_KEY`, or `CKO_SECRET_KEY` to an attribute map |
+
+An aspect map uses numeric `CKA_*` values as keys and architecture-independent
+CBOR values. Booleans are CBOR booleans, Cryptoki unsigned values and
+mechanisms are CBOR unsigned integers, byte attributes are byte strings, text
+attributes are text strings, mechanism lists are arrays, and nested attribute
+templates are maps using the same representation. Maps are encoded in numeric
+key order.
+
+`CKA_CLASS` is represented by the aspect-map key and cannot occur inside an
+attribute map. `CKA_TOKEN` is also structural: a persisted aspect is a token
+object, while a session aspect is never submitted to a provider. Presence of
+an empty public aspect therefore means that a public token projection exists
+and obtains all of its attributes from the backing provider.
+
+The generic layer validates the CBOR representation and the semantic type of
+every standard key attribute supported by pkcs11rs. Provider-specific
+attributes use byte strings. It retains the provider-owned backing CBOR
+byte-for-byte; the named provider owns that embedded schema and its semantic
+validation.
+
 The experimental [`previewSign` protocol model](preview-sign.md) supplies two
 such canonical schema layers: one for exact registration material and one for
 an offline-derived public key plus its algorithm-specific signing arguments.
-Neither schema is automatically written to a provider.
+Those protocol records can be embedded in the backing data of a backed-key
+record. Neither schema is automatically written to a provider.
 
 `ContentReference` is algorithm-tagged for hash agility. The currently
 implemented algorithm is SHA3-256. Its canonical CBOR form is the two-element
@@ -77,6 +115,9 @@ Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-Future integration must still define configuration, ownership and deletion
-semantics, token binding, private-data protection, and the PKCS #11 mapping
-before stored FIDO registration material can become a token or session object.
+Future previewSign integration must still define configuration, ownership and
+deletion semantics, token binding, private-data protection, and the PKCS #11
+mapping before stored FIDO registration material can become a token or session
+object. YubiHSM integration will use the same backed-key schema for metadata
+opaque objects and translate legacy `MDB1` values to the canonical schema when
+they are read.

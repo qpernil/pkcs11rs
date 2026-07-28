@@ -94,6 +94,12 @@ context needed by a later assertion. The storage provider treats both wrapper
 types as opaque immutable CBOR blobs; it does not interpret or traverse their
 reference.
 
+The provider-neutral [`BackedKeyMetadata`](storage.md#backed-key-metadata)
+record can embed these exact protocol wrappers as provider-owned backing data
+and describe the corresponding private and optional public PKCS #11 aspects.
+That model does not choose or configure a persistence provider. Session-only
+objects use the same in-memory representation without being stored.
+
 ## Offline ARKG-P256 derivation
 
 `ArkgP256PublicSeed::from_cose` parses the generated seed COSE_Key and requires
