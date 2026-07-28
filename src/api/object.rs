@@ -32,7 +32,7 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Fido2)
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2
             && template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION).is_some()
         {
             validate_unique_template(templ)?;

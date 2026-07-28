@@ -1,4 +1,4 @@
-use super::ccid::PcscAppletSession;
+use crate::connector::ConnectorIdentity;
 use crate::ctap::{CredentialAuthorization, DiscoverableCredential};
 use crate::*;
 #[cfg(test)]
@@ -61,10 +61,142 @@ impl CtapTransport for CcidCtapTransport {
     }
 }
 
+pub(crate) trait FidoEndpoint: std::fmt::Debug {
+    fn transport(&self) -> Rc<dyn CtapTransport>;
+    fn name(&self) -> String;
+    fn manufacturer(&self) -> &str;
+    fn product(&self) -> &str;
+    fn serial(&self) -> &str;
+    fn major(&self) -> u8;
+    fn minor(&self) -> u8;
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        None
+    }
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        None
+    }
+    fn identity(&self) -> ConnectorIdentity {
+        ConnectorIdentity {
+            manufacturer: self.manufacturer().to_owned(),
+            product: self.product().to_owned(),
+            serial: self.serial().to_owned(),
+            hardware_version: self.hardware_version(),
+            firmware_version: self.firmware_version(),
+        }
+    }
+    fn is_present(&self) -> bool;
+    fn refresh(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn prepare(&self) -> Result<(), Error> {
+        Ok(())
+    }
+    fn clear(&self) {}
+    fn set_applet_present(&self, _present: bool) {}
+    fn set_discovery_error(&self, _error: &Error) {}
+    fn clear_discovery_error(&self) {}
+    fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession>;
+}
+
 #[derive(Debug)]
-pub(crate) struct Fido2Slot {
+struct CcidFidoEndpoint {
     connector: Rc<dyn Connector>,
     application_aid: Vec<u8>,
+    transport: Rc<CcidCtapTransport>,
+}
+
+impl CcidFidoEndpoint {
+    fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        Self {
+            transport: Rc::new(CcidCtapTransport::new(connector.clone())),
+            connector,
+            application_aid,
+        }
+    }
+}
+
+impl FidoEndpoint for CcidFidoEndpoint {
+    fn transport(&self) -> Rc<dyn CtapTransport> {
+        self.transport.clone()
+    }
+
+    fn name(&self) -> String {
+        self.connector.name()
+    }
+
+    fn manufacturer(&self) -> &str {
+        self.connector.manufacturer()
+    }
+
+    fn product(&self) -> &str {
+        self.connector.product()
+    }
+
+    fn serial(&self) -> &str {
+        self.connector.serial()
+    }
+
+    fn major(&self) -> u8 {
+        self.connector.major()
+    }
+
+    fn minor(&self) -> u8 {
+        self.connector.minor()
+    }
+
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        self.connector.hardware_version()
+    }
+
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.connector.firmware_version()
+    }
+
+    fn identity(&self) -> ConnectorIdentity {
+        self.connector.identity()
+    }
+
+    fn is_present(&self) -> bool {
+        self.connector.is_present()
+    }
+
+    fn refresh(&self) -> Result<(), Error> {
+        self.connector.refresh()
+    }
+
+    fn prepare(&self) -> Result<(), Error> {
+        self.connector
+            .establish_secure_channel(&self.application_aid)
+    }
+
+    fn clear(&self) {
+        self.connector.clear_secure_channel();
+    }
+
+    fn set_applet_present(&self, present: bool) {
+        self.connector.set_applet_present(present);
+    }
+
+    fn set_discovery_error(&self, error: &Error) {
+        self.connector.set_discovery_error(error);
+    }
+
+    fn clear_discovery_error(&self) {
+        self.connector.clear_discovery_error();
+    }
+
+    fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
+        Box::new(super::ccid::PcscAppletSession {
+            slotID: slot_id,
+            flags,
+            connector: self.connector.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Fido2Slot {
+    endpoint: Rc<dyn FidoEndpoint>,
     client: CtapClient,
     info: RefCell<Option<AuthenticatorInfo>>,
     credentials: RefCell<Vec<DiscoverableCredential>>,
@@ -74,10 +206,13 @@ pub(crate) struct Fido2Slot {
 
 impl Fido2Slot {
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
-        let transport = Rc::new(CcidCtapTransport::new(connector.clone()));
+        Self::new_with_endpoint(Rc::new(CcidFidoEndpoint::new(connector, application_aid)))
+    }
+
+    pub(crate) fn new_with_endpoint(endpoint: Rc<dyn FidoEndpoint>) -> Self {
+        let transport = endpoint.transport();
         Self {
-            connector,
-            application_aid,
+            endpoint,
             client: CtapClient::new(transport),
             info: RefCell::new(None),
             credentials: RefCell::new(Vec::new()),
@@ -352,18 +487,18 @@ impl Slot for Fido2Slot {
         self
     }
     fn kind(&self) -> SlotKind {
-        SlotKind::Ccid(CcidApplication::Fido2)
+        SlotKind::Fido2
     }
 
     fn name(&self) -> String {
         match self.primary_protocol_version() {
-            Some(version) => format!("{} FIDO2 ({version})", self.connector.name()),
-            None => format!("{} FIDO2", self.connector.name()),
+            Some(version) => format!("{} FIDO2 ({version})", self.endpoint.name()),
+            None => format!("{} FIDO2", self.endpoint.name()),
         }
     }
 
     fn manufacturer(&self) -> &str {
-        self.connector.manufacturer()
+        self.endpoint.manufacturer()
     }
 
     fn product(&self) -> &str {
@@ -371,11 +506,11 @@ impl Slot for Fido2Slot {
     }
 
     fn model(&self) -> &str {
-        self.connector.product()
+        self.endpoint.product()
     }
 
     fn label(&self) -> String {
-        let serial = self.connector.identity().serial;
+        let serial = self.endpoint.identity().serial;
         match self.primary_protocol_version() {
             Some(version) => format!("FIDO2 {version} #{serial}"),
             None => format!("FIDO2 #{serial}"),
@@ -383,52 +518,47 @@ impl Slot for Fido2Slot {
     }
 
     fn serial(&self) -> &str {
-        self.connector.serial()
+        self.endpoint.serial()
     }
 
     fn major(&self) -> u8 {
-        self.connector.major()
+        self.endpoint.major()
     }
 
     fn minor(&self) -> u8 {
-        self.connector.minor()
+        self.endpoint.minor()
     }
 
     fn is_present(&self) -> bool {
-        self.connector.is_present()
+        self.endpoint.is_present()
     }
 
     fn refresh(&self) -> Result<(), Error> {
-        self.connector.refresh()
+        self.endpoint.refresh()
     }
 
     fn set_applet_present(&self, present: bool) {
-        self.connector.set_applet_present(present);
+        self.endpoint.set_applet_present(present);
     }
 
     fn set_discovery_error(&self, error: &Error) {
-        self.connector.set_discovery_error(error);
+        self.endpoint.set_discovery_error(error);
     }
 
     fn clear_discovery_error(&self) {
-        self.connector.clear_discovery_error();
+        self.endpoint.clear_discovery_error();
     }
 
     fn open_session(&mut self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
-        Box::new(PcscAppletSession {
-            slotID: slot_id,
-            flags,
-            connector: self.connector.clone(),
-        })
+        self.endpoint.open_session(slot_id, flags)
     }
 
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.preview_authorization.get_mut().take();
-        self.connector.clear_secure_channel();
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
+        self.endpoint.clear();
+        self.endpoint.prepare()?;
         let result = (|| {
             let info = self.discovered_info()?;
             let supports_credential_management = info.credential_management_command().is_some();
@@ -469,7 +599,7 @@ impl Slot for Fido2Slot {
                 Ok(())
             }
             Err(error) => {
-                self.connector.clear_secure_channel();
+                self.endpoint.clear();
                 Err(error)
             }
         }
@@ -479,7 +609,7 @@ impl Slot for Fido2Slot {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.preview_authorization.get_mut().take();
-        self.connector.clear_secure_channel();
+        self.endpoint.clear();
         Ok(())
     }
 
@@ -488,7 +618,7 @@ impl Slot for Fido2Slot {
         log!(
             2,
             "FIDO2 authenticator info on {}: versions {:?}, extensions {:?}, AAGUID {:02x?}, options {:?}, max message {:?}, PIN/UV protocols {:?}, transports {:?}, minimum PIN length {:?}",
-            self.connector.name(),
+            self.endpoint.name(),
             info.versions,
             info.extensions,
             info.aaguid,
@@ -503,18 +633,23 @@ impl Slot for Fido2Slot {
 
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        str_pad(
-            &self.connector.identity().manufacturer,
-            &mut info.manufacturerID,
-        );
-        apply_connector_versions(info, self.connector.as_ref());
+        let identity = self.endpoint.identity();
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        if let Some((major, minor)) = identity.hardware_version {
+            info.hardwareVersion.major = major;
+            info.hardwareVersion.minor = minor;
+        }
+        if let Some((major, minor, patch)) = identity.firmware_version {
+            info.firmwareVersion.major = major;
+            info.firmwareVersion.minor = minor.saturating_mul(10) + patch;
+        }
         Ok(())
     }
 
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         let discovered = self.discovered_info()?;
         self.format_token_info(info);
-        let identity = self.connector.identity();
+        let identity = self.endpoint.identity();
         str_pad(&self.label(), &mut info.label);
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
         str_pad(&identity.product, &mut info.model);
@@ -532,9 +667,8 @@ impl Slot for Fido2Slot {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.preview_authorization.get_mut().take();
-        self.connector.clear_secure_channel();
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
+        self.endpoint.clear();
+        self.endpoint.prepare()?;
         let result = (|| {
             self.info.get_mut().take();
             let info = self.discovered_info()?;
@@ -556,7 +690,7 @@ impl Slot for Fido2Slot {
             self.info.get_mut().take();
             Ok(())
         })();
-        self.connector.clear_secure_channel();
+        self.endpoint.clear();
         result
     }
 
@@ -564,16 +698,15 @@ impl Slot for Fido2Slot {
     fn create_fido2_test_credential(&mut self, pin: &[u8]) -> Result<Vec<u8>, Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
-        self.connector.clear_secure_channel();
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
+        self.endpoint.clear();
+        self.endpoint.prepare()?;
         let result = (|| {
             let info = self.discovered_info()?;
             self.client
                 .create_discoverable_test_credential(&info, pin)
                 .map_err(CtapError::into_pkcs11)
         })();
-        self.connector.clear_secure_channel();
+        self.endpoint.clear();
         result
     }
 
@@ -584,20 +717,19 @@ impl Slot for Fido2Slot {
     ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
-        self.connector.clear_secure_channel();
-        self.connector
-            .establish_secure_channel(&self.application_aid)?;
+        self.endpoint.clear();
+        self.endpoint.prepare()?;
         let result = (|| {
             let info = self.discovered_info()?;
             self.client
                 .create_preview_sign_test_registration(
                     &info,
                     pin,
-                    Some(self.connector.serial().to_owned()),
+                    Some(self.endpoint.serial().to_owned()),
                 )
                 .map_err(CtapError::into_pkcs11)
         })();
-        self.connector.clear_secure_channel();
+        self.endpoint.clear();
         result
     }
 
@@ -605,7 +737,7 @@ impl Slot for Fido2Slot {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.preview_authorization.get_mut().take();
-        self.connector.clear_secure_channel();
+        self.endpoint.clear();
     }
 
     fn fido_preview_sign_registration(
@@ -619,7 +751,7 @@ impl Slot for Fido2Slot {
         self.client
             .create_preview_sign_registration(
                 authorization,
-                Some(self.connector.serial().to_owned()),
+                Some(self.endpoint.serial().to_owned()),
             )
             .map_err(CtapError::into_pkcs11)
     }

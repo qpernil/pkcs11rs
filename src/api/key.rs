@@ -269,7 +269,7 @@ fn generate_key_pair(
             mechanism.mechanism,
             CKF_GENERATE_KEY_PAIR as CK_FLAGS,
         )?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Fido2) {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
             if mechanism.mechanism != CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN
                 || !mechanism.pParameter.is_null()
                 || mechanism.ulParameterLen != 0
