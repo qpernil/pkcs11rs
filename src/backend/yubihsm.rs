@@ -2531,6 +2531,7 @@ fn validate_yubihsm_backed_key(
 
 fn yubihsm_storage_error(error: StorageError) -> Error {
     match error {
+        StorageError::Unavailable => CKR_TOKEN_WRITE_PROTECTED.into(),
         StorageError::InvalidCbor
         | StorageError::InvalidReference
         | StorageError::Integrity
