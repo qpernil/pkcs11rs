@@ -1124,7 +1124,7 @@ mod fido2_hardware {
             let mut matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
                 let child = child.lock().ok()?;
                 (child.slot.kind()
-                    == crate::SlotKind::Ccid(crate::CcidApplication::Fido2)
+                    == crate::SlotKind::Fido2
                     && selector.as_ref().is_none_or(|selector| {
                         child.slot.serial() == selector || child.slot.name() == *selector
                     }))

@@ -60,6 +60,7 @@ pub(crate) enum SlotKind {
     #[cfg(any(test, feature = "abi-tests"))]
     Synthetic,
     YubiHsm,
+    Fido2,
     Ccid(CcidApplication),
 }
 

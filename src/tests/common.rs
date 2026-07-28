@@ -6530,6 +6530,7 @@ impl crate::Slot for ConcurrentSlot {
         match self.kind {
             crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
+            crate::SlotKind::Fido2 => String::from("Concurrent FIDO2"),
             crate::SlotKind::Ccid(application) => {
                 format!("Concurrent {}", crate::ccid_application_label(application))
             }
@@ -6549,6 +6550,7 @@ impl crate::Slot for ConcurrentSlot {
             crate::SlotKind::Ccid(crate::CcidApplication::HsmAuth) => "YubiHSM Auth",
             crate::SlotKind::Ccid(crate::CcidApplication::IssuerSecurityDomain) => "Issuer SD",
             crate::SlotKind::Ccid(crate::CcidApplication::Fido2) => "FIDO2",
+            crate::SlotKind::Fido2 => "FIDO2",
         }
     }
 
