@@ -178,6 +178,8 @@ pub enum StorageError {
     InvalidCbor,
     /// A provider encountered different bytes under the same content reference.
     Conflict,
+    /// A provider-specific backend operation failed.
+    Provider(String),
     /// The reference uses an algorithm this implementation does not support.
     UnsupportedHashAlgorithm(String),
 }
@@ -192,6 +194,7 @@ impl fmt::Display for StorageError {
             Self::Conflict => {
                 formatter.write_str("different content exists under the same reference")
             }
+            Self::Provider(error) => write!(formatter, "storage provider failed: {error}"),
             Self::UnsupportedHashAlgorithm(name) => {
                 write!(formatter, "unsupported content hash algorithm {name}")
             }
@@ -215,7 +218,7 @@ impl From<io::Error> for StorageError {
 }
 
 /// Persistence boundary for immutable, content-addressed CBOR objects.
-pub trait StorageProvider: Send + Sync {
+pub trait StorageProvider {
     /// List all valid objects currently available, in reference order.
     fn list(&self) -> Result<Vec<ContentReference>, StorageError>;
 

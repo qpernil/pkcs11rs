@@ -2760,8 +2760,10 @@ fn yubihsm_reference_metadata_overrides_private_and_public_attributes() {
         target_type: crate::YUBIHSM_ASYMMETRIC_KEY,
         target_id: 0x1234,
         target_sequence: 1,
+        primary_class: None,
         id: Some(b"private-id".to_vec()),
         label: Some("private label".to_owned()),
+        public: true,
         public_id: Some(b"public-id".to_vec()),
         public_label: Some("public label".to_owned()),
     };
