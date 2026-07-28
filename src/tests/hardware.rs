@@ -89,16 +89,16 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     ) -> Rc<dyn crate::Connector> {
         let selector = std::env::var(selector_name).ok();
         let mut matches = connectors.into_iter().filter(|connector| {
-            selector.as_ref().is_none_or(|selector| {
-                connector.serial() == selector || connector.name() == *selector
-            })
+            selector
+                .as_ref()
+                .is_none_or(|selector| connector.name() == *selector)
         });
         let connector = matches
             .next()
             .unwrap_or_else(|| panic!("no {kind} matched {selector_name}={selector:?}"));
         assert!(
             matches.next().is_none(),
-            "multiple {kind} devices matched; set {selector_name} to a serial number or full device name"
+            "multiple {kind} devices matched; set {selector_name} to the full endpoint name"
         );
         connector
     }
@@ -1091,6 +1091,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
             credential,
             version: info.version,
             trust_prefix: None,
+            source: String::new(),
         }
         .authenticate(yubihsm.as_ref(), authkey_id, credential_password.as_bytes())
         .expect("the provisioned asymmetric YubiHSM Auth pair could not authenticate");
@@ -1144,8 +1145,8 @@ mod fido2_hardware {
     }
 
     #[test]
-    #[ignore = "requires a YubiKey with the FIDO AID exposed through PC/SC"]
-    fn fido2_ccid_compatibility_probe() {
+    #[ignore = "requires a FIDO2 authenticator exposed through USB HID"]
+    fn fido2_hid_read_only_get_info() {
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
         assert_eq!(
@@ -1163,6 +1164,9 @@ mod fido2_hardware {
                 .lock()
                 .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
             let slot = child.get_slot(slot_id)?;
+            if !slot.name().contains("HID") {
+                return Err(CKR_TOKEN_NOT_RECOGNIZED.into());
+            }
             let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
             slot.get_slot_info(&mut slot_info)?;
             let description = String::from_utf8_lossy(&slot_info.slotDescription)
@@ -1185,11 +1189,11 @@ mod fido2_hardware {
             );
             Ok(())
         })
-        .expect("selected FIDO applet did not complete authenticatorGetInfo");
+        .expect("selected FIDO HID authenticator did not complete authenticatorGetInfo");
     }
 
     #[test]
-    #[ignore = "requires a YubiKey FIDO2 smart-card applet over USB CCID or NFC and PKCS11RS_FIDO2_TEST_PIN"]
+    #[ignore = "requires a FIDO2 authenticator and PKCS11RS_FIDO2_TEST_PIN"]
     fn fido2_read_only_resident_credential_enumeration() {
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
@@ -1268,6 +1272,7 @@ mod fido2_hardware {
 
         let mut class = CKO_PRIVATE_KEY as CK_ULONG;
         let mut can_sign = CK_TRUE as CK_BBOOL;
+        let mut label = b"pkcs11rs.invalid: pkcs11rs synthetic user private key".to_vec();
         let mut template = [
             CK_ATTRIBUTE {
                 type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
@@ -1278,6 +1283,11 @@ mod fido2_hardware {
                 type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
                 pValue: (&mut can_sign as *mut CK_BBOOL).cast(),
                 ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
+                pValue: label.as_mut_ptr().cast(),
+                ulValueLen: label.len() as CK_ULONG,
             },
         ];
         assert_eq!(
@@ -1297,7 +1307,7 @@ mod fido2_hardware {
         assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
         assert_eq!(
             count, 1,
-            "no operational resident FIDO credential was discovered"
+            "the synthetic resident FIDO credential was not discovered"
         );
 
         let mut mechanism = CK_MECHANISM {

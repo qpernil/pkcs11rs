@@ -1,3 +1,5 @@
+use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
+use crate::device::PhysicalDeviceKey;
 use crate::pkcs11::*;
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
@@ -10,9 +12,10 @@ use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
     configured_ccid_configurations, pinentry, select_application, str_pad, BackendSession,
     CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot, OpenPgpSlot,
-    PcscAppletConnector, PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot,
-    SlotKind, TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot,
+    OpenPgpSlot, PcscAppletConnector, PcscConnector, PivSlot, SharedConnector, SignatureOperation,
+    Slot, SlotKind, TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot,
+    YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
@@ -100,6 +103,24 @@ pub(crate) struct SlotContextRegistry {
     discovered: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FidoDuplicateResolution {
+    Independent,
+    KeepSecuredCcid(CK_SLOT_ID),
+    ReplaceCcidWithHid(CK_SLOT_ID),
+}
+
+fn resolve_fido_duplicate(
+    ccid_slots: &HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+    key: &PhysicalDeviceKey,
+) -> FidoDuplicateResolution {
+    match ccid_slots.get(key).copied() {
+        Some((slot_id, true)) => FidoDuplicateResolution::KeepSecuredCcid(slot_id),
+        Some((slot_id, false)) => FidoDuplicateResolution::ReplaceCcidWithHid(slot_id),
+        None => FidoDuplicateResolution::Independent,
+    }
+}
+
 impl SlotContextRegistry {
     fn new() -> Self {
         Self {
@@ -148,15 +169,15 @@ impl SlotContextRegistry {
         self.slots.insert(slot_id, Arc::new(Mutex::new(context)));
     }
 
-    fn insert_pcsc_slot_contexts(
+    fn insert_slot_contexts(
         &mut self,
         slots: Vec<(CK_SLOT_ID, Box<dyn Slot>, Vec<TokenObject>)>,
         handles: Arc<HandleCounters>,
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
-        // Each applet is a separate PKCS token with its own logical state.
-        // Their connectors share PcscReaderState for physical reader access.
+        // Each discovered application or authenticator is a separate PKCS
+        // token with its own logical state.
         let slot_ids = slots
             .iter()
             .map(|(slot_id, _, _)| *slot_id)
@@ -580,7 +601,7 @@ impl ModuleContext {
         self.slot_contexts
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .insert_pcsc_slot_contexts(
+            .insert_slot_contexts(
                 slots,
                 self.handles.clone(),
                 self.pinentry.clone(),
@@ -971,11 +992,23 @@ impl ModuleContext {
             let connector = Rc::new(MockYubiKeyConnector::new()?);
             select_application(connector.as_ref(), &crate::ctap::FIDO2_AID)?;
             let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
-            let mut slot = Box::new(Fido2Slot::new(connector, crate::ctap::FIDO2_AID.to_vec()))
-                as Box<dyn Slot>;
+            let device = Arc::new(crate::device::DeviceContext::new(
+                crate::device::DeviceIdentity {
+                    manufacturer: String::from("Yubico"),
+                    product: String::from("Mock YubiKey FIDO2"),
+                    serial: String::from("MOCK0001"),
+                    hardware_version: Some((1, 0)),
+                    firmware_version: None,
+                },
+            ));
+            let mut slot = Box::new(Fido2Slot::new_with_device(
+                connector,
+                crate::ctap::FIDO2_AID.to_vec(),
+                device,
+            )) as Box<dyn Slot>;
             slot.init_slot()?;
             let token_objects = slot.token_objects(slot_id)?;
-            slot_contexts.insert_pcsc_slot_contexts(
+            slot_contexts.insert_slot_contexts(
                 vec![(slot_id, slot, token_objects)],
                 self.handles.clone(),
                 self.pinentry.clone(),
@@ -987,6 +1020,7 @@ impl ModuleContext {
             return Ok(());
         }
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
+        let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
@@ -1146,7 +1180,16 @@ impl ModuleContext {
                         continue;
                     }
                     match YubiKeyClient.discover(&connector) {
-                        Ok(info) => connector.set_yubikey_device_info(info),
+                        Ok(info) => {
+                            if let Err(error) = connector.set_yubikey_device_info(info) {
+                                log!(
+                                    1,
+                                    "YubiKey physical-device identity for {}: {:?}",
+                                    name,
+                                    error
+                                );
+                            }
+                        }
                         Err(error) => log!(
                             2,
                             "YubiKey Management device-information discovery failed on {}: {:?}",
@@ -1164,6 +1207,7 @@ impl ModuleContext {
                     let reader_state = connector.state.clone();
                     let base_connector: SharedConnector = Arc::new(connector);
                     let mut reader_slots = Vec::new();
+                    let mut reader_fido_slots = Vec::new();
                     let Some(mut next_reader_slot_id) = slot_contexts.next_slot_id() else {
                         log!(1, "PCSC slot ID space exhausted");
                         break;
@@ -1218,19 +1262,22 @@ impl ModuleContext {
                         let application_connector: Rc<dyn Connector> =
                             Rc::new(application_connector);
                         let mut slot: Box<dyn Slot> = match configuration.application {
-                            CcidApplication::Piv => Box::new(PivSlot::new(
+                            CcidApplication::Piv => Box::new(PivSlot::new_with_device(
                                 application_connector,
                                 application_aid.clone(),
+                                reader_state.device.clone(),
                             )),
-                            CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new(
+                            CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new_with_device(
                                 application_connector,
                                 application_aid.clone(),
+                                reader_state.device.clone(),
                             )),
                             CcidApplication::HsmAuth => {
-                                let hsmauth_slot = HsmAuthSlot::new_shared(
+                                let hsmauth_slot = HsmAuthSlot::new_shared_with_device(
                                     application_connector,
                                     shared_application_connector,
                                     application_aid,
+                                    reader_state.device.clone(),
                                 );
                                 match hsmauth_slot.providers() {
                                     Ok(providers) => {
@@ -1249,13 +1296,27 @@ impl ModuleContext {
                                 Box::new(hsmauth_slot)
                             }
                             CcidApplication::IssuerSecurityDomain => {
-                                Box::new(IssuerSecurityDomainSlot::new(
+                                Box::new(IssuerSecurityDomainSlot::new_with_device(
                                     application_connector,
                                     application_aid,
+                                    reader_state.device.clone(),
                                 ))
                             }
                             CcidApplication::Fido2 => {
-                                Box::new(Fido2Slot::new(application_connector, application_aid))
+                                let fido_slot = Fido2Slot::new_with_device(
+                                    application_connector,
+                                    application_aid,
+                                    reader_state.device.clone(),
+                                );
+                                if let Some(key) = fido_slot.physical_device_key() {
+                                    log!(2, "FIDO CCID physical-device candidate: {:?}", key);
+                                    reader_fido_slots.push((
+                                        key,
+                                        slot_id,
+                                        configuration.secure_channel.is_some(),
+                                    ));
+                                }
+                                Box::new(fido_slot)
                             }
                         };
                         if slot.is_present() {
@@ -1287,16 +1348,135 @@ impl ModuleContext {
                         reader_slots.push((slot_id, slot, token_objects));
                     }
                     if !reader_slots.is_empty() {
-                        if let Err(error) = slot_contexts.insert_pcsc_slot_contexts(
+                        match slot_contexts.insert_slot_contexts(
                             reader_slots,
                             self.handles.clone(),
                             self.pinentry.clone(),
                             self.trust_store.clone(),
                         ) {
-                            log!(1, "PCSC slot context registration: {:?}", error);
+                            Ok(_) => {
+                                for (key, slot_id, secure_channel) in reader_fido_slots {
+                                    ccid_fido_slots.insert(key, (slot_id, secure_channel));
+                                }
+                            }
+                            Err(error) => {
+                                log!(1, "PCSC slot context registration: {:?}", error);
+                            }
                         }
                     }
                 }
+            }
+        }
+        let hid_descriptors = match enumerate_fido_devices() {
+            Ok(descriptors) => descriptors,
+            Err(error) => {
+                log!(1, "FIDO HID enumeration: {:?}", error);
+                Vec::new()
+            }
+        };
+        for descriptor in hid_descriptors {
+            let io = match descriptor.open() {
+                Ok(io) => io,
+                Err(error) => {
+                    log!(1, "FIDO HID open for {}: {:?}", descriptor.name(), error);
+                    continue;
+                }
+            };
+            let (transport, init) = match CtapHidTransport::connect(Box::new(io)) {
+                Ok(connected) => connected,
+                Err(error) => {
+                    log!(
+                        1,
+                        "FIDO HID channel initialization for {}: {:?}",
+                        descriptor.name(),
+                        error
+                    );
+                    continue;
+                }
+            };
+            let transport = Rc::new(transport);
+            let device_info = if descriptor.is_yubico() {
+                match YubiKeyClient
+                    .discover_from_config_pages(Some(init.firmware_version), |page| {
+                        transport.command(0x42, &[page])
+                    }) {
+                    Ok(info) => Some(info),
+                    Err(error) => {
+                        log!(
+                            2,
+                            "YubiKey device-information discovery through FIDO HID on {}: {:?}",
+                            descriptor.name(),
+                            error
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let endpoint = Rc::new(HidFidoEndpoint::new(
+                descriptor,
+                transport,
+                init,
+                device_info.as_ref(),
+            ));
+            let hid_slot = Fido2Slot::new_with_endpoint(endpoint);
+            if let Some(key) = hid_slot.physical_device_key() {
+                log!(2, "FIDO HID physical-device candidate: {:?}", key);
+                match resolve_fido_duplicate(&ccid_fido_slots, &key) {
+                    FidoDuplicateResolution::KeepSecuredCcid(ccid_slot_id) => {
+                        log!(
+                            2,
+                            "FIDO HID endpoint {:?} omitted in favor of explicitly secured CCID slot {}",
+                            key,
+                            ccid_slot_id
+                        );
+                        continue;
+                    }
+                    FidoDuplicateResolution::ReplaceCcidWithHid(ccid_slot_id) => {
+                        slot_contexts.remove(&ccid_slot_id);
+                        ccid_fido_slots.remove(&key);
+                        log!(
+                            2,
+                            "FIDO CCID slot {} replaced by the native HID endpoint for {:?}",
+                            ccid_slot_id,
+                            key
+                        );
+                    }
+                    FidoDuplicateResolution::Independent => {}
+                }
+            }
+            let mut slot = Box::new(hid_slot) as Box<dyn Slot>;
+            if let Err(error) = slot.init_slot() {
+                log!(
+                    1,
+                    "FIDO HID authenticator initialization for {}: {:?}",
+                    slot.name(),
+                    error
+                );
+                slot.set_discovery_error(&error);
+            } else {
+                slot.clear_discovery_error();
+            }
+            let Some(slot_id) = slot_contexts.next_slot_id() else {
+                log!(1, "FIDO HID slot ID space exhausted");
+                break;
+            };
+            let token_objects = match slot.token_objects(slot_id) {
+                Ok(objects) => objects,
+                Err(error) => {
+                    log!(2, "FIDO HID object discovery: {:?}", error);
+                    slot.set_discovery_error(&error);
+                    Vec::new()
+                }
+            };
+            if let Err(error) = slot_contexts.insert_slot_contexts(
+                vec![(slot_id, slot, token_objects)],
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+            ) {
+                log!(1, "FIDO HID slot context registration: {:?}", error);
             }
         }
         let yubihsm_slot_ids = slot_contexts
@@ -1398,3 +1578,39 @@ unsafe impl Send for SlotContext {}
 // Presence is the module lifecycle state. Ordinary calls retain a shared guard
 // for their complete duration; C_Initialize and C_Finalize require exclusivity.
 pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(None);
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn key(serial: &str) -> PhysicalDeviceKey {
+        PhysicalDeviceKey::YubicoSerial(serial.to_owned())
+    }
+
+    #[test]
+    fn native_hid_replaces_an_unsecured_ccid_view_of_the_same_fido_device() {
+        let slots = HashMap::from([(key("12345678"), (7, false))]);
+        assert_eq!(
+            resolve_fido_duplicate(&slots, &key("12345678")),
+            FidoDuplicateResolution::ReplaceCcidWithHid(7)
+        );
+    }
+
+    #[test]
+    fn explicitly_secured_ccid_wins_over_hid_for_the_same_fido_device() {
+        let slots = HashMap::from([(key("12345678"), (7, true))]);
+        assert_eq!(
+            resolve_fido_duplicate(&slots, &key("12345678")),
+            FidoDuplicateResolution::KeepSecuredCcid(7)
+        );
+    }
+
+    #[test]
+    fn different_physical_serials_remain_independent() {
+        let slots = HashMap::from([(key("12345678"), (7, false))]);
+        assert_eq!(
+            resolve_fido_duplicate(&slots, &key("87654321")),
+            FidoDuplicateResolution::Independent
+        );
+    }
+}

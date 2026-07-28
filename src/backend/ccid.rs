@@ -1,3 +1,4 @@
+use crate::device::DeviceContext;
 use crate::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +163,8 @@ impl std::fmt::Debug for HsmAuthManagementKey {
 
 pub(crate) struct HsmAuthSlot {
     connector: Rc<dyn Connector>,
+    device: Arc<DeviceContext>,
+    serial: String,
     shared_connector: Option<SharedConnector>,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
@@ -189,9 +192,22 @@ impl std::fmt::Debug for HsmAuthSlot {
 }
 
 impl HsmAuthSlot {
+    #[cfg(test)]
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        let device = Arc::new(DeviceContext::from_endpoint(connector.as_ref()));
+        Self::new_with_device(connector, application_aid, device)
+    }
+
+    pub(crate) fn new_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        let serial = device.identity(connector.connection_epoch()).serial;
         Self {
             connector,
+            device,
+            serial,
             shared_connector: None,
             application_aid,
             authenticated: Cell::new(false),
@@ -200,12 +216,13 @@ impl HsmAuthSlot {
         }
     }
 
-    pub(crate) fn new_shared(
+    pub(crate) fn new_shared_with_device(
         connector: Rc<dyn Connector>,
         shared_connector: SharedConnector,
         application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
     ) -> Self {
-        let mut slot = Self::new(connector, application_aid);
+        let mut slot = Self::new_with_device(connector, application_aid, device);
         slot.shared_connector = Some(shared_connector);
         slot
     }
@@ -225,6 +242,10 @@ impl HsmAuthSlot {
             .as_ref()
             .cloned()
             .ok_or(CKR_FUNCTION_NOT_SUPPORTED)?;
+        let source = self
+            .device
+            .identity(self.connector.connection_epoch())
+            .serial;
         Ok(info
             .credentials
             .into_iter()
@@ -233,6 +254,7 @@ impl HsmAuthSlot {
                 credential,
                 version: info.version,
                 trust_prefix: None,
+                source: source.clone(),
             })
             .collect())
     }
@@ -258,10 +280,15 @@ impl Slot for HsmAuthSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("HSM Auth #{}", self.connector.identity().serial)
+        format!(
+            "HSM Auth #{}",
+            self.device
+                .identity(self.connector.connection_epoch())
+                .serial
+        )
     }
     fn serial(&self) -> &str {
-        self.connector.serial()
+        &self.serial
     }
     fn major(&self) -> u8 {
         self.connector.major()
@@ -342,16 +369,14 @@ impl Slot for HsmAuthSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        str_pad(
-            &self.connector.identity().manufacturer,
-            &mut info.manufacturerID,
-        );
-        apply_connector_versions(info, self.connector.as_ref());
+        let identity = self.device.identity(self.connector.connection_epoch());
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        apply_device_versions(info, &identity);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        let identity = self.connector.identity();
+        let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(&format!("HSM Auth #{}", identity.serial), &mut info.label);
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
         str_pad(&identity.product, &mut info.model);
@@ -571,15 +596,30 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
 #[derive(Debug)]
 pub(crate) struct IssuerSecurityDomainSlot {
     connector: Rc<dyn Connector>,
+    device: Arc<DeviceContext>,
+    serial: String,
     application_aid: Vec<u8>,
     authenticated: Cell<bool>,
     info: RefCell<Option<SecurityDomainInfo>>,
 }
 
 impl IssuerSecurityDomainSlot {
+    #[cfg(test)]
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
+        let device = Arc::new(DeviceContext::from_endpoint(connector.as_ref()));
+        Self::new_with_device(connector, application_aid, device)
+    }
+
+    pub(crate) fn new_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        let serial = device.identity(connector.connection_epoch()).serial;
         Self {
             connector,
+            device,
+            serial,
             application_aid,
             authenticated: Cell::new(false),
             info: RefCell::new(None),
@@ -615,10 +655,16 @@ impl Slot for IssuerSecurityDomainSlot {
         self.connector.product()
     }
     fn label(&self) -> String {
-        format!("{} #{}", self.product(), self.connector.identity().serial)
+        format!(
+            "{} #{}",
+            self.product(),
+            self.device
+                .identity(self.connector.connection_epoch())
+                .serial
+        )
     }
     fn serial(&self) -> &str {
-        self.connector.serial()
+        &self.serial
     }
     fn major(&self) -> u8 {
         self.connector.major()
@@ -681,16 +727,14 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        str_pad(
-            &self.connector.identity().manufacturer,
-            &mut info.manufacturerID,
-        );
-        apply_connector_versions(info, self.connector.as_ref());
+        let identity = self.device.identity(self.connector.connection_epoch());
+        str_pad(&identity.manufacturer, &mut info.manufacturerID);
+        apply_device_versions(info, &identity);
         Ok(())
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        let identity = self.connector.identity();
+        let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(
             &format!("{} #{}", self.product(), identity.serial),
             &mut info.label,

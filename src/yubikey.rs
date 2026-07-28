@@ -128,6 +128,36 @@ impl Client {
         );
         Ok(info)
     }
+
+    pub(crate) fn discover_from_config_pages(
+        &self,
+        default_version: Option<(u8, u8, u8)>,
+        mut read_page: impl FnMut(u8) -> Result<Vec<u8>, Error>,
+    ) -> Result<DeviceInfo, Error> {
+        let mut raw_tlvs = Vec::new();
+        let mut page = 0u8;
+        loop {
+            let response = read_page(page)?;
+            let body = response.get(1..).ok_or(CKR_DATA_INVALID)?;
+            if usize::from(response[0]) != body.len() {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            let page_tlvs = parse_tlvs(body)?;
+            let more = page_tlvs
+                .iter()
+                .rev()
+                .find(|(tag, _)| *tag == TAG_MORE_DATA)
+                .map(|(_, value)| parse_integer(value))
+                .transpose()?
+                .unwrap_or(0);
+            raw_tlvs.extend(page_tlvs);
+            if more == 0 {
+                break;
+            }
+            page = page.checked_add(1).ok_or(CKR_DATA_LEN_RANGE)?;
+        }
+        DeviceInfo::parse(default_version, raw_tlvs)
+    }
 }
 
 impl DeviceInfo {
@@ -514,9 +544,6 @@ mod tests {
         }
         fn product(&self) -> &str {
             "YubiKey"
-        }
-        fn serial(&self) -> &str {
-            "0"
         }
         fn major(&self) -> u8 {
             0

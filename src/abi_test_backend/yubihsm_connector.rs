@@ -13,7 +13,7 @@ struct NativeObject {
 
 #[derive(Debug)]
 pub(super) struct AbiYubiHsmConnector {
-    serial: &'static str,
+    serial: u32,
     sessions: RefCell<HashMap<u8, YubiHsmSecureSession>>,
     expected_host_cryptograms: RefCell<HashMap<u8, [u8; 8]>>,
     next_sid: Cell<u8>,
@@ -26,6 +26,10 @@ impl AbiYubiHsmConnector {
         serial: &'static str,
         concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
     ) -> Result<Self, Error> {
+        let serial = serial
+            .strip_prefix("HSM")
+            .and_then(|serial| serial.parse().ok())
+            .ok_or(CKR_ARGUMENTS_BAD)?;
         Ok(Self {
             serial,
             sessions: RefCell::new(HashMap::new()),
@@ -95,7 +99,9 @@ impl AbiYubiHsmConnector {
             YubiHsmCommandCode::GetDeviceInfo => {
                 let response = match data.as_slice() {
                     [] => [
-                        &[2, 4, 0, 0, 0, 0, 1, 62, 3][..],
+                        &[2, 4, 0][..],
+                        &self.serial.to_be_bytes(),
+                        &[62, 3],
                         &[
                             YUBIHSM_ALGO_RSA_PKCS1_SHA1,
                             YUBIHSM_ALGO_RSA_PKCS1_SHA256,
@@ -291,10 +297,6 @@ impl Connector for AbiYubiHsmConnector {
 
     fn product(&self) -> &str {
         "YubiHSM"
-    }
-
-    fn serial(&self) -> &str {
-        self.serial
     }
 
     fn major(&self) -> u8 {

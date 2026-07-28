@@ -440,8 +440,10 @@ pub(crate) trait Slot {
     }
 }
 
-pub(crate) fn apply_connector_versions(info: &mut CK_SLOT_INFO, connector: &dyn Connector) {
-    let identity = connector.identity();
+pub(crate) fn apply_device_versions(
+    info: &mut CK_SLOT_INFO,
+    identity: &crate::device::DeviceIdentity,
+) {
     if let Some((major, minor)) = identity.hardware_version {
         info.hardwareVersion.major = major;
         info.hardwareVersion.minor = minor;

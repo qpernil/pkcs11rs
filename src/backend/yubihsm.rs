@@ -23,6 +23,7 @@ pub(crate) struct HsmAuthProvider {
     pub(crate) credential: HsmAuthCredential,
     pub(crate) version: (u8, u8, u8),
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
+    pub(crate) source: String,
 }
 
 #[derive(Clone)]
@@ -143,12 +144,10 @@ impl HsmAuthProviderRegistry {
 
 impl HsmAuthProvider {
     fn source_identifier(&self) -> String {
-        let connector = self.connector.as_ref();
-        let serial = connector.serial();
-        if serial.is_empty() {
-            connector.name()
+        if self.source.is_empty() || self.source == "0" {
+            self.connector.as_ref().name()
         } else {
-            serial.to_owned()
+            self.source.clone()
         }
     }
 
@@ -366,8 +365,10 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
+    pub(crate) hardware_version: Option<(u8, u8)>,
     pub(crate) algorithms: Vec<u8>,
     pub(crate) model: String,
+    pub(crate) serial: String,
     pub(crate) trust_prefix: Option<std::ffi::OsString>,
     pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
     pub(crate) object_metadata: RefCell<HashMap<YubiHsmObjectKey, YubiHsmObjectMetadata>>,
@@ -1019,6 +1020,7 @@ impl YubiHsmSlot {
         version: (u8, u8, u8),
         algorithms: Vec<u8>,
     ) -> Self {
+        let hardware_version = connector.hardware_version();
         Self {
             connector,
             session: Rc::new(RefCell::new(YubiHsmSessionState::LoggedOut)),
@@ -1026,8 +1028,10 @@ impl YubiHsmSlot {
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
             object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
+            hardware_version,
             algorithms,
             model: String::from("YubiHSM"),
+            serial: String::from("0"),
             trust_prefix: None,
             hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
             object_metadata: RefCell::new(HashMap::new()),
@@ -2938,7 +2942,7 @@ impl Slot for YubiHsmSlot {
         format!("{} #{}", self.product(), self.serial())
     }
     fn serial(&self) -> &str {
-        self.connector.serial()
+        &self.serial
     }
     fn major(&self) -> u8 {
         self.connector.major()
@@ -3109,6 +3113,7 @@ impl Slot for YubiHsmSlot {
         self.attestation_cache.try_borrow_mut()?.clear();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
+        self.serial = device_info.serial.to_string();
         self.algorithms = device_info.algorithms;
         self.model = device_info
             .part_number
@@ -3117,7 +3122,10 @@ impl Slot for YubiHsmSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        apply_connector_versions(info, self.connector.as_ref());
+        if let Some((major, minor)) = self.hardware_version {
+            info.hardwareVersion.major = major;
+            info.hardwareVersion.minor = minor;
+        }
         info.firmwareVersion.major = self.version.0;
         info.firmwareVersion.minor = self.version.1.saturating_mul(10) + self.version.2;
         Ok(())

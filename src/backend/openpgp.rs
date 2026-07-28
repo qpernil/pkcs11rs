@@ -1,8 +1,10 @@
+use crate::device::DeviceContext;
 use crate::*;
 
 #[derive(Debug)]
 pub(crate) struct OpenPgpSlot {
     pub(crate) connector: Rc<dyn Connector>,
+    pub(crate) device: Arc<DeviceContext>,
     pub(crate) application_aid: Vec<u8>,
     pub(crate) authenticated: Rc<Cell<bool>>,
     pub(crate) version: (u8, u8),
@@ -32,14 +34,26 @@ pub(crate) struct OpenPgpDataObject {
 }
 
 impl OpenPgpSlot {
+    #[cfg(test)]
     pub(crate) fn new(connector: Rc<dyn Connector>, application_aid: Vec<u8>) -> Self {
-        let serial = connector.serial().to_owned();
-        let version = connector
-            .firmware_version()
+        let device = Arc::new(DeviceContext::from_endpoint(connector.as_ref()));
+        Self::new_with_device(connector, application_aid, device)
+    }
+
+    pub(crate) fn new_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> Self {
+        let identity = device.identity(connector.connection_epoch());
+        let serial = identity.serial;
+        let version = identity
+            .firmware_version
             .map(|(major, minor, _patch)| (major, minor))
             .unwrap_or((0, 0));
         Self {
             connector,
+            device,
             application_aid,
             authenticated: Rc::new(Cell::new(false)),
             version,
@@ -58,7 +72,6 @@ impl OpenPgpSlot {
     fn update_info(&mut self, info: &openpgp::ApplicationInfo) {
         self.version = info.version;
         self.serial = info.serial.clone();
-        self.connector.set_device_identity(None, Some(&info.serial));
         self.pin_min = info.pin_min;
         self.pin_max = info.pin_max;
         self.admin_pin_min = info.admin_pin_min;
@@ -167,11 +180,7 @@ impl Slot for OpenPgpSlot {
         format!("OpenPGP #{}", self.serial())
     }
     fn serial(&self) -> &str {
-        if self.serial == "0" {
-            self.connector.serial()
-        } else {
-            &self.serial
-        }
+        &self.serial
     }
     fn major(&self) -> u8 {
         self.version.0
@@ -453,7 +462,7 @@ impl Slot for OpenPgpSlot {
     }
     fn get_slot_info(&self, info: &mut CK_SLOT_INFO) -> Result<(), Error> {
         self.format_slot_info(info);
-        let identity = self.connector.identity();
+        let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
         if let Some((major, minor)) = identity.hardware_version {
             info.hardwareVersion.major = major;
@@ -466,7 +475,7 @@ impl Slot for OpenPgpSlot {
     }
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
         self.format_token_info(info);
-        let identity = self.connector.identity();
+        let identity = self.device.identity(self.connector.connection_epoch());
         str_pad(&identity.manufacturer, &mut info.manufacturerID);
         str_pad(&identity.product, &mut info.model);
         let (major, minor) = self.reported_version();

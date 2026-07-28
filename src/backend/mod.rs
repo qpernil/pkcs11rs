@@ -22,14 +22,14 @@ pub(crate) use crypto::{
 };
 #[cfg(all(test, feature = "mock-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
-pub(crate) use ctap::{project_cose_public_key, Fido2Slot};
+pub(crate) use ctap::{project_cose_public_key, Fido2Slot, HidFidoEndpoint};
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
 pub(crate) use piv::{
     piv_algorithm_from_certificate, piv_ec_coordinate_length, piv_ec_parameters,
     piv_effective_pin_policy, piv_policy_requires_login, piv_public_key_from_certificate,
     piv_sign_mechanism_supported, piv_slot_label, PivPublicKey, PivSlot,
 };
-pub(crate) use traits::{apply_connector_versions, session_state, BackendSession, Slot, SlotKind};
+pub(crate) use traits::{apply_device_versions, session_state, BackendSession, Slot, SlotKind};
 pub(crate) use yubihsm::{
     send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry,
     YubiHsmPublicDiscoveryConfig, YubiHsmSessionState, YubiHsmSlot,
