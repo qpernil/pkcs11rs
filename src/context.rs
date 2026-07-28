@@ -1,4 +1,6 @@
 use crate::pkcs11::*;
+#[cfg(feature = "mock-yubikey")]
+use crate::MockYubiKeyConnector;
 #[cfg(feature = "abi-tests")]
 use crate::{
     abi_test_piv_slot, abi_test_yubihsm_slots, AbiScp03Slot, AbiTestSlot, ABI_TEST_PIV_SLOT_ID,
@@ -965,6 +967,22 @@ impl ModuleContext {
             return Ok(());
         }
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
+        #[cfg(feature = "mock-yubikey")]
+        {
+            let connector = Rc::new(MockYubiKeyConnector::new()?);
+            select_application(connector.as_ref(), &crate::ctap::FIDO2_AID)?;
+            let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
+            let mut slot = Box::new(Fido2Slot::new(connector, crate::ctap::FIDO2_AID.to_vec()))
+                as Box<dyn Slot>;
+            slot.init_slot()?;
+            let token_objects = slot.token_objects(slot_id)?;
+            slot_contexts.insert_pcsc_slot_contexts(
+                vec![(slot_id, slot, token_objects)],
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+            )?;
+        }
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {

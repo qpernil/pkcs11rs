@@ -864,6 +864,11 @@ pub(crate) use connector::{
 #[cfg(test)]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscReaderState};
 
+#[cfg(feature = "mock-yubikey")]
+mod mock_yubikey;
+#[cfg(feature = "mock-yubikey")]
+pub(crate) use mock_yubikey::MockYubiKeyConnector;
+
 mod context;
 pub(crate) use context::*;
 

@@ -16,6 +16,7 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 
 [features]
 abi-tests = []
+mock-yubikey = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
