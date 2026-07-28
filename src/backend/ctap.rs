@@ -264,10 +264,10 @@ fn fido2_token_objects(
                 id: credential.credential_id.clone(),
                 token: true,
                 private: true,
-                encrypt: false,
+                encrypt: projected.key_type == CKK_RSA as CK_KEY_TYPE,
                 decrypt: false,
                 sign: false,
-                verify: false,
+                verify: true,
                 derive: false,
                 sensitive: false,
                 extractable: true,
@@ -278,8 +278,20 @@ fn fido2_token_objects(
                 creator_session: None,
                 material: KeyMaterial::FidoKey {
                     public_key: projected.public_key.clone(),
+                    rp_id: credential.relying_party.id.clone(),
                 },
             });
+            let private_material = match credential.relying_party.id.as_ref() {
+                Some(rp_id) => KeyMaterial::FidoResidentPrivate {
+                    public_key: projected.public_key,
+                    rp_id: rp_id.clone(),
+                    credential_id: credential.credential_id.clone(),
+                },
+                None => KeyMaterial::FidoKey {
+                    public_key: projected.public_key,
+                    rp_id: None,
+                },
+            };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("{unique_id}:private"),
@@ -291,7 +303,7 @@ fn fido2_token_objects(
                 private: true,
                 encrypt: false,
                 decrypt: false,
-                sign: false,
+                sign: credential.relying_party.id.is_some(),
                 verify: false,
                 derive: false,
                 sensitive: true,
@@ -301,9 +313,7 @@ fn fido2_token_objects(
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
-                material: KeyMaterial::FidoKey {
-                    public_key: projected.public_key,
-                },
+                material: private_material,
             });
         }
         objects.push(TokenObject {
@@ -328,6 +338,7 @@ fn fido2_token_objects(
             key_gen_mechanism: None,
             creator_session: None,
             material: KeyMaterial::FidoCredential {
+                rp_id: credential.relying_party.id.clone(),
                 rp_id_hash: credential.relying_party.id_hash,
                 response_cbor: credential.response_cbor.clone(),
             },
@@ -634,43 +645,73 @@ impl Slot for Fido2Slot {
             .map_err(CtapError::into_pkcs11)
     }
 
+    fn fido_get_assertion(
+        &mut self,
+        authorization: &CredentialAuthorization,
+        rp_id: &str,
+        credential_id: &[u8],
+        client_data_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, Error> {
+        self.client
+            .get_assertion(authorization, rp_id, credential_id, client_data_hash)
+            .map_err(CtapError::into_pkcs11)
+    }
+
+    fn login_context_specific(
+        &mut self,
+        pin: &[u8],
+        _extended: bool,
+        rp_id: Option<&str>,
+    ) -> Result<Option<CredentialAuthorization>, Error> {
+        let rp_id = rp_id.ok_or(CKR_FUNCTION_NOT_SUPPORTED)?;
+        let info = self.discovered_info()?;
+        self.client
+            .authorize_assertion(&info, pin, rp_id)
+            .map(Some)
+            .map_err(CtapError::into_pkcs11)
+    }
+
     fn login_is_active(&self) -> bool {
         self.authenticated.get()
     }
 
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
-        let supports_preview_sign = self.discovered_info().is_ok_and(|info| {
-            info.extensions
-                .iter()
-                .any(|extension| extension == "previewSign")
-        });
-        if !supports_preview_sign {
+        let Ok(info) = self.discovered_info() else {
             return Vec::new();
+        };
+        let mut mechanisms = vec![MechanismDetails {
+            type_: CKM_PKCS11RS_FIDO_ASSERTION,
+            min_key_size: 0,
+            max_key_size: CK_UNAVAILABLE_INFORMATION as CK_ULONG,
+            flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        }];
+        if info
+            .extensions
+            .iter()
+            .any(|extension| extension == "previewSign")
+        {
+            mechanisms.extend([
+                MechanismDetails {
+                    type_: CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+                    min_key_size: 256,
+                    max_key_size: 256,
+                    flags: (CKF_HW | CKF_GENERATE_KEY_PAIR) as CK_FLAGS,
+                },
+                MechanismDetails {
+                    type_: CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+                    min_key_size: 256,
+                    max_key_size: 256,
+                    flags: CKF_DERIVE as CK_FLAGS,
+                },
+                MechanismDetails {
+                    type_: CKM_PKCS11RS_PREVIEW_SIGN,
+                    min_key_size: 256,
+                    max_key_size: 256,
+                    flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+                },
+            ]);
         }
-        vec![
-            MechanismDetails {
-                type_: CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
-                min_key_size: 256,
-                max_key_size: 256,
-                flags: (CKF_HW | CKF_GENERATE_KEY_PAIR) as CK_FLAGS,
-            },
-            MechanismDetails {
-                type_: CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
-                min_key_size: 256,
-                max_key_size: 256,
-                flags: CKF_DERIVE as CK_FLAGS,
-            },
-            MechanismDetails {
-                type_: CKM_PKCS11RS_PREVIEW_SIGN,
-                min_key_size: 256,
-                max_key_size: 256,
-                flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
-            },
-        ]
-    }
-
-    fn mechanisms(&self) -> Vec<MechanismDetails> {
-        self.backend_mechanisms()
+        mechanisms
     }
 
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
@@ -913,7 +954,10 @@ mod tests {
         );
         assert_eq!(token_info.ulMinPinLen, 4);
         assert_eq!(token_info.ulMaxPinLen, 63);
-        assert!(slot.backend_mechanisms().is_empty());
+        let mechanisms = slot.backend_mechanisms();
+        assert_eq!(mechanisms.len(), 1);
+        assert_eq!(mechanisms[0].type_, CKM_PKCS11RS_FIDO_ASSERTION);
+        assert_eq!(mechanisms[0].flags, (CKF_HW | CKF_SIGN) as CK_FLAGS);
     }
 
     #[test]
@@ -1065,7 +1109,7 @@ mod tests {
         assert_eq!(public.label, "Example: Alice public key");
         assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
         assert!(!public.encrypt);
-        assert!(!public.verify);
+        assert!(public.verify);
         assert!(!public.derive);
         assert_eq!(
             public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
@@ -1096,8 +1140,20 @@ mod tests {
         assert!(private.always_sensitive);
         assert!(private.never_extractable);
         assert!(!private.decrypt);
-        assert!(!private.sign);
+        assert!(private.sign);
         assert!(!private.derive);
+        assert_eq!(
+            private.attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE),
+            Some(vec![CK_TRUE as CK_BBOOL])
+        );
+        assert_eq!(
+            private.attribute_value(CKA_DERIVE as CK_ATTRIBUTE_TYPE),
+            Some(vec![CK_TRUE as CK_BBOOL])
+        );
+        assert_eq!(
+            private.attribute_value(CKA_PKCS11RS_FIDO_RP_ID),
+            Some(b"example.com".to_vec())
+        );
 
         let data = objects
             .iter()

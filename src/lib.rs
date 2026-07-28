@@ -328,6 +328,12 @@ pub const CKM_PKCS11RS_PREVIEW_SIGN_DERIVE: CK_MECHANISM_TYPE =
 /// Sign caller-supplied bytes through a previewSign GetAssertion operation.
 pub const CKM_PKCS11RS_PREVIEW_SIGN: CK_MECHANISM_TYPE =
     CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0003;
+/// Project the public component of a private key into a public session object.
+pub const CKM_PKCS11RS_PROJECT_PUBLIC_KEY: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0004;
+/// Return one exact CTAP GetAssertion response for a resident FIDO credential.
+pub const CKM_PKCS11RS_FIDO_ASSERTION: CK_MECHANISM_TYPE =
+    CKM_VENDOR_DEFINED as CK_MECHANISM_TYPE | 0x5053_0005;
 /// Key type used by the importable previewSign registration object.
 pub const CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_KEY_TYPE =
     CKK_VENDOR_DEFINED as CK_KEY_TYPE | 0x5053_0001;
@@ -337,6 +343,9 @@ pub const CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION: CK_ATTRIBUTE_TYPE =
 /// Canonical `PreviewSignDerivedKeyRecord` CBOR wrapper.
 pub const CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY: CK_ATTRIBUTE_TYPE =
     CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0002;
+/// UTF-8 relying-party identifier required by CTAP GetAssertion.
+pub const CKA_PKCS11RS_FIDO_RP_ID: CK_ATTRIBUTE_TYPE =
+    CKA_VENDOR_DEFINED as CK_ATTRIBUTE_TYPE | 0x5053_0003;
 
 fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(

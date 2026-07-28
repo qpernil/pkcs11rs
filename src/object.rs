@@ -7,11 +7,12 @@ use crate::{
     piv_public_key_from_certificate, send_yubihsm_secure_command,
     yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
-    PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_PIV_OBJECT_TAG,
-    CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
-    CKA_YUBICO_HSMAUTH_ALGORITHM, CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
-    CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
-    YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC,
+    PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_FIDO_RP_ID,
+    CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_ALGORITHM,
+    CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY,
+    CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
+    YUBIHSM_WRAP_KEY_PUBLIC,
 };
 use rsa::{
     traits::{PrivateKeyParts, PublicKeyParts},
@@ -149,11 +150,18 @@ pub(crate) enum KeyMaterial {
         value: Vec<u8>,
     },
     FidoCredential {
+        rp_id: Option<String>,
         rp_id_hash: [u8; 32],
         response_cbor: Vec<u8>,
     },
     FidoKey {
         public_key: FidoPublicKey,
+        rp_id: Option<String>,
+    },
+    FidoResidentPrivate {
+        public_key: FidoPublicKey,
+        rp_id: String,
+        credential_id: Vec<u8>,
     },
     FidoPreviewCredential {
         public_key: FidoPublicKey,
@@ -338,15 +346,23 @@ impl std::fmt::Debug for KeyMaterial {
             Self::FidoCredential {
                 rp_id_hash,
                 response_cbor,
+                ..
             } => fmt
                 .debug_struct("FidoCredential")
                 .field("rp_id_hash", rp_id_hash)
                 .field("response_size", &response_cbor.len())
                 .finish(),
-            Self::FidoKey { public_key } => fmt
+            Self::FidoKey { public_key, .. } => fmt
                 .debug_struct("FidoKey")
                 .field("public_key", public_key)
                 .finish(),
+            Self::FidoResidentPrivate {
+                public_key, rp_id, ..
+            } => fmt
+                .debug_struct("FidoResidentPrivate")
+                .field("public_key", public_key)
+                .field("rp_id", rp_id)
+                .finish_non_exhaustive(),
             Self::FidoPreviewCredential { public_key, .. } => fmt
                 .debug_struct("FidoPreviewCredential")
                 .field("public_key", public_key)
@@ -405,12 +421,15 @@ pub(crate) struct SignatureOperation {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
+    pub(crate) context_specific_rp_id: Option<String>,
+    pub(crate) fido_authorization: Option<crate::ctap::CredentialAuthorization>,
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) mac_length: Option<usize>,
     pub(crate) gmac: Option<GcmParameters>,
     pub(crate) pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
     pub(crate) piv_pin_policy: Option<u8>,
     pub(crate) buffer: Vec<u8>,
+    pub(crate) result: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -905,6 +924,14 @@ pub(crate) fn lazy_yubihsm_attestation_certificate(
 }
 
 impl TokenObject {
+    pub(crate) fn supports_public_projection(&self) -> bool {
+        self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && self.public_key_info().is_some()
+    }
+
+    pub(crate) fn allows_derive(&self) -> bool {
+        self.derive || self.supports_public_projection()
+    }
+
     pub(crate) fn supports_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
         if is_common_storage_attribute(attribute_type) {
             return true;
@@ -992,6 +1019,10 @@ impl TokenObject {
                 attribute_type,
                 CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION | CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY
             ),
+            KeyMaterial::FidoCredential { rp_id, .. } | KeyMaterial::FidoKey { rp_id, .. } => {
+                attribute_type == CKA_PKCS11RS_FIDO_RP_ID && rp_id.is_some()
+            }
+            KeyMaterial::FidoResidentPrivate { .. } => attribute_type == CKA_PKCS11RS_FIDO_RP_ID,
             _ => false,
         }
     }
@@ -1043,6 +1074,7 @@ impl TokenObject {
             CKA_YUBICO_PIN_POLICY,
             CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
             CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            CKA_PKCS11RS_FIDO_RP_ID,
         ] {
             if self.supports_attribute(attribute_type) {
                 types.push(attribute_type);
@@ -1155,6 +1187,16 @@ impl TokenObject {
                         public_key,
                         prefix_uncompressed,
                     },
+                ..
+            }
+            | KeyMaterial::FidoResidentPrivate {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters,
+                        public_key,
+                        prefix_uncompressed,
+                    },
+                ..
             } => ec_public_key_info(
                 self.key_type,
                 Some(parameters),
@@ -1167,6 +1209,15 @@ impl TokenObject {
                         modulus,
                         public_exponent,
                     },
+                ..
+            }
+            | KeyMaterial::FidoResidentPrivate {
+                public_key:
+                    FidoPublicKey::Rsa {
+                        modulus,
+                        public_exponent,
+                    },
+                ..
             } => rsa_public_key_info(modulus, public_exponent),
             KeyMaterial::FidoPreviewCredential {
                 public_key:
@@ -1259,6 +1310,7 @@ impl TokenObject {
                         pin_policy,
                         ..
                     } => openpgp_signature_requires_context_specific_login(*key_ref, *pin_policy),
+                    KeyMaterial::FidoResidentPrivate { .. } => true,
                     _ => false,
                 }))
             }
@@ -1275,7 +1327,7 @@ impl TokenObject {
                 Some(bool_attribute(self.verify))
             }
             x if x == CKA_DERIVE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
-                Some(bool_attribute(self.derive))
+                Some(bool_attribute(self.allows_derive()))
             }
             x if x == CKA_WRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.can_wrap()))
@@ -1373,6 +1425,16 @@ impl TokenObject {
                 KeyMaterial::PreviewSignDerived { derived, .. } => derived.to_cbor().ok(),
                 _ => None,
             },
+            x if x == CKA_PKCS11RS_FIDO_RP_ID => match &self.material {
+                KeyMaterial::FidoCredential {
+                    rp_id: Some(rp_id), ..
+                }
+                | KeyMaterial::FidoKey {
+                    rp_id: Some(rp_id), ..
+                }
+                | KeyMaterial::FidoResidentPrivate { rp_id, .. } => Some(rp_id.as_bytes().to_vec()),
+                _ => None,
+            },
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
@@ -1456,6 +1518,11 @@ impl TokenObject {
                 }
                 KeyMaterial::FidoKey {
                     public_key: FidoPublicKey::Rsa { modulus, .. },
+                    ..
+                }
+                | KeyMaterial::FidoResidentPrivate {
+                    public_key: FidoPublicKey::Rsa { modulus, .. },
+                    ..
                 } => Some(modulus.clone()),
                 _ => None,
             },
@@ -1476,6 +1543,14 @@ impl TokenObject {
                         FidoPublicKey::Rsa {
                             public_exponent, ..
                         },
+                    ..
+                }
+                | KeyMaterial::FidoResidentPrivate {
+                    public_key:
+                        FidoPublicKey::Rsa {
+                            public_exponent, ..
+                        },
+                    ..
                 } => Some(public_exponent.clone()),
                 _ => None,
             },
@@ -1521,6 +1596,11 @@ impl TokenObject {
                 }
                 KeyMaterial::FidoKey {
                     public_key: FidoPublicKey::Rsa { modulus, .. },
+                    ..
+                }
+                | KeyMaterial::FidoResidentPrivate {
+                    public_key: FidoPublicKey::Rsa { modulus, .. },
+                    ..
                 } => Some(ulong_attribute((modulus.len() * 8) as CK_ULONG)),
                 _ => None,
             },
@@ -1542,6 +1622,11 @@ impl TokenObject {
                 }
                 KeyMaterial::FidoKey {
                     public_key: FidoPublicKey::Ec { parameters, .. },
+                    ..
+                }
+                | KeyMaterial::FidoResidentPrivate {
+                    public_key: FidoPublicKey::Ec { parameters, .. },
+                    ..
                 } => Some(parameters.clone()),
                 KeyMaterial::FidoPreviewCredential {
                     public_key: FidoPublicKey::Ec { parameters, .. },
@@ -1627,6 +1712,16 @@ impl TokenObject {
                                 prefix_uncompressed,
                                 ..
                             },
+                        ..
+                    }
+                    | KeyMaterial::FidoResidentPrivate {
+                        public_key:
+                            FidoPublicKey::Ec {
+                                public_key,
+                                prefix_uncompressed,
+                                ..
+                            },
+                        ..
                     } if !public_key.is_empty() => {
                         let mut point = Vec::with_capacity(
                             public_key.len() + usize::from(*prefix_uncompressed),
@@ -1846,6 +1941,7 @@ impl TokenObject {
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::FidoCredential { .. }
                 | KeyMaterial::FidoKey { .. }
+                | KeyMaterial::FidoResidentPrivate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
                 | KeyMaterial::HsmAuthPublic { .. }
                 | KeyMaterial::YubiHsmDevicePublic { .. }
@@ -1919,6 +2015,27 @@ pub(crate) fn rsa_public_key_material(
 ) -> Result<Option<RsaPublicKey>, Error> {
     match material {
         KeyMaterial::RsaPublic(key) => Ok(Some(key.clone())),
+        KeyMaterial::FidoKey {
+            public_key:
+                FidoPublicKey::Rsa {
+                    modulus,
+                    public_exponent,
+                },
+            ..
+        }
+        | KeyMaterial::FidoResidentPrivate {
+            public_key:
+                FidoPublicKey::Rsa {
+                    modulus,
+                    public_exponent,
+                },
+            ..
+        } => RsaPublicKey::new(
+            BigUint::from_bytes_be(modulus),
+            BigUint::from_bytes_be(public_exponent),
+        )
+        .map(Some)
+        .map_err(|_| Error::from(CKR_DATA_INVALID)),
         KeyMaterial::YubiHsm {
             object_type: YUBIHSM_PUBLIC_KEY,
             algorithm,

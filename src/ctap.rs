@@ -170,7 +170,7 @@ pub(crate) struct DiscoverableCredential {
     pub(crate) response_cbor: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CredentialAuthorization {
     protocol: u8,
     token: Zeroizing<Vec<u8>>,
@@ -381,6 +381,18 @@ impl Client {
         )
     }
 
+    pub(crate) fn authorize_assertion(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+        rp_id: &str,
+    ) -> Result<CredentialAuthorization, CtapError> {
+        if info.option("noMcGaPermissionsWithClientPin") {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        self.authorize_with_pin(info, pin, PERMISSION_GET_ASSERTION, Some(rp_id))
+    }
+
     pub(crate) fn create_preview_sign_registration(
         &self,
         authorization: &CredentialAuthorization,
@@ -437,6 +449,26 @@ impl Client {
         )?;
         let response = self.exchange(AUTHENTICATOR_GET_ASSERTION, &request)?;
         parse_preview_sign_assertion_response(&response)
+    }
+
+    pub(crate) fn get_assertion(
+        &self,
+        authorization: &CredentialAuthorization,
+        rp_id: &str,
+        credential_id: &[u8],
+        client_data_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, CtapError> {
+        let pin_uv_auth_param = authenticate(&authorization.token, client_data_hash)?;
+        let request = encode_get_assertion_request(
+            rp_id,
+            credential_id,
+            client_data_hash,
+            &pin_uv_auth_param,
+            authorization.protocol,
+        )?;
+        let response = self.exchange(AUTHENTICATOR_GET_ASSERTION, &request)?;
+        validate_get_assertion_response(&response, rp_id, credential_id)?;
+        Ok(response)
     }
 
     #[cfg(all(test, not(feature = "abi-tests")))]
@@ -1123,6 +1155,84 @@ fn encode_preview_sign_get_assertion_request(
         .u8(0x07)?
         .u8(protocol)?;
     Ok(output)
+}
+
+fn encode_get_assertion_request(
+    rp_id: &str,
+    credential_id: &[u8],
+    client_data_hash: &[u8; 32],
+    pin_uv_auth_param: &[u8],
+    protocol: u8,
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(6)?
+        .u8(0x01)?
+        .str(rp_id)?
+        .u8(0x02)?
+        .bytes(client_data_hash)?
+        .u8(0x03)?
+        .array(1)?
+        .map(2)?
+        .str("id")?
+        .bytes(credential_id)?
+        .str("type")?
+        .str("public-key")?
+        .u8(0x05)?
+        .map(1)?
+        .str("up")?
+        .bool(true)?
+        .u8(0x06)?
+        .bytes(pin_uv_auth_param)?
+        .u8(0x07)?
+        .u8(protocol)?;
+    Ok(output)
+}
+
+fn validate_get_assertion_response(
+    data: &[u8],
+    rp_id: &str,
+    expected_credential_id: &[u8],
+) -> Result<(), CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut credential_id = None;
+    let mut authenticator_data = None;
+    let mut signature = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            1 if credential_id.is_none() => {
+                credential_id = Some(parse_credential_descriptor(&mut decoder)?)
+            }
+            2 if authenticator_data.is_none() => {
+                authenticator_data = Some(decoder.bytes()?.to_vec())
+            }
+            3 if signature.is_none() => signature = Some(decoder.bytes()?.to_vec()),
+            1..=3 => return Err(CtapError::Malformed("duplicate assertion response field")),
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing getAssertion response data"));
+    }
+    if credential_id.as_deref() != Some(expected_credential_id) {
+        return Err(CtapError::Malformed("unexpected assertion credential ID"));
+    }
+    let authenticator_data =
+        authenticator_data.ok_or(CtapError::Malformed("missing assertion authenticator data"))?;
+    if authenticator_data.len() < 37
+        || authenticator_data[..32] != Sha256::digest(rp_id.as_bytes())[..]
+        || authenticator_data[32] & 0x05 != 0x05
+    {
+        return Err(CtapError::Malformed("invalid assertion authenticator data"));
+    }
+    if signature
+        .as_ref()
+        .is_none_or(|signature| signature.is_empty())
+    {
+        return Err(CtapError::Malformed("missing assertion signature"));
+    }
+    Ok(())
 }
 
 fn parse_preview_sign_assertion_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
@@ -2280,6 +2390,117 @@ mod tests {
         assert_eq!(decoder.map().unwrap(), Some(4));
         assert_eq!(decoder.u8().unwrap(), 1);
         assert_eq!(decoder.u8().unwrap(), 4);
+    }
+
+    #[test]
+    fn get_assertion_request_matches_ctap21_vector() {
+        let request = encode_get_assertion_request("a", &[1, 2], &[0; 32], &[3; 32], 2).unwrap();
+        let mut expected = vec![0xa6, 0x01, 0x61, b'a', 0x02, 0x58, 0x20];
+        expected.extend_from_slice(&[0; 32]);
+        expected.extend_from_slice(&[
+            0x03, 0x81, 0xa2, 0x62, b'i', b'd', 0x42, 0x01, 0x02, 0x64, b't', b'y', b'p', b'e',
+            0x6a, b'p', b'u', b'b', b'l', b'i', b'c', b'-', b'k', b'e', b'y', 0x05, 0xa1, 0x62,
+            b'u', b'p', 0xf5, 0x06, 0x58, 0x20,
+        ]);
+        expected.extend_from_slice(&[3; 32]);
+        expected.extend_from_slice(&[0x07, 0x02]);
+        assert_eq!(request, expected);
+    }
+
+    fn get_assertion_response(rp_id: &str, credential_id: &[u8]) -> Vec<u8> {
+        let mut authenticator_data = Sha256::digest(rp_id.as_bytes()).to_vec();
+        authenticator_data.push(0x05);
+        authenticator_data.extend_from_slice(&1_u32.to_be_bytes());
+        let mut response = Vec::new();
+        Encoder::new(&mut response)
+            .map(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .map(2)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(credential_id)
+            .unwrap()
+            .str("type")
+            .unwrap()
+            .str("public-key")
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .bytes(&[0x30, 0x01])
+            .unwrap();
+        response
+    }
+
+    #[test]
+    fn get_assertion_response_is_bound_to_rp_and_credential() {
+        let response = get_assertion_response("example.com", &[0x22; 32]);
+        validate_get_assertion_response(&response, "example.com", &[0x22; 32]).unwrap();
+        assert!(matches!(
+            validate_get_assertion_response(&response, "other.example", &[0x22; 32]),
+            Err(CtapError::Malformed("invalid assertion authenticator data"))
+        ));
+        assert!(matches!(
+            validate_get_assertion_response(&response, "example.com", &[0x23; 32]),
+            Err(CtapError::Malformed("unexpected assertion credential ID"))
+        ));
+    }
+
+    #[test]
+    fn malformed_get_assertion_responses_are_rejected() {
+        let credential_id = [0x22; 32];
+        let mut trailing = get_assertion_response("example.com", &credential_id);
+        trailing.push(0);
+        assert!(matches!(
+            validate_get_assertion_response(&trailing, "example.com", &credential_id),
+            Err(CtapError::Malformed("trailing getAssertion response data"))
+        ));
+
+        let mut bad_flags = get_assertion_response("example.com", &credential_id);
+        let hash = Sha256::digest("example.com");
+        let offset = bad_flags
+            .windows(hash.len())
+            .position(|candidate| candidate == hash.as_slice())
+            .unwrap();
+        bad_flags[offset + 32] = 0x01;
+        assert!(matches!(
+            validate_get_assertion_response(&bad_flags, "example.com", &credential_id),
+            Err(CtapError::Malformed("invalid assertion authenticator data"))
+        ));
+
+        let mut missing_signature = Vec::new();
+        let mut authenticator_data = Sha256::digest("example.com").to_vec();
+        authenticator_data.push(0x05);
+        authenticator_data.extend_from_slice(&0_u32.to_be_bytes());
+        Encoder::new(&mut missing_signature)
+            .map(2)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .map(2)
+            .unwrap()
+            .str("id")
+            .unwrap()
+            .bytes(&credential_id)
+            .unwrap()
+            .str("type")
+            .unwrap()
+            .str("public-key")
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap();
+        assert!(matches!(
+            validate_get_assertion_response(&missing_signature, "example.com", &credential_id),
+            Err(CtapError::Malformed("missing assertion signature"))
+        ));
     }
 
     #[test]

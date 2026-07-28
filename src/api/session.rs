@@ -396,25 +396,49 @@ fn login(
         if user_type == CKU_CONTEXT_SPECIFIC as CK_USER_TYPE {
             return with_pin(pin, pin_len, |pin| {
                 let mut context_operation = None;
+                let mut sign_operation = false;
                 let session = ctx.get_session_context_mut(session_handle)?;
                 if let Some(operation) = &session.sign_operation {
-                    context_operation =
-                        Some((operation.slot_id, operation.context_specific_extended));
+                    context_operation = Some((
+                        operation.slot_id,
+                        operation.context_specific_extended,
+                        operation.context_specific_rp_id.clone(),
+                    ));
+                    sign_operation = true;
                 }
                 if let Some(operation) = &session.decrypt_operation {
                     if context_operation.is_some() {
                         return Err(CKR_OPERATION_ACTIVE.into());
                     }
                     context_operation =
-                        Some((operation.slot_id, operation.context_specific_extended));
+                        Some((operation.slot_id, operation.context_specific_extended, None));
                 }
-                let (slot_id, extended) = context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+                let (slot_id, extended, rp_id) =
+                    context_operation.ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
                 ctx.reconcile_login_state(slot_id);
                 if !ctx.is_slot_user_logged_in(slot_id) {
                     return Err(CKR_USER_NOT_LOGGED_IN.into());
                 }
-                ctx._get_slot_mut(slot_id)?
-                    .login_context_specific(pin, extended)
+                let authorization = ctx._get_slot_mut(slot_id)?.login_context_specific(
+                    pin,
+                    extended,
+                    rp_id.as_deref(),
+                )?;
+                if let Some(authorization) = authorization {
+                    if !sign_operation {
+                        return Err(CKR_FUNCTION_FAILED.into());
+                    }
+                    let operation = ctx
+                        .get_session_context_mut(session_handle)?
+                        .sign_operation
+                        .as_mut()
+                        .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+                    if operation.context_specific_rp_id != rp_id {
+                        return Err(CKR_OPERATION_NOT_INITIALIZED.into());
+                    }
+                    operation.fido_authorization = Some(authorization);
+                }
+                Ok(())
             });
         }
         let role = match user_type {

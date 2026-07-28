@@ -27,16 +27,23 @@ The minimum supported Rust version is 1.85.
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
 - **FIDO2** discovery over the CTAP smart-card binding: over USB CCID on
   YubiKey firmware that exposes it there, and over NFC on compatible
-  YubiKeys. This includes PIN provisioning and changes plus read-only
-  resident-credential metadata and non-operational key projections after PIN
-  login, with an experimental opt-in previewSign registration, offline
-  derivation, and hardware-signing lifecycle on devices advertising that
-  extension.
+  YubiKeys. This includes PIN provisioning and changes, read-only
+  resident-credential metadata, software public-key operations, and an
+  explicit one-shot GetAssertion mechanism after context-specific PIN login,
+  with an experimental opt-in previewSign registration, offline derivation,
+  and hardware-signing lifecycle on devices advertising that extension.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
+
+The vendor `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` mechanism provides a reference
+implementation of public-key projection through `C_DeriveKey`: a private key
+with recoverable public metadata can produce an independent public session
+object for ordinary software verification or RSA encryption. See the
+[public-key projection proposal](docs/public-key-projection-proposal.md) for
+the proposed standard semantics and current implementation boundary.
 
 ## PKCS #11 3.2 profiles
 
@@ -354,7 +361,10 @@ pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 
 The initial PIN is `123456`. Mock state, including PIN changes, currently lasts
 only for the lifetime of the loaded module and resets when the client process
-unloads or reinitializes it. The mock also implements the complete experimental
+unloads or reinitializes it. The mock begins with one deterministic resident
+credential and implements credential-management enumeration, RP-bound
+context-specific login, a genuine ES256 GetAssertion response, and verification
+through its projected public key. It also implements the complete experimental
 previewSign PKCS #11 flow: credential registration, registration-attribute
 export/import, offline ARKG derivation, GetAssertion signing, and verification
 with the derived public key.

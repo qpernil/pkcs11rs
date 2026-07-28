@@ -51,8 +51,9 @@ label; `C_GetTokenInfo` reports the stored discovery failure.
 When GetInfo succeeds, the primary CTAP version is included in the slot
 description and token label. Debug level 2 prints the reported versions,
 extensions, AAGUID, options, maximum message size, PIN/UV protocols, and
-transports. A normal FIDO2 slot is mechanism-free. A device advertising the
-experimental `previewSign` extension instead exposes the explicit vendor
+transports. A discovered FIDO2 slot advertises the vendor
+`CKM_PKCS11RS_FIDO_ASSERTION` signing mechanism. A device advertising the
+experimental `previewSign` extension additionally exposes the explicit vendor
 registration, derivation, and signing mechanisms described in
 [previewSign mapping](preview-sign.md).
 
@@ -101,7 +102,7 @@ This mapping follows the distinction between
 and FIDO's
 [authenticator-wide ClientPIN verification](https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html).
 
-The resident-credential discovery and PIN-management paths issue only:
+The resident-credential discovery and PIN-management paths issue:
 
 - `authenticatorGetInfo`;
 - `authenticatorClientPIN/getKeyAgreement`;
@@ -113,14 +114,17 @@ The resident-credential discovery and PIN-management paths issue only:
   `enumerateRPsGetNextRP`;
 - the same read-only credential-management command, using only
   `enumerateCredentialsBegin` and
-  `enumerateCredentialsGetNextCredential`.
+  `enumerateCredentialsGetNextCredential`;
+- `authenticatorGetAssertion` only after an application explicitly initializes
+  `CKM_PKCS11RS_FIDO_ASSERTION`, performs context-specific PIN login, and calls
+  `C_Sign`.
 
-They never send make-credential, get-assertion, update-user-information,
-delete-credential, authenticator-configuration, reset, or signing commands.
-Discoverable credentials and their metadata remain read-only. The separate,
-application-selected previewSign vendor mechanisms do send MakeCredential and
-GetAssertion; those operations cannot be reached through ordinary credential
-enumeration or projected credential objects.
+They never send make-credential through the ordinary credential objects, nor
+update-user-information, delete-credential, authenticator-configuration, or
+reset. Discoverable credentials and their metadata remain immutable. The
+separate, application-selected previewSign vendor mechanisms do send
+MakeCredential and GetAssertion; those operations cannot be reached through
+ordinary credential enumeration or assertion objects.
 
 Each sufficiently complete response becomes a private, token-resident,
 immutable `CKO_DATA` object:
@@ -162,17 +166,41 @@ P-384, and P-521, OKP Ed25519, and RSA public keys are projected. Other COSE
 key types leave the data object available without creating misleading key
 objects.
 
-The projected public key exposes its standard EC or RSA parameters and
-`CKA_PUBLIC_KEY_INFO`. The private object exposes no private key value. Both
-key objects have `CKA_ENCRYPT`, `CKA_DECRYPT`, `CKA_SIGN`, `CKA_VERIFY`, and
-`CKA_DERIVE` set to false and advertise no allowed mechanisms. In particular,
-authenticator support for the experimental `previewSign` extension does not
+The projected public key exposes its standard EC or RSA parameters,
+`CKA_PUBLIC_KEY_INFO`, and the module's ordinary software public operations.
+The private object exposes no private key value. When credential management
+returns the RP ID, the private object has `CKA_SIGN=true`,
+`CKA_ALWAYS_AUTHENTICATE=true`, and supports only
+`CKM_PKCS11RS_FIDO_ASSERTION`. If only an RP ID hash is available, the private
+projection remains non-operational because GetAssertion cannot be addressed
+safely.
+
+`CKM_PKCS11RS_FIDO_ASSERTION` deliberately returns the exact successful CTAP
+GetAssertion response CBOR, not only its signature field. The `C_Sign` input
+must be the 32-byte `clientDataHash`. After `C_SignInit`, the application must
+call `C_Login(CKU_CONTEXT_SPECIFIC)` with the FIDO PIN; this obtains one
+RP-bound `ga` permission token. The next `C_Sign` sends an allow-list containing
+only that credential and requests user presence. The response validator
+requires the expected credential ID, RP ID hash, UP and UV flags, and a
+nonempty assertion signature. A size query executes the assertion once and
+caches the response so buffer sizing cannot cause a second touch. Successful
+return or any device/protocol failure destroys the operation and its
+authorization. Multipart signing is unsupported, and neither the PIN nor the
+PIN/UV token is retained for another assertion.
+
+The returned CBOR contains the authenticator data, ordinary WebAuthn signature,
+credential descriptor, and any firmware-defined fields. An application can
+verify the ordinary assertion using the linked public-key object. This is a
+vendor mechanism because a CTAP assertion is a structured, RP-bound protocol
+result rather than a bare PKCS #11 signature.
+
+Authenticator support for the experimental `previewSign` extension does not
 show that an arbitrary enumerated credential carries saved registration
 metadata. previewSign registrations created through the vendor
 `C_GenerateKeyPair` mechanism are therefore augmented in memory rather than
-inferred from credential-management output. The separate
-[previewSign mapping](preview-sign.md) defines the explicit registration,
-import, derivation, and signing lifecycle.
+inferred from credential-management output. The separate [previewSign
+mapping](preview-sign.md) defines the explicit registration, import,
+derivation, and signing lifecycle.
 
 An object is not created unless the RP ID hash, user ID, credential ID, and
 encoded public key are all available. Object handles are reconciled from the
@@ -190,7 +218,7 @@ PKCS11RS_FIDO2_TEST_PIN='your PIN' \
 
 ## Synthetic discoverable-credential hardware fixture
 
-The ordinary resident-credential path never sends
+The ordinary resident-credential objects never send
 `authenticatorMakeCredential`. A test-only hook, compiled only into Rust test
 builds, can create one persistent discoverable credential so the read-only
 PKCS #11 mapping can be exercised against a nonempty authenticator. The

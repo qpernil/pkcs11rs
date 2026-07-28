@@ -1108,6 +1108,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
 #[cfg(not(feature = "abi-tests"))]
 mod fido2_hardware {
     use super::*;
+    use sha2::Digest;
 
     const CURRENT_PIN_ENV: &str = "PKCS11RS_FIDO2_TEST_PIN";
     const NEW_PIN_ENV: &str = "PKCS11RS_FIDO2_NEW_PIN";
@@ -1227,6 +1228,140 @@ mod fido2_hardware {
             Ok(())
         })
         .expect("read-only FIDO2 resident-credential enumeration failed");
+    }
+
+    #[test]
+    #[ignore = "requires a discoverable FIDO2 credential, its PIN, and user presence"]
+    fn fido2_resident_credential_get_assertion() {
+        let Ok(pin) = std::env::var(CURRENT_PIN_ENV) else {
+            eprintln!("skipped resident-credential assertion; set {CURRENT_PIN_ENV} to enable it");
+            return;
+        };
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let slot_id = fido2_slot_id();
+        let mut session = 0;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut pin = pin.into_bytes();
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                pin.as_mut_ptr(),
+                pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let mut class = CKO_PRIVATE_KEY as CK_ULONG;
+        let mut can_sign = CK_TRUE as CK_BBOOL;
+        let mut template = [
+            CK_ATTRIBUTE {
+                type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut class as *mut CK_ULONG).cast(),
+                ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+            },
+            CK_ATTRIBUTE {
+                type_: CKA_SIGN as CK_ATTRIBUTE_TYPE,
+                pValue: (&mut can_sign as *mut CK_BBOOL).cast(),
+                ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+            },
+        ];
+        assert_eq!(
+            crate::api::C_FindObjectsInit(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut key = 0;
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_FindObjects(session, &mut key, 1, &mut count),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        assert_eq!(
+            count, 1,
+            "no operational resident FIDO credential was discovered"
+        );
+
+        let mut mechanism = CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_FIDO_ASSERTION,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_SignInit(session, &mut mechanism, key),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+                pin.as_mut_ptr(),
+                pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        let client_data_hash: [u8; 32] =
+            sha2::Sha256::digest(b"pkcs11rs FIDO2 hardware assertion").into();
+        let mut response_len = 0;
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                client_data_hash.as_ptr() as *mut CK_BYTE,
+                client_data_hash.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut response_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut response = vec![0; response_len as usize];
+        assert_eq!(
+            crate::api::C_Sign(
+                session,
+                client_data_hash.as_ptr() as *mut CK_BYTE,
+                client_data_hash.len() as CK_ULONG,
+                response.as_mut_ptr(),
+                &mut response_len,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut decoder = minicbor::Decoder::new(&response);
+        let fields = decoder
+            .map()
+            .expect("GetAssertion response is not CBOR")
+            .expect("GetAssertion response uses an indefinite map");
+        for _ in 0..fields {
+            decoder.skip().expect("invalid GetAssertion response key");
+            decoder.skip().expect("invalid GetAssertion response value");
+        }
+        assert_eq!(decoder.position(), response.len());
+        eprintln!(
+            "received and validated a {}-byte CTAP GetAssertion response",
+            response.len()
+        );
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
     }
 
     #[test]
