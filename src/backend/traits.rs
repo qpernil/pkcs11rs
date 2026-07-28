@@ -127,6 +127,15 @@ pub(crate) trait Slot {
     ) -> Result<Vec<u8>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn fido_get_assertion(
+        &mut self,
+        _authorization: &crate::ctap::CredentialAuthorization,
+        _rp_id: &str,
+        _credential_id: &[u8],
+        _client_data_hash: &[u8; 32],
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
@@ -155,7 +164,12 @@ pub(crate) trait Slot {
     fn init_user_pin(&mut self, _new_pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    fn login_context_specific(&mut self, _pin: &[u8], _extended: bool) -> Result<(), Error> {
+    fn login_context_specific(
+        &mut self,
+        _pin: &[u8],
+        _extended: bool,
+        _rp_id: Option<&str>,
+    ) -> Result<Option<crate::ctap::CredentialAuthorization>, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn logout(&mut self) -> Result<(), Error>;
@@ -235,8 +249,25 @@ pub(crate) trait Slot {
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         MECHANISMS.to_vec()
     }
+    fn supports_software_public_operations(&self) -> bool {
+        true
+    }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
+        if self.supports_software_public_operations() {
+            for software in software_public_mechanisms() {
+                if let Some(existing) = mechanisms
+                    .iter_mut()
+                    .find(|mechanism| mechanism.type_ == software.type_)
+                {
+                    existing.min_key_size = existing.min_key_size.min(software.min_key_size);
+                    existing.max_key_size = existing.max_key_size.max(software.max_key_size);
+                    existing.flags |= software.flags;
+                } else {
+                    mechanisms.push(software);
+                }
+            }
+        }
         for software in SOFTWARE_DIGEST_MECHANISMS {
             if !mechanisms
                 .iter()

@@ -56,10 +56,11 @@ implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
 Backend mechanism lists describe hardware operations. The default `Slot`
-implementation augments them with the module's software digest mechanisms,
-whose active state is still stored in the calling session. Read-only FIDO2 is
-the exception: it explicitly reports an empty mechanism list so its projected
-credential keys cannot be mistaken for operational keys.
+implementation augments them with the module's software digest and public-key
+mechanisms, whose active state is still stored in the calling session. FIDO2
+adds an explicit vendor GetAssertion mechanism for operational resident
+credentials; it cannot be confused with a bare EC or RSA signing mechanism
+because its input and structured output are separately defined.
 
 The `abi-tests` feature uses synthetic slots that identify the real backend
 kind they model. Production dispatch therefore does not contain a generic

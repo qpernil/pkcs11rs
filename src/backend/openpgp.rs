@@ -309,7 +309,12 @@ impl Slot for OpenPgpSlot {
         }
         result
     }
-    fn login_context_specific(&mut self, pin: &[u8], extended: bool) -> Result<(), Error> {
+    fn login_context_specific(
+        &mut self,
+        pin: &[u8],
+        extended: bool,
+        _rp_id: Option<&str>,
+    ) -> Result<Option<crate::ctap::CredentialAuthorization>, Error> {
         self.validate_user_pin(pin)?;
         let pin = self
             .kdf
@@ -320,7 +325,7 @@ impl Slot for OpenPgpSlot {
         OpenPgpClient.unverify(self.connector.as_ref(), extended);
         OpenPgpClient.verify_pin(self.connector.as_ref(), &pin, extended)?;
         self.authenticated.set(true);
-        Ok(())
+        Ok(None)
     }
     fn logout(&mut self) -> Result<(), Error> {
         OpenPgpClient.unverify(self.connector.as_ref(), false);

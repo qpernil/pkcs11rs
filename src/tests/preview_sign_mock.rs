@@ -1,5 +1,5 @@
 use crate::pkcs11::*;
-use p256::ecdsa::{Signature, VerifyingKey};
+use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use signature::hazmat::PrehashVerifier;
 
@@ -266,6 +266,244 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     let signature = Signature::from_slice(&signature).unwrap();
     verifier.verify_prehash(&digest, &signature).unwrap();
 
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let mut slot_count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut slot_count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(slot_count, 1);
+    let mut slot = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut slot_count),
+        CKR_OK as CK_RV
+    );
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = b"123456".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut class = CKO_PRIVATE_KEY as CK_ULONG;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut find_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        bool_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+    ];
+    assert_eq!(
+        crate::api::C_FindObjectsInit(
+            session,
+            find_template.as_mut_ptr(),
+            find_template.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut private_key = 0;
+    let mut found = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(session, &mut private_key, 1, &mut found),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(found, 1);
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    assert_eq!(
+        read_attribute(
+            session,
+            private_key,
+            CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE
+        ),
+        [CK_TRUE as CK_BBOOL]
+    );
+    assert_eq!(
+        read_attribute(session, private_key, crate::CKA_PKCS11RS_FIDO_RP_ID),
+        b"example.com"
+    );
+
+    let mut project_mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut public_template = [bool_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify)];
+    let mut public_key = 0;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut project_mechanism,
+            private_key,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            &mut public_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    let point = read_attribute(session, public_key, CKA_EC_POINT as CK_ATTRIBUTE_TYPE);
+    let point = crate::der_octet_string_value(&point).unwrap();
+    VerifyingKey::from_sec1_bytes(point).unwrap();
+    let client_data_hash: [u8; 32] = Sha256::digest(b"pkcs11rs resident assertion mock").into();
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_FIDO_ASSERTION,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    let mut response_len = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut response_len,
+        ),
+        CKR_USER_NOT_LOGGED_IN as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_CONTEXT_SPECIFIC as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut response_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut short = vec![0; response_len.saturating_sub(1) as usize];
+    let mut short_len = short.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+            short.as_mut_ptr(),
+            &mut short_len,
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(short_len, response_len);
+    let mut response = vec![0; response_len as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+            response.as_mut_ptr(),
+            &mut response_len,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut decoder = minicbor::Decoder::new(&response);
+    let count = decoder.map().unwrap().unwrap();
+    let mut authenticator_data = None;
+    let mut signature = None;
+    for _ in 0..count {
+        match decoder.u8().unwrap() {
+            2 => authenticator_data = Some(decoder.bytes().unwrap().to_vec()),
+            3 => signature = Some(decoder.bytes().unwrap().to_vec()),
+            _ => decoder.skip().unwrap(),
+        }
+    }
+    assert_eq!(decoder.position(), response.len());
+    let authenticator_data = authenticator_data.unwrap();
+    let signature = DerSignature::from_bytes(&signature.unwrap()).unwrap();
+    let signature = Signature::try_from(signature).unwrap();
+    let signature = signature.to_bytes();
+    let mut signed = authenticator_data;
+    signed.extend_from_slice(&client_data_hash);
+    let assertion_digest = Sha256::digest(&signed);
+    let mut verify_mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut verify_mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            assertion_digest.as_ptr().cast_mut(),
+            assertion_digest.len() as CK_ULONG,
+            signature.as_ptr().cast_mut(),
+            signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut unused_len = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut unused_len,
+        ),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignUpdate(
+            session,
+            client_data_hash.as_ptr() as *mut CK_BYTE,
+            client_data_hash.len() as CK_ULONG,
+        ),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignFinal(session, std::ptr::null_mut(), &mut unused_len),
+        CKR_OPERATION_NOT_INITIALIZED as CK_RV
+    );
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),

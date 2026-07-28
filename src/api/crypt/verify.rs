@@ -139,7 +139,12 @@ fn verify_init(
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
                     || (!matches!(
                         &object.material,
-                        KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
+                        KeyMaterial::PivPublic { .. }
+                            | KeyMaterial::OpenPgpPublic { .. }
+                            | KeyMaterial::FidoKey {
+                                public_key: FidoPublicKey::Ec { .. },
+                                ..
+                            }
                     ) && !matches!(
                         &object.material,
                         KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm)
@@ -148,7 +153,12 @@ fn verify_init(
                 && (object.key_type != CKK_EC_EDWARDS as CK_KEY_TYPE
                     || (!matches!(
                         &object.material,
-                        KeyMaterial::PivPublic { .. } | KeyMaterial::OpenPgpPublic { .. }
+                        KeyMaterial::PivPublic { .. }
+                            | KeyMaterial::OpenPgpPublic { .. }
+                            | KeyMaterial::FidoKey {
+                                public_key: FidoPublicKey::Ec { .. },
+                                ..
+                            }
                     ) && !matches!(
                         &object.material,
                         KeyMaterial::YubiHsm { algorithm, .. }
@@ -164,12 +174,15 @@ fn verify_init(
             slot_id,
             requires_login: object.private,
             context_specific_extended: false,
+            context_specific_rp_id: None,
+            fido_authorization: None,
             mechanism: mechanism.mechanism,
             mac_length,
             gmac,
             pss,
             piv_pin_policy: None,
             buffer: Vec::new(),
+            result: None,
         });
         Ok(())
     })
@@ -361,6 +374,47 @@ fn verify(
                     return Err(CKR_MECHANISM_INVALID.into());
                 }
                 verify_ed25519(public_key, data, signature)
+            }
+            KeyMaterial::FidoKey {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters: _,
+                        public_key,
+                        ..
+                    },
+                ..
+            } if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE => {
+                verify_ed25519(public_key, data, signature)
+            }
+            KeyMaterial::FidoKey {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters,
+                        public_key,
+                        ..
+                    },
+                ..
+            } => {
+                let (curve, coordinate_length) = match parameters.as_slice() {
+                    [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => {
+                        (EcCurve::P256, 32)
+                    }
+                    [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => (EcCurve::P384, 48),
+                    [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23] => (EcCurve::P521, 66),
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                };
+                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
+                    data.to_vec()
+                } else {
+                    hash(
+                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
+                        data,
+                    )?
+                };
+                if signature.len() != coordinate_length * 2 {
+                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
+                }
+                verify_ecdsa(curve, public_key, &digest, signature)
             }
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }

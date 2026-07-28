@@ -70,12 +70,13 @@ enumeration have been validated with an earlier YubiKey over NFC on macOS.
 The module follows the CTAP ISO 7816 binding: it explicitly selects the FIDO2
 AID, sends `authenticatorGetInfo` as `80 10 80 00` with the CTAP command byte
 `04`, and follows `91 00` status updates with `80 11 00 00` GET RESPONSE
-commands. A successfully selected applet is exposed as a mechanism-free PKCS
-#11 slot even if `authenticatorGetInfo` later fails, consistent with the other
-CCID applets. Its enumerated credential objects remain read-only; `C_SetPIN`
-separately supports PIN initialization and changes when GetInfo succeeds.
-Devices advertising the experimental `previewSign` extension expose explicit
-vendor registration, derivation, and signing mechanisms. Preserving the
+commands. A successfully selected applet is exposed as a PKCS #11 slot even if
+`authenticatorGetInfo` later fails, consistent with the other CCID applets.
+Its enumerated credential metadata remains immutable; `C_SetPIN` separately
+supports PIN initialization and changes when GetInfo succeeds. A successful
+GetInfo also enables the explicit resident-assertion mechanism. Devices
+advertising the experimental `previewSign` extension expose additional vendor
+registration, derivation, and signing mechanisms. Preserving the
 selected slot makes discovery failures visible to diagnostics, and
 token-information calls continue to report the failure. When GetInfo succeeds,
 the primary CTAP version is included in the PKCS #11 slot description and
@@ -87,10 +88,13 @@ message size, PIN/UV protocols, and transports.
 
 Read-only resident-credential enumeration is available after FIDO2 PIN login.
 It creates private, immutable data objects and, where lossless, linked
-non-operational public/private key projections. Those objects do not expose
-signing or credential mutation. See [`fido2.md`](fido2.md) for the object
-mapping and local hardware probes, and [`preview-sign.md`](preview-sign.md) for
-the separate experimental lifecycle.
+public/private key projections. Public operations execute in software. A
+private projection with a known RP ID supports only the explicit, one-shot
+vendor GetAssertion mechanism after context-specific PIN login. Those objects
+do not expose credential mutation or previewSign signing merely because the
+authenticator advertises that extension. See [`fido2.md`](fido2.md) for the
+object mapping and local hardware probes, and
+[`preview-sign.md`](preview-sign.md) for the separate experimental lifecycle.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those
 credentials are also available as authentication providers to each ordinary

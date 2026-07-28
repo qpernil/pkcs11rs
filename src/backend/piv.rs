@@ -564,10 +564,15 @@ impl Slot for PivSlot {
         self.connector.clear_secure_channel();
         result.map(|_| ())
     }
-    fn login_context_specific(&mut self, pin: &[u8], _extended: bool) -> Result<(), Error> {
+    fn login_context_specific(
+        &mut self,
+        pin: &[u8],
+        _extended: bool,
+        _rp_id: Option<&str>,
+    ) -> Result<Option<crate::ctap::CredentialAuthorization>, Error> {
         PivClient.verify_pin(self.connector.as_ref(), pin)?;
         self.authenticated.set(true);
-        Ok(())
+        Ok(None)
     }
     fn init_slot(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);

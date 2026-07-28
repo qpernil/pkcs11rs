@@ -223,6 +223,7 @@ fn sign_init(
                     || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                     || x == CKM_AES_GMAC as CK_MECHANISM_TYPE
                     || x == CKM_PKCS11RS_PREVIEW_SIGN
+                    || x == CKM_PKCS11RS_FIDO_ASSERTION
             ) {
                 return Err(CKR_MECHANISM_INVALID.into());
             }
@@ -247,6 +248,7 @@ fn sign_init(
                 CKK_EC as CK_KEY_TYPE
             }
             x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
+            x if x == CKM_PKCS11RS_FIDO_ASSERTION => 0,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
             x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => CKK_SHA_1_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
@@ -265,7 +267,8 @@ fn sign_init(
             && matches!(object.material, KeyMaterial::YubiHsm { .. });
         if ((!secret_yubihsm && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
             || (secret_yubihsm && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
-            || object.key_type != expected_key_type
+            || (mechanism.mechanism != CKM_PKCS11RS_FIDO_ASSERTION
+                && object.key_type != expected_key_type)
             || !matches!(
                 object.material,
                 KeyMaterial::RsaPrivate(_)
@@ -273,6 +276,7 @@ fn sign_init(
                     | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
                     | KeyMaterial::PreviewSignDerived { .. }
+                    | KeyMaterial::FidoResidentPrivate { .. }
             )
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -292,10 +296,16 @@ fn sign_init(
             KeyMaterial::PreviewSignDerived { .. }
                 if mechanism.mechanism == CKM_PKCS11RS_PREVIEW_SIGN
         );
+        let fido_assertion_mechanism_supported = matches!(
+            object.material,
+            KeyMaterial::FidoResidentPrivate { .. }
+                if mechanism.mechanism == CKM_PKCS11RS_FIDO_ASSERTION
+        );
         if !matches!(object.material, KeyMaterial::YubiHsm { .. })
             && !piv_mechanism_supported
             && !openpgp_mechanism_supported
             && !preview_sign_mechanism_supported
+            && !fido_assertion_mechanism_supported
             && !matches!(
                 &object.material,
                 KeyMaterial::RsaPrivate(_) if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
@@ -316,11 +326,17 @@ fn sign_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
+        let context_specific_rp_id = match &object.material {
+            KeyMaterial::FidoResidentPrivate { rp_id, .. } => Some(rp_id.clone()),
+            _ => None,
+        };
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
             key: object.material.clone(),
             slot_id,
             requires_login: object.private,
             context_specific_extended: false,
+            context_specific_rp_id,
+            fido_authorization: None,
             mechanism: mechanism.mechanism,
             mac_length,
             gmac,
@@ -330,6 +346,7 @@ fn sign_init(
                 _ => None,
             },
             buffer: Vec::new(),
+            result: None,
         });
         Ok(())
     })
@@ -393,6 +410,68 @@ fn sign(
                 return Err(error);
             }
         };
+        if let KeyMaterial::FidoResidentPrivate {
+            rp_id,
+            credential_id,
+            ..
+        } = &operation.key
+        {
+            if data.len() != 32 || (!operation.buffer.is_empty() && operation.buffer != data) {
+                ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+                return Err(CKR_DATA_LEN_RANGE.into());
+            }
+            let response = if let Some(response) = operation.result {
+                response
+            } else {
+                let authorization = ctx
+                    .get_session_context_mut(session_handle)?
+                    .sign_operation
+                    .as_mut()
+                    .and_then(|operation| operation.fido_authorization.take())
+                    .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+                let client_data_hash: &[u8; 32] = data
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+                let result = match ctx._get_slot_mut(operation.slot_id) {
+                    Ok(slot) => slot.fido_get_assertion(
+                        &authorization,
+                        rp_id,
+                        credential_id,
+                        client_data_hash,
+                    ),
+                    Err(error) => Err(error),
+                };
+                let response = match result {
+                    Ok(response) => response,
+                    Err(error) => {
+                        ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+                        return Err(error);
+                    }
+                };
+                let active = ctx
+                    .get_session_context_mut(session_handle)?
+                    .sign_operation
+                    .as_mut()
+                    .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+                active.buffer = data.to_vec();
+                active.result = Some(response.clone());
+                response
+            };
+            if signature.is_null() {
+                *signature_len = response.len() as CK_ULONG;
+                return Ok(());
+            }
+            if *signature_len < response.len() as CK_ULONG {
+                *signature_len = response.len() as CK_ULONG;
+                return Err(CKR_BUFFER_TOO_SMALL.into());
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(response.as_ptr(), signature, response.len());
+            }
+            *signature_len = response.len() as CK_ULONG;
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Ok(());
+        }
         let mut buffered_data = operation.buffer;
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
@@ -665,11 +744,15 @@ pub extern "C" fn C_SignUpdate(
 ) -> CK_RV {
     map(with_session_context_mut(session_handle, |ctx| {
         let part = from_raw_parts(part, part_len as usize)?.to_vec();
-        let operation = ctx
-            .get_session_context_mut(session_handle)?
+        let session = ctx.get_session_context_mut(session_handle)?;
+        let operation = session
             .sign_operation
             .as_mut()
             .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+        if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION {
+            session.sign_operation = None;
+            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+        }
         operation.buffer.extend_from_slice(&part);
         Ok(())
     }))

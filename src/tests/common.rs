@@ -2,7 +2,7 @@
 use crate::pkcs11::*;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::RsaPrivateKey;
+use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
 
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
@@ -43,7 +43,7 @@ mod interfaces;
 mod key;
 #[path = "object.rs"]
 mod object;
-#[cfg(feature = "mock-yubikey")]
+#[cfg(all(feature = "mock-yubikey", not(feature = "abi-tests")))]
 #[path = "preview_sign_mock.rs"]
 mod preview_sign_mock;
 #[path = "wrap.rs"]
@@ -5926,9 +5926,11 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         patch: 0,
     };
     let mechanisms = crate::Slot::mechanisms(&slot);
-    assert!(!mechanisms
+    let eddsa = mechanisms
         .iter()
-        .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
+        .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(eddsa.flags, CKF_VERIFY as CK_FLAGS);
     let rsa_generation = mechanisms
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
@@ -6739,12 +6741,13 @@ impl crate::Slot for TestSlot {
         &mut self,
         pin: &[u8],
         _extended: bool,
-    ) -> Result<(), crate::error::Error> {
+        _rp_id: Option<&str>,
+    ) -> Result<Option<crate::ctap::CredentialAuthorization>, crate::error::Error> {
         if pin != b"1234" {
             return Err(CKR_PIN_INCORRECT.into());
         }
         TEST_CONTEXT_LOGIN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        Ok(None)
     }
 
     fn logout(&mut self) -> Result<(), crate::error::Error> {
@@ -7511,4 +7514,267 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
             &mut object
         )
     );
+}
+
+#[test]
+fn public_key_projection_creates_an_independent_operational_session_object() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let (base_private, software_private) = with_test_slot_context(TEST_SLOT_ID, |context| {
+        let (handle, object) = context
+            .memory_objects
+            .iter()
+            .find(|(_, object)| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            .unwrap();
+        let private = match &object.material {
+            crate::KeyMaterial::RsaPrivate(private) => private.as_ref().clone(),
+            _ => panic!("default private key must be RSA"),
+        };
+        (*handle, private)
+    });
+    let base_public = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .memory_objects
+            .iter()
+            .find_map(|(handle, object)| {
+                (object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS).then_some(*handle)
+            })
+            .unwrap()
+    });
+    let base_reports_derive = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .resolve_object(base_private)
+            .unwrap()
+            .unwrap()
+            .attribute_value(CKA_DERIVE as CK_ATTRIBUTE_TYPE)
+            .unwrap()
+    });
+    assert_eq!(base_reports_derive, [CK_TRUE as CK_BBOOL]);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut encrypt = CK_TRUE as CK_BBOOL;
+    let mut template = [
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut encrypt),
+    ];
+    let mut projected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut unexpected_parameter = 0u8;
+    mechanism.pParameter = (&mut unexpected_parameter as *mut u8).cast();
+    mechanism.ulParameterLen = 1;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut projected,
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    mechanism.pParameter = std::ptr::null_mut();
+    mechanism.ulParameterLen = 0;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut projected,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(projected).unwrap().unwrap();
+        assert_eq!(object.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+        assert_eq!(object.key_type, CKK_RSA as CK_KEY_TYPE);
+        assert!(!object.token);
+        assert!(!object.private);
+        assert!(object.encrypt);
+        assert!(object.verify);
+        assert!(!object.local);
+        assert_eq!(object.key_gen_mechanism, None);
+        assert!(object.id.is_empty());
+        assert!(object.label.is_empty());
+        assert!(object.public_key_info().is_some());
+    });
+
+    let message = b"projected public keys perform ordinary public operations";
+    let mut sign_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut sign_mechanism, base_private),
+        CKR_OK as CK_RV
+    );
+    let mut signature_len = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            TEST_SESSION_HANDLE,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0u8; signature_len as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            TEST_SESSION_HANDLE,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut sign_mechanism, projected),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            TEST_SESSION_HANDLE,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let plaintext = b"public projection";
+    let mut encryption_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut encryption_mechanism, projected,),
+        CKR_OK as CK_RV
+    );
+    let mut ciphertext_len = 0;
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut ciphertext = vec![0u8; ciphertext_len as usize];
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    let recovered = software_private
+        .decrypt(Pkcs1v15Encrypt, &ciphertext)
+        .unwrap();
+    assert_eq!(recovered, plaintext);
+
+    let mut invalid = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_public,
+            std::ptr::null_mut(),
+            0,
+            &mut invalid,
+        ),
+        CKR_KEY_TYPE_INCONSISTENT as CK_RV
+    );
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut token_template = scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token);
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            &mut token_template,
+            1,
+            &mut invalid,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    let mut matching_modulus = software_private.n().to_bytes_be();
+    let mut intrinsic_template = bytes_attribute(
+        CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+        matching_modulus.as_mut_slice(),
+    );
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            &mut intrinsic_template,
+            1,
+            &mut invalid,
+        ),
+        CKR_OK as CK_RV
+    );
+    matching_modulus[0] ^= 1;
+    intrinsic_template = bytes_attribute(
+        CKA_MODULUS as CK_ATTRIBUTE_TYPE,
+        matching_modulus.as_mut_slice(),
+    );
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            &mut intrinsic_template,
+            1,
+            &mut invalid,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut sensitive_template =
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive);
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            &mut sensitive_template,
+            1,
+            &mut invalid,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert!(context.resolve_object(projected).unwrap().is_none());
+        assert!(context.resolve_object(base_private).unwrap().is_some());
+    });
+    finalize_for_test();
 }
