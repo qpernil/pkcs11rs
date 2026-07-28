@@ -1,5 +1,5 @@
 use super::ccid::PcscAppletSession;
-use crate::ctap::DiscoverableCredential;
+use crate::ctap::{CredentialAuthorization, DiscoverableCredential};
 use crate::*;
 #[cfg(test)]
 use minicbor::Encoder;
@@ -68,6 +68,7 @@ pub(crate) struct Fido2Slot {
     client: CtapClient,
     info: RefCell<Option<AuthenticatorInfo>>,
     credentials: RefCell<Vec<DiscoverableCredential>>,
+    preview_authorization: RefCell<Option<CredentialAuthorization>>,
     authenticated: Cell<bool>,
 }
 
@@ -80,6 +81,7 @@ impl Fido2Slot {
             client: CtapClient::new(transport),
             info: RefCell::new(None),
             credentials: RefCell::new(Vec::new()),
+            preview_authorization: RefCell::new(None),
             authenticated: Cell::new(false),
         }
     }
@@ -110,9 +112,9 @@ fn hex(value: &[u8]) -> String {
     output
 }
 
-struct ProjectedFidoKey {
-    key_type: CK_KEY_TYPE,
-    public_key: FidoPublicKey,
+pub(crate) struct ProjectedFidoKey {
+    pub(crate) key_type: CK_KEY_TYPE,
+    pub(crate) public_key: FidoPublicKey,
 }
 
 fn decode_cbor_u64(value: &[u8]) -> Option<u64> {
@@ -127,7 +129,7 @@ fn decode_cbor_bytes(value: &[u8]) -> Option<Vec<u8>> {
     (decoder.position() == value.len()).then_some(decoded)
 }
 
-fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey> {
+pub(crate) fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey> {
     let mut decoder = minicbor::Decoder::new(encoded);
     let count = decoder.map().ok()??;
     let mut kty = None;
@@ -412,22 +414,46 @@ impl Slot for Fido2Slot {
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.preview_authorization.get_mut().take();
         self.connector.clear_secure_channel();
         self.connector
             .establish_secure_channel(&self.application_aid)?;
         let result = (|| {
             let info = self.discovered_info()?;
-            let authorization = self
-                .client
-                .authorize_credential_enumeration(&info, pin)
-                .map_err(CtapError::into_pkcs11)?;
-            self.client
-                .enumerate_credentials(&info, &authorization)
-                .map_err(CtapError::into_pkcs11)
+            let supports_credential_management = info.credential_management_command().is_some();
+            let supports_preview_sign = info
+                .extensions
+                .iter()
+                .any(|extension| extension == "previewSign");
+            if !supports_credential_management && !supports_preview_sign {
+                return Err(Error::from(CKR_FUNCTION_NOT_SUPPORTED));
+            }
+            let credentials = if supports_credential_management {
+                let authorization = self
+                    .client
+                    .authorize_credential_enumeration(&info, pin)
+                    .map_err(CtapError::into_pkcs11)?;
+                self.client
+                    .enumerate_credentials(&info, &authorization)
+                    .map_err(CtapError::into_pkcs11)?
+            } else {
+                Vec::new()
+            };
+            let preview_authorization = if supports_preview_sign {
+                Some(
+                    self.client
+                        .authorize_preview_sign(&info, pin)
+                        .map_err(CtapError::into_pkcs11)?,
+                )
+            } else {
+                None
+            };
+            Ok((credentials, preview_authorization))
         })();
         match result {
-            Ok(credentials) => {
+            Ok((credentials, preview_authorization)) => {
                 *self.credentials.get_mut() = credentials;
+                *self.preview_authorization.get_mut() = preview_authorization;
                 self.authenticated.set(true);
                 Ok(())
             }
@@ -441,6 +467,7 @@ impl Slot for Fido2Slot {
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.preview_authorization.get_mut().take();
         self.connector.clear_secure_channel();
         Ok(())
     }
@@ -493,6 +520,7 @@ impl Slot for Fido2Slot {
     fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.preview_authorization.get_mut().take();
         self.connector.clear_secure_channel();
         self.connector
             .establish_secure_channel(&self.application_aid)?;
@@ -565,7 +593,45 @@ impl Slot for Fido2Slot {
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.preview_authorization.get_mut().take();
         self.connector.clear_secure_channel();
+    }
+
+    fn fido_preview_sign_registration(
+        &mut self,
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
+        let authorization = self
+            .preview_authorization
+            .get_mut()
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        self.client
+            .create_preview_sign_registration(
+                authorization,
+                Some(self.connector.serial().to_owned()),
+            )
+            .map_err(CtapError::into_pkcs11)
+    }
+
+    fn fido_preview_sign(
+        &mut self,
+        registration: &crate::preview_sign::PreviewSignRegistration,
+        to_be_signed: &[u8],
+        additional_args_cbor: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let authorization = self
+            .preview_authorization
+            .get_mut()
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        self.client
+            .preview_sign(
+                authorization,
+                registration,
+                to_be_signed,
+                additional_args_cbor,
+            )
+            .map_err(CtapError::into_pkcs11)
     }
 
     fn login_is_active(&self) -> bool {
@@ -573,11 +639,38 @@ impl Slot for Fido2Slot {
     }
 
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
-        Vec::new()
+        let supports_preview_sign = self.discovered_info().is_ok_and(|info| {
+            info.extensions
+                .iter()
+                .any(|extension| extension == "previewSign")
+        });
+        if !supports_preview_sign {
+            return Vec::new();
+        }
+        vec![
+            MechanismDetails {
+                type_: CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+                min_key_size: 256,
+                max_key_size: 256,
+                flags: (CKF_HW | CKF_GENERATE_KEY_PAIR) as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+                min_key_size: 256,
+                max_key_size: 256,
+                flags: CKF_DERIVE as CK_FLAGS,
+            },
+            MechanismDetails {
+                type_: CKM_PKCS11RS_PREVIEW_SIGN,
+                min_key_size: 256,
+                max_key_size: 256,
+                flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+            },
+        ]
     }
 
     fn mechanisms(&self) -> Vec<MechanismDetails> {
-        Vec::new()
+        self.backend_mechanisms()
     }
 
     fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {

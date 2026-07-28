@@ -8,6 +8,7 @@ use crate::{
     yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
     PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_PIV_OBJECT_TAG,
+    CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
     CKA_YUBICO_HSMAUTH_ALGORITHM, CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
     CKA_YUBICO_PIN_POLICY, CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
     YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC,
@@ -153,6 +154,18 @@ pub(crate) enum KeyMaterial {
     },
     FidoKey {
         public_key: FidoPublicKey,
+    },
+    FidoPreviewCredential {
+        public_key: FidoPublicKey,
+        registration: crate::preview_sign::PreviewSignRegistration,
+    },
+    PreviewSignRegistration {
+        registration: crate::preview_sign::PreviewSignRegistration,
+    },
+    PreviewSignDerived {
+        public_key: FidoPublicKey,
+        registration: crate::preview_sign::PreviewSignRegistration,
+        derived: crate::preview_sign::PreviewSignDerivedKeyRecord,
     },
     HsmAuthCredential {
         algorithm: HsmAuthAlgorithm,
@@ -334,6 +347,17 @@ impl std::fmt::Debug for KeyMaterial {
                 .debug_struct("FidoKey")
                 .field("public_key", public_key)
                 .finish(),
+            Self::FidoPreviewCredential { public_key, .. } => fmt
+                .debug_struct("FidoPreviewCredential")
+                .field("public_key", public_key)
+                .finish_non_exhaustive(),
+            Self::PreviewSignRegistration { .. } => fmt
+                .debug_struct("PreviewSignRegistration")
+                .finish_non_exhaustive(),
+            Self::PreviewSignDerived { public_key, .. } => fmt
+                .debug_struct("PreviewSignDerived")
+                .field("public_key", public_key)
+                .finish_non_exhaustive(),
             Self::HsmAuthCredential {
                 algorithm,
                 retries,
@@ -960,6 +984,14 @@ impl TokenObject {
                     | CKA_YUBICO_HSMAUTH_RETRIES
                     | CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED
             ),
+            KeyMaterial::FidoPreviewCredential { .. }
+            | KeyMaterial::PreviewSignRegistration { .. } => {
+                attribute_type == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+            }
+            KeyMaterial::PreviewSignDerived { .. } => matches!(
+                attribute_type,
+                CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION | CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY
+            ),
             _ => false,
         }
     }
@@ -1009,6 +1041,8 @@ impl TokenObject {
             CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED,
             CKA_YUBICO_TOUCH_POLICY,
             CKA_YUBICO_PIN_POLICY,
+            CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
         ] {
             if self.supports_attribute(attribute_type) {
                 types.push(attribute_type);
@@ -1134,6 +1168,29 @@ impl TokenObject {
                         public_exponent,
                     },
             } => rsa_public_key_info(modulus, public_exponent),
+            KeyMaterial::FidoPreviewCredential {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters,
+                        public_key,
+                        prefix_uncompressed,
+                    },
+                ..
+            }
+            | KeyMaterial::PreviewSignDerived {
+                public_key:
+                    FidoPublicKey::Ec {
+                        parameters,
+                        public_key,
+                        prefix_uncompressed,
+                    },
+                ..
+            } => ec_public_key_info(
+                self.key_type,
+                Some(parameters),
+                public_key,
+                *prefix_uncompressed,
+            ),
             _ => None,
         }
     }
@@ -1302,6 +1359,18 @@ impl TokenObject {
             },
             x if x == CKA_PKCS11RS_PIV_OBJECT_TAG => match &self.material {
                 KeyMaterial::PivData { object_id, .. } => Some(piv_object_tag(*object_id)),
+                _ => None,
+            },
+            x if x == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION => match &self.material {
+                KeyMaterial::FidoPreviewCredential { registration, .. }
+                | KeyMaterial::PreviewSignRegistration { registration }
+                | KeyMaterial::PreviewSignDerived { registration, .. } => {
+                    registration.to_cbor().ok()
+                }
+                _ => None,
+            },
+            x if x == CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY => match &self.material {
+                KeyMaterial::PreviewSignDerived { derived, .. } => derived.to_cbor().ok(),
                 _ => None,
             },
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
@@ -1473,6 +1542,14 @@ impl TokenObject {
                 }
                 KeyMaterial::FidoKey {
                     public_key: FidoPublicKey::Ec { parameters, .. },
+                } => Some(parameters.clone()),
+                KeyMaterial::FidoPreviewCredential {
+                    public_key: FidoPublicKey::Ec { parameters, .. },
+                    ..
+                }
+                | KeyMaterial::PreviewSignDerived {
+                    public_key: FidoPublicKey::Ec { parameters, .. },
+                    ..
                 } => Some(parameters.clone()),
                 _ => None,
             },

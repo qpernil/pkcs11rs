@@ -222,6 +222,7 @@ fn sign_init(
                     || x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                     || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                     || x == CKM_AES_GMAC as CK_MECHANISM_TYPE
+                    || x == CKM_PKCS11RS_PREVIEW_SIGN
             ) {
                 return Err(CKR_MECHANISM_INVALID.into());
             }
@@ -245,6 +246,7 @@ fn sign_init(
             x if x == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(x) => {
                 CKK_EC as CK_KEY_TYPE
             }
+            x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
             x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => CKK_SHA_1_HMAC as CK_KEY_TYPE,
             x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
@@ -270,6 +272,7 @@ fn sign_init(
                     | KeyMaterial::PivPrivate { .. }
                     | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
+                    | KeyMaterial::PreviewSignDerived { .. }
             )
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -284,9 +287,15 @@ fn sign_init(
             KeyMaterial::OpenPgpPrivate { algorithm, .. }
                 if openpgp_sign_mechanism_supported(*algorithm, mechanism.mechanism)
         );
+        let preview_sign_mechanism_supported = matches!(
+            object.material,
+            KeyMaterial::PreviewSignDerived { .. }
+                if mechanism.mechanism == CKM_PKCS11RS_PREVIEW_SIGN
+        );
         if !matches!(object.material, KeyMaterial::YubiHsm { .. })
             && !piv_mechanism_supported
             && !openpgp_mechanism_supported
+            && !preview_sign_mechanism_supported
             && !matches!(
                 &object.material,
                 KeyMaterial::RsaPrivate(_) if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
@@ -436,8 +445,13 @@ fn sign(
                 YUBIHSM_ALGO_HMAC_SHA512 => 64,
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
+            KeyMaterial::PreviewSignDerived { .. } => 64,
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
+        if matches!(operation.key, KeyMaterial::PreviewSignDerived { .. }) && data.len() != 32 {
+            ctx.get_session_context_mut(session_handle)?.sign_operation = None;
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
         if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
             && data.len() > required.saturating_sub(11)
         {
@@ -604,6 +618,20 @@ fn sign(
                     } else {
                         Ok(response)
                     }
+                }
+                KeyMaterial::PreviewSignDerived {
+                    registration,
+                    derived,
+                    ..
+                } => {
+                    let arguments = derived
+                        .additional_args_cbor()
+                        .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                    ctx._get_slot_mut(operation.slot_id)?.fido_preview_sign(
+                        registration,
+                        data,
+                        arguments,
+                    )
                 }
                 _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }

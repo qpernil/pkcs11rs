@@ -32,6 +32,48 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Fido2)
+            && template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION).is_some()
+        {
+            validate_unique_template(templ)?;
+            let encoded = read_attribute_value(
+                template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            let registration = crate::preview_sign::PreviewSignRegistration::from_cbor(&encoded)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            let mut parsed = TokenObjectTemplate {
+                class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+                key_type: Some(CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION),
+                token: false,
+                private: true,
+                sensitive: Some(true),
+                extractable: Some(false),
+                ..TokenObjectTemplate::default()
+            };
+            for attribute in templ {
+                if attribute.type_ == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION {
+                    continue;
+                }
+                parsed.apply_attribute(attribute).map_err(Error::from)?;
+            }
+            let mut imported = parsed.into_object().map_err(Error::from)?;
+            if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                || imported.key_type != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+                || imported.token
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            imported.sign = false;
+            imported.derive = true;
+            imported.local = false;
+            imported.material = KeyMaterial::PreviewSignRegistration { registration };
+            validate_new_object_access(&imported, flags, logged_in)?;
+            imported.set_creator(session_handle, slot_id);
+            *object_handle = ctx.insert_object(imported)?;
+            return Ok(());
+        }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
             let import = piv_import_parameters(templ)?;
             match import {

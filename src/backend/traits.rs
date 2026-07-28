@@ -114,6 +114,19 @@ pub(crate) trait Slot {
     ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    fn fido_preview_sign_registration(
+        &mut self,
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn fido_preview_sign(
+        &mut self,
+        _registration: &crate::preview_sign::PreviewSignRegistration,
+        _to_be_signed: &[u8],
+        _additional_args_cbor: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn login_user(&mut self, _username: &[u8], _pin: &[u8]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }

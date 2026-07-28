@@ -21,12 +21,10 @@ pub(crate) const FIDO2_AID: [u8; 8] = [0xa0, 0x00, 0x00, 0x06, 0x47, 0x2f, 0x00,
 pub(crate) const FIDO2_TEST_RP_ID: &str = "pkcs11rs.invalid";
 #[cfg(test)]
 pub(crate) const FIDO2_TEST_USER_DISPLAY_NAME: &str = "pkcs11rs synthetic user";
-#[cfg(test)]
-pub(crate) const PREVIEW_SIGN_TEST_RP_ID: &str = "preview-sign.pkcs11rs.invalid";
+pub(crate) const PREVIEW_SIGN_RP_ID: &str = "preview-sign.pkcs11rs.invalid";
 
-#[cfg(all(test, not(feature = "abi-tests")))]
-const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
-#[cfg(test)]
+pub(crate) const AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
+pub(crate) const AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
 const PREVIEW_SIGN_ARKG_P256_ESP256: i64 = -65_539;
 const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
 const CTAP2_ERR_PIN_INVALID: u8 = 0x31;
@@ -38,8 +36,8 @@ const CTAP2_ERR_PIN_POLICY_VIOLATION: u8 = 0x37;
 const CLIENT_PIN_GET_PIN_TOKEN: u8 = 0x05;
 const CLIENT_PIN_GET_PIN_UV_AUTH_TOKEN_USING_PIN_WITH_PERMISSIONS: u8 = 0x09;
 const PIN_UV_AUTH_PROTOCOL_TWO: u8 = 2;
-#[cfg(test)]
 const PERMISSION_MAKE_CREDENTIAL: u8 = 0x01;
+const PERMISSION_GET_ASSERTION: u8 = 0x02;
 const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
 const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
@@ -117,7 +115,7 @@ impl AuthenticatorInfo {
             .any(|(candidate, enabled)| candidate == name && *enabled)
     }
 
-    fn credential_management_command(&self) -> Option<u8> {
+    pub(crate) fn credential_management_command(&self) -> Option<u8> {
         if self.option("credMgmt") {
             Some(AUTHENTICATOR_CREDENTIAL_MANAGEMENT)
         } else if self.option("credentialMgmtPreview") {
@@ -367,6 +365,80 @@ impl Client {
         })
     }
 
+    pub(crate) fn authorize_preview_sign(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+    ) -> Result<CredentialAuthorization, CtapError> {
+        if info.option("noMcGaPermissionsWithClientPin") {
+            return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
+        }
+        self.authorize_with_pin(
+            info,
+            pin,
+            PERMISSION_MAKE_CREDENTIAL | PERMISSION_GET_ASSERTION,
+            Some(PREVIEW_SIGN_RP_ID),
+        )
+    }
+
+    pub(crate) fn create_preview_sign_registration(
+        &self,
+        authorization: &CredentialAuthorization,
+        token_serial_hint: Option<String>,
+    ) -> Result<crate::preview_sign::PreviewSignRegistration, CtapError> {
+        let mut nonce = [0_u8; 32];
+        getrandom::fill(&mut nonce)
+            .map_err(|_| CtapError::Transport(crate::CKR_RANDOM_NO_RNG.into()))?;
+        let mut client_data_hasher = Sha256::new();
+        client_data_hasher.update(b"pkcs11rs previewSign registration v1");
+        client_data_hasher.update(nonce);
+        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let request = encode_preview_sign_make_credential_request(
+            &client_data_hash,
+            &nonce,
+            Some((&pin_uv_auth_param, authorization.protocol)),
+        )?;
+        let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
+        crate::preview_sign::PreviewSignRegistration::new(
+            PREVIEW_SIGN_RP_ID,
+            client_data_hash,
+            response,
+            token_serial_hint,
+        )
+        .map_err(|error| {
+            log!(
+                1,
+                "previewSign registration response validation failed: {error}"
+            );
+            CtapError::Malformed("invalid previewSign registration response")
+        })
+    }
+
+    pub(crate) fn preview_sign(
+        &self,
+        authorization: &CredentialAuthorization,
+        registration: &crate::preview_sign::PreviewSignRegistration,
+        to_be_signed: &[u8],
+        additional_args_cbor: &[u8],
+    ) -> Result<Vec<u8>, CtapError> {
+        let mut client_data_hasher = Sha256::new();
+        client_data_hasher.update(b"pkcs11rs previewSign assertion v1");
+        client_data_hasher.update(to_be_signed);
+        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let pin_uv_auth_param = authenticate(&authorization.token, &client_data_hash)?;
+        let request = encode_preview_sign_get_assertion_request(
+            registration,
+            &client_data_hash,
+            to_be_signed,
+            additional_args_cbor,
+            &pin_uv_auth_param,
+            authorization.protocol,
+        )?;
+        let response = self.exchange(AUTHENTICATOR_GET_ASSERTION, &request)?;
+        parse_preview_sign_assertion_response(&response)
+    }
+
     #[cfg(all(test, not(feature = "abi-tests")))]
     pub(crate) fn create_discoverable_test_credential(
         &self,
@@ -425,7 +497,7 @@ impl Client {
                 info,
                 pin,
                 PERMISSION_MAKE_CREDENTIAL,
-                Some(PREVIEW_SIGN_TEST_RP_ID),
+                Some(PREVIEW_SIGN_RP_ID),
             )?)
         };
         let pin_uv_auth = authorization
@@ -435,7 +507,7 @@ impl Client {
                     .map(|parameter| (parameter, authorization.protocol))
             })
             .transpose()?;
-        let request = encode_test_preview_sign_make_credential_request(
+        let request = encode_preview_sign_make_credential_request(
             &client_data_hash,
             &nonce,
             pin_uv_auth
@@ -444,7 +516,7 @@ impl Client {
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
         crate::preview_sign::PreviewSignRegistration::new(
-            PREVIEW_SIGN_TEST_RP_ID,
+            PREVIEW_SIGN_RP_ID,
             client_data_hash,
             response,
             token_serial_hint,
@@ -959,8 +1031,7 @@ fn encode_test_make_credential_request(
     Ok(output)
 }
 
-#[cfg(test)]
-fn encode_test_preview_sign_make_credential_request(
+fn encode_preview_sign_make_credential_request(
     client_data_hash: &[u8; 32],
     user_id: &[u8; 32],
     pin_uv_auth: Option<(&[u8], u8)>,
@@ -974,7 +1045,7 @@ fn encode_test_preview_sign_make_credential_request(
         .u8(0x02)?
         .map(2)?
         .str("id")?
-        .str(PREVIEW_SIGN_TEST_RP_ID)?
+        .str(PREVIEW_SIGN_RP_ID)?
         .str("name")?
         .str("pkcs11rs previewSign test")?
         .u8(0x03)?
@@ -1009,6 +1080,101 @@ fn encode_test_preview_sign_make_credential_request(
         encoder.u8(0x08)?.bytes(parameter)?.u8(0x09)?.u8(protocol)?;
     }
     Ok(output)
+}
+
+fn encode_preview_sign_get_assertion_request(
+    registration: &crate::preview_sign::PreviewSignRegistration,
+    client_data_hash: &[u8; 32],
+    to_be_signed: &[u8],
+    additional_args_cbor: &[u8],
+    pin_uv_auth_param: &[u8],
+    protocol: u8,
+) -> Result<Vec<u8>, CtapError> {
+    let mut output = Vec::new();
+    Encoder::new(&mut output)
+        .map(7)?
+        .u8(0x01)?
+        .str(registration.rp_id())?
+        .u8(0x02)?
+        .bytes(client_data_hash)?
+        .u8(0x03)?
+        .array(1)?
+        .map(2)?
+        .str("id")?
+        .bytes(registration.credential_id())?
+        .str("type")?
+        .str("public-key")?
+        .u8(0x04)?
+        .map(1)?
+        .str("previewSign")?
+        .map(3)?
+        .u8(0x02)?
+        .bytes(registration.signing_key_handle())?
+        .u8(0x06)?
+        .bytes(to_be_signed)?
+        .u8(0x07)?
+        .bytes(additional_args_cbor)?
+        .u8(0x05)?
+        .map(1)?
+        .str("up")?
+        .bool(true)?
+        .u8(0x06)?
+        .bytes(pin_uv_auth_param)?
+        .u8(0x07)?
+        .u8(protocol)?;
+    Ok(output)
+}
+
+fn parse_preview_sign_assertion_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut authenticator_data = None;
+    for _ in 0..count {
+        match decoder.u64()? {
+            2 if authenticator_data.is_none() => {
+                authenticator_data = Some(decoder.bytes()?.to_vec())
+            }
+            2 => {
+                return Err(CtapError::Malformed(
+                    "duplicate assertion authenticator data",
+                ))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing getAssertion response data"));
+    }
+    let authenticator_data =
+        authenticator_data.ok_or(CtapError::Malformed("missing assertion authenticator data"))?;
+    if authenticator_data.len() <= 37 || authenticator_data[32] & 0x80 == 0 {
+        return Err(CtapError::Malformed(
+            "assertion authenticator data has no extension output",
+        ));
+    }
+    let extensions = &authenticator_data[37..];
+    let mut decoder = Decoder::new(extensions);
+    let count = definite_map(&mut decoder)?;
+    let mut signature = None;
+    for _ in 0..count {
+        let name = decoder.str()?;
+        if name != "previewSign" {
+            decoder.skip()?;
+            continue;
+        }
+        let extension_count = definite_map(&mut decoder)?;
+        for _ in 0..extension_count {
+            match decoder.i64()? {
+                6 if signature.is_none() => signature = Some(decoder.bytes()?.to_vec()),
+                6 => return Err(CtapError::Malformed("duplicate previewSign signature")),
+                _ => decoder.skip()?,
+            }
+        }
+    }
+    if decoder.position() != extensions.len() {
+        return Err(CtapError::Malformed("trailing assertion extension output"));
+    }
+    signature.ok_or(CtapError::Malformed("missing previewSign signature"))
 }
 
 #[cfg(test)]
@@ -1701,8 +1867,7 @@ mod tests {
     #[test]
     fn preview_sign_make_credential_request_matches_extension_vector() {
         let request =
-            encode_test_preview_sign_make_credential_request(&[0x11; 32], &[0x22; 32], None)
-                .unwrap();
+            encode_preview_sign_make_credential_request(&[0x11; 32], &[0x22; 32], None).unwrap();
         let mut decoder = Decoder::new(&request);
         assert_eq!(decoder.map().unwrap(), Some(6));
         let mut saw_extension = false;
@@ -1736,7 +1901,7 @@ mod tests {
 
     #[test]
     fn preview_sign_make_credential_request_appends_pin_authorization() {
-        let request = encode_test_preview_sign_make_credential_request(
+        let request = encode_preview_sign_make_credential_request(
             &[0x11; 32],
             &[0x22; 32],
             Some((&[0x33; 32], 2)),
@@ -2157,5 +2322,70 @@ mod tests {
             0x41, 2, 0x08, 0x40, 0x09, 0x01,
         ];
         assert!(parse_credential_response(&public_key_not_map, &rp, true).is_err());
+    }
+
+    fn preview_sign_assertion_response(
+        signature_value: impl FnOnce(&mut Encoder<&mut Vec<u8>>),
+    ) -> Vec<u8> {
+        let mut extensions = Vec::new();
+        let mut encoder = Encoder::new(&mut extensions);
+        encoder
+            .map(1)
+            .unwrap()
+            .str("previewSign")
+            .unwrap()
+            .map(1)
+            .unwrap()
+            .u8(6)
+            .unwrap();
+        signature_value(&mut encoder);
+        let mut authenticator_data = vec![0; 32];
+        authenticator_data.push(0x80);
+        authenticator_data.extend_from_slice(&0_u32.to_be_bytes());
+        authenticator_data.extend_from_slice(&extensions);
+        let mut response = Vec::new();
+        Encoder::new(&mut response)
+            .map(1)
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap();
+        response
+    }
+
+    #[test]
+    fn preview_sign_assertion_response_extracts_only_the_signed_extension_value() {
+        let response = preview_sign_assertion_response(|encoder| {
+            encoder.bytes(&[0x5a; 64]).unwrap();
+        });
+        assert_eq!(
+            parse_preview_sign_assertion_response(&response).unwrap(),
+            [0x5a; 64]
+        );
+    }
+
+    #[test]
+    fn malformed_preview_sign_assertion_responses_are_rejected() {
+        let wrong_type = preview_sign_assertion_response(|encoder| {
+            encoder.u8(1).unwrap();
+        });
+        assert!(parse_preview_sign_assertion_response(&wrong_type).is_err());
+
+        let mut no_extension_flag = preview_sign_assertion_response(|encoder| {
+            encoder.bytes(&[0x5a; 64]).unwrap();
+        });
+        let mut decoder = Decoder::new(&no_extension_flag);
+        assert_eq!(decoder.map().unwrap(), Some(1));
+        assert_eq!(decoder.u8().unwrap(), 2);
+        let auth_data_position = decoder.position() + 2;
+        no_extension_flag[auth_data_position + 32] = 0;
+        assert!(parse_preview_sign_assertion_response(&no_extension_flag).is_err());
+
+        let mut trailing = preview_sign_assertion_response(|encoder| {
+            encoder.bytes(&[0x5a; 64]).unwrap();
+        });
+        trailing.push(0);
+        assert!(parse_preview_sign_assertion_response(&trailing).is_err());
     }
 }
