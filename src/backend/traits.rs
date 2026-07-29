@@ -66,6 +66,12 @@ pub(crate) enum SlotKind {
 
 pub(crate) trait Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
+    fn device_context(&self) -> Option<Arc<crate::device::DeviceContext>> {
+        None
+    }
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        crate::device::DeviceOperationKind::Ccid
+    }
     fn kind(&self) -> SlotKind;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;

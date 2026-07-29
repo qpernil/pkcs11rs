@@ -161,6 +161,9 @@ impl Slot for OpenPgpSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.device.clone())
+    }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::OpenPgp)
     }

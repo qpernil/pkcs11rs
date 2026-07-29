@@ -176,6 +176,11 @@ impl HsmAuthProvider {
         credential_password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
     ) -> Result<YubiHsmSecureSession, Error> {
+        let physical_device = self.connector.as_ref().device_context();
+        let _device_operation = physical_device
+            .as_ref()
+            .map(|device| device.lock_operation(crate::device::DeviceOperationKind::Ccid))
+            .transpose()?;
         match self.credential.algorithm {
             HsmAuthAlgorithm::Aes128YubicoAuthentication => {
                 log!(

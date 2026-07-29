@@ -6236,6 +6236,7 @@ struct ConcurrentSlot {
     state: std::sync::Arc<ConcurrentOperationState>,
     slot_index: usize,
     kind: crate::SlotKind,
+    device: Option<std::sync::Arc<crate::device::DeviceContext>>,
 }
 
 #[derive(Debug)]
@@ -6509,6 +6510,15 @@ impl crate::BackendSession for ConcurrentSession {
 impl crate::Slot for ConcurrentSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
+    }
+    fn device_context(&self) -> Option<std::sync::Arc<crate::device::DeviceContext>> {
+        self.device.clone()
+    }
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        match self.kind {
+            crate::SlotKind::Fido2 => crate::device::DeviceOperationKind::Hid,
+            _ => crate::device::DeviceOperationKind::Ccid,
+        }
     }
     fn kind(&self) -> crate::SlotKind {
         self.kind

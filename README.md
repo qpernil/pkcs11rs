@@ -88,7 +88,11 @@ Applet connectors on a reader share one `PcscReaderState`, which owns the card
 connection, selected AID, APDU capabilities, SCP state, and complete APDU
 exchange lock. Local operations on different applet slots can execute
 concurrently; actual card exchanges on one reader are serialized. Different
-YubiHSMs and different PC/SC readers can also execute concurrently.
+YubiHSMs and different PC/SC readers can also execute concurrently. When
+Yubico's device-information commands report the same physical serial over HID
+and PC/SC, pkcs11rs additionally prevents its own HID and CCID operations from
+overlapping. HID remains shared with other HID clients; no exclusive HID lock
+is requested.
 
 See [Architecture](docs/architecture.md) for the object graph, lifecycle
 locking, session ownership, transport sharing, and cache boundaries.
@@ -325,6 +329,9 @@ interfaces interfere:
 cargo test diagnoses_yubikey_hid_ccid_cross_interface_concurrency \
   -- --ignored --nocapture
 ```
+
+The corresponding protected-path test is
+`serializes_yubikey_hid_ccid_cross_interface_operations`.
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048

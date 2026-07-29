@@ -1,5 +1,5 @@
 use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
-use crate::device::PhysicalDeviceKey;
+use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::pkcs11::*;
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
@@ -77,6 +77,8 @@ pub(crate) struct ModuleContext {
 pub(crate) struct SlotContext {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) slot: Box<dyn Slot>,
+    pub(crate) device: Option<Arc<crate::device::DeviceContext>>,
+    pub(crate) device_operation_kind: crate::device::DeviceOperationKind,
     handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
@@ -118,6 +120,19 @@ fn resolve_fido_duplicate(
         Some((slot_id, true)) => FidoDuplicateResolution::KeepSecuredCcid(slot_id),
         Some((slot_id, false)) => FidoDuplicateResolution::ReplaceCcidWithHid(slot_id),
         None => FidoDuplicateResolution::Independent,
+    }
+}
+
+fn hid_device_context(
+    pcsc_devices: &HashMap<PhysicalDeviceKey, Arc<DeviceContext>>,
+    identity: DeviceIdentity,
+) -> (Arc<DeviceContext>, bool) {
+    match identity
+        .physical_key()
+        .and_then(|key| pcsc_devices.get(&key))
+    {
+        Some(device) => (device.clone(), true),
+        None => (Arc::new(DeviceContext::new(identity)), false),
     }
 }
 
@@ -633,9 +648,13 @@ impl SlotContext {
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<Self, Error> {
+        let device = slot.device_context();
+        let device_operation_kind = slot.device_operation_kind();
         let mut context = Self {
             slot_id,
             slot,
+            device,
+            device_operation_kind,
             handles,
             pinentry,
             trust_store,
@@ -1021,6 +1040,7 @@ impl ModuleContext {
         }
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
+        let mut pcsc_devices: HashMap<PhysicalDeviceKey, Arc<DeviceContext>> = HashMap::new();
         if let Some(context) = self.libusb.as_ref() {
             if let Ok(devices) = context.devices() {
                 for device in devices.iter() {
@@ -1196,6 +1216,17 @@ impl ModuleContext {
                             name,
                             error
                         ),
+                    }
+                    let connection_epoch = connector.connection_epoch();
+                    if let Some(key) = connector
+                        .state
+                        .device
+                        .identity(connection_epoch)
+                        .physical_key()
+                    {
+                        pcsc_devices
+                            .entry(key)
+                            .or_insert_with(|| connector.state.device.clone());
                     }
                     let configurations = match configured_ccid_configurations() {
                         Ok(configurations) => configurations,
@@ -1414,11 +1445,34 @@ impl ModuleContext {
             } else {
                 None
             };
+            let identity = DeviceIdentity {
+                manufacturer: descriptor.manufacturer().to_owned(),
+                product: descriptor.product().to_owned(),
+                serial: device_info
+                    .as_ref()
+                    .and_then(|info| info.serial.clone())
+                    .or_else(|| descriptor.serial().map(str::to_owned))
+                    .unwrap_or_else(|| String::from("0")),
+                hardware_version: None,
+                firmware_version: device_info
+                    .as_ref()
+                    .and_then(|info| info.version)
+                    .or(Some(init.firmware_version)),
+            };
+            let (device, shares_pcsc_gate) = hid_device_context(&pcsc_devices, identity);
+            if shares_pcsc_gate {
+                log!(
+                    2,
+                    "FIDO HID endpoint {} shares the physical-device operation gate with PC/SC",
+                    descriptor.name()
+                );
+            }
             let endpoint = Rc::new(HidFidoEndpoint::new(
                 descriptor,
                 transport,
                 init,
                 device_info.as_ref(),
+                device,
             ));
             let hid_slot = Fido2Slot::new_with_endpoint(endpoint);
             if let Some(key) = hid_slot.physical_device_key() {
@@ -1583,6 +1637,16 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 mod discovery_tests {
     use super::*;
 
+    fn identity(serial: &str) -> DeviceIdentity {
+        DeviceIdentity {
+            manufacturer: String::from("Yubico"),
+            product: String::from("YubiKey"),
+            serial: serial.to_owned(),
+            hardware_version: None,
+            firmware_version: None,
+        }
+    }
+
     fn key(serial: &str) -> PhysicalDeviceKey {
         PhysicalDeviceKey::YubicoSerial(serial.to_owned())
     }
@@ -1612,5 +1676,23 @@ mod discovery_tests {
             resolve_fido_duplicate(&slots, &key("87654321")),
             FidoDuplicateResolution::Independent
         );
+    }
+
+    #[test]
+    fn hid_and_pcsc_views_with_the_same_serial_share_a_device_context() {
+        let pcsc_device = Arc::new(DeviceContext::new(identity("0012345678")));
+        let devices = HashMap::from([(key("12345678"), pcsc_device.clone())]);
+        let (hid_device, shared) = hid_device_context(&devices, identity("12345678"));
+        assert!(shared);
+        assert!(Arc::ptr_eq(&hid_device, &pcsc_device));
+    }
+
+    #[test]
+    fn hid_without_a_matching_pcsc_serial_gets_an_independent_device_context() {
+        let pcsc_device = Arc::new(DeviceContext::new(identity("12345678")));
+        let devices = HashMap::from([(key("12345678"), pcsc_device.clone())]);
+        let (hid_device, shared) = hid_device_context(&devices, identity("87654321"));
+        assert!(!shared);
+        assert!(!Arc::ptr_eq(&hid_device, &pcsc_device));
     }
 }

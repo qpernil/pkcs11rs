@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::connector::Connector;
 use crate::{Error, CKR_MUTEX_BAD};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceIdentity {
@@ -46,10 +46,17 @@ pub(crate) enum PhysicalDeviceKey {
     YubicoSerial(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceOperationKind {
+    Hid,
+    Ccid,
+}
+
 #[derive(Debug)]
 pub(crate) struct DeviceContext {
     fallback: DeviceIdentity,
     discovered: Mutex<Option<(u64, DeviceIdentity)>>,
+    operation: RwLock<()>,
 }
 
 impl DeviceContext {
@@ -57,6 +64,7 @@ impl DeviceContext {
         Self {
             fallback,
             discovered: Mutex::new(None),
+            operation: RwLock::new(()),
         }
     }
 
@@ -87,10 +95,37 @@ impl DeviceContext {
         Ok(())
     }
 
+    pub(crate) fn lock_operation(
+        &self,
+        kind: DeviceOperationKind,
+    ) -> Result<DeviceOperationGuard<'_>, Error> {
+        match kind {
+            DeviceOperationKind::Hid => self
+                .operation
+                .read()
+                .map(|guard| DeviceOperationGuard::Hid { _guard: guard })
+                .map_err(|_| Error::from(CKR_MUTEX_BAD)),
+            DeviceOperationKind::Ccid => self
+                .operation
+                .write()
+                .map(|guard| DeviceOperationGuard::Ccid { _guard: guard })
+                .map_err(|_| Error::from(CKR_MUTEX_BAD)),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test() -> Self {
         Self::new(DeviceIdentity::unknown("Test", "Test"))
     }
+}
+
+pub(crate) enum DeviceOperationGuard<'a> {
+    Hid {
+        _guard: std::sync::RwLockReadGuard<'a, ()>,
+    },
+    Ccid {
+        _guard: std::sync::RwLockWriteGuard<'a, ()>,
+    },
 }
 
 #[cfg(test)]

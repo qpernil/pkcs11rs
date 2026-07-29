@@ -264,6 +264,9 @@ impl Slot for HsmAuthSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.device.clone())
+    }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::HsmAuth)
     }
@@ -638,6 +641,9 @@ impl IssuerSecurityDomainSlot {
 impl Slot for IssuerSecurityDomainSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
+    }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.device.clone())
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::IssuerSecurityDomain)
