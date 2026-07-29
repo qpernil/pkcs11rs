@@ -1,4 +1,5 @@
 use super::shared::{rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad};
+use crate::backed_object::projected_public_key_material;
 use crate::*;
 use ghash::{universal_hash::UniversalHash, GHash};
 use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
@@ -337,6 +338,17 @@ fn crypt_init(
         if (encrypting && !object.encrypt) || (!encrypting && !object.decrypt) {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        let rsa_mechanism = matches!(
+            mechanism.mechanism,
+            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE
+        );
+        let operation_key = if encrypting && rsa_mechanism {
+            projected_public_key_material(&object)?
+        } else {
+            object.material.clone()
+        };
         let valid_key = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
@@ -344,7 +356,7 @@ fn crypt_init(
             {
                 object.key_type == CKK_RSA as CK_KEY_TYPE
                     && if encrypting {
-                        rsa_public_key_material(&object.material)?.is_some()
+                        rsa_public_key_material(&operation_key)?.is_some()
                     } else {
                         matches!(
                             object.material,
@@ -363,7 +375,7 @@ fn crypt_init(
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
         let operation = CryptOperation {
-            key: object.material.clone(),
+            key: operation_key,
             slot_id,
             requires_login: object.private,
             context_specific_extended: matches!(
