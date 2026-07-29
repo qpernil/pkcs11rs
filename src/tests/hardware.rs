@@ -1322,6 +1322,7 @@ mod fido2_hardware {
     fn run_cross_interface_phase(
         fixture: &CrossInterfaceFixture,
         ccid_probe: CcidProbe,
+        device: Option<std::sync::Arc<crate::device::DeviceContext>>,
     ) -> (ProbeStats, ProbeStats) {
         let iteration_barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let setup_barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -1331,6 +1332,7 @@ mod fido2_hardware {
             let hid_iteration_barrier = iteration_barrier.clone();
             let hid_setup_barrier = setup_barrier.clone();
             let hid_setup_ok = setup_ok.clone();
+            let hid_device = device.clone();
             let hid_worker = scope.spawn(move || {
                 let setup = (|| {
                     let io = hid_descriptor
@@ -1354,7 +1356,18 @@ mod fido2_hardware {
                 let mut stats = ProbeStats::default();
                 for _ in 0..CROSS_INTERFACE_ITERATIONS {
                     hid_iteration_barrier.wait();
-                    stats.observe(client.get_info());
+                    stats.observe((|| {
+                        let _operation = hid_device
+                            .as_ref()
+                            .map(|device| {
+                                device.lock_operation(crate::device::DeviceOperationKind::Hid)
+                            })
+                            .transpose()?;
+                        client
+                            .get_info()
+                            .map(|_| ())
+                            .map_err(crate::CtapError::into_pkcs11)
+                    })());
                 }
                 stats.elapsed = started.elapsed();
                 Ok(stats)
@@ -1364,6 +1377,7 @@ mod fido2_hardware {
             let ccid_iteration_barrier = iteration_barrier;
             let ccid_setup_barrier = setup_barrier.clone();
             let ccid_setup_ok = setup_ok.clone();
+            let ccid_device = device;
             let ccid_worker = scope.spawn(move || {
                 let setup = open_pcsc_connector(pcsc_reader).map_err(|error| format!("{error:?}"));
                 if setup.is_err() {
@@ -1380,7 +1394,15 @@ mod fido2_hardware {
                 let mut stats = ProbeStats::default();
                 for _ in 0..CROSS_INTERFACE_ITERATIONS {
                     ccid_iteration_barrier.wait();
-                    stats.observe(ccid_probe.run(&connector));
+                    stats.observe((|| {
+                        let _operation = ccid_device
+                            .as_ref()
+                            .map(|device| {
+                                device.lock_operation(crate::device::DeviceOperationKind::Ccid)
+                            })
+                            .transpose()?;
+                        ccid_probe.run(&connector)
+                    })());
                 }
                 stats.elapsed = started.elapsed();
                 Ok(stats)
@@ -1518,7 +1540,7 @@ mod fido2_hardware {
         }
 
         for probe in supported {
-            let (hid, ccid) = run_cross_interface_phase(&fixture, probe);
+            let (hid, ccid) = run_cross_interface_phase(&fixture, probe, None);
             eprintln!(
                 "HID GetInfo versus {}: HID {}/{} successful in {:?}, CCID {}/{} successful in {:?}",
                 probe.label(),
@@ -1550,6 +1572,45 @@ mod fido2_hardware {
                     probe.label()
                 )
             });
+        }
+    }
+
+    #[test]
+    #[ignore = "requires one serial-matched YubiKey exposed through both FIDO HID and PC/SC"]
+    fn serializes_yubikey_hid_ccid_cross_interface_operations() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let fixture = cross_interface_fixture();
+        let device = std::sync::Arc::new(crate::device::DeviceContext::test());
+        let mut supported = Vec::new();
+        for probe in [CcidProbe::Management, CcidProbe::Piv, CcidProbe::Fido] {
+            let connector = open_pcsc_connector(fixture.pcsc.reader.clone())
+                .expect("PC/SC capability probe connection failed");
+            if probe.run(&connector).is_ok() {
+                supported.push(probe);
+            }
+        }
+        assert!(
+            !supported.is_empty(),
+            "the serial-matched PC/SC interface had no supported read-only probe"
+        );
+
+        for probe in supported {
+            let (hid, ccid) = run_cross_interface_phase(&fixture, probe, Some(device.clone()));
+            assert_eq!(
+                hid.successes,
+                hid.attempts,
+                "coordinated HID GetInfo failed against {}: {:?}",
+                probe.label(),
+                hid.errors
+            );
+            assert_eq!(
+                ccid.successes,
+                ccid.attempts,
+                "coordinated {} failed against HID GetInfo: {:?}",
+                probe.label(),
+                ccid.errors
+            );
         }
     }
 

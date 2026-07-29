@@ -5,6 +5,9 @@ pub(crate) type SharedConnector = Arc<dyn Connector + Send + Sync>;
 
 pub(crate) trait Connector {
     fn as_debug(&self) -> &dyn std::fmt::Debug;
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        None
+    }
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
     fn major(&self) -> u8;
@@ -413,6 +416,9 @@ impl Connector for PcscAppletConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.state.device.clone())
+    }
 
     fn name(&self) -> String {
         self.base.name()
@@ -805,6 +811,9 @@ impl std::fmt::Debug for PcscConnector {
 impl Connector for PcscConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
+    }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.state.device.clone())
     }
     fn name(&self) -> String {
         self.reader.to_string_lossy().to_string()

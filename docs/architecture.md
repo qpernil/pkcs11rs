@@ -110,11 +110,20 @@ device identity used for correlation. A HID authenticator absent from the
 initial discovery snapshot creates no slot; a previously discovered endpoint
 can reopen the same device and allocate a fresh channel after reinsertion.
 
-CTAPHID report exchange is serialized inside the FIDO slot. A response on an
-invalid channel causes one fresh channel allocation and retry because the
-authenticator rejected the original request. I/O failures and timeouts are not
-retried, since a mutating or signing operation may have executed before the
-connection failed. HID has no SCP03 or SCP11 layer; configured CCID secure
+The validated Yubico physical serial also associates the HID endpoint with the
+shared PC/SC `DeviceContext`, even when the FIDO CCID applet is unavailable or
+its slot is removed by transport deduplication. PKCS #11 operations through
+those HID and CCID views cannot overlap. HID-to-HID access remains shareable;
+pkcs11rs does not request `CTAPHID_LOCK` or an operating-system-exclusive HID
+open, and cannot serialize unrelated browser or process access. The PC/SC
+connection remains exclusive and its existing reader gate serializes CCID
+exchanges.
+
+CTAPHID report exchange is also serialized inside each FIDO slot. A response
+on an invalid channel causes one fresh channel allocation and retry because
+the authenticator rejected the original request. I/O failures and timeouts are
+not retried, since a mutating or signing operation may have executed before
+the connection failed. HID has no SCP03 or SCP11 layer; configured CCID secure
 channels apply only to the smart-card endpoint.
 
 ## YubiHSM transports and caches

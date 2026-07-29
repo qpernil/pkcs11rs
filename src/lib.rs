@@ -781,6 +781,12 @@ fn with_slot_context<T>(
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let device = child.device.clone();
+    let device_operation_kind = child.device_operation_kind;
+    let _device_operation = device
+        .as_ref()
+        .map(|device| device.lock_operation(device_operation_kind))
+        .transpose()?;
     f(&child)
 }
 
@@ -800,6 +806,12 @@ fn with_slot_context_mut_in_context<T>(
 ) -> Result<T, Error> {
     let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let device = child.device.clone();
+    let device_operation_kind = child.device_operation_kind;
+    let _device_operation = device
+        .as_ref()
+        .map(|device| device.lock_operation(device_operation_kind))
+        .transpose()?;
     f(&mut child)
 }
 
@@ -811,6 +823,12 @@ fn with_session_context<T>(
     let ctx = guard.as_ref().ok_or(CKR_CRYPTOKI_NOT_INITIALIZED)?;
     let child = session_slot_context(ctx, session_handle)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let device = child.device.clone();
+    let device_operation_kind = child.device_operation_kind;
+    let _device_operation = device
+        .as_ref()
+        .map(|device| device.lock_operation(device_operation_kind))
+        .transpose()?;
     f(&child)
 }
 
@@ -830,6 +848,12 @@ fn with_session_context_mut_in_context<T>(
 ) -> Result<T, Error> {
     let child = session_slot_context(ctx, session_handle)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+    let device = child.device.clone();
+    let device_operation_kind = child.device_operation_kind;
+    let _device_operation = device
+        .as_ref()
+        .map(|device| device.lock_operation(device_operation_kind))
+        .transpose()?;
     f(&mut child)
 }
 

@@ -2734,6 +2734,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                     state: state.clone(),
                     slot_index: 0,
                     kind: crate::SlotKind::YubiHsm,
+                    device: None,
                 }),
             )
             .unwrap();
@@ -2744,6 +2745,7 @@ pub fn different_yubihsm_slots_execute_concurrently() {
                     state: state.clone(),
                     slot_index: 1,
                     kind: crate::SlotKind::YubiHsm,
+                    device: None,
                 }),
             )
             .unwrap();
@@ -2832,6 +2834,7 @@ fn assert_pcsc_slot_context_concurrency(same_slot: bool) {
                 state: state.clone(),
                 slot_index,
                 kind: crate::SlotKind::Ccid(crate::CcidApplication::Piv),
+                device: None,
             }) as Box<dyn crate::Slot>,
         )
     };
@@ -2905,6 +2908,116 @@ fn pcsc_sessions_on_one_slot_share_a_slot_context() {
     assert_pcsc_slot_context_concurrency(true);
 }
 
+fn assert_physical_device_gate(
+    shared_device: bool,
+    second_kind: crate::SlotKind,
+    expected_max_active: usize,
+) {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const HID_SLOT_ID: CK_SLOT_ID = 222;
+    const CCID_SLOT_ID: CK_SLOT_ID = 223;
+    let state = std::sync::Arc::new(ConcurrentOperationState::default());
+    let first_device = std::sync::Arc::new(crate::device::DeviceContext::test());
+    let second_device = if shared_device {
+        first_device.clone()
+    } else {
+        std::sync::Arc::new(crate::device::DeviceContext::test())
+    };
+    let slots = vec![
+        (
+            HID_SLOT_ID,
+            Box::new(ConcurrentSlot {
+                state: state.clone(),
+                slot_index: 0,
+                kind: crate::SlotKind::Fido2,
+                device: Some(first_device),
+            }) as Box<dyn crate::Slot>,
+        ),
+        (
+            CCID_SLOT_ID,
+            Box::new(ConcurrentSlot {
+                state: state.clone(),
+                slot_index: 1,
+                kind: second_kind,
+                device: Some(second_device),
+            }) as Box<dyn crate::Slot>,
+        ),
+    ];
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().insert_pcsc_slots(slots).unwrap();
+    }
+
+    let open = |slot_id| {
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                ::std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        session
+    };
+    let hid_session = open(HID_SLOT_ID);
+    let ccid_session = open(CCID_SLOT_ID);
+
+    std::thread::scope(|scope| {
+        let workers = [hid_session, ccid_session].map(|session| {
+            scope.spawn(move || {
+                let mut output = [0u8; 8];
+                assert_eq!(
+                    crate::api::C_GenerateRandom(
+                        session,
+                        output.as_mut_ptr(),
+                        output.len() as CK_ULONG,
+                    ),
+                    CKR_OK as CK_RV
+                );
+            })
+        });
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+
+    assert_eq!(
+        state.max_active.load(std::sync::atomic::Ordering::SeqCst),
+        expected_max_active,
+        "the physical-device gate applied the wrong transport-sharing policy"
+    );
+    assert_eq!(crate::api::C_CloseSession(hid_session), CKR_OK as CK_RV);
+    assert_eq!(crate::api::C_CloseSession(ccid_session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn hid_and_ccid_slots_for_one_device_share_an_operation_gate() {
+    assert_physical_device_gate(true, crate::SlotKind::Ccid(crate::CcidApplication::Piv), 1);
+}
+
+#[test]
+fn hid_slots_for_one_device_may_execute_concurrently() {
+    assert_physical_device_gate(true, crate::SlotKind::Fido2, 2);
+}
+
+#[test]
+fn slots_for_different_physical_devices_execute_concurrently() {
+    assert_physical_device_gate(false, crate::SlotKind::Ccid(crate::CcidApplication::Piv), 2);
+}
+
 #[test]
 pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
     let _guard = TEST_LOCK.lock().unwrap();
@@ -2930,6 +3043,7 @@ pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
                     state: state.clone(),
                     slot_index: 0,
                     kind: crate::SlotKind::YubiHsm,
+                    device: None,
                 }),
             )
             .unwrap();
@@ -2940,6 +3054,7 @@ pub fn many_threads_repeat_operations_on_independent_yubihsm_slots() {
                     state: state.clone(),
                     slot_index: 1,
                     kind: crate::SlotKind::YubiHsm,
+                    device: None,
                 }),
             )
             .unwrap();

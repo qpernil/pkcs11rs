@@ -64,6 +64,8 @@ impl CtapTransport for CcidCtapTransport {
 
 pub(crate) trait FidoEndpoint: std::fmt::Debug {
     fn transport(&self) -> Rc<dyn CtapTransport>;
+    fn device_context(&self) -> Arc<DeviceContext>;
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind;
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
@@ -128,6 +130,14 @@ impl CcidFidoEndpoint {
 impl FidoEndpoint for CcidFidoEndpoint {
     fn transport(&self) -> Rc<dyn CtapTransport> {
         self.transport.clone()
+    }
+
+    fn device_context(&self) -> Arc<DeviceContext> {
+        self.device.clone()
+    }
+
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        crate::device::DeviceOperationKind::Ccid
     }
 
     fn name(&self) -> String {
@@ -208,6 +218,7 @@ impl FidoEndpoint for CcidFidoEndpoint {
 pub(crate) struct HidFidoEndpoint {
     descriptor: HidDeviceDescriptor,
     transport: Rc<CtapHidTransport>,
+    device: Arc<DeviceContext>,
     present: Cell<bool>,
     serial: String,
     firmware_version: (u8, u8, u8),
@@ -219,6 +230,7 @@ impl HidFidoEndpoint {
         transport: Rc<CtapHidTransport>,
         init: CtapHidInit,
         device_info: Option<&crate::yubikey::DeviceInfo>,
+        device: Arc<DeviceContext>,
     ) -> Self {
         let serial = device_info
             .and_then(|info| info.serial.clone())
@@ -230,6 +242,7 @@ impl HidFidoEndpoint {
         Self {
             descriptor,
             transport,
+            device,
             present: Cell::new(true),
             serial,
             firmware_version,
@@ -240,6 +253,14 @@ impl HidFidoEndpoint {
 impl FidoEndpoint for HidFidoEndpoint {
     fn transport(&self) -> Rc<dyn CtapTransport> {
         self.transport.clone()
+    }
+
+    fn device_context(&self) -> Arc<DeviceContext> {
+        self.device.clone()
+    }
+
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        crate::device::DeviceOperationKind::Hid
     }
 
     fn name(&self) -> String {
@@ -658,6 +679,12 @@ fn fido2_token_objects(
 impl Slot for Fido2Slot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
+    }
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.endpoint.device_context())
+    }
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        self.endpoint.device_operation_kind()
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Fido2

@@ -65,6 +65,15 @@ stable physical identity is unavailable, both endpoints remain visible rather
 than risking an incorrect merge. Applet-specific serials are not used as
 physical-device identities.
 
+The same validated physical serial establishes an internal cross-interface
+operation gate for every pkcs11rs CCID applet on that YubiKey, not only a FIDO
+CCID slot. This matters on devices whose FIDO applet is HID-only. HID and CCID
+operations issued through this module do not overlap. HID itself remains
+shared: pkcs11rs does not request `CTAPHID_LOCK` or an exclusive HID open, so
+HID-to-HID access by browsers or other processes is unaffected and remains the
+authenticator's responsibility. PC/SC is already opened in exclusive mode and
+serializes its own complete card exchanges.
+
 When GetInfo succeeds, the primary CTAP version is included in the slot
 description and token label. Debug level 2 prints the reported versions,
 extensions, AAGUID, options, maximum message size, PIN/UV protocols, and
@@ -338,6 +347,28 @@ generations. It does not establish that arbitrary stateful operations can
 safely overlap on the older key; the production boundary therefore remains
 conservative unless broader testing and a documented device guarantee justify
 a narrower policy.
+
+The production boundary is therefore:
+
+- a Yubico-reported serial must match exactly after leading-zero
+  normalization before endpoints share a physical-device context;
+- CCID operations take the exclusive side of that context's cross-interface
+  gate, while HID operations take its shared side;
+- consequently HID and CCID cannot overlap inside pkcs11rs, while HID and HID
+  may overlap;
+- devices without a validated matching serial remain independent rather than
+  being guessed together.
+
+The ignored diagnostic intentionally bypasses this gate so it remains useful
+for qualifying future devices and firmware.
+
+The complementary hardware test applies the production gate and requires all
+50 HID and CCID operations in every supported read-only phase to succeed:
+
+```sh
+cargo test serializes_yubikey_hid_ccid_cross_interface_operations \
+  -- --ignored --nocapture
+```
 
 ## PIN management through PKCS #11
 
