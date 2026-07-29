@@ -116,8 +116,10 @@ its slot is removed by transport deduplication. PKCS #11 operations through
 those HID and CCID views cannot overlap. HID-to-HID access remains shareable;
 pkcs11rs does not request `CTAPHID_LOCK` or an operating-system-exclusive HID
 open, and cannot serialize unrelated browser or process access. The PC/SC
-connection remains exclusive and its existing reader gate serializes CCID
-exchanges.
+connection uses `SCARD_SHARE_EXCLUSIVE`; the reader gate serializes CCID
+exchanges made by pkcs11rs, but no PC/SC transaction is started. Consequently
+an external shared or exclusive PC/SC connection can prevent discovery or
+reconnection instead of participating in the in-process gate.
 
 CTAPHID report exchange is also serialized inside each FIDO slot. A response
 on an invalid channel causes one fresh channel allocation and retry because

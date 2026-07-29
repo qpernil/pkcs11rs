@@ -26,6 +26,51 @@ card lacks the applet, the slot remains registered but reports no usable token
 and rejects communication. It does not morph into slots for other applets on
 the replacement card.
 
+## PC/SC ownership and external daemons
+
+pkcs11rs connects to each card with `SCARD_SHARE_EXCLUSIVE`, both initially and
+on reconnect. Its shared reader state serializes complete applet selections and
+APDU exchanges among pkcs11rs slots, but it does not call
+`SCardBeginTransaction` or `SCardEndTransaction`. This means another process
+holding either a shared or exclusive PC/SC connection can prevent pkcs11rs from
+opening that reader. If this happens during the initial snapshot, none of that
+reader's CCID applets become slots.
+
+On macOS, GnuPG `scdaemon` is a common competing owner. It can use either its
+built-in CCID driver, which opens the USB CCID interface directly and bypasses
+PC/SC, or Apple's `PCSC.framework`. A typical `~/.gnupg/scdaemon.conf`
+configuration that disables the direct driver and makes GnuPG request a shared
+PC/SC connection is:
+
+```text
+disable-ccid
+pcsc-shared
+card-timeout 5
+```
+
+Apply it to the next daemon instance with:
+
+```sh
+gpgconf --kill scdaemon
+```
+
+`disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. GnuPG
+documents `pcsc-shared` as potentially unsafe because `scdaemon` still assumes
+exclusive ownership and caches card state. Its current PC/SC implementation
+loads the transaction entry points but does not use them around commands.
+Because pkcs11rs itself still requests exclusive access, `pcsc-shared` does not
+enable concurrent operation between the two programs; `card-timeout` can
+merely let an idle daemon release its connection sooner. Safe coexistence
+requires both clients to use shared connections, transaction-bounded
+multi-APDU operations, and correct applet re-selection.
+
+Native FIDO HID discovery does not use PC/SC and may remain available while
+the CCID interface is owned by another process.
+
+[GnuPG documents `pcsc-shared` and its warning](https://www.gnupg.org/documentation/manuals/gnupg26/scdaemon.1.html).
+[The GnuPG transaction discussion](https://dev.gnupg.org/T5484) confirms the
+unimplemented boundary.
+
 ## Allowlist
 
 Without configuration, all five applets above are probed. Set
@@ -140,8 +185,10 @@ Protocol-specific key and certificate configuration is documented in
 log level:
 
 - unset or `0`: no diagnostic output;
-- `1`: initialization and applet-discovery failures only;
-- `2`: all diagnostic output, including API and transport tracing.
+- `1`: initialization and applet-discovery failures, including the PC/SC
+  reader name when a reader cannot be opened;
+- `2`: all diagnostic output, including successful PC/SC reader opens, API
+  calls, and transport tracing.
 
 Other values are invalid and cause `C_Initialize` to return
 `CKR_ARGUMENTS_BAD`.
