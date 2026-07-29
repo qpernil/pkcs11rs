@@ -332,6 +332,9 @@ cargo test diagnoses_yubikey_hid_ccid_cross_interface_concurrency \
 
 The corresponding protected-path test is
 `serializes_yubikey_hid_ccid_cross_interface_operations`.
+`pkcs11_dispatch_serializes_fido_hid_login_against_piv_ccid` additionally
+exercises automatic device correlation and the exported PKCS #11 dispatch
+path; it is gated by `PKCS11RS_FIDO2_TEST_PIN` and verifies that PIN once.
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048

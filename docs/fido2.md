@@ -370,6 +370,21 @@ cargo test serializes_yubikey_hid_ccid_cross_interface_operations \
   -- --ignored --nocapture
 ```
 
+An end-to-end variant exercises the same boundary through exported PKCS #11
+entry points. It performs exactly one `C_Login` PIN verification on the
+automatically correlated HID FIDO slot while another thread repeatedly opens
+and closes sessions on the paired PIV slot, causing real PC/SC applet
+selection. It does not change the PIN or persistent objects:
+
+```sh
+PKCS11RS_FIDO2_TEST_PIN=123456 \
+  cargo test pkcs11_dispatch_serializes_fido_hid_login_against_piv_ccid \
+  -- --ignored --nocapture
+```
+
+Replace the example PIN with the attached authenticator's current PIN. A wrong
+PIN is submitted only once.
+
 ## PIN management through PKCS #11
 
 An application can provision the first FIDO2 PIN through `C_SetPIN` in an R/W
