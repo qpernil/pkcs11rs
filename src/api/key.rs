@@ -385,11 +385,6 @@ fn generate_key_pair(
         } else {
             YUBIHSM_ASYMMETRIC_KEY
         };
-        let public_object_type = if wrap_key {
-            YUBIHSM_WRAP_KEY_PUBLIC
-        } else {
-            YUBIHSM_PUBLIC_KEY
-        };
         validate_new_object_access(&private_object, flags, logged_in)?;
         validate_new_object_access(&public_object, flags, logged_in)?;
         let response = ctx
@@ -414,22 +409,6 @@ fn generate_key_pair(
                     )
             })
             .ok_or(CKR_DEVICE_ERROR)?;
-        let (public, imported_public) = ctx
-            .resolved_objects()?
-            .into_iter()
-            .find(|(_, object)| {
-                object.slot_id == Some(slot_id)
-                    && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                    && matches!(
-                        &object.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type,
-                            ..
-                        } if *object_id == id && *object_type == public_object_type
-                    )
-            })
-            .ok_or(CKR_DEVICE_ERROR)?;
         let private_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
             slot_id,
             &imported_private.unique_id,
@@ -442,18 +421,37 @@ fn generate_key_pair(
             return Err(error);
         }
         refresh?;
-        let public_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-            slot_id,
-            &imported_public.unique_id,
-            (!public_object.id.is_empty()).then_some(public_object.id.as_slice()),
-            (!public_object.label.is_empty()).then_some(public_object.label.as_str()),
-        );
-        let refresh = ctx.refresh_slot_token_objects(slot_id);
-        if let Err(error) = public_result {
-            let _ = refresh;
-            return Err(error);
-        }
-        refresh?;
+        let imported_private = ctx.resolve_object(private)?.ok_or(CKR_DEVICE_ERROR)?;
+        let mut projected = project_public_key_object(&imported_private, public_template)?;
+        projected.local = true;
+        projected.key_gen_mechanism = Some(mechanism.mechanism);
+        let public = if projected.token {
+            ctx.get_slot(slot_id)?.yubihsm_persist_public_projection(
+                slot_id,
+                &imported_private.unique_id,
+                &projected,
+            )?;
+            ctx.refresh_slot_token_objects(slot_id)?;
+            ctx.resolved_objects()?
+                .into_iter()
+                .find(|(_, object)| {
+                    object.slot_id == Some(slot_id)
+                        && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                        && matches!(
+                            object.material,
+                            KeyMaterial::YubiHsm {
+                                id: object_id,
+                                object_type: YUBIHSM_PUBLIC_KEY | YUBIHSM_WRAP_KEY_PUBLIC,
+                                ..
+                            } if object_id == id
+                        )
+                })
+                .map(|(handle, _)| handle)
+                .ok_or(CKR_DEVICE_ERROR)?
+        } else {
+            projected.set_creator(session_handle, slot_id);
+            ctx.insert_object(projected)?
+        };
         *private_handle = private;
         *public_handle = public;
         Ok(())
@@ -947,11 +945,14 @@ pub(crate) fn yubihsm_generate_key_pair_command(
                 && attribute.type_ != CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE
         })
         .collect::<Vec<_>>();
-    let public_object = key_pair_object(
+    let mut public_object = key_pair_object(
         &public_filtered,
         CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
+    if template_attribute(public_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE).is_none() {
+        public_object.token = false;
+    }
     let mut private_object = key_pair_object(
         &private_filtered,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -959,10 +960,10 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     )?;
     private_object.extractable = private_extractable;
     private_object.never_extractable = !private_extractable;
-    if !public_object.token || !private_object.token {
+    if !private_object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    if public_object.id != private_object.id {
+    if public_object.token && public_object.id != private_object.id {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     if is_montgomery_key_type(key_type)
@@ -1051,6 +1052,164 @@ pub extern "C" fn C_DeriveKey(
     ))
 }
 
+fn project_public_key_object(
+    base: &TokenObject,
+    templ: &[CK_ATTRIBUTE],
+) -> Result<TokenObject, Error> {
+    let material = match &base.material {
+        KeyMaterial::RsaPrivate(private) => {
+            KeyMaterial::RsaPublic(RsaPublicKey::from(private.as_ref()))
+        }
+        KeyMaterial::PivPrivate {
+            algorithm,
+            modulus,
+            public_exponent,
+            public_key,
+            ..
+        } => {
+            if !modulus.is_empty() {
+                KeyMaterial::RsaPublic(
+                    RsaPublicKey::new(
+                        BigUint::from_bytes_be(modulus),
+                        BigUint::from_bytes_be(public_exponent),
+                    )
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                )
+            } else {
+                KeyMaterial::PivPublic {
+                    algorithm: *algorithm,
+                    public_key: public_key.clone(),
+                }
+            }
+        }
+        KeyMaterial::OpenPgpPrivate {
+            algorithm,
+            modulus,
+            public_exponent,
+            public_key,
+            ..
+        } => {
+            if !modulus.is_empty() {
+                KeyMaterial::RsaPublic(
+                    RsaPublicKey::new(
+                        BigUint::from_bytes_be(modulus),
+                        BigUint::from_bytes_be(public_exponent),
+                    )
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                )
+            } else {
+                KeyMaterial::OpenPgpPublic {
+                    algorithm: *algorithm,
+                    public_key: public_key.clone(),
+                }
+            }
+        }
+        KeyMaterial::YubiHsm {
+            algorithm,
+            public_key,
+            ..
+        } if !public_key.is_empty() && is_yubihsm_rsa(*algorithm) => KeyMaterial::RsaPublic(
+            RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+        ),
+        KeyMaterial::YubiHsm {
+            algorithm,
+            public_key,
+            ..
+        } if !public_key.is_empty()
+            && (is_yubihsm_ec(*algorithm)
+                || is_yubihsm_x25519(*algorithm)
+                || *algorithm == YUBIHSM_ALGO_ED25519) =>
+        {
+            KeyMaterial::FidoKey {
+                public_key: FidoPublicKey::Ec {
+                    parameters: yubihsm_ec_parameters(*algorithm)
+                        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                        .to_vec(),
+                    public_key: public_key.clone(),
+                    prefix_uncompressed: is_yubihsm_ec(*algorithm),
+                },
+                rp_id: None,
+            }
+        }
+        KeyMaterial::FidoResidentPrivate {
+            public_key, rp_id, ..
+        } => KeyMaterial::FidoKey {
+            public_key: public_key.clone(),
+            rp_id: Some(rp_id.clone()),
+        },
+        KeyMaterial::FidoPreviewCredential { public_key, .. }
+        | KeyMaterial::PreviewSignDerived { public_key, .. } => KeyMaterial::FidoKey {
+            public_key: public_key.clone(),
+            rp_id: None,
+        },
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    let mut parsed = TokenObjectTemplate {
+        class: Some(CKO_PUBLIC_KEY as CK_OBJECT_CLASS),
+        key_type: Some(base.key_type),
+        token: false,
+        private: false,
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in templ {
+        if !matches!(
+            attribute.type_,
+            x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+                || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
+                || x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+                || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+                || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
+                || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+        ) {
+            parsed.apply_attribute(attribute).map_err(Error::from)?;
+        }
+    }
+    let mut projected = parsed.into_object().map_err(Error::from)?;
+    if projected.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+        || projected.key_type != base.key_type
+        || projected.sensitive
+        || !projected.extractable
+        || projected.sign
+        || projected.decrypt
+        || projected.derive
+        || projected.encrypt && projected.key_type != CKK_RSA as CK_KEY_TYPE
+        || projected.verify
+            && !matches!(
+                projected.key_type,
+                x if x == CKK_RSA as CK_KEY_TYPE
+                    || x == CKK_EC as CK_KEY_TYPE
+                    || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+            )
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    projected.material = material;
+    projected.local = false;
+    projected.key_gen_mechanism = None;
+    for attribute in templ {
+        if matches!(
+            attribute.type_,
+            x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
+                || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
+                || x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+                || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+                || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
+                || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
+        ) {
+            let supplied = read_attribute_value(attribute).map_err(Error::from)?;
+            if projected.attribute_value(attribute.type_).as_deref() != Some(supplied.as_slice()) {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+        }
+    }
+    Ok(projected)
+}
+
 fn derive_key(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -1080,160 +1239,58 @@ fn derive_key(
             if !base.allows_derive() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
-            let material = match &base.material {
-                KeyMaterial::RsaPrivate(private) => {
-                    KeyMaterial::RsaPublic(RsaPublicKey::from(private.as_ref()))
-                }
-                KeyMaterial::PivPrivate {
-                    algorithm,
-                    modulus,
-                    public_exponent,
-                    public_key,
-                    ..
-                } => {
-                    if !modulus.is_empty() {
-                        KeyMaterial::RsaPublic(
-                            RsaPublicKey::new(
-                                BigUint::from_bytes_be(modulus),
-                                BigUint::from_bytes_be(public_exponent),
-                            )
-                            .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                        )
-                    } else {
-                        KeyMaterial::PivPublic {
-                            algorithm: *algorithm,
-                            public_key: public_key.clone(),
-                        }
-                    }
-                }
-                KeyMaterial::OpenPgpPrivate {
-                    algorithm,
-                    modulus,
-                    public_exponent,
-                    public_key,
-                    ..
-                } => {
-                    if !modulus.is_empty() {
-                        KeyMaterial::RsaPublic(
-                            RsaPublicKey::new(
-                                BigUint::from_bytes_be(modulus),
-                                BigUint::from_bytes_be(public_exponent),
-                            )
-                            .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                        )
-                    } else {
-                        KeyMaterial::OpenPgpPublic {
-                            algorithm: *algorithm,
-                            public_key: public_key.clone(),
-                        }
-                    }
-                }
-                KeyMaterial::YubiHsm {
-                    algorithm,
-                    public_key,
-                    ..
-                } if !public_key.is_empty() && is_yubihsm_rsa(*algorithm) => KeyMaterial::FidoKey {
-                    public_key: FidoPublicKey::Rsa {
-                        modulus: public_key.clone(),
-                        public_exponent: vec![0x01, 0x00, 0x01],
-                    },
-                    rp_id: None,
-                },
-                KeyMaterial::YubiHsm {
-                    algorithm,
-                    public_key,
-                    ..
-                } if !public_key.is_empty()
-                    && (is_yubihsm_ec(*algorithm) || *algorithm == YUBIHSM_ALGO_ED25519) =>
-                {
-                    KeyMaterial::FidoKey {
-                        public_key: FidoPublicKey::Ec {
-                            parameters: yubihsm_ec_parameters(*algorithm)
-                                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-                                .to_vec(),
-                            public_key: public_key.clone(),
-                            prefix_uncompressed: is_yubihsm_ec(*algorithm),
-                        },
-                        rp_id: None,
-                    }
-                }
-                KeyMaterial::FidoResidentPrivate {
-                    public_key, rp_id, ..
-                } => KeyMaterial::FidoKey {
-                    public_key: public_key.clone(),
-                    rp_id: Some(rp_id.clone()),
-                },
-                KeyMaterial::FidoPreviewCredential { public_key, .. }
-                | KeyMaterial::PreviewSignDerived { public_key, .. } => KeyMaterial::FidoKey {
-                    public_key: public_key.clone(),
-                    rp_id: None,
-                },
-                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-            };
-            let mut parsed = TokenObjectTemplate {
-                class: Some(CKO_PUBLIC_KEY as CK_OBJECT_CLASS),
-                key_type: Some(base.key_type),
-                token: false,
-                private: false,
-                ..TokenObjectTemplate::default()
-            };
-            for attribute in templ {
-                if !matches!(
-                    attribute.type_,
-                    x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
-                        || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
-                        || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
-                ) {
-                    parsed.apply_attribute(attribute).map_err(Error::from)?;
-                }
-            }
-            let mut projected = parsed.into_object().map_err(Error::from)?;
-            if projected.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                || projected.key_type != base.key_type
-                || projected.token
-                || projected.sensitive
-                || !projected.extractable
-                || projected.sign
-                || projected.decrypt
-                || projected.derive
-                || projected.encrypt && projected.key_type != CKK_RSA as CK_KEY_TYPE
-                || projected.verify
-                    && !matches!(
-                        projected.key_type,
-                        x if x == CKK_RSA as CK_KEY_TYPE
-                            || x == CKK_EC as CK_KEY_TYPE
-                            || x == CKK_EC_EDWARDS as CK_KEY_TYPE
-                    )
-            {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            projected.material = material;
-            projected.local = false;
-            projected.key_gen_mechanism = None;
-            for attribute in templ {
-                if matches!(
-                    attribute.type_,
-                    x if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE
-                        || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
-                        || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
-                        || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
-                ) {
-                    let supplied = read_attribute_value(attribute).map_err(Error::from)?;
-                    if projected.attribute_value(attribute.type_).as_deref()
-                        != Some(supplied.as_slice())
-                    {
-                        return Err(CKR_TEMPLATE_INCONSISTENT.into());
-                    }
-                }
-            }
+            let mut projected = project_public_key_object(&base, templ)?;
             validate_new_object_access(&projected, flags, logged_in)?;
-            projected.set_creator(session_handle, slot_id);
-            *key_handle = ctx.insert_object(projected)?;
+            if projected.token {
+                let (base_id, public_object_type) = match &base.material {
+                    KeyMaterial::YubiHsm {
+                        id,
+                        object_type: YUBIHSM_ASYMMETRIC_KEY,
+                        ..
+                    } => (*id, YUBIHSM_PUBLIC_KEY),
+                    KeyMaterial::YubiHsm {
+                        id,
+                        object_type: YUBIHSM_WRAP_KEY,
+                        ..
+                    } => (*id, YUBIHSM_WRAP_KEY_PUBLIC),
+                    _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
+                };
+                if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
+                }
+                ctx.get_slot(slot_id)?.yubihsm_persist_public_projection(
+                    slot_id,
+                    &base.unique_id,
+                    &projected,
+                )?;
+                ctx.refresh_slot_token_objects(slot_id)?;
+                *key_handle = ctx
+                    .resolved_objects()?
+                    .into_iter()
+                    .find(|(_, object)| {
+                        object.slot_id == Some(slot_id)
+                            && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                            && object.token
+                            && matches!(
+                                object.material,
+                                KeyMaterial::YubiHsm {
+                                    id,
+                                    object_type,
+                                    ..
+                                } if id == base_id && object_type == public_object_type
+                            )
+                            && object.id == projected.id
+                            && object.label == projected.label
+                            && object.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+                                == projected
+                                    .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+                    })
+                    .map(|(handle, _)| handle)
+                    .ok_or(CKR_DEVICE_ERROR)?;
+            } else {
+                projected.set_creator(session_handle, slot_id);
+                *key_handle = ctx.insert_object(projected)?;
+            }
             Ok(())
         });
     }

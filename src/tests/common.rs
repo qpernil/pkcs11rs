@@ -59,6 +59,51 @@ fn bytes_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut [u8]) -> CK_ATTRIBUTE {
     }
 }
 
+fn yubihsm_objects_with_persisted_public(
+    slot_id: CK_SLOT_ID,
+    info: crate::yubihsm::ObjectInfo,
+    public_key: crate::yubihsm::PublicKey,
+) -> Vec<crate::TokenObject> {
+    let native = crate::yubihsm_token_objects_with_generation(
+        slot_id,
+        info.clone(),
+        Some(public_key.clone()),
+        1,
+        None,
+    )
+    .unwrap();
+    let public_key_info = native[0]
+        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+        .expect("a hardware private key with a readable public key");
+    let mut public_attributes = crate::key_metadata::KeyAttributes::new();
+    public_attributes
+        .insert(
+            u64::from(CKA_PUBLIC_KEY_INFO),
+            crate::key_metadata::KeyAttributeValue::Bytes(public_key_info),
+        )
+        .unwrap();
+    let metadata = crate::YubiHsmPkcs11Metadata {
+        target_type: info.object_type,
+        target_id: info.id,
+        target_sequence: info.sequence,
+        primary_class: None,
+        id: None,
+        label: None,
+        public: true,
+        public_id: None,
+        public_label: None,
+        public_attributes,
+    };
+    crate::yubihsm_token_objects_with_generation(
+        slot_id,
+        info,
+        Some(public_key),
+        1,
+        Some(&metadata),
+    )
+    .unwrap()
+}
+
 #[test]
 fn debug_level_configuration_has_three_modes() {
     assert_eq!(crate::parse_debug_level(None), Ok(0));
@@ -1254,31 +1299,28 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert_eq!(found, 1);
     assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
-    let mut public_class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    let mut rsa_key_type = CKK_RSA as CK_KEY_TYPE;
-    let mut public_template = [
-        CK_ATTRIBUTE {
-            type_: CKA_CLASS as CK_ATTRIBUTE_TYPE,
-            pValue: (&mut public_class as *mut CK_OBJECT_CLASS).cast(),
-            ulValueLen: std::mem::size_of::<CK_OBJECT_CLASS>() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            type_: CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
-            pValue: (&mut rsa_key_type as *mut CK_KEY_TYPE).cast(),
-            ulValueLen: std::mem::size_of::<CK_KEY_TYPE>() as CK_ULONG,
-        },
-    ];
+    let mut encrypt = CK_TRUE as CK_BBOOL;
+    let mut public_template = [scalar_attribute(
+        CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+        &mut encrypt,
+    )];
+    let mut projection_mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
-        crate::api::C_FindObjectsInit(session, public_template.as_mut_ptr(), 2),
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection_mechanism,
+            private_key,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            &mut public_key,
+        ),
         CKR_OK as CK_RV
     );
-    let mut public_key = 0;
-    assert_eq!(
-        crate::api::C_FindObjects(session, &mut public_key, 1, &mut found),
-        CKR_OK as CK_RV
-    );
-    assert_eq!(found, 1);
-    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
 
     let mut raw_rsa_mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_X_509 as CK_MECHANISM_TYPE,
@@ -1605,8 +1647,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         &[0, 2],
         "collision public",
     );
-    assert_eq!(collision_public.len(), 1);
-    assert_ne!(collision_public[0], generated_public);
+    assert!(collision_public.is_empty());
     let metadata_puts = commands
         .borrow()
         .iter()
@@ -1615,6 +1656,38 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         .collect::<Vec<_>>();
     assert!(!metadata_puts.is_empty());
     assert!(metadata_puts.iter().all(|value| value[..2] == [0, 0]));
+    with_test_slot_context(SLOT_ID, |context| {
+        context.refresh_slot_token_objects(SLOT_ID).unwrap();
+    });
+    assert_eq!(
+        find_yubihsm_object(
+            session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            &generated_id,
+            "generated public",
+        ),
+        [generated_public]
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, generated_public),
+        CKR_OK as CK_RV
+    );
+    assert!(find_yubihsm_object(
+        session,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        &generated_id,
+        "generated public",
+    )
+    .is_empty());
+    assert_eq!(
+        find_yubihsm_object(
+            session,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            &generated_id,
+            "generated private",
+        ),
+        [generated_private]
+    );
     assert_eq!(
         crate::api::C_DestroyObject(session, generated_private),
         CKR_OK as CK_RV
@@ -2046,7 +2119,7 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
         algorithm: crate::YUBIHSM_ALGO_EC_P521,
         key: vec![0x5a; 132],
     };
-    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
     let public = objects
         .iter()
         .find(|object| {
@@ -2070,7 +2143,7 @@ fn yubihsm_ec_discovery_exposes_named_curve_and_der_encoded_point() {
     );
     assert_eq!(
         public.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
-        Some(crate::bool_attribute(false))
+        Some(crate::bool_attribute(true))
     );
     assert_eq!(
         public.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
@@ -2111,7 +2184,7 @@ fn yubihsm_unknown_algorithms_use_vendor_defined_key_types() {
         algorithm: unknown_algorithm,
         key: vec![0x5a; 32],
     };
-    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
     let vendor_key_type = CKK_VENDOR_DEFINED as CK_KEY_TYPE + unknown_algorithm as CK_KEY_TYPE;
 
     assert_eq!(objects.len(), 2);
@@ -2261,7 +2334,7 @@ fn yubihsm_wrap_key_object_types_match_the_reference_module() {
         b"rsa-wrap",
     );
     assert!(crate::yubihsm_object_has_public_key(&rsa_info));
-    let rsa = crate::yubihsm_token_objects(99, rsa_info, Some(rsa_public.clone())).unwrap();
+    let rsa = yubihsm_objects_with_persisted_public(99, rsa_info, rsa_public.clone());
     assert_eq!(rsa.len(), 2);
     let private = rsa
         .iter()
@@ -2739,7 +2812,7 @@ fn yubihsm_invalid_reference_metadata_remains_an_opaque_object() {
 }
 
 #[test]
-fn yubihsm_reference_metadata_overrides_private_and_public_attributes() {
+fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
     let info = crate::yubihsm::ObjectInfo {
         capabilities: crate::yubihsm_capabilities(&[0x07]),
         id: 0x1234,
@@ -2766,6 +2839,7 @@ fn yubihsm_reference_metadata_overrides_private_and_public_attributes() {
         public: true,
         public_id: Some(b"public-id".to_vec()),
         public_label: Some("public label".to_owned()),
+        public_attributes: crate::key_metadata::KeyAttributes::new(),
     };
     let objects = crate::yubihsm_token_objects_with_generation(
         99,
@@ -2775,10 +2849,9 @@ fn yubihsm_reference_metadata_overrides_private_and_public_attributes() {
         Some(&metadata),
     )
     .unwrap();
+    assert_eq!(objects.len(), 1);
     assert_eq!(objects[0].id, b"private-id");
     assert_eq!(objects[0].label, "private label");
-    assert_eq!(objects[1].id, b"public-id");
-    assert_eq!(objects[1].label, "public label");
 }
 
 #[test]
@@ -2793,16 +2866,11 @@ fn yubihsm_created_metadata_object_is_applied_during_discovery() {
             object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && object.label == "private label"
         })
         .unwrap();
-    let public = objects
-        .iter()
-        .find(|object| {
-            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "public label"
-        })
-        .unwrap();
     assert_eq!(private.id, b"private-id");
     assert_eq!(private.label, "private label");
-    assert_eq!(public.id, b"public-id");
-    assert_eq!(public.label, "public label");
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"public-id"
+    }));
     assert!(!objects
         .iter()
         .any(|object| object.label.starts_with("Meta object for ")));
@@ -2824,16 +2892,11 @@ fn yubihsm_created_invalid_metadata_object_is_hidden_and_not_applied() {
             object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && object.label == "test-rsa"
         })
         .unwrap();
-    let public = objects
-        .iter()
-        .find(|object| {
-            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.label == "test-rsa"
-        })
-        .unwrap();
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
-    assert_eq!(public.id, [0, 1]);
-    assert_eq!(public.label, "test-rsa");
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 1]
+    }));
 }
 
 fn find_yubihsm_object(
@@ -2966,19 +3029,19 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         CKR_OK as CK_RV
     );
     if public_discovery {
-        let public = find_yubihsm_object(
-            session,
-            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
-            b"shared-id",
-            "metadata public key",
-        );
         let certificate = find_yubihsm_object(
             session,
             CKO_CERTIFICATE as CK_OBJECT_CLASS,
             b"shared-id",
             "metadata certificate",
         );
-        assert_eq!(public.len(), 1);
+        assert!(find_yubihsm_object(
+            session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            b"shared-id",
+            "metadata public key",
+        )
+        .is_empty());
         assert_eq!(certificate.len(), 1);
 
         let read_policy = |handle| {
@@ -3002,14 +3065,6 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
             (modifiable, copyable, destroyable)
         };
         assert_eq!(
-            read_policy(public[0]),
-            (
-                CK_TRUE as CK_BBOOL,
-                CK_FALSE as CK_BBOOL,
-                CK_FALSE as CK_BBOOL,
-            )
-        );
-        assert_eq!(
             read_policy(certificate[0]),
             (
                 CK_TRUE as CK_BBOOL,
@@ -3023,25 +3078,12 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         let mut blocked_attribute =
             bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut blocked_label);
         assert_eq!(
-            crate::api::C_SetAttributeValue(session, public[0], &mut blocked_attribute, 1),
-            CKR_USER_NOT_LOGGED_IN as CK_RV
-        );
-        assert_eq!(
             crate::api::C_SetAttributeValue(session, certificate[0], &mut blocked_attribute, 1),
             CKR_USER_NOT_LOGGED_IN as CK_RV
         );
         assert_eq!(
-            crate::api::C_DestroyObject(session, public[0]),
-            CKR_ACTION_PROHIBITED as CK_RV
-        );
-        assert_eq!(
             crate::api::C_DestroyObject(session, certificate[0]),
             CKR_USER_NOT_LOGGED_IN as CK_RV
-        );
-        let mut copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-        assert_eq!(
-            crate::api::C_CopyObject(session, public[0], std::ptr::null_mut(), 0, &mut copy),
-            CKR_ACTION_PROHIBITED as CK_RV
         );
         assert_eq!(commands.borrow().len(), command_count);
     }
@@ -3090,6 +3132,13 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         "metadata private key",
     );
     assert_eq!(initial.len(), 1);
+    assert!(find_yubihsm_object(
+        session,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        b"shared-id",
+        "metadata public key"
+    )
+    .is_empty());
     assert!(find_yubihsm_object(
         session,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -3186,34 +3235,39 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         "set attribute label",
     );
     assert_eq!(updated, initial);
-    let public = find_yubihsm_object(
+    assert!(find_yubihsm_object(
         session,
         CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
         b"updated-shared-id",
         "updated public key",
-    );
-    assert_eq!(public.len(), 1);
+    )
+    .is_empty());
+
     let mut public_id = b"set-public-id".to_vec();
     let mut public_label = b"set public label".to_vec();
-    let mut public_replacement = [
-        CK_ATTRIBUTE {
-            type_: CKA_ID as CK_ATTRIBUTE_TYPE,
-            pValue: public_id.as_mut_ptr().cast(),
-            ulValueLen: public_id.len() as CK_ULONG,
-        },
-        CK_ATTRIBUTE {
-            type_: CKA_LABEL as CK_ATTRIBUTE_TYPE,
-            pValue: public_label.as_mut_ptr().cast(),
-            ulValueLen: public_label.len() as CK_ULONG,
-        },
+    let mut public_token = CK_TRUE as CK_BBOOL;
+    let mut public_verify = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut public_token),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut public_verify),
+        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut public_id),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut public_label),
     ];
+    let mut projection_mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let command_start = commands.borrow().len();
     assert_eq!(
-        crate::api::C_SetAttributeValue(
+        crate::api::C_DeriveKey(
             session,
-            public[0],
-            public_replacement.as_mut_ptr(),
-            public_replacement.len() as CK_ULONG,
+            &mut projection_mechanism,
+            updated[0],
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            &mut public,
         ),
         CKR_OK as CK_RV
     );
@@ -3235,7 +3289,7 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
             b"set-public-id",
             "set public label",
         ),
-        public
+        [public]
     );
     assert_eq!(
         find_yubihsm_object(
@@ -3246,33 +3300,52 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         ),
         updated
     );
-    let mut empty_id = Vec::new();
-    let mut empty_label = Vec::new();
-    let mut clear_public_attributes = [
-        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut empty_id),
-        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut empty_label),
-    ];
+    assert!(
+        !read_bytes_attribute(session, public, CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE).is_empty()
+    );
+
+    let public_unique_id = with_test_slot_context(SLOT_ID, |context| {
+        context.resolve_object(public).unwrap().unwrap().unique_id
+    });
+    with_test_slot_context(SLOT_ID, |context| {
+        context.refresh_slot_token_objects(SLOT_ID).unwrap();
+    });
+    let public_after_refresh = with_test_slot_context(SLOT_ID, |context| {
+        context
+            .resolved_objects()
+            .unwrap()
+            .into_iter()
+            .find_map(|(handle, object)| (object.unique_id == public_unique_id).then_some(handle))
+            .unwrap()
+    });
+    assert_eq!(public_after_refresh, public);
+
+    let command_start = commands.borrow().len();
     assert_eq!(
-        crate::api::C_SetAttributeValue(
-            session,
-            public[0],
-            clear_public_attributes.as_mut_ptr(),
-            clear_public_attributes.len() as CK_ULONG,
-        ),
+        crate::api::C_DestroyObject(session, public),
         CKR_OK as CK_RV
     );
+    let destroy_commands = commands.borrow()[command_start..].to_vec();
+    assert!(destroy_commands
+        .iter()
+        .any(|(command, _)| *command == crate::yubihsm::CommandCode::PutOpaque as u8));
+    assert!(find_yubihsm_object(
+        session,
+        CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        b"set-public-id",
+        "set public label",
+    )
+    .is_empty());
     assert_eq!(
-        find_yubihsm_object(session, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, b"", ""),
-        public
+        find_yubihsm_object(
+            session,
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            b"set-attribute-id",
+            "set attribute label",
+        ),
+        updated
     );
-    assert_eq!(
-        read_bytes_attribute(session, public[0], CKA_ID as CK_ATTRIBUTE_TYPE),
-        b""
-    );
-    assert_eq!(
-        read_bytes_attribute(session, public[0], CKA_LABEL as CK_ATTRIBUTE_TYPE),
-        b""
-    );
+    assert!(peer.has_metadata_object(101));
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -5092,7 +5165,7 @@ fn yubihsm_x25519_objects_use_montgomery_key_type() {
         algorithm: crate::YUBIHSM_ALGO_X25519,
         key: vec![0x5a; 32],
     };
-    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
 
     assert_eq!(objects.len(), 2);
     for object in &objects {
@@ -5164,7 +5237,7 @@ fn yubihsm_ed25519_objects_use_edwards_key_type() {
         algorithm: crate::YUBIHSM_ALGO_ED25519,
         key: vec![0x5a; 32],
     };
-    let objects = crate::yubihsm_token_objects(99, info, Some(public_key)).unwrap();
+    let objects = yubihsm_objects_with_persisted_public(99, info, public_key);
     assert_eq!(objects.len(), 2);
     let private = objects
         .iter()

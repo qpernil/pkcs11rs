@@ -1348,11 +1348,6 @@ impl TokenObject {
             {
                 Some(bool_attribute(false))
             }
-            x if x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
-                && self.is_yubihsm_synthetic_public() =>
-            {
-                Some(bool_attribute(false))
-            }
             x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE && self.is_immutable_object() => {
                 Some(bool_attribute(false))
             }
@@ -1914,7 +1909,7 @@ impl TokenObject {
         )
     }
 
-    pub(crate) fn is_yubihsm_synthetic_public(&self) -> bool {
+    pub(crate) fn is_yubihsm_public_projection(&self) -> bool {
         matches!(
             self.material,
             KeyMaterial::YubiHsm {

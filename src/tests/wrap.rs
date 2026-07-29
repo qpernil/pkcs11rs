@@ -15,26 +15,30 @@ fn yubihsm_wrap_test_object(
     slot_id: CK_SLOT_ID,
     definition: YubiHsmWrapTestObject<'_>,
 ) -> Vec<TokenObject> {
-    crate::yubihsm_token_objects(
-        slot_id,
-        crate::YubiHsmObjectInfo {
-            capabilities: crate::yubihsm_capabilities(definition.capabilities),
-            id: definition.id,
-            length: match definition.algorithm {
-                crate::YUBIHSM_ALGO_AES128 | crate::YUBIHSM_ALGO_AES128_CCM_WRAP => 16,
-                _ => 256,
-            },
-            domains: 0xffff,
-            object_type: definition.object_type,
-            algorithm: definition.algorithm,
-            sequence: 1,
-            origin: 1,
-            label: definition.label.to_owned(),
-            delegated_capabilities: crate::yubihsm_capabilities(definition.delegated_capabilities),
+    let info = crate::YubiHsmObjectInfo {
+        capabilities: crate::yubihsm_capabilities(definition.capabilities),
+        id: definition.id,
+        length: match definition.algorithm {
+            crate::YUBIHSM_ALGO_AES128 | crate::YUBIHSM_ALGO_AES128_CCM_WRAP => 16,
+            _ => 256,
         },
-        definition.public_key,
-    )
-    .unwrap()
+        domains: 0xffff,
+        object_type: definition.object_type,
+        algorithm: definition.algorithm,
+        sequence: 1,
+        origin: 1,
+        label: definition.label.to_owned(),
+        delegated_capabilities: crate::yubihsm_capabilities(definition.delegated_capabilities),
+    };
+    match definition.public_key {
+        Some(public_key)
+            if definition.object_type == crate::YUBIHSM_ASYMMETRIC_KEY
+                || definition.object_type == crate::YUBIHSM_WRAP_KEY =>
+        {
+            yubihsm_objects_with_persisted_public(slot_id, info, public_key)
+        }
+        public_key => crate::yubihsm_token_objects(slot_id, info, public_key).unwrap(),
+    }
 }
 
 fn install_yubihsm_wrap_test_objects(
