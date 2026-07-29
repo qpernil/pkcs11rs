@@ -1,6 +1,6 @@
-use super::shared::yubihsm_ec_coordinate_length;
 use super::sign::{aes_cmac_length, aes_gmac_parameters, yubihsm_aes_cmac, yubihsm_aes_gmac};
 use crate::api::general::session_function_not_supported;
+use crate::backed_object::projected_public_key_material;
 use crate::*;
 
 #[no_mangle]
@@ -107,6 +107,11 @@ fn verify_init(
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
+        let asymmetric_key = if !cmac_mechanism && hmac_mechanism.is_none() {
+            Some(projected_public_key_material(&object)?)
+        } else {
+            None
+        };
         let hmac_key_is_invalid = hmac_mechanism.is_some_and(|(key_type, algorithm, _)| {
             object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
                 || object.key_type != key_type
@@ -134,43 +139,35 @@ fn verify_init(
                 && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
             || (rsa_mechanism
                 && (object.key_type != CKK_RSA as CK_KEY_TYPE
-                    || rsa_public_key_material(&object.material)?.is_none()))
+                    || rsa_public_key_material(
+                        asymmetric_key.as_ref().ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                    )?
+                    .is_none()))
             || (ecdsa_mechanism
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
-                    || (!matches!(
-                        &object.material,
-                        KeyMaterial::PivPublic { .. }
-                            | KeyMaterial::OpenPgpPublic { .. }
-                            | KeyMaterial::FidoKey {
-                                public_key: FidoPublicKey::Ec { .. },
-                                ..
-                            }
-                    ) && !matches!(
-                        &object.material,
-                        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm)
-                    ))))
+                    || !matches!(
+                        asymmetric_key,
+                        Some(KeyMaterial::FidoKey {
+                            public_key: FidoPublicKey::Ec { .. },
+                            ..
+                        })
+                    )))
             || (eddsa_mechanism
                 && (object.key_type != CKK_EC_EDWARDS as CK_KEY_TYPE
-                    || (!matches!(
-                        &object.material,
-                        KeyMaterial::PivPublic { .. }
-                            | KeyMaterial::OpenPgpPublic { .. }
-                            | KeyMaterial::FidoKey {
-                                public_key: FidoPublicKey::Ec { .. },
-                                ..
-                            }
-                    ) && !matches!(
-                        &object.material,
-                        KeyMaterial::YubiHsm { algorithm, .. }
-                            if *algorithm == YUBIHSM_ALGO_ED25519
-                    ))))
+                    || !matches!(
+                        asymmetric_key,
+                        Some(KeyMaterial::FidoKey {
+                            public_key: FidoPublicKey::Ec { .. },
+                            ..
+                        })
+                    )))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
 
         ctx.get_session_context_mut(session_handle)?
             .verify_operation = Some(SignatureOperation {
-            key: object.material.clone(),
+            key: asymmetric_key.unwrap_or_else(|| object.material.clone()),
             slot_id,
             requires_login: object.private,
             context_specific_extended: false,
@@ -285,96 +282,6 @@ fn verify(
             );
         }
         match &operation.key {
-            KeyMaterial::PivPublic {
-                algorithm,
-                public_key,
-            } => {
-                if *algorithm == piv::Algorithm::Ed25519 {
-                    if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
-                        return Err(CKR_MECHANISM_INVALID.into());
-                    }
-                    return verify_ed25519(public_key, data, signature);
-                }
-                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
-                    data.to_vec()
-                } else {
-                    hash(
-                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
-                        data,
-                    )?
-                    .to_vec()
-                };
-                let coordinate_length =
-                    piv_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-                if signature.len() != coordinate_length * 2 {
-                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
-                }
-                verify_ecdsa(piv_ec_curve(*algorithm)?, public_key, &digest, signature)
-            }
-            KeyMaterial::OpenPgpPublic {
-                algorithm: OpenPgpAlgorithm::Ed25519,
-                public_key,
-            } => {
-                if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
-                    return Err(CKR_MECHANISM_INVALID.into());
-                }
-                verify_ed25519(public_key, data, signature)
-            }
-            KeyMaterial::OpenPgpPublic {
-                algorithm: OpenPgpAlgorithm::Ecdsa(curve),
-                public_key,
-            } => {
-                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
-                    data.to_vec()
-                } else {
-                    hash(
-                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
-                        data,
-                    )?
-                    .to_vec()
-                };
-                let coordinate_length =
-                    curve.coordinate_length().ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
-                if signature.len() != coordinate_length * 2 {
-                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
-                }
-                verify_ecdsa(openpgp_ec_curve(*curve)?, public_key, &digest, signature)
-            }
-            KeyMaterial::YubiHsm {
-                algorithm,
-                public_key,
-                ..
-            } if is_yubihsm_ec(*algorithm) => {
-                let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
-                    data.to_vec()
-                } else {
-                    hash(
-                        piv_hash_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?,
-                        data,
-                    )?
-                    .to_vec()
-                };
-                let coordinate_length = yubihsm_ec_coordinate_length(*algorithm)?;
-                if signature.len() != coordinate_length * 2 {
-                    return Err(CKR_SIGNATURE_LEN_RANGE.into());
-                }
-                verify_ecdsa(
-                    yubihsm_ec_curve(*algorithm)?,
-                    public_key,
-                    &digest,
-                    signature,
-                )
-            }
-            KeyMaterial::YubiHsm {
-                algorithm: YUBIHSM_ALGO_ED25519,
-                public_key,
-                ..
-            } => {
-                if operation.mechanism != CKM_EDDSA as CK_MECHANISM_TYPE {
-                    return Err(CKR_MECHANISM_INVALID.into());
-                }
-                verify_ed25519(public_key, data, signature)
-            }
             KeyMaterial::FidoKey {
                 public_key:
                     FidoPublicKey::Ec {
@@ -395,14 +302,8 @@ fn verify(
                     },
                 ..
             } => {
-                let (curve, coordinate_length) = match parameters.as_slice() {
-                    [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => {
-                        (EcCurve::P256, 32)
-                    }
-                    [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => (EcCurve::P384, 48),
-                    [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23] => (EcCurve::P521, 66),
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-                };
+                let curve = ec_curve_from_parameters(parameters)?;
+                let coordinate_length = ec_parameters(curve)?.coordinate_length;
                 let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
                     data.to_vec()
                 } else {

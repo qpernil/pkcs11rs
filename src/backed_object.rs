@@ -181,6 +181,36 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
                 rp_id.clone(),
             ),
         },
+        KeyMaterial::YubiHsm {
+            algorithm,
+            public_key,
+            ..
+        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => (
+            PUBLIC_KEY_KIND_RSA,
+            public_key.clone(),
+            vec![0x01, 0x00, 0x01],
+            false,
+            None,
+        ),
+        KeyMaterial::YubiHsm {
+            algorithm,
+            public_key,
+            ..
+        } if !public_key.is_empty()
+            && (is_yubihsm_ec(*algorithm)
+                || is_yubihsm_x25519(*algorithm)
+                || *algorithm == YUBIHSM_ALGO_ED25519) =>
+        {
+            (
+                PUBLIC_KEY_KIND_EC,
+                yubihsm_ec_parameters(*algorithm)
+                    .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                    .to_vec(),
+                public_key.clone(),
+                is_yubihsm_ec(*algorithm),
+                None,
+            )
+        }
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     };
     let count = 7 + usize::from(rp_id.is_some());
@@ -477,6 +507,19 @@ fn decode_public_key_material(encoded: &[u8]) -> Result<(CK_KEY_TYPE, KeyMateria
         _ => return Err(CKR_DATA_INVALID.into()),
     };
     Ok((key_type, material))
+}
+
+/// Convert any operational public-key object to the canonical software-backed
+/// material used by projected and provider-restored public keys.
+pub(crate) fn projected_public_key_material(object: &TokenObject) -> Result<KeyMaterial, Error> {
+    if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    let (key_type, material) = decode_public_key_material(&encode_public_key_material(object)?)?;
+    if key_type != object.key_type {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    Ok(material)
 }
 
 fn materialize_object(

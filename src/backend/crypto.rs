@@ -711,37 +711,22 @@ pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(
     }
 }
 
-pub(crate) fn piv_ec_curve(algorithm: piv::Algorithm) -> Result<EcCurve, Error> {
-    match algorithm {
-        piv::Algorithm::EccP256 => Ok(EcCurve::P256),
-        piv::Algorithm::EccP384 => Ok(EcCurve::P384),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-    }
-}
-
-pub(crate) fn openpgp_ec_curve(curve: openpgp::Curve) -> Result<EcCurve, Error> {
-    match curve {
-        openpgp::Curve::P256 => Ok(EcCurve::P256),
-        openpgp::Curve::P384 => Ok(EcCurve::P384),
-        openpgp::Curve::P521 => Ok(EcCurve::P521),
-        openpgp::Curve::BrainpoolP256 => Ok(EcCurve::BrainpoolP256),
-        openpgp::Curve::BrainpoolP384 => Ok(EcCurve::BrainpoolP384),
-        openpgp::Curve::BrainpoolP512 => Ok(EcCurve::BrainpoolP512),
-        openpgp::Curve::Secp256k1 => Ok(EcCurve::K256),
-        openpgp::Curve::Ed25519 | openpgp::Curve::X25519 => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-    }
-}
-
-pub(crate) fn yubihsm_ec_curve(algorithm: u8) -> Result<EcCurve, Error> {
-    match algorithm {
-        YUBIHSM_ALGO_EC_P224 => Ok(EcCurve::P224),
-        YUBIHSM_ALGO_EC_P256 => Ok(EcCurve::P256),
-        YUBIHSM_ALGO_EC_P384 => Ok(EcCurve::P384),
-        YUBIHSM_ALGO_EC_P521 => Ok(EcCurve::P521),
-        YUBIHSM_ALGO_EC_K256 => Ok(EcCurve::K256),
-        YUBIHSM_ALGO_EC_BP256 => Ok(EcCurve::BrainpoolP256),
-        YUBIHSM_ALGO_EC_BP384 => Ok(EcCurve::BrainpoolP384),
-        YUBIHSM_ALGO_EC_BP512 => Ok(EcCurve::BrainpoolP512),
+pub(crate) fn ec_curve_from_parameters(parameters: &[u8]) -> Result<EcCurve, Error> {
+    match parameters {
+        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21] => Ok(EcCurve::P224),
+        [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => Ok(EcCurve::P256),
+        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => Ok(EcCurve::P384),
+        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23] => Ok(EcCurve::P521),
+        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a] => Ok(EcCurve::K256),
+        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07] => {
+            Ok(EcCurve::BrainpoolP256)
+        }
+        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0b] => {
+            Ok(EcCurve::BrainpoolP384)
+        }
+        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d] => {
+            Ok(EcCurve::BrainpoolP512)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
