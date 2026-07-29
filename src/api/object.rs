@@ -61,7 +61,6 @@ fn create_object(
             let mut imported = parsed.into_object().map_err(Error::from)?;
             if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                 || imported.key_type != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
-                || imported.token
             {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
@@ -70,8 +69,7 @@ fn create_object(
             imported.local = false;
             imported.material = KeyMaterial::PreviewSignRegistration { registration };
             validate_new_object_access(&imported, flags, logged_in)?;
-            imported.set_creator(session_handle, slot_id);
-            *object_handle = ctx.insert_object(imported)?;
+            *object_handle = ctx.store_backed_object(session_handle, imported)?;
             return Ok(());
         }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
@@ -239,8 +237,12 @@ fn create_object(
             *object_handle = handle;
             return Ok(());
         }
-        object.set_creator(session_handle, slot_id);
-        let handle = ctx.insert_object(object)?;
+        let handle = if crate::backed_object::supports_backed_object(&object) {
+            ctx.store_backed_object(session_handle, object)?
+        } else {
+            object.set_creator(session_handle, slot_id);
+            ctx.insert_object(object)?
+        };
         *object_handle = handle;
         Ok(())
     })
@@ -1156,7 +1158,11 @@ fn copy_object(
         copied_object.set_creator(session_handle, slot_id);
         copied_object.unique_id.clear();
 
-        let handle = ctx.insert_object(copied_object)?;
+        let handle = if crate::backed_object::supports_backed_object(&copied_object) {
+            ctx.store_backed_object(session_handle, copied_object)?
+        } else {
+            ctx.insert_object(copied_object)?
+        };
         *new_object_handle = handle;
         Ok(())
     })
@@ -1213,6 +1219,9 @@ fn destroy_object(
             } else {
                 ctx.remove_object_handle(object);
             }
+            return Ok(());
+        }
+        if ctx.destroy_backed_object(object, &stored_object)? {
             return Ok(());
         }
         let piv_action = match &stored_object.material {
@@ -1610,11 +1619,6 @@ fn set_attribute_value(
             refresh?;
             return Ok(());
         }
-        if ctx.token_object_handles.contains_key(&object)
-            && !matches!(stored_object.material, KeyMaterial::PivPrivate { .. })
-        {
-            return Err(CKR_ATTRIBUTE_READ_ONLY.into());
-        }
         if let KeyMaterial::PivPrivate { slot: from, .. } = stored_object.material {
             let [attribute] = templ else {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
@@ -1660,7 +1664,7 @@ fn set_attribute_value(
             ctx.reconcile_slot_token_objects_with_rebindings(slot_id, token_objects, &rebindings)?;
             return Ok(());
         }
-        let mut updated_object = stored_object;
+        let mut updated_object = stored_object.clone();
 
         let mut rv = CKR_OK as CK_RV;
         for attribute in templ {
@@ -1670,6 +1674,12 @@ fn set_attribute_value(
         }
 
         if rv == CKR_OK as CK_RV {
+            if ctx.replace_backed_object(object, &stored_object, updated_object.clone())? {
+                return Ok(());
+            }
+            if ctx.token_object_handles.contains_key(&object) {
+                return Err(CKR_ATTRIBUTE_READ_ONLY.into());
+            }
             ctx.memory_objects.insert(object, updated_object);
             Ok(())
         } else {

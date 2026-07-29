@@ -145,7 +145,7 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
 
     let mut registration_key_type = crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION as CK_ULONG;
     let mut class = CKO_PRIVATE_KEY as CK_ULONG;
-    let mut session_object = CK_FALSE as CK_BBOOL;
+    let mut session_object = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
     let mut registration_value = registration.clone();
     let mut import_template = [
@@ -163,6 +163,20 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         ),
     ];
     let mut registration_key = 0;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            import_template.as_mut_ptr(),
+            import_template.len() as CK_ULONG,
+            &mut registration_key,
+        ),
+        CKR_TOKEN_WRITE_PROTECTED as CK_RV
+    );
+    super::with_test_slot_context(slot, |context| {
+        context
+            .set_token_storage_provider(Box::new(crate::storage::MemoryStorageProvider::new()))
+            .unwrap();
+    });
     assert_eq!(
         crate::api::C_CreateObject(
             session,
@@ -266,6 +280,24 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     let signature = Signature::from_slice(&signature).unwrap();
     verifier.verify_prehash(&digest, &signature).unwrap();
 
+    super::with_test_slot_context(slot, |context| {
+        context.refresh_slot_token_objects(slot).unwrap();
+        assert!(context.resolve_object(registration_key).unwrap().is_some());
+        assert!(context.resolve_object(signing_key).unwrap().is_some());
+    });
+    assert_eq!(
+        crate::api::C_DestroyObject(session, signing_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, registration_key),
+        CKR_OK as CK_RV
+    );
+    super::with_test_slot_context(slot, |context| {
+        context
+            .set_token_storage_provider(Box::new(crate::storage::UnavailableStorageProvider))
+            .unwrap();
+    });
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),

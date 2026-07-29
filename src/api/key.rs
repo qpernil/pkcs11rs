@@ -449,8 +449,7 @@ fn generate_key_pair(
                 .map(|(handle, _)| handle)
                 .ok_or(CKR_DEVICE_ERROR)?
         } else {
-            projected.set_creator(session_handle, slot_id);
-            ctx.insert_object(projected)?
+            ctx.store_backed_object(session_handle, projected)?
         };
         *private_handle = private;
         *public_handle = public;
@@ -1239,9 +1238,17 @@ fn derive_key(
             if !base.allows_derive() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
-            let mut projected = project_public_key_object(&base, templ)?;
+            let projected = project_public_key_object(&base, templ)?;
             validate_new_object_access(&projected, flags, logged_in)?;
-            if projected.token {
+            if projected.token
+                && matches!(
+                    &base.material,
+                    KeyMaterial::YubiHsm {
+                        object_type: YUBIHSM_ASYMMETRIC_KEY | YUBIHSM_WRAP_KEY,
+                        ..
+                    }
+                )
+            {
                 let (base_id, public_object_type) = match &base.material {
                     KeyMaterial::YubiHsm {
                         id,
@@ -1288,8 +1295,7 @@ fn derive_key(
                     .map(|(handle, _)| handle)
                     .ok_or(CKR_DEVICE_ERROR)?;
             } else {
-                projected.set_creator(session_handle, slot_id);
-                *key_handle = ctx.insert_object(projected)?;
+                *key_handle = ctx.store_backed_object(session_handle, projected)?;
             }
             Ok(())
         });
@@ -1331,7 +1337,6 @@ fn derive_key(
             let mut object = parsed.into_object().map_err(Error::from)?;
             if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                 || object.key_type != CKK_EC as CK_KEY_TYPE
-                || object.token
             {
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
@@ -1360,8 +1365,7 @@ fn derive_key(
             };
             object.local = true;
             object.key_gen_mechanism = Some(mechanism.mechanism);
-            object.set_creator(session_handle, slot_id);
-            *key_handle = ctx.insert_object(object)?;
+            *key_handle = ctx.store_backed_object(session_handle, object)?;
             Ok(())
         });
     }

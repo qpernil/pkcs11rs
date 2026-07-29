@@ -73,6 +73,12 @@ pub(crate) trait Slot {
         crate::device::DeviceOperationKind::Ccid
     }
     fn kind(&self) -> SlotKind;
+    fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
+        None
+    }
+    fn native_storage_objects_are_backend_managed(&self) -> bool {
+        false
+    }
     fn name(&self) -> String;
     fn manufacturer(&self) -> &str;
     fn product(&self) -> &str;
@@ -226,6 +232,7 @@ pub(crate) trait Slot {
         Ok(objects)
     }
     fn invalidate_token_objects(&self) {}
+    #[allow(dead_code)]
     fn backend_token_object(
         &self,
         slot_id: CK_SLOT_ID,
@@ -236,6 +243,7 @@ pub(crate) trait Slot {
             .into_iter()
             .find(|object| object.token && object.unique_id == unique_id))
     }
+    #[allow(dead_code)]
     fn token_object(
         &self,
         slot_id: CK_SLOT_ID,

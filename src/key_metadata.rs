@@ -18,6 +18,17 @@ const MAX_ASPECTS: usize = 3;
 const MAX_ATTRIBUTES: usize = 256;
 const MAX_TEMPLATE_DEPTH: usize = 4;
 
+pub(crate) fn cryptoki_ulong_to_u64(value: CK_ULONG) -> u64 {
+    #[cfg(windows)]
+    {
+        u64::from(value)
+    }
+    #[cfg(not(windows))]
+    {
+        value
+    }
+}
+
 /// A failure while constructing or decoding canonical backed-key metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeyMetadataError {
@@ -163,8 +174,9 @@ impl KeyAttributes {
 
     /// Insert one semantically typed attribute.
     ///
-    /// `CKA_CLASS` and `CKA_TOKEN` are structural properties of a persisted
-    /// aspect and cannot appear in this map.
+    /// `CKA_CLASS` is represented by the aspect-map key. `CKA_TOKEN` is
+    /// represented by the provider selected for the object lifetime. Neither
+    /// can appear in this map.
     pub fn insert(
         &mut self,
         attribute: u64,

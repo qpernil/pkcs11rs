@@ -1,6 +1,7 @@
 use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::pkcs11::*;
+use crate::storage::{MemoryStorageProvider, StorageProvider, UnavailableStorageProvider};
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
 #[cfg(feature = "abi-tests")]
@@ -9,6 +10,7 @@ use crate::{
     ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID,
 };
 use crate::{
+    backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
     configured_ccid_configurations, pinentry, select_application, str_pad, usb_bcd_version,
     BackendSession, CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot,
@@ -98,15 +100,20 @@ pub(crate) struct SlotContext {
     handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
+    token_storage: Box<dyn StorageProvider>,
     pub(crate) sessions: HashMap<CK_SESSION_HANDLE, SessionContext>,
     pub(crate) login_role: Option<LoginRole>,
     pub(crate) memory_objects: HashMap<CK_OBJECT_HANDLE, TokenObject>,
     pub(crate) token_object_handles: HashMap<CK_OBJECT_HANDLE, TokenObjectLocator>,
+    backed_token_objects: HashMap<String, TokenObject>,
+    backed_object_references: HashMap<String, crate::storage::ContentReference>,
+    backed_object_handles: HashMap<CK_OBJECT_HANDLE, crate::storage::ContentReference>,
 }
 
 // Mutable PKCS #11 operation state belonging to one application session.
 pub(crate) struct SessionContext {
     backend: Box<dyn BackendSession>,
+    storage: MemoryStorageProvider,
     pub(crate) find_operation: Option<FindOperation>,
     pub(crate) digest_operation: Option<DigestOperation>,
     pub(crate) encrypt_operation: Option<CryptOperation>,
@@ -361,6 +368,7 @@ impl SessionContext {
     pub(crate) fn new(backend: Box<dyn BackendSession>) -> Self {
         Self {
             backend,
+            storage: MemoryStorageProvider::new(),
             find_operation: None,
             digest_operation: None,
             encrypt_operation: None,
@@ -654,6 +662,26 @@ impl SlotContext {
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
     ) -> Result<Self, Error> {
+        Self::new_with_storage(
+            slot_id,
+            slot,
+            token_objects,
+            handles,
+            pinentry,
+            trust_store,
+            Box::new(UnavailableStorageProvider),
+        )
+    }
+
+    pub(crate) fn new_with_storage(
+        slot_id: CK_SLOT_ID,
+        slot: Box<dyn Slot>,
+        token_objects: Vec<TokenObject>,
+        handles: Arc<HandleCounters>,
+        pinentry: Arc<pinentry::Pinentry>,
+        trust_store: Arc<crate::yubihsm::trust::TrustStore>,
+        token_storage: Box<dyn StorageProvider>,
+    ) -> Result<Self, Error> {
         let device = slot.device_context();
         let device_operation_kind = slot.device_operation_kind();
         let mut context = Self {
@@ -664,13 +692,226 @@ impl SlotContext {
             handles,
             pinentry,
             trust_store,
+            token_storage,
             sessions: HashMap::new(),
             login_role: None,
             memory_objects: HashMap::new(),
             token_object_handles: HashMap::new(),
+            backed_token_objects: HashMap::new(),
+            backed_object_references: HashMap::new(),
+            backed_object_handles: HashMap::new(),
         };
+        let mut token_objects = token_objects;
+        let stored = context.stored_token_objects()?;
+        context.record_backed_objects(&stored);
+        token_objects.extend(stored.into_iter().map(|(_, object)| object));
         context.reconcile_slot_token_objects(slot_id, token_objects)?;
         Ok(context)
+    }
+
+    fn token_storage_provider(&self) -> &dyn StorageProvider {
+        self.slot
+            .native_storage_provider()
+            .unwrap_or(self.token_storage.as_ref())
+    }
+
+    fn stored_token_objects(
+        &self,
+    ) -> Result<Vec<(crate::storage::ContentReference, TokenObject)>, Error> {
+        if self.slot.native_storage_objects_are_backend_managed() {
+            return Ok(Vec::new());
+        }
+        stored_objects(self.token_storage_provider(), self.slot_id, true)
+    }
+
+    fn record_backed_objects(
+        &mut self,
+        objects: &[(crate::storage::ContentReference, TokenObject)],
+    ) {
+        self.backed_object_references.clear();
+        self.backed_token_objects = objects
+            .iter()
+            .map(|(_, object)| (object.unique_id.clone(), object.clone()))
+            .collect();
+        for (reference, object) in objects {
+            self.backed_object_references
+                .insert(object.unique_id.clone(), reference.clone());
+        }
+        for (handle, locator) in &self.token_object_handles {
+            if let Some(reference) = self.backed_object_references.get(&locator.unique_id) {
+                self.backed_object_handles
+                    .insert(*handle, reference.clone());
+            }
+        }
+    }
+
+    pub(crate) fn store_backed_object(
+        &mut self,
+        session_handle: CK_SESSION_HANDLE,
+        mut object: TokenObject,
+    ) -> Result<CK_OBJECT_HANDLE, Error> {
+        let reference = if object.token {
+            put_backed_object(self.token_storage_provider(), &object)?
+        } else {
+            let session = self.get_session_context(session_handle)?;
+            put_backed_object(&session.storage, &object)?
+        };
+        if object.token {
+            object.unique_id = backed_object_unique_id(&reference);
+            self.backed_object_references
+                .insert(object.unique_id.clone(), reference.clone());
+            let unique_id = object.unique_id.clone();
+            self.refresh_slot_token_objects(self.slot_id)?;
+            let handle = self
+                .token_object_handles
+                .iter()
+                .find_map(|(handle, locator)| (locator.unique_id == unique_id).then_some(*handle))
+                .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))?;
+            self.backed_object_handles.insert(handle, reference);
+            Ok(handle)
+        } else {
+            object.set_creator(session_handle, self.slot_id);
+            let handle = self.insert_object(object)?;
+            self.backed_object_handles.insert(handle, reference);
+            Ok(handle)
+        }
+    }
+
+    fn backed_reference_is_shared(
+        &self,
+        handle: CK_OBJECT_HANDLE,
+        reference: &crate::storage::ContentReference,
+        object: &TokenObject,
+    ) -> bool {
+        self.backed_object_handles
+            .iter()
+            .any(|(candidate, candidate_reference)| {
+                if *candidate == handle || candidate_reference != reference {
+                    return false;
+                }
+                if object.token {
+                    self.token_object_handles.contains_key(candidate)
+                } else {
+                    self.memory_objects.get(candidate).is_some_and(|candidate| {
+                        !candidate.token && candidate.creator_session == object.creator_session
+                    })
+                }
+            })
+    }
+
+    pub(crate) fn destroy_backed_object(
+        &mut self,
+        handle: CK_OBJECT_HANDLE,
+        object: &TokenObject,
+    ) -> Result<bool, Error> {
+        let Some(reference) = self
+            .backed_object_handles
+            .get(&handle)
+            .cloned()
+            .or_else(|| {
+                self.backed_object_references
+                    .get(&object.unique_id)
+                    .cloned()
+            })
+        else {
+            return Ok(false);
+        };
+        let shared = self.backed_reference_is_shared(handle, &reference, object);
+        let deleted = if shared {
+            true
+        } else if object.token {
+            self.token_storage_provider()
+                .delete(&reference)
+                .map_err(crate::backed_object::storage_error)?
+        } else {
+            let creator = object.creator_session.ok_or(CKR_DEVICE_ERROR)?;
+            self.get_session_context(creator)?
+                .storage
+                .delete(&reference)
+                .map_err(crate::backed_object::storage_error)?
+        };
+        if !deleted {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        self.backed_object_handles.remove(&handle);
+        if object.token {
+            self.backed_object_references.remove(&object.unique_id);
+        }
+        if object.token {
+            self.refresh_slot_token_objects(self.slot_id)?;
+        } else {
+            self.remove_object_handle(handle);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn replace_backed_object(
+        &mut self,
+        handle: CK_OBJECT_HANDLE,
+        previous: &TokenObject,
+        mut replacement: TokenObject,
+    ) -> Result<bool, Error> {
+        let Some(previous_reference) =
+            self.backed_object_handles
+                .get(&handle)
+                .cloned()
+                .or_else(|| {
+                    self.backed_object_references
+                        .get(&previous.unique_id)
+                        .cloned()
+                })
+        else {
+            return Ok(false);
+        };
+        let replacement_reference = if replacement.token {
+            put_backed_object(self.token_storage_provider(), &replacement)?
+        } else {
+            let creator = previous.creator_session.ok_or(CKR_DEVICE_ERROR)?;
+            put_backed_object(&self.get_session_context(creator)?.storage, &replacement)?
+        };
+        let shared = self.backed_reference_is_shared(handle, &previous_reference, previous);
+        if replacement_reference != previous_reference && !shared {
+            let deleted = if replacement.token {
+                self.token_storage_provider()
+                    .delete(&previous_reference)
+                    .map_err(crate::backed_object::storage_error)?
+            } else {
+                let creator = previous.creator_session.ok_or(CKR_DEVICE_ERROR)?;
+                self.get_session_context(creator)?
+                    .storage
+                    .delete(&previous_reference)
+                    .map_err(crate::backed_object::storage_error)?
+            };
+            if !deleted {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+        }
+        if replacement.token {
+            self.backed_object_references.remove(&previous.unique_id);
+            replacement.unique_id = backed_object_unique_id(&replacement_reference);
+            self.backed_object_references
+                .insert(replacement.unique_id.clone(), replacement_reference.clone());
+        } else {
+            replacement.unique_id = previous.unique_id.clone();
+        }
+        self.backed_object_handles
+            .insert(handle, replacement_reference);
+        if replacement.token {
+            let mut objects = self.slot.token_objects(self.slot_id)?;
+            let stored = self.stored_token_objects()?;
+            self.record_backed_objects(&stored);
+            objects.extend(stored.into_iter().map(|(_, object)| object));
+            self.reconcile_slot_token_objects_with_rebindings(
+                self.slot_id,
+                objects,
+                &[(handle, replacement.unique_id)],
+            )?;
+        } else {
+            let creator = previous.creator_session.ok_or(CKR_DEVICE_ERROR)?;
+            replacement.set_creator(creator, self.slot_id);
+            self.memory_objects.insert(handle, replacement);
+        }
+        Ok(true)
     }
 
     fn require_slot_id(&self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
@@ -798,6 +1039,9 @@ impl SlotContext {
         let Some(locator) = self.token_object_handles.get(&handle) else {
             return Ok(None);
         };
+        if let Some(object) = self.backed_token_objects.get(&locator.unique_id) {
+            return Ok(Some(object.clone()));
+        }
         self.slot.token_object(self.slot_id, &locator.unique_id)
     }
 
@@ -807,13 +1051,14 @@ impl SlotContext {
             .iter()
             .map(|(handle, object)| (*handle, object.clone()))
             .collect::<Vec<_>>();
-        let token_objects = self
+        let mut token_objects = self
             .slot
             .token_objects(self.slot_id)?
             .into_iter()
             .filter(|object| object.token)
             .map(|object| (object.unique_id.clone(), object))
             .collect::<HashMap<_, _>>();
+        token_objects.extend(self.backed_token_objects.clone());
         for (handle, locator) in &self.token_object_handles {
             if let Some(object) = token_objects.get(&locator.unique_id) {
                 objects.push((*handle, object.clone()));
@@ -823,7 +1068,12 @@ impl SlotContext {
     }
 
     pub(crate) fn remove_object_handle(&mut self, handle: CK_OBJECT_HANDLE) {
-        self.memory_objects.remove(&handle);
+        self.backed_object_handles.remove(&handle);
+        if let Some(object) = self.memory_objects.remove(&handle) {
+            if !object.token {
+                self.backed_object_references.remove(&object.unique_id);
+            }
+        }
         self.token_object_handles.remove(&handle);
         for session in self.sessions.values_mut() {
             if let Some(operation) = &mut session.find_operation {
@@ -931,8 +1181,23 @@ impl SlotContext {
 
     pub(crate) fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
-        let objects = self.slot.token_objects(slot_id)?;
+        let mut objects = self.slot.token_objects(slot_id)?;
+        let stored = self.stored_token_objects()?;
+        self.record_backed_objects(&stored);
+        objects.extend(stored.into_iter().map(|(_, object)| object));
         self.reconcile_slot_token_objects(slot_id, objects)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_token_storage_provider(
+        &mut self,
+        provider: Box<dyn StorageProvider>,
+    ) -> Result<(), Error> {
+        if self.slot.native_storage_provider().is_some() {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        self.token_storage = provider;
+        self.refresh_slot_token_objects(self.slot_id)
     }
 
     pub(crate) fn insert_session_objects(
