@@ -4,6 +4,85 @@ use super::key::{
 };
 use crate::*;
 
+fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObject>, Error> {
+    let registration_attribute = template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION);
+    let derived_attribute = template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY);
+    if registration_attribute.is_none() && derived_attribute.is_none() {
+        return Ok(None);
+    }
+    validate_unique_template(templ)?;
+    let registration_encoded =
+        read_attribute_value(registration_attribute.ok_or(CKR_TEMPLATE_INCOMPLETE)?)
+            .map_err(Error::from)?;
+    let registration =
+        crate::preview_sign::PreviewSignRegistration::from_cbor(&registration_encoded)
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+    let derived = derived_attribute
+        .map(|attribute| {
+            read_attribute_value(attribute)
+                .map_err(Error::from)
+                .and_then(|encoded| {
+                    crate::preview_sign::PreviewSignDerivedKeyRecord::from_cbor(&encoded)
+                        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
+                })
+        })
+        .transpose()?;
+    let mut parsed = TokenObjectTemplate {
+        class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+        key_type: Some(if derived.is_some() {
+            CKK_EC as CK_KEY_TYPE
+        } else {
+            CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+        }),
+        token: false,
+        private: true,
+        sensitive: Some(true),
+        extractable: Some(false),
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in templ {
+        if matches!(
+            attribute.type_,
+            CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION | CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY
+        ) {
+            continue;
+        }
+        parsed.apply_attribute(attribute).map_err(Error::from)?;
+    }
+    let mut imported = parsed.into_object().map_err(Error::from)?;
+    imported.local = false;
+    imported.material = if let Some(derived) = derived {
+        if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || imported.key_type != CKK_EC as CK_KEY_TYPE
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        derived
+            .validate_for_registration(&registration)
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+        let projected = project_cose_public_key(derived.verification_key_cose())
+            .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
+            .ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+        imported.sign = true;
+        imported.derive = false;
+        KeyMaterial::PreviewSignDerived {
+            public_key: projected.public_key,
+            registration,
+            derived,
+        }
+    } else {
+        if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            || imported.key_type != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        imported.sign = false;
+        imported.derive = true;
+        KeyMaterial::PreviewSignRegistration { registration }
+    };
+    Ok(Some(imported))
+}
+
 #[no_mangle]
 pub extern "C" fn C_CreateObject(
     session_handle: CK_SESSION_HANDLE,
@@ -32,45 +111,12 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2
-            && template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION).is_some()
-        {
-            validate_unique_template(templ)?;
-            let encoded = read_attribute_value(
-                template_attribute(templ, CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION)
-                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
-            )
-            .map_err(Error::from)?;
-            let registration = crate::preview_sign::PreviewSignRegistration::from_cbor(&encoded)
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            let mut parsed = TokenObjectTemplate {
-                class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
-                key_type: Some(CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION),
-                token: false,
-                private: true,
-                sensitive: Some(true),
-                extractable: Some(false),
-                ..TokenObjectTemplate::default()
-            };
-            for attribute in templ {
-                if attribute.type_ == CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION {
-                    continue;
-                }
-                parsed.apply_attribute(attribute).map_err(Error::from)?;
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
+            if let Some(imported) = preview_sign_import_object(templ)? {
+                validate_new_object_access(&imported, flags, logged_in)?;
+                *object_handle = ctx.store_backed_object(session_handle, imported)?;
+                return Ok(());
             }
-            let mut imported = parsed.into_object().map_err(Error::from)?;
-            if imported.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-                || imported.key_type != CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION
-            {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            imported.sign = false;
-            imported.derive = true;
-            imported.local = false;
-            imported.material = KeyMaterial::PreviewSignRegistration { registration };
-            validate_new_object_access(&imported, flags, logged_in)?;
-            *object_handle = ctx.store_backed_object(session_handle, imported)?;
-            return Ok(());
         }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
             let import = piv_import_parameters(templ)?;

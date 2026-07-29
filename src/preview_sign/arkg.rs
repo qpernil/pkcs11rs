@@ -525,6 +525,148 @@ fn encode_signing_arguments(
     Ok(encoded)
 }
 
+fn validate_verification_key(encoded: &[u8]) -> Result<(), PreviewSignError> {
+    let mut decoder = Decoder::new(encoded);
+    let count = decoder.map()?.ok_or(PreviewSignError::Malformed(
+        "derived verification key is not a definite map",
+    ))?;
+    let mut key_type = None;
+    let mut algorithm = None;
+    let mut curve = None;
+    let mut x = None;
+    let mut y = None;
+    for _ in 0..count {
+        match decoder.i64()? {
+            1 if key_type.is_none() => key_type = Some(decoder.i64()?),
+            3 if algorithm.is_none() => algorithm = Some(decoder.i64()?),
+            -1 if curve.is_none() => curve = Some(decoder.i64()?),
+            -2 if x.is_none() => x = Some(decoder.bytes()?.to_vec()),
+            -3 if y.is_none() => y = Some(decoder.bytes()?.to_vec()),
+            1 | 3 | -1 | -2 | -3 => {
+                return Err(PreviewSignError::Malformed(
+                    "duplicate derived verification-key field",
+                ))
+            }
+            _ => {
+                return Err(PreviewSignError::Malformed(
+                    "unknown derived verification-key field",
+                ))
+            }
+        }
+    }
+    if decoder.position() != encoded.len()
+        || key_type != Some(COSE_EC2_KEY_TYPE)
+        || algorithm != Some(ESP256_ALGORITHM)
+        || curve != Some(COSE_P256_CURVE)
+    {
+        return Err(PreviewSignError::Malformed(
+            "derived verification key is not ESP256",
+        ));
+    }
+    let x = x.ok_or(PreviewSignError::Malformed(
+        "missing derived verification-key x-coordinate",
+    ))?;
+    let y = y.ok_or(PreviewSignError::Malformed(
+        "missing derived verification-key y-coordinate",
+    ))?;
+    if x.len() != 32 || y.len() != 32 {
+        return Err(PreviewSignError::Malformed(
+            "derived verification-key coordinate is not 32 bytes",
+        ));
+    }
+    let mut public_key = [0u8; P256_POINT_LENGTH];
+    public_key[0] = 4;
+    public_key[1..33].copy_from_slice(&x);
+    public_key[33..].copy_from_slice(&y);
+    PublicKey::from_sec1_bytes(&public_key).map_err(|_| {
+        PreviewSignError::Malformed("derived verification key is not on the P-256 curve")
+    })?;
+    if encode_verification_key(&public_key)? != encoded {
+        return Err(PreviewSignError::Malformed(
+            "derived verification key is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_signing_arguments(encoded: &[u8]) -> Result<(), PreviewSignError> {
+    let mut decoder = Decoder::new(encoded);
+    let count = decoder.map()?.ok_or(PreviewSignError::Malformed(
+        "derived signing arguments are not a definite map",
+    ))?;
+    let mut algorithm = None;
+    let mut ticket = None;
+    let mut context = None;
+    for _ in 0..count {
+        match decoder.i64()? {
+            3 if algorithm.is_none() => algorithm = Some(decoder.i64()?),
+            -1 if ticket.is_none() => ticket = Some(decoder.bytes()?.to_vec()),
+            -2 if context.is_none() => context = Some(decoder.bytes()?.to_vec()),
+            3 | -1 | -2 => {
+                return Err(PreviewSignError::Malformed(
+                    "duplicate derived signing-argument field",
+                ))
+            }
+            _ => {
+                return Err(PreviewSignError::Malformed(
+                    "unknown derived signing-argument field",
+                ))
+            }
+        }
+    }
+    if decoder.position() != encoded.len() || algorithm != Some(ARKG_P256_ESP256_ALGORITHM) {
+        return Err(PreviewSignError::Malformed(
+            "derived signing arguments use the wrong algorithm",
+        ));
+    }
+    let ticket: [u8; ARKG_TICKET_LENGTH] = ticket
+        .ok_or(PreviewSignError::Malformed(
+            "missing derived signing ticket",
+        ))?
+        .try_into()
+        .map_err(|_| PreviewSignError::Malformed("invalid derived signing ticket length"))?;
+    let context = context.ok_or(PreviewSignError::Malformed(
+        "missing derived signing context",
+    ))?;
+    if context.len() > MAX_CONTEXT_LENGTH {
+        return Err(PreviewSignError::Malformed(
+            "derived signing context is too long",
+        ));
+    }
+    PublicKey::from_sec1_bytes(&ticket[16..])
+        .map_err(|_| PreviewSignError::Malformed("invalid derived signing ticket point"))?;
+    if encode_signing_arguments(&ticket, &context)? != encoded {
+        return Err(PreviewSignError::Malformed(
+            "derived signing arguments are not canonical",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_derived_key_record(
+    registration: &PreviewSignRegistration,
+    derived: &PreviewSignDerivedKeyRecord,
+) -> Result<(), PreviewSignError> {
+    registration.arkg_p256_public_seed()?;
+    let registration_cbor = registration.to_cbor()?;
+    if derived.registration() != &ContentReference::for_object(&registration_cbor) {
+        return Err(PreviewSignError::Malformed(
+            "derived key references a different registration",
+        ));
+    }
+    if derived.algorithm() != ARKG_P256_ESP256_ALGORITHM
+        || derived.algorithm() != registration.algorithm()
+    {
+        return Err(PreviewSignError::Malformed(
+            "derived key uses a different signing algorithm",
+        ));
+    }
+    validate_verification_key(derived.verification_key_cose())?;
+    validate_signing_arguments(derived.additional_args_cbor().ok_or(
+        PreviewSignError::Malformed("derived key is missing signing arguments"),
+    )?)
+}
+
 fn concatenate(parts: &[&[u8]]) -> Vec<u8> {
     let length = parts.iter().map(|part| part.len()).sum();
     let mut output = Vec::with_capacity(length);
