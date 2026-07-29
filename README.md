@@ -409,29 +409,28 @@ with the derived public key.
 
 ## Persistence boundary
 
-The crate exposes a `StorageProvider` boundary and a local implementation for
-immutable, content-addressed CBOR blobs. It is intended for FIDO and other
-backends where content-addressed external persistence fits the hardware model;
-FIDO persistence is not yet connected to a PKCS #11 slot or configuration
-variable.
+Each PKCS #11 session owns an in-memory `StorageProvider`, and each slot owns a
+token provider. Generic public projections and previewSign registration and
+derived-key objects are encoded as canonical, content-addressed CBOR and routed
+by `CKA_TOKEN`: session objects use the current session's memory provider,
+while token objects use the slot provider. Slots without configured or native
+storage use `UnavailableStorageProvider`, so unsupported token persistence
+fails explicitly instead of silently becoming session-local. A durable local
+provider exists, but no environment/configuration path installs it on FIDO
+slots or restores saved FIDO objects yet.
 
-YubiHSM metadata persistence is instead private to that backend. It uses the
-same canonical backed-key CBOR data model and writes only canonical CBOR under
-the distinct `pkcs11rs metadata ...` namespace. Legacy `MDB1` companions under
-Yubico's `Meta object for ...` namespace are read-only compatibility input,
-used only when no pkcs11rs metadata exists for the target. pkcs11rs never
-rewrites or deletes them. The separate namespace keeps ownership apparent to
-administrators and prevents other YubiHSM tooling from misparsing canonical
-CBOR as MDB1. A YubiHSM public token object exists only when its canonical
+YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
+metadata objects on the device. Its canonical CBOR uses the distinct
+`pkcs11rs metadata ...` namespace. Legacy `MDB1` companions under Yubico's
+`Meta object for ...` namespace are read-only compatibility input, used only
+when no pkcs11rs metadata exists for the target; pkcs11rs never rewrites or
+deletes them. A YubiHSM public token object exists only when its canonical
 public aspect contains validated public-key material. `C_GenerateKeyPair`
 returns a session public key by default and persists it only when the public
 template explicitly sets `CKA_TOKEN=CK_TRUE`; the same choice is available
 through `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. Destroying that public object removes
 only the canonical public aspect, while destroying the hardware private object
-also removes its pkcs11rs-owned companion metadata. The experimental
-`previewSign` model defines canonical registration and derived-key records and
-exposes an initial session/module-local PKCS #11 signing flow, but does not
-automatically persist or restore those objects. See
+also removes its pkcs11rs-owned companion metadata. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.

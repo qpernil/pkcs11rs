@@ -224,16 +224,17 @@ input cannot silently regain authority.
 
 Companions have canonical `pkcs11rs.backed-key` logical contents. The
 provider-owned backing binds the target domains and primary key class, and
-private/public aspects hold their sparse attributes. Persistence and
-replacement are private YubiHSM backend operations rather than an
-implementation of the content-addressed `StorageProvider` interface.
+private/public aspects hold their sparse attributes. The YubiHSM backend
+implements the content-addressed `StorageProvider` interface over these
+companions while retaining their device-native back-pointer labels and
+validation.
 
 Legacy `MDB1` key metadata is converted to the canonical logical model on the
 fly only when no pkcs11rs metadata exists for the target. It is read-only
 compatibility input: pkcs11rs never writes, rewrites, or deletes legacy
 companions. Legacy public ID and label fields remain identity compatibility
-data and never create a public token object. All new records use canonical CBOR and the
-`pkcs11rs metadata 0x...` namespace. MDB1 records retain Yubico's
+data and never create a public token object. All new records use canonical CBOR
+and the `pkcs11rs metadata 0x...` namespace. MDB1 records retain Yubico's
 `Meta object for 0x...` convention. This prevents Yubico's PKCS #11 module
 from treating unfamiliar canonical CBOR as MDB1 and makes ownership apparent
 in `yubihsm-shell` listings. See

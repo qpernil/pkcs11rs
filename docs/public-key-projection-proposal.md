@@ -8,18 +8,20 @@ proposal has not been submitted to or adopted by the OASIS PKCS 11 Technical
 Committee.
 
 pkcs11rs includes a vendor-defined reference implementation named
-`CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. It creates session objects for all supported
-backends and accepts `CKA_TOKEN=true` for YubiHSM private keys, where the public
-object is retained in pkcs11rs-owned canonical metadata on the device. It
-supports software RSA private keys and PIV, OpenPGP, YubiHSM,
+`CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. It creates provider-backed session objects
+for all supported backends and accepts `CKA_TOKEN=true` when the slot has a
+writable token provider. YubiHSM supplies a native provider that retains the
+public object in pkcs11rs-owned canonical metadata on the device. It supports
+software RSA private keys and PIV, OpenPGP, YubiHSM,
 resident-FIDO, and previewSign private objects when their backend metadata
 contains a validated RSA, EC, or Ed25519 public component. RSA encryption and
 RSA, ECDSA, and EdDSA verification execute in software on the projected
 object. Tests cover RSA projection, encryption, and verification; FIDO P-256
 projection and verification of a genuine mock GetAssertion signature;
-matching and conflicting intrinsic attributes; non-private bases; unsupported
-token lifetime; session cleanup; and YubiHSM token creation, rediscovery,
-material validation, and independent destruction.
+matching and conflicting intrinsic attributes; non-private bases; unavailable
+token storage; session cleanup; generic token creation, refresh, update, and
+destruction; and YubiHSM token creation, rediscovery, material validation, and
+independent destruction.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and
@@ -339,12 +341,13 @@ restart even if the physical device persists only the private component.
 An implementation without suitable storage rejects that request. It does not
 pretend that a host-memory object is a persistent token object.
 
-The pkcs11rs reference implementation exercises this path for YubiHSM keys.
-It stores a validated `CKA_PUBLIC_KEY_INFO` and the supported public-object
-policy attributes in a canonical metadata aspect owned by pkcs11rs. Legacy
-Yubico metadata and identity-only canonical aspects do not establish object
-existence. Destroying the public token object removes only that aspect; the
-hardware private key and its unrelated metadata remain.
+The pkcs11rs reference implementation routes generic token projections through
+the slot's `StorageProvider`. Slots without token storage reject the request.
+Its YubiHSM provider stores a validated `CKA_PUBLIC_KEY_INFO` and the supported
+public-object policy attributes in a canonical metadata aspect owned by
+pkcs11rs. Legacy Yubico metadata and identity-only canonical aspects do not
+establish object existence. Destroying the public token object removes only
+that aspect; the hardware private key and its unrelated metadata remain.
 
 ### 5.3 Protocol-backed private key
 
