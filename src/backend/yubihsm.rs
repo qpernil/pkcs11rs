@@ -1,6 +1,8 @@
 use crate::key_metadata::{
-    BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking, KeyMetadataError,
+    cryptoki_ulong_to_u64, BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking,
+    KeyMetadataError,
 };
+use crate::storage::{ContentReference, StorageError, StorageProvider};
 use crate::*;
 use minicbor::{Decoder, Encoder};
 
@@ -379,6 +381,7 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) object_generations: RefCell<HashMap<YubiHsmObjectKey, (u8, u64)>>,
     pub(crate) attestation_cache:
         RefCell<HashMap<(YubiHsmObjectKey, u64), YubiHsmAttestationCache>>,
+    metadata_storage_writes: RefCell<HashMap<ContentReference, u16>>,
     pub(crate) next_object_generation: Cell<u64>,
     pub(crate) device_public_key: OnceLock<Vec<u8>>,
 }
@@ -683,10 +686,10 @@ impl YubiHsmPkcs11Metadata {
         {
             return Err(CKR_DATA_INVALID.into());
         }
-        let primary_class = yubihsm_object_class(target);
+        let primary_class = cryptoki_ulong_to_u64(yubihsm_object_class(target));
         if self
             .primary_class
-            .is_some_and(|class| class != primary_class)
+            .is_some_and(|class| cryptoki_ulong_to_u64(class) != primary_class)
         {
             return Err(CKR_DATA_INVALID.into());
         }
@@ -774,7 +777,10 @@ impl YubiHsmPkcs11Metadata {
             target_type: backing.object_type,
             target_id: backing.id,
             target_sequence: backing.sequence,
-            primary_class: Some(backing.primary_class),
+            primary_class: Some(
+                CK_OBJECT_CLASS::try_from(backing.primary_class)
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+            ),
             id,
             label,
             public: projected_public,
@@ -1002,6 +1008,7 @@ impl YubiHsmSlot {
             object_metadata: RefCell::new(HashMap::new()),
             object_generations: RefCell::new(HashMap::new()),
             attestation_cache: RefCell::new(HashMap::new()),
+            metadata_storage_writes: RefCell::new(HashMap::new()),
             next_object_generation: Cell::new(1),
             device_public_key: OnceLock::new(),
         }
@@ -2080,6 +2087,7 @@ impl YubiHsmSlot {
             self.object_metadata.try_borrow_mut()?.clear();
             self.object_generations.try_borrow_mut()?.clear();
             self.attestation_cache.try_borrow_mut()?.clear();
+            self.metadata_storage_writes.try_borrow_mut()?.clear();
         }
         Ok(())
     }
@@ -2210,6 +2218,11 @@ impl YubiHsmSlot {
         self.attestation_cache
             .try_borrow_mut()?
             .retain(|(candidate, _), _| *candidate != key);
+        if object_type & !0x80 == YUBIHSM_OPAQUE {
+            self.metadata_storage_writes
+                .try_borrow_mut()?
+                .retain(|_, candidate_id| *candidate_id != id);
+        }
         Ok(())
     }
 
@@ -2367,9 +2380,24 @@ impl YubiHsmSlot {
         let has_legacy_metadata = !self
             .metadata_objects_in_format(&old_objects, YubiHsmMetadataPhysicalFormat::LegacyMdb1)?
             .is_empty();
+        let mut old_references = Vec::new();
+        for (id, sequence) in &old_canonical_objects {
+            let info = self
+                .cached_object_info(*id, YUBIHSM_OPAQUE, Some(*sequence))?
+                .ok_or(CKR_DEVICE_ERROR)?;
+            let value = self.storage_object_value(&info)?;
+            let reference = ContentReference::for_object(&value);
+            if !old_references.contains(&reference) {
+                old_references.push(reference);
+            }
+        }
 
         if metadata.is_empty() && !has_legacy_metadata {
-            return self.delete_metadata_objects(&old_canonical_objects);
+            for reference in old_references {
+                StorageProvider::delete(self, &reference)
+                    .map_err(crate::backed_object::storage_error)?;
+            }
+            return Ok(());
         }
 
         let value = metadata.encode(info)?;
@@ -2381,12 +2409,15 @@ impl YubiHsmSlot {
         {
             return Ok(());
         }
-        let new_id = self.write_backed_key_metadata(&value)?;
-        let old_canonical_objects = old_canonical_objects
-            .into_iter()
-            .filter(|(id, _)| *id != new_id)
-            .collect::<Vec<_>>();
-        self.delete_metadata_objects(&old_canonical_objects)
+        let new_reference =
+            StorageProvider::put(self, &value).map_err(crate::backed_object::storage_error)?;
+        for reference in old_references {
+            if reference != new_reference {
+                StorageProvider::delete(self, &reference)
+                    .map_err(crate::backed_object::storage_error)?;
+            }
+        }
+        Ok(())
     }
 
     fn persist_public_projection(
@@ -2478,6 +2509,174 @@ impl YubiHsmSlot {
         self.forget_cached_object(id, YUBIHSM_OPAQUE)?;
         Ok(id)
     }
+
+    fn refresh_canonical_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
+        if self
+            .session
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .role()
+            .is_some()
+        {
+            let _ = self.discover_objects(self.session.as_ref())?;
+        }
+        self.cached_canonical_storage_objects()
+    }
+
+    fn cached_canonical_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
+        let state = self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        Ok(state
+            .native_objects
+            .values()
+            .filter_map(|entry| entry.info.as_ref())
+            .filter(|info| {
+                info.object_type == YUBIHSM_OPAQUE
+                    && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
+                    && yubihsm_metadata_label(&info.label).is_some_and(|(format, _)| {
+                        format == YubiHsmMetadataPhysicalFormat::CanonicalCbor
+                    })
+            })
+            .cloned()
+            .collect())
+    }
+
+    fn storage_object_value(&self, info: &YubiHsmObjectInfo) -> Result<Vec<u8>, Error> {
+        if self.has_session_role(YubiHsmSessionRole::User) {
+            self.read_object_value_with_session(info, self.session.as_ref())
+        } else {
+            self.read_object_value_with_public_discovery(info.id, info.object_type)
+        }
+    }
+}
+
+fn yubihsm_storage_error(error: Error) -> StorageError {
+    StorageError::Provider(format!("{error:?}"))
+}
+
+impl StorageProvider for YubiHsmSlot {
+    fn supports_mutation(&self) -> bool {
+        self.has_session_role(YubiHsmSessionRole::User)
+    }
+
+    fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+        let mut references = Vec::new();
+        for info in self
+            .refresh_canonical_storage_objects()
+            .map_err(yubihsm_storage_error)?
+        {
+            let object = self
+                .storage_object_value(&info)
+                .map_err(yubihsm_storage_error)?;
+            BackedKeyMetadata::from_cbor(&object)
+                .map_err(|error| StorageError::Provider(error.to_string()))?;
+            let reference = ContentReference::for_object(&object);
+            if !references.contains(&reference) {
+                references.push(reference);
+            }
+        }
+        references.sort();
+        Ok(references)
+    }
+
+    fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+        for info in self
+            .refresh_canonical_storage_objects()
+            .map_err(yubihsm_storage_error)?
+        {
+            let object = self
+                .storage_object_value(&info)
+                .map_err(yubihsm_storage_error)?;
+            if ContentReference::for_object(&object) == *reference {
+                return Ok(Some(object));
+            }
+        }
+        Ok(None)
+    }
+
+    fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
+        let record = BackedKeyMetadata::from_cbor(object)
+            .map_err(|error| StorageError::Provider(error.to_string()))?;
+        if record.backing().provider() != YUBIHSM_BACKING_PROVIDER {
+            return Err(StorageError::Provider(String::from(
+                "YubiHSM storage rejected a non-YubiHSM backing record",
+            )));
+        }
+        let reference = ContentReference::for_object(object);
+        if self
+            .metadata_storage_writes
+            .try_borrow()
+            .map_err(|_| {
+                StorageError::Provider(String::from(
+                    "YubiHSM metadata storage cache is already borrowed",
+                ))
+            })?
+            .contains_key(&reference)
+        {
+            return Ok(reference);
+        }
+        for info in self
+            .cached_canonical_storage_objects()
+            .map_err(yubihsm_storage_error)?
+        {
+            let existing = self
+                .storage_object_value(&info)
+                .map_err(yubihsm_storage_error)?;
+            if ContentReference::for_object(&existing) == reference && existing == object {
+                return Ok(reference);
+            }
+        }
+        let id = self
+            .write_backed_key_metadata(object)
+            .map_err(yubihsm_storage_error)?;
+        self.metadata_storage_writes
+            .try_borrow_mut()
+            .map_err(|_| {
+                StorageError::Provider(String::from(
+                    "YubiHSM metadata storage cache is already borrowed",
+                ))
+            })?
+            .insert(reference.clone(), id);
+        Ok(reference)
+    }
+
+    fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError> {
+        let mut matches = Vec::new();
+        if let Some(id) = self
+            .metadata_storage_writes
+            .try_borrow()
+            .map_err(|_| {
+                StorageError::Provider(String::from(
+                    "YubiHSM metadata storage cache is already borrowed",
+                ))
+            })?
+            .get(reference)
+            .copied()
+        {
+            matches.push((id, 0));
+        }
+        for info in self
+            .cached_canonical_storage_objects()
+            .map_err(yubihsm_storage_error)?
+        {
+            let object = self
+                .storage_object_value(&info)
+                .map_err(yubihsm_storage_error)?;
+            if ContentReference::for_object(&object) == *reference
+                && !matches.iter().any(|(id, _)| *id == info.id)
+            {
+                matches.push((info.id, info.sequence));
+            }
+        }
+        if matches.is_empty() {
+            return Ok(false);
+        }
+        self.delete_metadata_objects(&matches)
+            .map_err(yubihsm_storage_error)?;
+        Ok(true)
+    }
 }
 
 fn validate_yubihsm_backed_key(
@@ -2493,7 +2692,7 @@ fn validate_yubihsm_backed_key(
         || backing.id != target.id
         || backing.sequence != target.sequence
         || backing.domains != target.domains
-        || backing.primary_class != yubihsm_object_class(target)
+        || backing.primary_class != cryptoki_ulong_to_u64(yubihsm_object_class(target))
         || metadata_object.domains != target.domains
         || yubihsm_metadata_label_target(&metadata_object.label)
             != Some((target.sequence, target.object_type, target.id))
@@ -3029,7 +3228,7 @@ fn apply_yubihsm_public_projection_metadata(
             (attribute, KeyAttributeValue::Unsigned(value))
                 if attribute == u64::from(CKA_KEY_TYPE) =>
             {
-                if *value != object.key_type {
+                if *value != cryptoki_ulong_to_u64(object.key_type) {
                     return Err(CKR_DATA_INVALID.into());
                 }
             }
@@ -3097,7 +3296,7 @@ fn yubihsm_public_projection_attributes(object: &TokenObject) -> Result<KeyAttri
     for (attribute, value) in [
         (
             u64::from(CKA_KEY_TYPE),
-            KeyAttributeValue::Unsigned(object.key_type),
+            KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(object.key_type)),
         ),
         (
             u64::from(CKA_LABEL),
@@ -3140,7 +3339,7 @@ fn yubihsm_public_projection_attributes(object: &TokenObject) -> Result<KeyAttri
         attributes
             .insert(
                 u64::from(CKA_KEY_GEN_MECHANISM),
-                KeyAttributeValue::Unsigned(mechanism),
+                KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(mechanism)),
             )
             .map_err(key_metadata_error)?;
     }
@@ -3172,6 +3371,12 @@ impl Slot for YubiHsmSlot {
     }
     fn kind(&self) -> SlotKind {
         SlotKind::YubiHsm
+    }
+    fn native_storage_provider(&self) -> Option<&dyn StorageProvider> {
+        Some(self)
+    }
+    fn native_storage_objects_are_backend_managed(&self) -> bool {
+        true
     }
     fn name(&self) -> String {
         self.connector.name()
@@ -3358,6 +3563,7 @@ impl Slot for YubiHsmSlot {
         self.object_metadata.try_borrow_mut()?.clear();
         self.object_generations.try_borrow_mut()?.clear();
         self.attestation_cache.try_borrow_mut()?.clear();
+        self.metadata_storage_writes.try_borrow_mut()?.clear();
         let device_info = get_yubihsm_device_info(self.connector.as_ref())?;
         self.version = (device_info.major, device_info.minor, device_info.patch);
         self.serial = device_info.serial.to_string();
