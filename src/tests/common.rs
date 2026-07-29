@@ -7594,6 +7594,7 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
         CKR_OK as CK_RV
     );
     install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE + 1);
 
     let (base_private, software_private) = with_test_slot_context(TEST_SLOT_ID, |context| {
         let (handle, object) = context
@@ -7778,18 +7779,81 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
         CKR_KEY_TYPE_INCONSISTENT as CK_RV
     );
     let mut token = CK_TRUE as CK_BBOOL;
-    let mut token_template = scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token);
+    let mut token_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut encrypt),
+    ];
     assert_eq!(
         crate::api::C_DeriveKey(
             TEST_SESSION_HANDLE,
             &mut mechanism,
             base_private,
-            &mut token_template,
-            1,
+            token_template.as_mut_ptr(),
+            token_template.len() as CK_ULONG,
             &mut invalid,
         ),
-        CKR_TEMPLATE_INCONSISTENT as CK_RV
+        CKR_TOKEN_WRITE_PROTECTED as CK_RV
     );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .set_token_storage_provider(Box::new(crate::storage::MemoryStorageProvider::new()))
+            .unwrap();
+    });
+    let mut token_projected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base_private,
+            token_template.as_mut_ptr(),
+            token_template.len() as CK_ULONG,
+            &mut token_projected,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(token_projected).unwrap().unwrap();
+        assert!(object.token);
+        assert_eq!(object.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
+        context.refresh_slot_token_objects(TEST_SLOT_ID).unwrap();
+        assert!(context.resolve_object(token_projected).unwrap().is_some());
+    });
+    let mut persisted_label = b"persisted projection".to_vec();
+    let mut label_attribute = bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        persisted_label.as_mut_slice(),
+    );
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            TEST_SESSION_HANDLE,
+            token_projected,
+            &mut label_attribute,
+            1,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.refresh_slot_token_objects(TEST_SLOT_ID).unwrap();
+        assert_eq!(
+            context
+                .resolve_object(token_projected)
+                .unwrap()
+                .unwrap()
+                .label,
+            "persisted projection"
+        );
+    });
+    assert_eq!(
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, token_projected),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert!(context.resolve_object(token_projected).unwrap().is_none());
+        context
+            .set_token_storage_provider(Box::new(crate::storage::UnavailableStorageProvider))
+            .unwrap();
+    });
     let mut matching_modulus = software_private.n().to_bytes_be();
     let mut intrinsic_template = bytes_attribute(
         CKA_MODULUS as CK_ATTRIBUTE_TYPE,
@@ -7806,6 +7870,32 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
         ),
         CKR_OK as CK_RV
     );
+    let duplicate_projection = invalid;
+    assert_eq!(
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE + 1, duplicate_projection),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert!(context.resolve_object(projected).unwrap().is_some());
+    });
+    let mut shared_label = b"shared projection".to_vec();
+    let mut shared_label_attribute =
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, shared_label.as_mut_slice());
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            TEST_SESSION_HANDLE + 1,
+            projected,
+            &mut shared_label_attribute,
+            1,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        assert_eq!(
+            context.resolve_object(projected).unwrap().unwrap().label,
+            "shared projection"
+        );
+    });
     matching_modulus[0] ^= 1;
     intrinsic_template = bytes_attribute(
         CKA_MODULUS as CK_ATTRIBUTE_TYPE,
@@ -7845,5 +7935,9 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
         assert!(context.resolve_object(projected).unwrap().is_none());
         assert!(context.resolve_object(base_private).unwrap().is_some());
     });
+    assert_eq!(
+        crate::api::C_CloseSession(TEST_SESSION_HANDLE + 1),
+        CKR_OK as CK_RV
+    );
     finalize_for_test();
 }

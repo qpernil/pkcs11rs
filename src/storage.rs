@@ -1,5 +1,4 @@
-//! Persistence primitives intended for a future hybrid FIDO
-//! hardware/software slot.
+//! Persistence primitives for provider-backed PKCS #11 objects.
 //!
 //! Providers expose opaque, immutable canonical-CBOR data items and address
 //! those logical bytes by an algorithm-tagged digest. A provider may use a
@@ -7,12 +6,18 @@
 //! canonical bytes exactly. This keeps local-directory, device, and future
 //! remote providers behind the same boundary without coupling storage to CTAP.
 //!
-//! This module is not yet connected to PKCS #11 slot discovery, configuration,
-//! FIDO credential registration, key derivation, or signing.
+//! Each PKCS #11 session owns an in-memory provider for session objects. Each
+//! slot owns a token provider, which is unavailable by default unless the
+//! backend or its construction supplies one. Provider-backed public
+//! projections and previewSign registration and derived-key objects use this
+//! boundary. Provider selection through external configuration and automatic
+//! FIDO restoration remain future work.
 
 use minicbor::{Decoder, Encoder};
 use sha3::{Digest, Sha3_256};
 use std::{
+    cell::RefCell,
+    collections::BTreeMap,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -276,6 +281,82 @@ impl StorageProvider for UnavailableStorageProvider {
     }
 }
 
+/// An ephemeral content-addressed provider backed by process memory.
+///
+/// A provider instance owns one independent storage lifetime. PKCS #11 uses a
+/// separate instance for each session so records stored for `CKA_TOKEN=false`
+/// disappear when their creating session closes.
+#[derive(Debug, Default)]
+pub struct MemoryStorageProvider {
+    objects: RefCell<BTreeMap<ContentReference, Vec<u8>>>,
+}
+
+impl MemoryStorageProvider {
+    /// Construct an empty memory-backed provider.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl StorageProvider for MemoryStorageProvider {
+    fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+        Ok(self
+            .objects
+            .try_borrow()
+            .map_err(|_| {
+                StorageError::Provider(String::from("memory storage is already borrowed"))
+            })?
+            .keys()
+            .cloned()
+            .collect())
+    }
+
+    fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+        let object = self
+            .objects
+            .try_borrow()
+            .map_err(|_| {
+                StorageError::Provider(String::from("memory storage is already borrowed"))
+            })?
+            .get(reference)
+            .cloned();
+        if object
+            .as_deref()
+            .is_some_and(|object| !reference.matches(object))
+        {
+            return Err(StorageError::Integrity);
+        }
+        Ok(object)
+    }
+
+    fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
+        validate_cbor_object(object)?;
+        let reference = ContentReference::for_object(object);
+        let mut objects = self.objects.try_borrow_mut().map_err(|_| {
+            StorageError::Provider(String::from("memory storage is already borrowed"))
+        })?;
+        match objects.get(&reference) {
+            Some(existing) if existing == object => {}
+            Some(_) => return Err(StorageError::Conflict),
+            None => {
+                objects.insert(reference.clone(), object.to_vec());
+            }
+        }
+        Ok(reference)
+    }
+
+    fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError> {
+        Ok(self
+            .objects
+            .try_borrow_mut()
+            .map_err(|_| {
+                StorageError::Provider(String::from("memory storage is already borrowed"))
+            })?
+            .remove(reference)
+            .is_some())
+    }
+}
+
 /// A local provider backed by immutable files in an `objects` directory.
 #[derive(Clone, Debug)]
 pub struct LocalStorageProvider {
@@ -506,6 +587,34 @@ mod tests {
             provider.delete(&reference),
             Err(StorageError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn memory_provider_has_content_addressed_ephemeral_semantics() {
+        let provider = MemoryStorageProvider::new();
+        let first = [0xa1, 0x01, 0x61, 0x61];
+        let second = [0xa1, 0x01, 0x61, 0x62];
+        let first_reference = provider.put(&first).unwrap();
+        let second_reference = provider.put(&second).unwrap();
+        assert_eq!(provider.put(&first).unwrap(), first_reference);
+        let mut expected = vec![first_reference.clone(), second_reference.clone()];
+        expected.sort();
+        assert_eq!(provider.list().unwrap(), expected);
+        assert_eq!(
+            provider.get(&first_reference).unwrap().as_deref(),
+            Some(first.as_slice())
+        );
+        assert!(provider.delete(&first_reference).unwrap());
+        assert!(!provider.delete(&first_reference).unwrap());
+        assert!(provider.get(&first_reference).unwrap().is_none());
+        assert_eq!(provider.list().unwrap(), vec![second_reference]);
+    }
+
+    #[test]
+    fn memory_provider_rejects_non_cbor_objects() {
+        let provider = MemoryStorageProvider::new();
+        assert!(matches!(provider.put(&[]), Err(StorageError::InvalidCbor)));
+        assert!(provider.list().unwrap().is_empty());
     }
     use std::sync::Arc;
 
