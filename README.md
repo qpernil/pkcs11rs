@@ -42,7 +42,9 @@ available in a particular slot.
 The vendor `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` mechanism provides a reference
 implementation of public-key projection through `C_DeriveKey`: a private key
 with recoverable public metadata can produce an independent public session
-object for ordinary software verification or RSA encryption. See the
+object for ordinary software verification or RSA encryption. YubiHSM private
+keys can additionally produce persistent public token objects backed by
+pkcs11rs-owned canonical metadata. See the
 [public-key projection proposal](docs/public-key-projection-proposal.md) for
 the proposed standard semantics and current implementation boundary.
 
@@ -420,7 +422,13 @@ Yubico's `Meta object for ...` namespace are read-only compatibility input,
 used only when no pkcs11rs metadata exists for the target. pkcs11rs never
 rewrites or deletes them. The separate namespace keeps ownership apparent to
 administrators and prevents other YubiHSM tooling from misparsing canonical
-CBOR as MDB1. The experimental
+CBOR as MDB1. A YubiHSM public token object exists only when its canonical
+public aspect contains validated public-key material. `C_GenerateKeyPair`
+returns a session public key by default and persists it only when the public
+template explicitly sets `CKA_TOKEN=CK_TRUE`; the same choice is available
+through `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. Destroying that public object removes
+only the canonical public aspect, while destroying the hardware private object
+also removes its pkcs11rs-owned companion metadata. The experimental
 `previewSign` model defines canonical registration and derived-key records and
 exposes an initial session/module-local PKCS #11 signing flow, but does not
 automatically persist or restore those objects. See

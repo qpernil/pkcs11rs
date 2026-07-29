@@ -54,9 +54,12 @@ key order.
 
 `CKA_CLASS` is represented by the aspect-map key and cannot occur inside an
 attribute map. `CKA_TOKEN` is also structural: a persisted aspect is a token
-object, while a session aspect is never submitted to a provider. Presence of
-an empty public aspect therefore means that a public token projection exists
-and obtains all of its attributes from the backing provider.
+object, while a session aspect is never submitted to a provider. Aspect
+presence alone does not prove that a provider can reconstruct an object: each
+provider must validate the stable material required by its backing model. The
+YubiHSM backend, for example, requires a canonical public aspect containing
+`CKA_PUBLIC_KEY_INFO`; an empty or identity-only public aspect does not create a
+public token object.
 
 The generic layer validates the CBOR representation and the semantic type of
 every standard key attribute supported by pkcs11rs. Provider-specific
