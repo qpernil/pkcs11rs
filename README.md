@@ -57,7 +57,7 @@ from the backend's advertised behavior:
 | Profile | Availability |
 | --- | --- |
 | `CKP_BASELINE_PROVIDER` | Every present slot |
-| `CKP_EXTENDED_PROVIDER` | YubiHSM slots and other slots whose mechanism list satisfies the mandatory Extended Provider mechanism and flag vector |
+| `CKP_EXTENDED_PROVIDER` | YubiHSM slots, which provide the profile's required mechanism discovery and login functions |
 | `CKP_AUTHENTICATION_TOKEN` | Slots advertising signing-capable `CKM_SHA256_RSA_PKCS` |
 | `CKP_PUBLIC_CERTIFICATES_TOKEN` | PIV and OpenPGP slots; YubiHSM slots only after successful configured public discovery |
 
@@ -67,10 +67,10 @@ YubiHSM public-certificates profile is based on an actual authenticated
 discovery result, not merely on the presence of configuration.
 
 YubiHSM slots advertise the Extended Provider profile because the module
-provides its required provider behavior through the YubiHSM's standard and
-vendor-backed wrapping adaptations. The profile describes the slot
-implementation and does not depend on which key algorithms are currently
-provisioned.
+provides its required mechanism discovery and authentication functions. The
+profile does not mandate a particular mechanism. Available wrapping mechanisms
+remain limited to the YubiHSM's standard and vendor-backed adaptations and
+depend on device capabilities.
 
 ## Threading
 
@@ -404,8 +404,9 @@ credential and implements credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification
 through its projected public key. It also implements the complete experimental
 previewSign PKCS #11 flow: credential registration, registration-attribute
-export/import, offline ARKG derivation, GetAssertion signing, and verification
-with the derived public key.
+export/import, offline ARKG derivation, derived-key metadata export and strict
+re-import, GetAssertion signing, public-key projection, and PKCS #11
+verification with the derived public key.
 
 ## Persistence boundary
 
@@ -417,7 +418,9 @@ while token objects use the slot provider. Slots without configured or native
 storage use `UnavailableStorageProvider`, so unsupported token persistence
 fails explicitly instead of silently becoming session-local. A durable local
 provider exists, but no environment/configuration path installs it on FIDO
-slots or restores saved FIDO objects yet.
+slots or automatically restores saved FIDO objects yet. Applications can
+manually restore exported previewSign registration or derived-key wrappers
+through `C_CreateObject`.
 
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct

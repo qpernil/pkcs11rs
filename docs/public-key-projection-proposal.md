@@ -16,8 +16,13 @@ software RSA private keys and PIV, OpenPGP, YubiHSM,
 resident-FIDO, and previewSign private objects when their backend metadata
 contains a validated RSA, EC, or Ed25519 public component. RSA encryption and
 RSA, ECDSA, and EdDSA verification execute in software on the projected
-object. Tests cover RSA projection, encryption, and verification; FIDO P-256
+object. Native public objects and provider-restored objects are normalized
+through the same canonical projected-key backing before those operations, so
+the cryptographic paths do not depend on backend-specific public-object
+variants. Tests cover RSA projection, encryption, and verification; FIDO P-256
 projection and verification of a genuine mock GetAssertion signature;
+previewSign export, destruction, strict restoration, projection, signing, and
+PKCS #11 verification;
 matching and conflicting intrinsic attributes; non-private bases; unavailable
 token storage; session cleanup; generic token creation, refresh, update, and
 destruction; and YubiHSM token creation, rediscovery, material validation, and
