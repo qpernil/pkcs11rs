@@ -2097,6 +2097,18 @@ fn mismatched_canonical_public_material_does_not_hide_the_private_key() {
         .unwrap();
     let projection = persisted_public_projection(&private, b"persisted-id", "persisted public");
     Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    let references = crate::storage::StorageProvider::list(&slot).unwrap();
+    assert_eq!(references.len(), 1);
+    let canonical = crate::storage::StorageProvider::get(&slot, &references[0])
+        .unwrap()
+        .unwrap();
+    BackedKeyMetadata::from_cbor(&canonical).unwrap();
+    let object_count = peer.metadata_objects.borrow().len();
+    assert_eq!(
+        crate::storage::StorageProvider::put(&slot, &canonical).unwrap(),
+        references[0]
+    );
+    assert_eq!(peer.metadata_objects.borrow().len(), object_count);
     assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"persisted-id"
     }));
