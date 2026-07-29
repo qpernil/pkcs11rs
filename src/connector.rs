@@ -666,13 +666,13 @@ impl std::fmt::Debug for dyn Connector + '_ {
 
 #[derive(Debug)]
 pub(crate) struct UsbConnector {
-    pub(crate) handle: rusb::DeviceHandle<rusb::Context>,
-    pub(crate) version: rusb::Version,
+    pub(crate) device: nusb::Device,
+    pub(crate) interface: Option<nusb::Interface>,
+    pub(crate) version: (u8, u8),
     pub(crate) manufacturer: String,
     pub(crate) product: String,
     pub(crate) serial: String,
     pub(crate) packet_size: usize,
-    pub(crate) claimed: bool,
     pub(crate) connection_epoch: u64,
     pub(crate) connected_once: bool,
 }
@@ -691,19 +691,19 @@ impl Connector for UsbConnector {
         format!("{} {} {}", self.manufacturer, self.product, self.serial)
     }
     fn major(&self) -> u8 {
-        self.version.major()
+        self.version.0
     }
     fn minor(&self) -> u8 {
-        self.version.minor()
+        self.version.1
     }
     fn hardware_version(&self) -> Option<(u8, u8)> {
-        Some((self.version.major(), self.version.minor()))
+        Some(self.version)
     }
     fn connection_epoch(&self) -> u64 {
         self.connection_epoch
     }
     fn is_present(&self) -> bool {
-        self.claimed
+        self.interface.is_some()
     }
     fn buffer_size(&self) -> usize {
         3136 + self.packet_size
@@ -714,22 +714,63 @@ impl Connector for UsbConnector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let len = self.handle.write_bulk(0x01, send_buffer, timeout)?;
-        log!(2, "libusb.write_bulk({:?}) -> {}", send_buffer, len);
+        let interface = self.interface.as_ref().ok_or(CKR_DEVICE_REMOVED)?;
+        u32::try_from(send_buffer.len()).map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+        u32::try_from(receive_buffer.len()).map_err(|_| Error::from(CKR_DEVICE_MEMORY))?;
+
+        let mut bulk_out = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(0x01)?;
+        let completion = nusb_transfer(
+            &mut bulk_out,
+            nusb::transfer::Buffer::from(send_buffer),
+            timeout,
+        );
+        let len = completion.actual_len;
+        completion.status?;
+        log!(2, "nusb.bulk_out({:?}) -> {}", send_buffer, len);
         ensure_complete_write(len, send_buffer.len())?;
         if needs_zero_length_packet(len, self.packet_size) {
             // Write a ZLP if last packet is full
-            let zlp = self.handle.write_bulk(0x01, &[], timeout)?;
-            log!(2, "libusb.write_bulk'zlp() -> {}", zlp);
+            let completion = nusb_transfer(&mut bulk_out, nusb::transfer::Buffer::new(0), timeout);
+            let zlp = completion.actual_len;
+            completion.status?;
+            log!(2, "nusb.bulk_out_zlp() -> {}", zlp);
         }
-        let len = self.handle.read_bulk(0x81, receive_buffer, timeout)?;
-        log!(
-            2,
-            "libusb.read_bulk({:?}) -> {}",
-            &receive_buffer[..len],
-            len
+
+        let mut bulk_in = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81)?;
+        let completion = nusb_transfer(
+            &mut bulk_in,
+            nusb::transfer::Buffer::new(receive_buffer.len()),
+            timeout,
         );
+        let len = completion.actual_len;
+        completion.status?;
+        receive_buffer[..len].copy_from_slice(&completion.buffer[..len]);
+        log!(2, "nusb.bulk_in({:?}) -> {}", &receive_buffer[..len], len);
         Ok(&receive_buffer[..len])
+    }
+}
+
+fn nusb_transfer<EpType, Direction>(
+    endpoint: &mut nusb::Endpoint<EpType, Direction>,
+    buffer: nusb::transfer::Buffer,
+    timeout: Duration,
+) -> nusb::transfer::Completion
+where
+    EpType: nusb::transfer::BulkOrInterrupt,
+    Direction: nusb::transfer::EndpointDirection,
+{
+    if !timeout.is_zero() {
+        return endpoint.transfer_blocking(buffer, timeout);
+    }
+
+    // The Connector contract follows libusb and the YubiHSM Connector:
+    // Duration::ZERO means no timeout. nusb treats zero as an immediate
+    // timeout, so retain the pending transfer and wait in bounded intervals.
+    endpoint.submit(buffer);
+    loop {
+        if let Some(completion) = endpoint.wait_next_complete(Duration::from_secs(60)) {
+            return completion;
+        }
     }
 }
 
@@ -745,42 +786,55 @@ pub(crate) fn needs_zero_length_packet(length: usize, packet_size: usize) -> boo
     packet_size != 0 && crate::is_multiple_of(length, packet_size)
 }
 
-pub(crate) fn bulk_out_packet_size(device: &rusb::Device<rusb::Context>) -> Result<usize, Error> {
-    let config = device.active_config_descriptor()?;
+pub(crate) fn usb_bcd_version(raw: u16) -> (u8, u8) {
+    let major = (((raw >> 12) & 0x0f) * 10 + ((raw >> 8) & 0x0f)) as u8;
+    let minor = ((raw >> 4) & 0x0f) as u8;
+    (major, minor)
+}
+
+pub(crate) fn bulk_out_packet_size(device: &nusb::Device) -> Result<usize, Error> {
+    let config = device.active_configuration().map_err(nusb::Error::from)?;
     for interface in config.interfaces() {
-        for descriptor in interface.descriptors() {
-            for endpoint in descriptor.endpoint_descriptors() {
+        for descriptor in interface.alt_settings() {
+            for endpoint in descriptor.endpoints() {
                 if endpoint.address() == 0x01
-                    && endpoint.transfer_type() == rusb::TransferType::Bulk
+                    && endpoint.transfer_type() == nusb::descriptors::TransferType::Bulk
                 {
-                    return Ok(endpoint.max_packet_size() as usize);
+                    return Ok(endpoint.max_packet_size());
                 }
             }
         }
     }
-    Err(rusb::Error::NotFound.into())
+    Err(CKR_DEVICE_ERROR.into())
 }
 
 impl UsbConnector {
     pub(crate) fn connect(&mut self) -> Result<(), Error> {
-        self.handle.claim_interface(0)?;
-        let mut stale = vec![0; self.buffer_size()];
-        if let Ok(length) = self
-            .handle
-            .read_bulk(0x81, &mut stale, Duration::from_millis(1))
+        use nusb::MaybeFuture;
+
+        let interface = self.device.claim_interface(0).wait()?;
+        let stale = vec![0; self.buffer_size()];
+        if let Ok(mut bulk_in) =
+            interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81)
         {
-            log!(2, "libusb drained {length} stale bytes");
+            let completion = bulk_in.transfer_blocking(
+                nusb::transfer::Buffer::new(stale.len()),
+                Duration::from_millis(1),
+            );
+            if completion.status.is_ok() {
+                let length = completion.actual_len;
+                log!(2, "nusb drained {length} stale bytes");
+            }
         }
         if self.connected_once {
             self.connection_epoch = self.connection_epoch.wrapping_add(1);
         }
         self.connected_once = true;
-        self.claimed = true;
+        self.interface = Some(interface);
         Ok(())
     }
     fn _disconnect(&mut self) -> Result<(), Error> {
-        self.handle.release_interface(0)?;
-        self.claimed = false;
+        self.interface = None;
         Ok(())
     }
 }

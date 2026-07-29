@@ -10,20 +10,20 @@ use crate::{
 };
 use crate::{
     bulk_out_packet_size, ccid_application_aid, ccid_application_label,
-    configured_ccid_configurations, pinentry, select_application, str_pad, BackendSession,
-    CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, IssuerSecurityDomainSlot,
-    OpenPgpSlot, PcscAppletConnector, PcscConnector, PivSlot, SharedConnector, SignatureOperation,
-    Slot, SlotKind, TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot,
-    YubiKeyClient,
+    configured_ccid_configurations, pinentry, select_application, str_pad, usb_bcd_version,
+    BackendSession, CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot,
+    FindOperation, HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
+    IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector, PcscConnector, PivSlot,
+    SharedConnector, SignatureOperation, Slot, SlotKind, TokenObject, UsbConnector,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{KeyMaterial, ABI_TEST_SLOT_ID};
+use nusb::MaybeFuture;
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::RsaPublicKey;
-use rusb::UsbContext;
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
@@ -58,12 +58,28 @@ pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Resul
     }
 }
 
+fn read_nusb_string(device: &nusb::Device, index: Option<std::num::NonZeroU8>) -> Option<String> {
+    let index = index?;
+    let timeout = std::time::Duration::from_millis(100);
+    let mut languages = device
+        .get_string_descriptor_supported_languages(timeout)
+        .wait()
+        .ok()?;
+    let language = languages
+        .next()
+        .unwrap_or(nusb::descriptors::language_id::US_ENGLISH);
+    device
+        .get_string_descriptor(index, language, timeout)
+        .wait()
+        .ok()
+}
+
 // Initialized module resources and the registry of independently locked slots.
 // The registry lock protects lazy discovery and session-handle routing; slot
 // operations release it before taking an individual SlotContext lock.
 pub(crate) struct ModuleContext {
     pub(crate) debug_level: u8,
-    pub(crate) libusb: Option<rusb::Context>,
+    pub(crate) yubihsm_usb: bool,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
@@ -317,7 +333,7 @@ impl std::fmt::Debug for ModuleContext {
             .ok()
             .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
         fmt.debug_struct("ModuleContext")
-            .field("libusb", &self.libusb)
+            .field("yubihsm_usb", &self.yubihsm_usb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field(
@@ -464,19 +480,9 @@ impl ModuleContext {
         let mut context = ModuleContext {
             debug_level,
             #[cfg(feature = "abi-tests")]
-            libusb: None,
+            yubihsm_usb: false,
             #[cfg(not(feature = "abi-tests"))]
-            libusb: if yubihsm_usb {
-                match rusb::Context::new() {
-                    Ok(context) => Some(context),
-                    Err(e) => {
-                        log!(1, "libusb::Context::new: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            },
+            yubihsm_usb,
             #[cfg(feature = "abi-tests")]
             pcsc: None,
             #[cfg(not(feature = "abi-tests"))]
@@ -1041,93 +1047,102 @@ impl ModuleContext {
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
         let mut pcsc_devices: HashMap<PhysicalDeviceKey, Arc<DeviceContext>> = HashMap::new();
-        if let Some(context) = self.libusb.as_ref() {
-            if let Ok(devices) = context.devices() {
-                for device in devices.iter() {
-                    if let Ok(desc) = device.device_descriptor() {
-                        //eprintln!("USB Bus {} Device {}: ID {}: {}", device.bus_number(), device.address(), desc.vendor_id(), desc.product_id());
-                        if desc.vendor_id() == 0x1050 && desc.product_id() == 0x30 {
-                            match device.open() {
-                                Ok(handle) => {
-                                    let version = desc.device_version();
-                                    let packet_size = match bulk_out_packet_size(&device) {
-                                        Ok(packet_size) => packet_size,
-                                        Err(error) => {
-                                            log!(1, "libusb bulk OUT endpoint: {:?}", error);
-                                            continue;
-                                        }
-                                    };
-                                    let manufacturer = handle
-                                        .read_manufacturer_string_ascii(&desc)
-                                        .unwrap_or_default();
-                                    let product =
-                                        handle.read_product_string_ascii(&desc).unwrap_or_default();
-                                    let serial = handle
-                                        .read_serial_number_string_ascii(&desc)
-                                        .unwrap_or_default();
-                                    let mut connector = UsbConnector {
-                                        handle,
-                                        version,
-                                        manufacturer,
-                                        product,
-                                        serial,
-                                        packet_size,
-                                        claimed: false,
-                                        connection_epoch: 0,
-                                        connected_once: false,
-                                    };
-                                    let name = connector.name();
-                                    log!(2, "{}", name);
-                                    if slot_contexts.values().any(|context| {
-                                        context
-                                            .lock()
-                                            .ok()
-                                            .map(|context| context.slot.name() == name)
-                                            .unwrap_or(false)
-                                    }) {
-                                        continue;
-                                    }
-                                    if let Err(error) = connector.connect() {
-                                        log!(1, "libusb.claim_interface: {:?}", error);
-                                        continue;
-                                    }
-                                    let Some(slot_id) = slot_contexts.next_slot_id() else {
-                                        log!(1, "YubiHSM slot ID space exhausted");
-                                        continue;
-                                    };
-                                    let mut yubihsm_slot =
-                                        YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
-                                            Rc::new(connector),
-                                            (0, 0, 0),
-                                            Vec::new(),
-                                            hsmauth_providers.clone(),
-                                            self.yubihsm_public_discovery_config.clone(),
-                                        );
-                                    yubihsm_slot.set_pinentry(self.pinentry.clone());
-                                    let mut slot = Box::new(yubihsm_slot);
-                                    if let Err(error) = slot.init_slot() {
-                                        log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
-                                        continue;
-                                    }
-                                    if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
-                                        &mut slot_contexts,
-                                        slot_id,
-                                        slot,
-                                        true,
-                                        self.handles.clone(),
-                                        self.pinentry.clone(),
-                                        self.trust_store.clone(),
-                                    ) {
-                                        log!(1, "YubiHSM slot registration: {:?}", error);
-                                        continue;
-                                    }
-                                }
-                                Err(e) => {
-                                    log!(1, "libusb.open: {}", e);
-                                }
-                            }
-                        }
+        if self.yubihsm_usb {
+            let devices = match nusb::list_devices().wait() {
+                Ok(devices) => Some(devices),
+                Err(error) => {
+                    log!(1, "nusb::list_devices: {}", error);
+                    None
+                }
+            };
+            for device_info in devices.into_iter().flatten() {
+                if device_info.vendor_id() != 0x1050 || device_info.product_id() != 0x0030 {
+                    continue;
+                }
+                let device = match device_info.open().wait() {
+                    Ok(device) => device,
+                    Err(error) => {
+                        log!(1, "nusb.open: {}", error);
+                        continue;
                     }
+                };
+                let packet_size = match bulk_out_packet_size(&device) {
+                    Ok(packet_size) => packet_size,
+                    Err(error) => {
+                        log!(1, "nusb bulk OUT endpoint: {:?}", error);
+                        continue;
+                    }
+                };
+                let descriptor = device.device_descriptor();
+                let manufacturer = device_info
+                    .manufacturer_string()
+                    .map(str::to_owned)
+                    .or_else(|| read_nusb_string(&device, descriptor.manufacturer_string_index()))
+                    .unwrap_or_else(|| String::from("Yubico"));
+                let product = device_info
+                    .product_string()
+                    .map(str::to_owned)
+                    .or_else(|| read_nusb_string(&device, descriptor.product_string_index()))
+                    .unwrap_or_else(|| String::from("YubiHSM"));
+                let serial = device_info
+                    .serial_number()
+                    .map(str::to_owned)
+                    .or_else(|| read_nusb_string(&device, descriptor.serial_number_string_index()))
+                    .unwrap_or_default();
+                let mut connector = UsbConnector {
+                    device,
+                    interface: None,
+                    version: usb_bcd_version(device_info.device_version()),
+                    manufacturer,
+                    product,
+                    serial,
+                    packet_size,
+                    connection_epoch: 0,
+                    connected_once: false,
+                };
+                let name = connector.name();
+                log!(2, "{}", name);
+                if slot_contexts.values().any(|context| {
+                    context
+                        .lock()
+                        .ok()
+                        .map(|context| context.slot.name() == name)
+                        .unwrap_or(false)
+                }) {
+                    continue;
+                }
+                if let Err(error) = connector.connect() {
+                    log!(1, "nusb.claim_interface: {:?}", error);
+                    continue;
+                }
+                let Some(slot_id) = slot_contexts.next_slot_id() else {
+                    log!(1, "YubiHSM slot ID space exhausted");
+                    continue;
+                };
+                let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+                    Rc::new(connector),
+                    (0, 0, 0),
+                    Vec::new(),
+                    hsmauth_providers.clone(),
+                    self.yubihsm_public_discovery_config.clone(),
+                );
+                yubihsm_slot.set_pinentry(self.pinentry.clone());
+                let mut slot = Box::new(yubihsm_slot);
+                if let Err(error) = slot.init_slot() {
+                    log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
+                    continue;
+                }
+                if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
+                    &mut slot_contexts,
+                    slot_id,
+                    slot,
+                    true,
+                    self.handles.clone(),
+                    self.pinentry.clone(),
+                    self.trust_store.clone(),
+                ) {
+                    log!(1, "YubiHSM slot registration: {:?}", error);
+                    continue;
                 }
             }
         }

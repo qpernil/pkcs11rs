@@ -31,7 +31,7 @@ hkdf = "0.13.0"
 hidapi = { version = "2.6.6", default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
 minicbor = { version = "2.3.0", features = ["alloc"] }
 pbkdf2 = "0.13.0"
-rusb = "0.9.4"
+nusb = "0.2.5"
 pcsc = "2.9.0"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 flate2 = "1.1.9"

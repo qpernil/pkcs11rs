@@ -119,10 +119,12 @@ firmware used in a deployment.
 Building requires a Rust toolchain plus the development files for:
 
 - PC/SC
-- libusb 1.0
 - libudev on Linux
 
 The exact package names depend on the operating system and package manager.
+Direct YubiHSM USB access uses native OS APIs through the pure-Rust `nusb`
+crate: usbfs on Linux, IOKit on macOS, and WinUSB on Windows. It does not
+require libusb. On Windows, the YubiHSM interface must be bound to WinUSB.
 The `hidapi` Rust dependency compiles its bundled hidraw backend on Linux and
 its bundled IOKit backend on macOS; Windows uses its native Windows HID
 backend. No separately installed `libhidapi` is required.
@@ -335,6 +337,15 @@ The corresponding protected-path test is
 `pkcs11_dispatch_serializes_fido_hid_login_against_piv_ccid` additionally
 exercises automatic device correlation and the exported PKCS #11 dispatch
 path; it is gated by `PKCS11RS_FIDO2_TEST_PIN` and verifies that PIN once.
+
+The direct YubiHSM USB smoke test performs only discovery and metadata reads
+through `nusb`. Leave `PKCS11RS_YUBIHSM_URLS` unset so every reported YubiHSM
+slot must be a directly attached USB device:
+
+```sh
+cargo test direct_yubihsm_usb_slot_reports_metadata \
+  -- --ignored --nocapture
+```
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048
