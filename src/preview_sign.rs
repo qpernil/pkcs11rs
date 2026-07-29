@@ -589,6 +589,19 @@ impl PreviewSignDerivedKeyRecord {
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
+
+    /// Validate that this derived key can be restored with an exact
+    /// registration record.
+    ///
+    /// This checks the content reference, the current ARKG-P256 algorithm,
+    /// the canonical ESP256 verification key, and the canonical signing
+    /// ticket and context consumed by the authenticator.
+    pub fn validate_for_registration(
+        &self,
+        registration: &PreviewSignRegistration,
+    ) -> Result<(), PreviewSignError> {
+        arkg::validate_derived_key_record(registration, self)
+    }
 }
 
 fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, PreviewSignError> {

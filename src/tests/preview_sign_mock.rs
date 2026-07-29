@@ -1,7 +1,6 @@
 use crate::pkcs11::*;
 use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
-use signature::hazmat::PrehashVerifier;
 
 fn ulong_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut CK_ULONG) -> CK_ATTRIBUTE {
     CK_ATTRIBUTE {
@@ -221,12 +220,162 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         ),
         registration
     );
-    let derived = read_attribute(
+    let derived_encoded = read_attribute(
         session,
         signing_key,
         crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
     );
-    let derived = crate::preview_sign::PreviewSignDerivedKeyRecord::from_cbor(&derived).unwrap();
+    let derived =
+        crate::preview_sign::PreviewSignDerivedKeyRecord::from_cbor(&derived_encoded).unwrap();
+    assert_eq!(
+        crate::api::C_DestroyObject(session, signing_key),
+        CKR_OK as CK_RV
+    );
+
+    let mut derived_only = derived_encoded.clone();
+    let mut missing_registration_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            &mut derived_only,
+        ),
+    ];
+    let mut restored_signing_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            missing_registration_template.as_mut_ptr(),
+            missing_registration_template.len() as CK_ULONG,
+            &mut restored_signing_key,
+        ),
+        CKR_TEMPLATE_INCOMPLETE as CK_RV
+    );
+
+    let mismatched = crate::preview_sign::PreviewSignDerivedKeyRecord::new(
+        crate::storage::ContentReference::for_object(b"different registration"),
+        derived.algorithm(),
+        derived.verification_key_cose().to_vec(),
+        derived.additional_args_cbor().map(<[u8]>::to_vec),
+        derived.label().map(str::to_owned),
+    )
+    .unwrap()
+    .to_cbor()
+    .unwrap();
+    let mut mismatched_registration = registration.clone();
+    let mut mismatched_derived = mismatched;
+    let mut session_token = CK_FALSE as CK_BBOOL;
+    let mut mismatched_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_token),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            &mut mismatched_registration,
+        ),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            &mut mismatched_derived,
+        ),
+    ];
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            mismatched_template.as_mut_ptr(),
+            mismatched_template.len() as CK_ULONG,
+            &mut restored_signing_key,
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+    mismatched_derived = crate::preview_sign::PreviewSignDerivedKeyRecord::new(
+        derived.registration().clone(),
+        derived.algorithm(),
+        derived.verification_key_cose().to_vec(),
+        Some(vec![0xa0]),
+        derived.label().map(str::to_owned),
+    )
+    .unwrap()
+    .to_cbor()
+    .unwrap();
+    mismatched_template[4] = bytes_attribute(
+        crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+        &mut mismatched_derived,
+    );
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            mismatched_template.as_mut_ptr(),
+            mismatched_template.len() as CK_ULONG,
+            &mut restored_signing_key,
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+
+    let mut restored_registration = registration.clone();
+    let mut restored_derived = derived_encoded.clone();
+    let mut restored_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_token),
+        bool_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+        bool_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            &mut restored_registration,
+        ),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            &mut restored_derived,
+        ),
+    ];
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            restored_template.as_mut_ptr(),
+            restored_template.len() as CK_ULONG,
+            &mut restored_signing_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        read_attribute(
+            session,
+            restored_signing_key,
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+        ),
+        registration
+    );
+    assert_eq!(
+        read_attribute(
+            session,
+            restored_signing_key,
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+        ),
+        derived_encoded
+    );
+
+    let mut project_mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut projected_template = [
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_token),
+        bool_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+    ];
+    let mut projected_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut project_mechanism,
+            restored_signing_key,
+            projected_template.as_mut_ptr(),
+            projected_template.len() as CK_ULONG,
+            &mut projected_key,
+        ),
+        CKR_OK as CK_RV
+    );
 
     let digest: [u8; 32] = Sha256::digest(b"pkcs11rs previewSign PKCS #11 mock").into();
     mechanism = CK_MECHANISM {
@@ -235,7 +384,7 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         ulParameterLen: 0,
     };
     assert_eq!(
-        crate::api::C_SignInit(session, &mut mechanism, signing_key),
+        crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
         CKR_OK as CK_RV
     );
     let mut signature_len = 0;
@@ -262,31 +411,40 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
 
-    let projected = crate::project_cose_public_key(derived.verification_key_cose()).unwrap();
-    let crate::FidoPublicKey::Ec {
-        public_key,
-        prefix_uncompressed,
-        ..
-    } = projected.public_key
-    else {
-        panic!("derived previewSign key is not EC");
+    let mut verify_mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
     };
-    let mut sec1 = Vec::with_capacity(public_key.len() + 1);
-    if prefix_uncompressed {
-        sec1.push(4);
-    }
-    sec1.extend_from_slice(&public_key);
-    let verifier = VerifyingKey::from_sec1_bytes(&sec1).unwrap();
-    let signature = Signature::from_slice(&signature).unwrap();
-    verifier.verify_prehash(&digest, &signature).unwrap();
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut verify_mechanism, projected_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            digest.as_ptr().cast_mut(),
+            digest.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
 
     super::with_test_slot_context(slot, |context| {
         context.refresh_slot_token_objects(slot).unwrap();
         assert!(context.resolve_object(registration_key).unwrap().is_some());
-        assert!(context.resolve_object(signing_key).unwrap().is_some());
+        assert!(context
+            .resolve_object(restored_signing_key)
+            .unwrap()
+            .is_some());
     });
     assert_eq!(
-        crate::api::C_DestroyObject(session, signing_key),
+        crate::api::C_DestroyObject(session, projected_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, restored_signing_key),
         CKR_OK as CK_RV
     );
     assert_eq!(
