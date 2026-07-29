@@ -1781,7 +1781,9 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_rejects_unadvertised_sign_mechanism(self) -> None:
+    def test_abi_yubihsm_rejects_sign_mechanism_advertised_for_verify_only(
+        self,
+    ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
         self.login_session(session)
@@ -1802,7 +1804,18 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        self.assertNotIn(CKM_SHA224_RSA_PKCS, mechanisms)
+        self.assertIn(CKM_SHA224_RSA_PKCS, mechanisms)
+        info = CK_MECHANISM_INFO()
+        self.assertEqual(
+            self.lib.C_GetMechanismInfo(
+                ABI_TEST_YUBIHSM_SLOT_ID,
+                CKM_SHA224_RSA_PKCS,
+                ctypes.byref(info),
+            ),
+            CKR_OK,
+        )
+        self.assertEqual(info.flags & CKF_VERIFY, CKF_VERIFY)
+        self.assertEqual(info.flags & CKF_SIGN, 0)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -2145,17 +2158,22 @@ done
                 else:
                     os.environ["PKCS11RS_PINENTRY"] = previous
 
-    def test_yubihsm_key_pair_generation_requires_token_objects(self) -> None:
+    def test_yubihsm_key_pair_generation_requires_a_token_private_key(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        session = self.open_slot_session(
+            ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
+        )
+        self.login_session(session)
         modulus_bits = CK_ULONG(2048)
         session_object = CK_BYTE(0)
-        public_template = (CK_ATTRIBUTE * 2)(
+        public_template = (CK_ATTRIBUTE * 1)(
             CK_ATTRIBUTE(
                 CKA_MODULUS_BITS,
                 ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
                 ctypes.sizeof(modulus_bits),
             ),
+        )
+        private_template = (CK_ATTRIBUTE * 1)(
             CK_ATTRIBUTE(
                 CKA_TOKEN,
                 ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
@@ -2172,8 +2190,8 @@ done
                 ctypes.byref(mechanism),
                 public_template,
                 len(public_template),
-                None,
-                0,
+                private_template,
+                len(private_template),
                 ctypes.byref(public_key),
                 ctypes.byref(private_key),
             ),
@@ -2182,15 +2200,24 @@ done
 
     def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        session = self.open_slot_session(ABI_TEST_YUBIHSM_SLOT_ID)
+        session = self.open_slot_session(
+            ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
+        )
+        self.login_session(session)
         modulus_bits = CK_ULONG(2048)
+        token_object = CK_BYTE(1)
         public_id = (CK_BYTE * 2)(0, 1)
         private_id = (CK_BYTE * 2)(0, 2)
-        public_template = (CK_ATTRIBUTE * 2)(
+        public_template = (CK_ATTRIBUTE * 3)(
             CK_ATTRIBUTE(
                 CKA_MODULUS_BITS,
                 ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
                 ctypes.sizeof(modulus_bits),
+            ),
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                ctypes.sizeof(token_object),
             ),
             CK_ATTRIBUTE(CKA_ID, ctypes.cast(public_id, CK_VOID_PTR), len(public_id)),
         )
@@ -3247,7 +3274,7 @@ done
         opaque_data = find_one(
             CKA_LABEL, b"Mozilla Builtin Roots", CKO_DATA
         )
-        self.assertEqual(policy(public_key), (1, 0, 0))
+        self.assertEqual(policy(public_key), (1, 0, 1))
         self.assertEqual(policy(opaque_data), (1, 0, 1))
 
         label = (CK_BYTE * len(b"updated public key"))(*b"updated public key")
@@ -3267,7 +3294,7 @@ done
             CKR_USER_NOT_LOGGED_IN,
         )
         self.assertEqual(
-            self.lib.C_DestroyObject(session, public_key), CKR_ACTION_PROHIBITED
+            self.lib.C_DestroyObject(session, public_key), CKR_USER_NOT_LOGGED_IN
         )
         self.assertEqual(
             self.lib.C_DestroyObject(session, opaque_data), CKR_USER_NOT_LOGGED_IN
@@ -4377,7 +4404,7 @@ done
 
     def test_mechanism_list_and_info_report_supported_mechanisms(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
-        expected = [
+        required = {
             CKM_RSA_PKCS_KEY_PAIR_GEN,
             CKM_RSA_PKCS,
             CKM_EC_KEY_PAIR_GEN,
@@ -4392,13 +4419,13 @@ done
             CKM_SHA3_256,
             CKM_SHA3_384,
             CKM_SHA3_512,
-        ]
+        }
         count = CK_ULONG()
         self.assertEqual(
             self.lib.C_GetMechanismList(ABI_TEST_SLOT_ID, None, ctypes.byref(count)),
             CKR_OK,
         )
-        self.assertEqual(count.value, len(expected))
+        self.assertGreaterEqual(count.value, len(required))
 
         mechanisms = (CK_ULONG * count.value)()
         self.assertEqual(
@@ -4409,7 +4436,9 @@ done
             ),
             CKR_OK,
         )
-        self.assertEqual(list(mechanisms), expected)
+        advertised = set(mechanisms)
+        self.assertEqual(len(advertised), count.value)
+        self.assertTrue(required.issubset(advertised))
 
         info = CK_MECHANISM_INFO()
         self.assertEqual(

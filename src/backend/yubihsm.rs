@@ -3346,6 +3346,30 @@ fn yubihsm_public_projection_attributes(object: &TokenObject) -> Result<KeyAttri
     Ok(attributes)
 }
 
+#[cfg(feature = "abi-tests")]
+pub(crate) fn yubihsm_abi_public_projection_metadata(
+    target: &YubiHsmObjectInfo,
+    projection: &TokenObject,
+) -> Result<(String, Vec<u8>), Error> {
+    let metadata = YubiHsmPkcs11Metadata {
+        target_type: target.object_type,
+        target_id: target.id,
+        target_sequence: target.sequence,
+        primary_class: None,
+        id: None,
+        label: None,
+        public: true,
+        public_id: (projection.id != target.id.to_be_bytes()).then(|| projection.id.clone()),
+        public_label: (projection.label != yubihsm_object_label(target))
+            .then(|| projection.label.clone()),
+        public_attributes: yubihsm_public_projection_attributes(projection)?,
+    };
+    Ok((
+        yubihsm_metadata_label_for_target(target, YubiHsmMetadataPhysicalFormat::CanonicalCbor),
+        metadata.encode(target)?,
+    ))
+}
+
 fn yubihsm_object_class(info: &YubiHsmObjectInfo) -> CK_OBJECT_CLASS {
     match info.object_type {
         YUBIHSM_OPAQUE if info.algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE => {
