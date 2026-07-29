@@ -1252,7 +1252,7 @@ fn destroy_object(
         {
             let related_metadata = ctx
                 .get_slot(slot_id)?
-                .yubihsm_related_metadata_object(id, object_type)?;
+                .yubihsm_owned_metadata_objects(id, object_type)?;
             ctx._get_session(session_handle)?
                 .1
                 .yubihsm_command(&YubiHsmCommand::delete_object(id, object_type & !0x80))?;

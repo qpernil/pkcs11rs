@@ -298,7 +298,7 @@ pub(crate) trait Slot {
     fn yubihsm_forget_object(&self, _id: u16, _object_type: u8) -> Result<(), Error> {
         Ok(())
     }
-    fn yubihsm_related_metadata_object(
+    fn yubihsm_owned_metadata_objects(
         &self,
         _id: u16,
         _object_type: u8,

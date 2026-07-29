@@ -123,25 +123,25 @@ class. These fields are checked against the live target and companion label
 before a record is accepted. A stale record cannot attach to a newly created
 object that reuses the same ID.
 
-Legacy `MDB1` key metadata is decoded into the canonical logical model without
-rewriting the device merely because it was read. When a new logical record can
-be represented exactly by MDB1, the backend retains that physical encoding for
-downgrade compatibility. It proves this by decoding the candidate MDB1 bytes
-back to canonical metadata and comparing the complete logical record. Records
-with newer attributes or semantics are stored physically as canonical CBOR.
+Legacy `MDB1` key metadata is decoded into the canonical logical model only as
+read-only compatibility input. It is selected only when no metadata in the
+pkcs11rs namespace exists for the target. pkcs11rs never writes, rewrites, or
+deletes MDB1 companions, including when their target is deleted; their target
+sequence makes resulting orphans inert if an object ID is reused.
 
-MDB1 objects retain the interoperable `Meta object for 0x...` label. Canonical
-objects instead use `pkcs11rs metadata 0x...`, because Yubico's PKCS #11 module
-recognizes the former prefix as MDB1 metadata before inspecting its contents.
-The separate namespace also makes ownership clear in `yubihsm-shell` object
-listings.
+All new records are canonical CBOR and use the `pkcs11rs metadata 0x...` label.
+MDB1 objects retain Yubico's `Meta object for 0x...` label. The separate
+namespaces make ownership clear in `yubihsm-shell` listings and prevent
+Yubico's PKCS #11 module from treating unfamiliar canonical CBOR as MDB1.
 
 Metadata updates are backend-native operations requiring a secure session with
 the applicable YubiHSM capabilities. Replacement remains failure-safe: the new
-companion is written before old companions are removed, and a later update
-repairs ambiguity left by a failed deletion. The current PKCS #11 path projects
-only sparse `CKA_ID` and `CKA_LABEL` overrides, while the shared canonical model
-can represent additional supported key attributes for later lifecycle work.
+canonical companion is written before older pkcs11rs companions are removed,
+and a later update repairs ambiguity left by a failed deletion. Legacy
+companions are not part of this lifecycle. The current PKCS #11 path projects
+only sparse `CKA_ID` and `CKA_LABEL` overrides, while the shared canonical
+model can represent additional supported key attributes for later lifecycle
+work.
 
 ## Current integration boundary
 

@@ -202,14 +202,16 @@ contents identify the target object type, ID, and sequence, while its own
 sequence identifies the current companion incarnation. A link contributes
 attribute overrides only when its target sequence matches the current target
 entry; this prevents reused object IDs from inheriting obsolete attributes.
-Domains must also match. Invalid metadata is hidden and ignored. If multiple
-valid metadata objects claim the same target, none is selected until a later
-attribute update repairs the ambiguity. `C_SetAttributeValue` writes a
-replacement metadata object before removing older companions, and creating an
+Domains must also match. Invalid metadata is hidden. Canonical metadata is
+authoritative whenever any pkcs11rs-namespaced companion exists; legacy
+metadata is considered only in its absence. Multiple valid companions within
+the selected namespace are ambiguous until a later attribute update repairs
+the pkcs11rs namespace. `C_SetAttributeValue` writes a replacement canonical
+metadata object before removing older canonical companions, and creating an
 object automatically creates metadata when requested attributes cannot be
 encoded by the native YubiHSM object. New metadata uses YubiHSM
-auto-allocation. Destroying the main object also deletes every linked metadata
-companion.
+auto-allocation. Destroying the main object deletes its pkcs11rs-owned
+companions but leaves legacy companions untouched.
 
 Companions have canonical `pkcs11rs.backed-key` logical contents. The
 provider-owned backing binds the target domains and primary key class, and
@@ -218,13 +220,13 @@ replacement are private YubiHSM backend operations rather than an
 implementation of the content-addressed `StorageProvider` interface.
 
 Legacy `MDB1` key metadata is converted to the canonical logical model on the
-fly. New logical records that can be represented exactly as `MDB1` retain that
-physical encoding for compatibility with older pkcs11rs versions; records with
-newer attributes use canonical CBOR physically. Physical labels also identify
-the format: MDB1 records retain Yubico's `Meta object for 0x...` convention,
-whereas canonical records use `pkcs11rs metadata 0x...`. This prevents
-Yubico's PKCS #11 module from treating unfamiliar canonical CBOR as MDB1 and
-makes pkcs11rs-owned objects apparent in `yubihsm-shell` listings. See
+fly only when no pkcs11rs metadata exists for the target. It is read-only
+compatibility input: pkcs11rs never writes, rewrites, or deletes legacy
+companions. All new records use canonical CBOR and the
+`pkcs11rs metadata 0x...` namespace. MDB1 records retain Yubico's
+`Meta object for 0x...` convention. This prevents Yubico's PKCS #11 module
+from treating unfamiliar canonical CBOR as MDB1 and makes ownership apparent
+in `yubihsm-shell` listings. See
 [Content-addressed CBOR storage](storage.md#yubihsm-backend-metadata) for the
 shared schema and backend behavior.
 

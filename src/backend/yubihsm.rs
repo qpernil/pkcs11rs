@@ -7,7 +7,6 @@ use minicbor::{Decoder, Encoder};
 const YUBIHSM_BACKING_PROVIDER: &str = "pkcs11rs.yubihsm";
 const YUBIHSM_BACKING_SCHEMA: &str = "pkcs11rs.yubihsm.object";
 const YUBIHSM_BACKING_SCHEMA_VERSION: u64 = 1;
-const YUBIHSM_LEGACY_METADATA_MAX_ATTRIBUTE_LENGTH: usize = 256;
 const YUBIHSM_LEGACY_METADATA_LABEL_PREFIX: &str = "Meta object for 0x";
 const YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX: &str = "pkcs11rs metadata 0x";
 
@@ -826,84 +825,6 @@ fn sparse_identity(attributes: &KeyAttributes) -> Result<(Option<Vec<u8>>, Optio
     Ok((id, label))
 }
 
-fn encode_legacy_yubihsm_key_metadata(
-    record: &BackedKeyMetadata,
-    target: &YubiHsmObjectInfo,
-) -> Result<Option<Vec<u8>>, Error> {
-    let primary_class = yubihsm_object_class(target);
-    let Some(primary) = record.aspect(primary_class) else {
-        return Ok(None);
-    };
-    let Ok((id, label)) = sparse_identity(primary) else {
-        return Ok(None);
-    };
-    let legacy_projects_public =
-        primary_class != u64::from(CKO_PUBLIC_KEY) && yubihsm_object_has_public_key(target);
-    let projected_public = if primary_class == u64::from(CKO_PUBLIC_KEY) {
-        None
-    } else {
-        record.aspect(u64::from(CKO_PUBLIC_KEY))
-    };
-    if projected_public.is_some() != legacy_projects_public {
-        return Ok(None);
-    }
-    let (public_id, public_label) = match projected_public {
-        Some(attributes) => {
-            let Ok(identity) = sparse_identity(attributes) else {
-                return Ok(None);
-            };
-            identity
-        }
-        None => (None, None),
-    };
-
-    let mut encoded = b"MDB1".to_vec();
-    encoded.push(target.object_type);
-    encoded.extend_from_slice(&target.id.to_be_bytes());
-    encoded.push(target.sequence);
-    for (tag, value) in [
-        (1, id.as_deref()),
-        (2, label.as_deref().map(str::as_bytes)),
-        (3, public_id.as_deref()),
-        (4, public_label.as_deref().map(str::as_bytes)),
-    ] {
-        let Some(value) = value else {
-            continue;
-        };
-        if value.len() > YUBIHSM_LEGACY_METADATA_MAX_ATTRIBUTE_LENGTH {
-            return Ok(None);
-        }
-        encoded.push(tag);
-        encoded.extend_from_slice(
-            &u16::try_from(value.len())
-                .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?
-                .to_be_bytes(),
-        );
-        encoded.extend_from_slice(value);
-    }
-
-    let metadata_info = YubiHsmObjectInfo {
-        capabilities: [0; 8],
-        id: 0,
-        length: u16::try_from(encoded.len()).unwrap_or(u16::MAX),
-        domains: target.domains,
-        object_type: YUBIHSM_OPAQUE,
-        algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
-        sequence: 0,
-        origin: 0,
-        label: yubihsm_metadata_label_for_target(target, YubiHsmMetadataPhysicalFormat::LegacyMdb1),
-        delegated_capabilities: [0; 8],
-    };
-    let round_trip = parse_yubihsm_pkcs11_metadata(&metadata_info, &encoded)?
-        .to_backed_key(target, true)?
-        .to_cbor()
-        .map_err(key_metadata_error)?;
-    if round_trip != record.to_cbor().map_err(key_metadata_error)? {
-        return Ok(None);
-    }
-    Ok(Some(encoded))
-}
-
 fn encode_yubihsm_key_backing(
     info: &YubiHsmObjectInfo,
     primary_class: u64,
@@ -1690,15 +1611,18 @@ impl YubiHsmSlot {
             self.connector.name()
         );
         let mut discovered = Vec::new();
-        let mut pkcs11_metadata = HashMap::new();
-        let mut ambiguous_metadata = HashSet::new();
+        let mut legacy_metadata = HashMap::new();
+        let mut ambiguous_legacy_metadata = HashSet::new();
+        let mut canonical_metadata = HashMap::new();
+        let mut ambiguous_canonical_metadata = HashSet::new();
+        let mut canonical_metadata_present = HashSet::new();
         let mut related_metadata = HashMap::<_, Vec<_>>::new();
         for entry in listed {
             let info =
                 self.listed_object_info(session, entry.id, entry.object_type, entry.sequence)?;
             if info.object_type == YUBIHSM_OPAQUE && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA {
-                let Some((target_sequence, target_type, target_id)) =
-                    yubihsm_metadata_label_target(&info.label)
+                let Some((format, (target_sequence, target_type, target_id))) =
+                    yubihsm_metadata_label(&info.label)
                 else {
                     discovered.push(YubiHsmDiscoveredObject {
                         info,
@@ -1713,6 +1637,16 @@ impl YubiHsmSlot {
                     })
                     .or_default()
                     .push((info.id, info.sequence));
+                let label_scope = YubiHsmMetadataScope {
+                    target: YubiHsmMetadataTarget {
+                        object: YubiHsmObjectKey::new(target_type, target_id),
+                        sequence: target_sequence,
+                    },
+                    domains: info.domains,
+                };
+                if format == YubiHsmMetadataPhysicalFormat::CanonicalCbor {
+                    canonical_metadata_present.insert(label_scope);
+                }
                 let value = self.read_opaque_with_session(&info, session)?;
                 match parse_yubihsm_pkcs11_metadata(&info, &value) {
                     Ok(metadata) => {
@@ -1726,19 +1660,27 @@ impl YubiHsmSlot {
                             },
                             domains: info.domains,
                         };
-                        if ambiguous_metadata.contains(&target) {
-                            continue;
-                        }
-                        if pkcs11_metadata.remove(&target).is_some() {
-                            ambiguous_metadata.insert(target);
-                            log!(
-                                2,
-                                "YubiHSM has duplicate PKCS11 metadata for object type {:02x} ID {:04x}",
-                                target.target.object.object_type,
-                                target.target.object.id
-                            );
-                        } else {
-                            pkcs11_metadata.insert(target, metadata);
+                        let (selected, ambiguous) = match format {
+                            YubiHsmMetadataPhysicalFormat::LegacyMdb1 => {
+                                (&mut legacy_metadata, &mut ambiguous_legacy_metadata)
+                            }
+                            YubiHsmMetadataPhysicalFormat::CanonicalCbor => {
+                                (&mut canonical_metadata, &mut ambiguous_canonical_metadata)
+                            }
+                        };
+                        if !ambiguous.contains(&target) {
+                            if selected.remove(&target).is_some() {
+                                ambiguous.insert(target);
+                                log!(
+                                    2,
+                                    "YubiHSM has duplicate {:?} PKCS11 metadata for object type {:02x} ID {:04x}",
+                                    format,
+                                    target.target.object.object_type,
+                                    target.target.object.id
+                                );
+                            } else {
+                                selected.insert(target, metadata);
+                            }
                         }
                         continue;
                     }
@@ -1770,6 +1712,18 @@ impl YubiHsmSlot {
                 None
             };
             discovered.push(YubiHsmDiscoveredObject { info, public_key });
+        }
+        let mut pkcs11_metadata = legacy_metadata;
+        for target in ambiguous_legacy_metadata {
+            pkcs11_metadata.remove(&target);
+        }
+        for target in canonical_metadata_present {
+            pkcs11_metadata.remove(&target);
+        }
+        for (target, metadata) in canonical_metadata {
+            if !ambiguous_canonical_metadata.contains(&target) {
+                pkcs11_metadata.insert(target, metadata);
+            }
         }
         log!(
             2,
@@ -2231,6 +2185,30 @@ impl YubiHsmSlot {
             .unwrap_or_default())
     }
 
+    fn metadata_objects_in_format(
+        &self,
+        objects: &[(u16, u8)],
+        format: YubiHsmMetadataPhysicalFormat,
+    ) -> Result<Vec<(u16, u8)>, Error> {
+        let state = self
+            .object_cache
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?;
+        Ok(objects
+            .iter()
+            .copied()
+            .filter(|(id, sequence)| {
+                state
+                    .native_objects
+                    .get(&YubiHsmObjectKey::new(YUBIHSM_OPAQUE, *id))
+                    .filter(|entry| entry.sequence == Some(*sequence))
+                    .and_then(|entry| entry.info.as_ref())
+                    .and_then(|info| yubihsm_metadata_label(&info.label))
+                    .is_some_and(|(candidate, _)| candidate == format)
+            })
+            .collect())
+    }
+
     fn metadata_target_by_unique_id(
         &self,
         slot_id: CK_SLOT_ID,
@@ -2296,6 +2274,13 @@ impl YubiHsmSlot {
     ) -> Result<(), Error> {
         let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
         let old_objects = self.related_metadata_object(info.id, info.object_type)?;
+        let old_canonical_objects = self.metadata_objects_in_format(
+            &old_objects,
+            YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+        )?;
+        let has_legacy_metadata = !self
+            .metadata_objects_in_format(&old_objects, YubiHsmMetadataPhysicalFormat::LegacyMdb1)?
+            .is_empty();
         let mut metadata = current.clone().unwrap_or(YubiHsmPkcs11Metadata {
             target_type: info.object_type,
             target_id: info.id,
@@ -2327,25 +2312,26 @@ impl YubiHsmSlot {
             }
         }
 
-        if metadata.is_empty() {
-            return self.delete_metadata_objects(&old_objects);
+        if metadata.is_empty() && !has_legacy_metadata {
+            return self.delete_metadata_objects(&old_canonical_objects);
         }
 
         let value = metadata.encode(&info)?;
-        if current
-            .as_ref()
-            .and_then(|current| current.encode(&info).ok())
-            .as_deref()
-            == Some(value.as_slice())
+        if !old_canonical_objects.is_empty()
+            && current
+                .as_ref()
+                .and_then(|current| current.encode(&info).ok())
+                .as_deref()
+                == Some(value.as_slice())
         {
             return Ok(());
         }
         let new_id = self.write_backed_key_metadata(&value)?;
-        let old_objects = old_objects
+        let old_canonical_objects = old_canonical_objects
             .into_iter()
             .filter(|(id, _)| *id != new_id)
             .collect::<Vec<_>>();
-        self.delete_metadata_objects(&old_objects)
+        self.delete_metadata_objects(&old_canonical_objects)
     }
 
     fn write_backed_key_metadata(&self, object: &[u8]) -> Result<u16, Error> {
@@ -2373,15 +2359,10 @@ impl YubiHsmSlot {
             delegated_capabilities: [0; 8],
         };
         validate_yubihsm_backed_key(&synthetic_metadata_info, &target, &record)?;
-        let legacy_physical_object = encode_legacy_yubihsm_key_metadata(&record, &target)?;
-        let (physical_format, physical_object) = match legacy_physical_object {
-            Some(legacy) => (YubiHsmMetadataPhysicalFormat::LegacyMdb1, legacy),
-            None => (
-                YubiHsmMetadataPhysicalFormat::CanonicalCbor,
-                object.to_vec(),
-            ),
-        };
-        let physical_label = yubihsm_metadata_label_for_target(&target, physical_format);
+        let physical_label = yubihsm_metadata_label_for_target(
+            &target,
+            YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+        );
         let capabilities = if yubihsm_capability(&target.capabilities, 0x10) {
             yubihsm_capabilities(&[0x10])
         } else {
@@ -2399,7 +2380,7 @@ impl YubiHsmSlot {
                     capabilities,
                     algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
                 },
-                &physical_object,
+                object,
             )?,
         )?;
         let id = parse_yubihsm_object_id(&response)?;
@@ -3395,12 +3376,13 @@ impl Slot for YubiHsmSlot {
     fn yubihsm_forget_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
         self.forget_cached_object(id, object_type)
     }
-    fn yubihsm_related_metadata_object(
+    fn yubihsm_owned_metadata_objects(
         &self,
         id: u16,
         object_type: u8,
     ) -> Result<Vec<(u16, u8)>, Error> {
-        self.related_metadata_object(id, object_type)
+        let objects = self.related_metadata_object(id, object_type)?;
+        self.metadata_objects_in_format(&objects, YubiHsmMetadataPhysicalFormat::CanonicalCbor)
     }
     fn yubihsm_set_attributes(
         &self,
