@@ -15,9 +15,9 @@ use crate::{
     configured_ccid_configurations, pinentry, select_application, str_pad, usb_bcd_version,
     BackendSession, CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot,
     FindOperation, HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
-    IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector, PcscConnector, PivSlot,
-    SharedConnector, SignatureOperation, Slot, SlotKind, TokenObject, UsbConnector,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector,
+    PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot, SlotKind, TokenObject,
+    UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
@@ -31,6 +31,11 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
 };
+use zeroize::Zeroizing;
+
+pub(crate) const YUBIHSM_TLS_CLIENT_CERT_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_CERT";
+pub(crate) const YUBIHSM_TLS_CLIENT_KEY_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_KEY";
+pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUNDLE";
 
 pub(crate) fn configured_yubihsm_urls(
     value: Option<std::ffi::OsString>,
@@ -48,6 +53,32 @@ pub(crate) fn configured_yubihsm_urls(
         urls.push(url.to_owned());
     }
     Ok(urls)
+}
+
+pub(crate) fn configured_yubihsm_http_tls(
+    certificate_path: Option<std::ffi::OsString>,
+    private_key_path: Option<std::ffi::OsString>,
+    ca_bundle_path: Option<std::ffi::OsString>,
+) -> Result<HttpConnectorTlsConfig, Error> {
+    let mut tls = match (certificate_path, private_key_path) {
+        (None, None) => HttpConnectorTlsConfig::default(),
+        (Some(certificate_path), Some(private_key_path))
+            if !certificate_path.is_empty() && !private_key_path.is_empty() =>
+        {
+            let certificate_chain_pem = std::fs::read(certificate_path)?;
+            let private_key_pem = Zeroizing::new(std::fs::read(private_key_path)?);
+            HttpConnectorTlsConfig::from_client_pem(&certificate_chain_pem, &private_key_pem)?
+        }
+        _ => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+    if let Some(ca_bundle_path) = ca_bundle_path {
+        if ca_bundle_path.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let ca_bundle_pem = std::fs::read(ca_bundle_path)?;
+        tls = tls.with_ca_bundle_pem(&ca_bundle_pem)?;
+    }
+    Ok(tls)
 }
 
 #[cfg(any(not(feature = "abi-tests"), test))]
@@ -84,6 +115,7 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_usb: bool,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
+    pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
@@ -343,6 +375,7 @@ impl std::fmt::Debug for ModuleContext {
             .field("yubihsm_usb", &self.yubihsm_usb)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
+            .field("yubihsm_http_tls", &self.yubihsm_http_tls)
             .field(
                 "yubihsm_public_discovery_config",
                 &self.yubihsm_public_discovery_config,
@@ -475,6 +508,11 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
+        let yubihsm_http_tls = configured_yubihsm_http_tls(
+            std::env::var_os(YUBIHSM_TLS_CLIENT_CERT_ENV),
+            std::env::var_os(YUBIHSM_TLS_CLIENT_KEY_ENV),
+            std::env::var_os(YUBIHSM_TLS_CA_BUNDLE_ENV),
+        )?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_config =
             configured_yubihsm_public_discovery_credential_with_pinentry(
@@ -502,6 +540,7 @@ impl ModuleContext {
                 }
             },
             yubihsm_urls,
+            yubihsm_http_tls,
             yubihsm_public_discovery_config,
             handles: handles.clone(),
             pinentry: pinentry.clone(),
@@ -1412,13 +1451,14 @@ impl ModuleContext {
             }
         }
         for url in self.yubihsm_urls.clone() {
-            let mut connector = match HttpConnector::new(url.clone()) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    log!(1, "YubiHSM connector configuration for {url}: {:?}", error);
-                    continue;
-                }
-            };
+            let mut connector =
+                match HttpConnector::new_with_tls(url.clone(), &self.yubihsm_http_tls) {
+                    Ok(connector) => connector,
+                    Err(error) => {
+                        log!(1, "YubiHSM connector configuration for {url}: {:?}", error);
+                        continue;
+                    }
+                };
             let connected = match connector.connect() {
                 Ok(()) => true,
                 Err(error) => {

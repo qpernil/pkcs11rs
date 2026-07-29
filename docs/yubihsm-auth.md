@@ -13,6 +13,40 @@ discovery. An unreachable configured connector is retained as an empty slot
 until the module is reinitialized. The URL scheme selects plain HTTP or
 rustls-backed HTTPS.
 
+HTTPS verifies the server certificate and hostname against the Mozilla root
+snapshot embedded through the locked `webpki-roots` dependency. It does not
+use the operating-system trust store. Configure mutual TLS with:
+
+```sh
+export PKCS11RS_YUBIHSM_TLS_CLIENT_CERT=/etc/pkcs11rs/client-chain.pem
+export PKCS11RS_YUBIHSM_TLS_CLIENT_KEY=/etc/pkcs11rs/client-key.pem
+```
+
+The certificate path may contain a PEM chain in leaf-first order. The private
+key must be an unencrypted PEM PKCS#8, SEC1, or PKCS#1 key matching the leaf
+certificate. The two variables form one module-wide client identity and must
+either both be absent or both be present. Files are read and validated during
+`C_Initialize`; changing them requires module reinitialization. Invalid,
+unreadable, or mismatched material fails initialization instead of falling
+back to unauthenticated TLS. The identity is offered only to configured
+`https://` URLs, and redirects are disabled while it is configured. Plain HTTP
+URLs remain unauthenticated. Client authentication does not disable server
+verification or extend its embedded root set; private server CAs are not
+trusted unless explicitly configured.
+
+For HTTPS servers issued by a private CA, set:
+
+```sh
+export PKCS11RS_YUBIHSM_TLS_CA_BUNDLE=/etc/pkcs11rs/connector-ca.pem
+```
+
+This PEM bundle replaces, rather than extends, the embedded Mozilla roots for
+every configured HTTPS connector. All certificates in the bundle are parsed
+as trust anchors during `C_Initialize`; an empty, malformed, or unreadable
+bundle fails initialization. It may be configured independently of the client
+identity. Server certificate-chain and hostname or IP-address verification
+remain mandatory.
+
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP
 connector slots. The only accepted values are `0` and `1`. Direct USB access

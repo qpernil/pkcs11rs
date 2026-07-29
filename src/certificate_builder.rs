@@ -17,7 +17,7 @@ use x509_cert::{
     builder::{profile::BuilderProfile, Builder, CertificateBuilder},
     certificate::TbsCertificate,
     ext::{
-        pkix::{BasicConstraints, KeyUsage, KeyUsages},
+        pkix::{name::GeneralName, BasicConstraints, KeyUsage, KeyUsages, SubjectAltName},
         Extension, ToExtension,
     },
     name::Name,
@@ -59,6 +59,7 @@ struct TestProfile {
     is_ca: bool,
     enable_key_agreement: bool,
     enable_key_encipherment: bool,
+    subject_alt_ip_address: Option<Vec<u8>>,
 }
 
 impl BuilderProfile for TestProfile {
@@ -95,6 +96,14 @@ impl BuilderProfile for TestProfile {
             usages |= KeyUsages::KeyEncipherment;
         }
         extensions.push(KeyUsage(usages).to_extension(tbs.subject(), &extensions)?);
+        if let Some(ip_address) = &self.subject_alt_ip_address {
+            extensions.push(
+                SubjectAltName(vec![GeneralName::IpAddress(der::asn1::OctetString::new(
+                    ip_address.clone(),
+                )?)])
+                .to_extension(tbs.subject(), &extensions)?,
+            );
+        }
         Ok(extensions)
     }
 }
@@ -107,12 +116,45 @@ pub(crate) fn p256_certificate(
     serial: u32,
     is_ca: bool,
 ) -> Vec<u8> {
+    p256_certificate_with_ip_address(subject_key, signer, subject, issuer, serial, is_ca, None)
+}
+
+#[cfg(test)]
+pub(crate) fn p256_tls_ip_certificate(
+    subject_key: &VerifyingKey,
+    signer: &SigningKey,
+    subject: &str,
+    issuer: &str,
+    serial: u32,
+    ip_address: &[u8],
+) -> Vec<u8> {
+    p256_certificate_with_ip_address(
+        subject_key,
+        signer,
+        subject,
+        issuer,
+        serial,
+        false,
+        Some(ip_address),
+    )
+}
+
+fn p256_certificate_with_ip_address(
+    subject_key: &VerifyingKey,
+    signer: &SigningKey,
+    subject: &str,
+    issuer: &str,
+    serial: u32,
+    is_ca: bool,
+    ip_address: Option<&[u8]>,
+) -> Vec<u8> {
     let profile = TestProfile {
         subject: Name::from_str(subject).unwrap(),
         issuer: Name::from_str(issuer).unwrap(),
         is_ca,
         enable_key_agreement: !is_ca,
         enable_key_encipherment: false,
+        subject_alt_ip_address: ip_address.map(ToOwned::to_owned),
     };
     let builder = CertificateBuilder::new(
         profile,
@@ -144,6 +186,7 @@ pub(crate) fn p256_certificate_for_rsa(
             is_ca: false,
             enable_key_agreement: false,
             enable_key_encipherment: true,
+            subject_alt_ip_address: None,
         },
         SerialNumber::from(serial),
         Validity::from_now(Duration::from_secs(86_400 * 3_650)).unwrap(),

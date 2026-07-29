@@ -1124,6 +1124,110 @@ fn parse_yubihsm_connector_status(value: &[u8]) -> Result<YubiHsmConnectorStatus
     })
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct HttpConnectorTlsConfig {
+    client_cert: Option<ureq::tls::ClientCert>,
+    custom_roots: Option<ureq::tls::RootCerts>,
+}
+
+impl std::fmt::Debug for HttpConnectorTlsConfig {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("HttpConnectorTlsConfig")
+            .field("client_certificate_configured", &self.client_cert.is_some())
+            .field("custom_ca_bundle_configured", &self.custom_roots.is_some())
+            .finish()
+    }
+}
+
+impl HttpConnectorTlsConfig {
+    pub(crate) fn from_client_pem(
+        certificate_chain_pem: &[u8],
+        private_key_pem: &[u8],
+    ) -> Result<Self, Error> {
+        let certificates = http_pem_certificates(certificate_chain_pem)?;
+        let private_key = ureq::tls::PrivateKey::from_pem(private_key_pem)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        validate_http_client_identity(&certificates, &private_key)?;
+        Ok(Self {
+            client_cert: Some(ureq::tls::ClientCert::new_with_certs(
+                &certificates,
+                private_key,
+            )),
+            custom_roots: None,
+        })
+    }
+
+    pub(crate) fn with_ca_bundle_pem(mut self, ca_bundle_pem: &[u8]) -> Result<Self, Error> {
+        let certificates = http_pem_certificates(ca_bundle_pem)?;
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in &certificates {
+            roots
+                .add(rustls_pki_types::CertificateDer::from(certificate.der()))
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        }
+        self.custom_roots = Some(ureq::tls::RootCerts::new_with_certs(&certificates));
+        Ok(self)
+    }
+
+    pub(crate) fn is_configured(&self) -> bool {
+        self.client_cert.is_some() || self.custom_roots.is_some()
+    }
+
+    fn has_client_identity(&self) -> bool {
+        self.client_cert.is_some()
+    }
+
+    fn for_url(&self, url: &str) -> Option<ureq::tls::TlsConfig> {
+        let scheme = url.get(..8)?;
+        if !scheme.eq_ignore_ascii_case("https://") {
+            return None;
+        }
+        let mut builder = ureq::tls::TlsConfig::builder()
+            .client_cert(self.client_cert.clone())
+            .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()));
+        if let Some(custom_roots) = &self.custom_roots {
+            builder = builder.root_certs(custom_roots.clone());
+        }
+        Some(builder.build())
+    }
+}
+
+fn http_pem_certificates(pem: &[u8]) -> Result<Vec<ureq::tls::Certificate<'static>>, Error> {
+    let mut certificates = Vec::new();
+    for item in ureq::tls::parse_pem(pem) {
+        match item.map_err(|_| Error::from(CKR_ARGUMENTS_BAD))? {
+            ureq::tls::PemItem::Certificate(certificate) => certificates.push(certificate),
+            ureq::tls::PemItem::PrivateKey(_) => {}
+            _ => {}
+        }
+    }
+    if certificates.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(certificates)
+}
+
+fn validate_http_client_identity(
+    certificates: &[ureq::tls::Certificate<'static>],
+    private_key: &ureq::tls::PrivateKey<'static>,
+) -> Result<(), Error> {
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
+    let certificates = certificates
+        .iter()
+        .map(|certificate| CertificateDer::from(certificate.der().to_vec()))
+        .collect();
+    let private_key = PrivateKeyDer::try_from(private_key.der().to_vec())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    rustls::sign::CertifiedKey::from_der(
+        certificates,
+        private_key,
+        &rustls::crypto::ring::default_provider(),
+    )
+    .map(|_| ())
+    .map_err(|_| CKR_ARGUMENTS_BAD.into())
+}
+
 #[derive(Debug)]
 pub(crate) struct HttpConnector {
     url: String,
@@ -1260,14 +1364,23 @@ impl HttpConnector {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new(url: String) -> Result<Self, Error> {
+        Self::new_with_tls(url, &HttpConnectorTlsConfig::default())
+    }
+
+    pub(crate) fn new_with_tls(url: String, tls: &HttpConnectorTlsConfig) -> Result<Self, Error> {
         let url = url.trim_end_matches('/').to_owned();
         if url.is_empty() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
+        let url_tls = tls.for_url(&url);
         let config = ureq::Agent::config_builder()
             .user_agent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(5)))
+            .tls_config(url_tls.clone().unwrap_or_default())
+            .https_only(tls.is_configured() && url_tls.is_some())
+            .max_redirects(if tls.has_client_identity() { 0 } else { 10 })
             .build();
         Ok(Self {
             url,
@@ -1310,7 +1423,134 @@ impl HttpConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use der::{pem::LineEnding, Decode, EncodePem};
+    use p256::pkcs8::EncodePrivateKey;
+
+    fn test_http_client_identity() -> (Vec<u8>, zeroize::Zeroizing<Vec<u8>>) {
+        let key = crate::certificate_builder::p256_key();
+        let certificate = crate::certificate_builder::p256_certificate(
+            key.verifying_key(),
+            &key,
+            "CN=pkcs11rs mTLS client",
+            "CN=pkcs11rs mTLS client",
+            1,
+            false,
+        );
+        let certificate = x509_cert::Certificate::from_der(&certificate)
+            .unwrap()
+            .to_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let private_key = key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        (
+            certificate,
+            zeroize::Zeroizing::new(private_key.as_bytes().to_vec()),
+        )
+    }
+
+    fn test_ca_certificate() -> Vec<u8> {
+        let key = crate::certificate_builder::p256_key();
+        certificate_pem(&crate::certificate_builder::p256_certificate(
+            key.verifying_key(),
+            &key,
+            "CN=pkcs11rs test root",
+            "CN=pkcs11rs test root",
+            2,
+            true,
+        ))
+    }
+
+    fn certificate_pem(certificate: &[u8]) -> Vec<u8> {
+        x509_cert::Certificate::from_der(certificate)
+            .unwrap()
+            .to_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes()
+    }
+
+    fn test_mutual_tls(
+        server_ip_address: &[u8],
+        trust_server_ca: bool,
+    ) -> (HttpConnectorTlsConfig, Arc<rustls::ServerConfig>) {
+        let ca_key = crate::certificate_builder::p256_key();
+        let ca_name = "CN=pkcs11rs test CA";
+        let ca_certificate = crate::certificate_builder::p256_certificate(
+            ca_key.verifying_key(),
+            &ca_key,
+            ca_name,
+            ca_name,
+            10,
+            true,
+        );
+
+        let client_key = crate::certificate_builder::p256_key();
+        let client_certificate = crate::certificate_builder::p256_certificate(
+            client_key.verifying_key(),
+            &ca_key,
+            "CN=pkcs11rs test client",
+            ca_name,
+            11,
+            false,
+        );
+        let client_key_pem = client_key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let client_tls = HttpConnectorTlsConfig::from_client_pem(
+            &certificate_pem(&client_certificate),
+            client_key_pem.as_bytes(),
+        )
+        .unwrap();
+        let client_tls = if trust_server_ca {
+            client_tls
+                .with_ca_bundle_pem(&certificate_pem(&ca_certificate))
+                .unwrap()
+        } else {
+            let other_ca_key = crate::certificate_builder::p256_key();
+            let other_ca = crate::certificate_builder::p256_certificate(
+                other_ca_key.verifying_key(),
+                &other_ca_key,
+                "CN=pkcs11rs other CA",
+                "CN=pkcs11rs other CA",
+                12,
+                true,
+            );
+            client_tls
+                .with_ca_bundle_pem(&certificate_pem(&other_ca))
+                .unwrap()
+        };
+
+        let server_key = crate::certificate_builder::p256_key();
+        let server_certificate = crate::certificate_builder::p256_tls_ip_certificate(
+            server_key.verifying_key(),
+            &ca_key,
+            "CN=pkcs11rs test server",
+            ca_name,
+            13,
+            server_ip_address,
+        );
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots
+            .add(rustls_pki_types::CertificateDer::from(
+                ca_certificate.clone(),
+            ))
+            .unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(client_roots),
+            provider.clone(),
+        )
+        .build()
+        .unwrap();
+        let server_key = server_key.to_pkcs8_der().unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(
+                vec![rustls_pki_types::CertificateDer::from(server_certificate)],
+                rustls_pki_types::PrivateKeyDer::try_from(server_key.as_bytes().to_vec()).unwrap(),
+            )
+            .unwrap();
+        (client_tls, Arc::new(server_config))
+    }
 
     fn assert_pcsc_operation_concurrency(
         first: Arc<PcscReaderState>,
@@ -1383,9 +1623,7 @@ mod tests {
         assert_pcsc_operation_concurrency(first_reader, second_reader, true);
     }
 
-    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
-        use std::io::Read;
-
+    fn read_http_request(stream: &mut impl std::io::Read) -> Vec<u8> {
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
         let header_end = loop {
@@ -1413,7 +1651,7 @@ mod tests {
         request
     }
 
-    fn write_http_response(stream: &mut std::net::TcpStream, body: &[u8], close: bool) {
+    fn write_http_response(stream: &mut impl std::io::Write, body: &[u8], close: bool) {
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n",
@@ -1464,6 +1702,141 @@ mod tests {
         assert_eq!(timeouts.per_call, None);
         assert_eq!(timeouts.recv_response, None);
         assert_eq!(timeouts.recv_body, None);
+    }
+
+    #[test]
+    fn http_connector_configures_client_auth_only_for_https() {
+        let (certificate, private_key) = test_http_client_identity();
+        let tls = HttpConnectorTlsConfig::from_client_pem(&certificate, &private_key).unwrap();
+        let https =
+            HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();
+        assert!(https.agent.config().tls_config().client_cert().is_some());
+        assert!(https.agent.config().https_only());
+        assert_eq!(https.agent.config().max_redirects(), 0);
+
+        let http =
+            HttpConnector::new_with_tls("http://connector.example".to_owned(), &tls).unwrap();
+        assert!(http.agent.config().tls_config().client_cert().is_none());
+        assert!(!http.agent.config().https_only());
+        assert_eq!(http.agent.config().max_redirects(), 0);
+    }
+
+    #[test]
+    fn http_connector_rejects_malformed_or_mismatched_client_identity() {
+        let (certificate, private_key) = test_http_client_identity();
+        assert!(
+            HttpConnectorTlsConfig::from_client_pem(b"not a certificate", &private_key).is_err()
+        );
+        assert!(
+            HttpConnectorTlsConfig::from_client_pem(&certificate, b"not a private key").is_err()
+        );
+
+        let other_key = crate::certificate_builder::p256_key();
+        let other_private_key = other_key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        assert!(HttpConnectorTlsConfig::from_client_pem(
+            &certificate,
+            other_private_key.as_bytes()
+        )
+        .is_err());
+        assert!(HttpConnectorTlsConfig::default()
+            .with_ca_bundle_pem(b"not a CA bundle")
+            .is_err());
+    }
+
+    #[test]
+    fn http_connector_custom_ca_does_not_require_a_client_identity() {
+        let tls = HttpConnectorTlsConfig::default()
+            .with_ca_bundle_pem(&test_ca_certificate())
+            .unwrap();
+        let https =
+            HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();
+        assert!(https.agent.config().tls_config().client_cert().is_none());
+        assert!(matches!(
+            https.agent.config().tls_config().root_certs(),
+            ureq::tls::RootCerts::Specific(certificates) if certificates.len() == 1
+        ));
+        assert!(https.agent.config().https_only());
+        assert_eq!(https.agent.config().max_redirects(), 10);
+    }
+
+    #[test]
+    fn http_connector_mutual_tls_verifies_both_peers() {
+        let (tls, server_config) = test_mutual_tls(&[127, 0, 0, 1], true);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            connection
+                .set_write_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            let session = rustls::ServerConnection::new(server_config).unwrap();
+            let mut connection = rustls::StreamOwned::new(session, connection);
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            assert_eq!(
+                connection
+                    .conn
+                    .peer_certificates()
+                    .map(|certificates| certificates.len()),
+                Some(1)
+            );
+            write_http_response(
+                &mut connection,
+                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                true,
+            );
+        });
+
+        let mut connector =
+            HttpConnector::new_with_tls(format!("https://127.0.0.1:{}", address.port()), &tls)
+                .unwrap();
+        connector.connect().unwrap();
+        assert!(connector.is_present());
+        server.join().unwrap();
+    }
+
+    fn assert_tls_server_is_rejected(
+        tls: &HttpConnectorTlsConfig,
+        server_config: Arc<rustls::ServerConfig>,
+    ) {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            connection
+                .set_write_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            let session = rustls::ServerConnection::new(server_config).unwrap();
+            let mut connection = rustls::StreamOwned::new(session, connection);
+            let mut byte = [0];
+            assert!(connection.read(&mut byte).is_err());
+        });
+        let mut connector =
+            HttpConnector::new_with_tls(format!("https://127.0.0.1:{}", address.port()), tls)
+                .unwrap();
+        assert!(connector.connect().is_err());
+        assert!(!connector.is_present());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_connector_rejects_an_untrusted_tls_server() {
+        let (tls, server_config) = test_mutual_tls(&[127, 0, 0, 1], false);
+        assert_tls_server_is_rejected(&tls, server_config);
+    }
+
+    #[test]
+    fn http_connector_rejects_a_tls_server_with_the_wrong_identity() {
+        let (tls, server_config) = test_mutual_tls(&[127, 0, 0, 2], true);
+        assert_tls_server_is_rejected(&tls, server_config);
     }
 
     #[test]
