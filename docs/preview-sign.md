@@ -200,6 +200,15 @@ The initial lifecycle is:
    signing-key handle, 32-byte ESP256 digest, and preserved COSE_Sign_Args to
    GetAssertion. It returns the 64-byte raw P-256 `r || s` signature.
 
+A saved derived signing key can be restored directly with `C_CreateObject`.
+The template must contain both exact vendor attributes: the registration
+wrapper and the derived-key wrapper. pkcs11rs rejects a derived wrapper by
+itself, a reference to a different registration, a non-ARKG algorithm, a
+non-canonical or invalid verification key, and malformed ticket/context
+arguments. A successfully restored private key can be passed to
+`CKM_PKCS11RS_PROJECT_PUBLIC_KEY`; the resulting ordinary public object
+supports `C_Verify`.
+
 The generated hardware credential objects are token objects owned by the FIDO
 backend. Imported registration objects and derived signing keys are immutable
 provider-backed objects. With `CKA_TOKEN=CK_FALSE`, they live in the creating
@@ -212,10 +221,12 @@ provider is supplied; it never silently degrades to module-local storage.
 The in-process mock exercises this complete flow through the exported PKCS #11
 entry points: login with the initial PIN `123456`, GenerateKeyPair, read and
 re-import the registration attribute as a token object, derive a token signing
-key, refresh both objects, Sign, ordinary software verification with the
-derived public key, and independent destruction. The mock test installs an
-in-memory slot token provider, so it validates token lifecycle semantics
-without claiming durable process-to-process persistence.
+key, export both wrappers, destroy the signing key, reject incomplete and
+mismatched restoration attempts, restore the exact signing key as a session
+object, project its public key, Sign, `C_Verify`, and independently destroy the
+objects. The mock test installs an in-memory slot token provider, so it
+validates token lifecycle semantics without claiming durable
+process-to-process persistence.
 
 ## Hardware status
 

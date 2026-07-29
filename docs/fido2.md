@@ -500,9 +500,10 @@ structural registration parser, canonical
 [previewSign persistence model](preview-sign.md), protocol vectors, and an
 ignored capability-gated registration test. It also exposes an experimental
 vendor PKCS #11 flow and a complete in-process mock. Registration and derived
-metadata are not yet written to the
-[content-addressed CBOR storage boundary](storage.md), so restoration after
-module finalization remains deferred.
+metadata use the [content-addressed CBOR storage boundary](storage.md).
+Applications can export and strictly re-import both wrappers with
+`C_CreateObject`; automatic durable FIDO-provider configuration and restoration
+after module finalization remain deferred.
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

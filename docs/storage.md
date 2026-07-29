@@ -193,13 +193,19 @@ read, update where permitted, refresh, and destroy all operate through the
 session memory provider. The same operations use the slot provider when
 `CKA_TOKEN=CK_TRUE`.
 
+Applications can restore an exported previewSign derived private key with
+`C_CreateObject` by supplying both its registration and derived-key vendor
+attributes. Restoration validates the immutable content reference and the
+canonical public key and signing arguments before the object enters either
+provider. This manual import path is independent of automatic slot discovery.
+
 YubiHSM installs its native provider and therefore supports persistent public
 projections. Other slots currently receive `UnavailableStorageProvider` by
 default, so a generic token-object request returns
 `CKR_TOKEN_WRITE_PROTECTED`. No storage path is read from configuration, and
 constructing a local provider does not itself create a PKCS #11 slot. In
-particular, FIDO slots do not yet restore saved previewSign records or augment
-rediscovered resident credentials from external metadata.
+particular, FIDO slots do not yet automatically restore saved previewSign
+records or augment rediscovered resident credentials from external metadata.
 
 There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may
