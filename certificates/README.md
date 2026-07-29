@@ -9,12 +9,16 @@ only; it does not contain private keys or device credentials.
 | File | Published source | File SHA-256 |
 | --- | --- | --- |
 | `yubikey/yubico-attestation-root-1.pem` | https://developers.yubico.com/PKI/yubico-ca-1.pem | `9271d914d48d05487666703586aea27d9a69ad0c8ddf8c2fc4c8734a04285887` |
+| `yubikey/yubico-fido-ca-1.pem` | https://developers.yubico.com/PKI/yubico-fido-ca-1.pem | `bb479d380ef940c5469e008b12a2f35137b884696963dc845c0ddce37f2f9bbf` |
+| `yubikey/yubico-fido-ca-2.pem` | https://developers.yubico.com/PKI/yubico-fido-ca-2.pem | `c3429d7a5d990ec702a1f74e1ab713651c65e5678f05db4162bebcf34e33d0cd` |
 | `yubikey/yubico-piv-ca-1.pem` | https://developers.yubico.com/PKI/yubico-piv-ca-1.pem | `6234f33d5f652109d265b391f2898b8ba92f62df406b684db18363f50d7c9129` |
 | `yubikey/yubico-intermediate.pem` | https://developers.yubico.com/PKI/yubico-intermediate.pem | `ec0172fe38838e3de174aae4e058bb44920be47cebd8d658a0fba1634b82aee1` |
 
 Attestation Root 1 is embedded as the factory trust anchor for YubiKey SCP11b.
-The PIV root and intermediate are retained as public reference fixtures and
-used by certificate-chain tests.
+The current root, the two published FIDO roots, and the published
+intermediates are used to classify verified FIDO packed attestations. The PIV
+root is retained as a public reference fixture and used by certificate-chain
+tests.
 
 The current and legacy YubiKey root certificate SHA-256 fingerprints are:
 

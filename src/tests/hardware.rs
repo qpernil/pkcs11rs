@@ -2049,7 +2049,7 @@ mod fido2_hardware {
             CKR_OK as CK_RV
         );
         let slot_id = fido2_slot_id();
-        let credential_id = crate::with_context(|context| {
+        let credential = crate::with_context(|context| {
             let slot_contexts = context
                 .slot_contexts
                 .read()
@@ -2063,6 +2063,12 @@ mod fido2_hardware {
                 .create_fido2_test_credential(&pin)
         })
         .expect("authenticatorMakeCredential failed for the synthetic hardware fixture");
+        eprintln!(
+            "makeCredential attestation: {:?}, certificate count {}, AAGUID {:02x?}",
+            credential.attestation_trust,
+            credential.attestation_certificate_count,
+            credential.aaguid
+        );
 
         let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
         assert_eq!(
@@ -2103,7 +2109,7 @@ mod fido2_hardware {
                         && object
                             .label
                             .contains(crate::ctap::FIDO2_TEST_USER_DISPLAY_NAME)
-                        && object.id == credential_id
+                        && object.id == credential.credential_id
                 })
                 .map(|object| object.unique_id)
                 .ok_or_else(|| crate::Error::from(CKR_DEVICE_ERROR))

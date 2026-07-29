@@ -60,6 +60,13 @@ struct TestProfile {
     enable_key_agreement: bool,
     enable_key_encipherment: bool,
     subject_alt_ip_address: Option<Vec<u8>>,
+    fido_aaguid: Option<[u8; 16]>,
+}
+
+#[derive(Default)]
+struct TestExtensions<'a> {
+    ip_address: Option<&'a [u8]>,
+    fido_aaguid: Option<[u8; 16]>,
 }
 
 impl BuilderProfile for TestProfile {
@@ -104,6 +111,14 @@ impl BuilderProfile for TestProfile {
                 .to_extension(tbs.subject(), &extensions)?,
             );
         }
+        if let Some(aaguid) = self.fido_aaguid {
+            let value = der::asn1::OctetString::new(aaguid.to_vec())?.to_der()?;
+            extensions.push(Extension {
+                extn_id: const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4"),
+                critical: false,
+                extn_value: der::asn1::OctetString::new(value)?,
+            });
+        }
         Ok(extensions)
     }
 }
@@ -116,7 +131,15 @@ pub(crate) fn p256_certificate(
     serial: u32,
     is_ca: bool,
 ) -> Vec<u8> {
-    p256_certificate_with_ip_address(subject_key, signer, subject, issuer, serial, is_ca, None)
+    p256_certificate_with_extensions(
+        subject_key,
+        signer,
+        subject,
+        issuer,
+        serial,
+        is_ca,
+        TestExtensions::default(),
+    )
 }
 
 #[cfg(test)]
@@ -128,25 +151,51 @@ pub(crate) fn p256_tls_ip_certificate(
     serial: u32,
     ip_address: &[u8],
 ) -> Vec<u8> {
-    p256_certificate_with_ip_address(
+    p256_certificate_with_extensions(
         subject_key,
         signer,
         subject,
         issuer,
         serial,
         false,
-        Some(ip_address),
+        TestExtensions {
+            ip_address: Some(ip_address),
+            ..TestExtensions::default()
+        },
     )
 }
 
-fn p256_certificate_with_ip_address(
+#[cfg(test)]
+pub(crate) fn p256_fido_attestation_certificate(
+    subject_key: &VerifyingKey,
+    signer: &SigningKey,
+    subject: &str,
+    issuer: &str,
+    serial: u32,
+    aaguid: [u8; 16],
+) -> Vec<u8> {
+    p256_certificate_with_extensions(
+        subject_key,
+        signer,
+        subject,
+        issuer,
+        serial,
+        false,
+        TestExtensions {
+            fido_aaguid: Some(aaguid),
+            ..TestExtensions::default()
+        },
+    )
+}
+
+fn p256_certificate_with_extensions(
     subject_key: &VerifyingKey,
     signer: &SigningKey,
     subject: &str,
     issuer: &str,
     serial: u32,
     is_ca: bool,
-    ip_address: Option<&[u8]>,
+    extensions: TestExtensions<'_>,
 ) -> Vec<u8> {
     let profile = TestProfile {
         subject: Name::from_str(subject).unwrap(),
@@ -154,7 +203,8 @@ fn p256_certificate_with_ip_address(
         is_ca,
         enable_key_agreement: !is_ca,
         enable_key_encipherment: false,
-        subject_alt_ip_address: ip_address.map(ToOwned::to_owned),
+        subject_alt_ip_address: extensions.ip_address.map(ToOwned::to_owned),
+        fido_aaguid: extensions.fido_aaguid,
     };
     let builder = CertificateBuilder::new(
         profile,
@@ -187,6 +237,7 @@ pub(crate) fn p256_certificate_for_rsa(
             enable_key_agreement: false,
             enable_key_encipherment: true,
             subject_alt_ip_address: None,
+            fido_aaguid: None,
         },
         SerialNumber::from(serial),
         Validity::from_now(Duration::from_secs(86_400 * 3_650)).unwrap(),

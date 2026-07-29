@@ -895,7 +895,10 @@ impl Slot for Fido2Slot {
     }
 
     #[cfg(all(test, not(feature = "abi-tests")))]
-    fn create_fido2_test_credential(&mut self, pin: &[u8]) -> Result<Vec<u8>, Error> {
+    fn create_fido2_test_credential(
+        &mut self,
+        pin: &[u8],
+    ) -> Result<crate::ctap::VerifiedMakeCredential, Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
         self.endpoint.clear();
