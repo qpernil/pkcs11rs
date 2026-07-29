@@ -6,9 +6,14 @@ use crate::{
 };
 use hmac::{Hmac, Mac};
 use minicbor::{data::Type, Decoder, Encoder};
-use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
+use p256::{
+    ecdh::diffie_hellman,
+    ecdsa::{signature::Verifier, Signature, VerifyingKey},
+    elliptic_curve::sec1::ToSec1Point,
+    PublicKey, SecretKey,
+};
 use sha2::{Digest, Sha256};
-use std::rc::Rc;
+use std::{rc::Rc, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -223,6 +228,22 @@ pub(crate) struct AuthenticatorInfo {
     pub(crate) pin_uv_auth_protocols: Vec<u64>,
     pub(crate) transports: Vec<String>,
     pub(crate) min_pin_length: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FidoAttestationTrust {
+    None,
+    SelfAttestation,
+    YubicoFactory,
+    UntrustedCertificate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VerifiedMakeCredential {
+    pub(crate) credential_id: Vec<u8>,
+    pub(crate) aaguid: [u8; 16],
+    pub(crate) attestation_trust: FidoAttestationTrust,
+    pub(crate) attestation_certificate_count: usize,
 }
 
 impl AuthenticatorInfo {
@@ -530,6 +551,7 @@ impl Client {
             Some((&pin_uv_auth_param, authorization.protocol.id())),
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
+        verify_make_credential_response(&response, PREVIEW_SIGN_RP_ID, &client_data_hash)?;
         crate::preview_sign::PreviewSignRegistration::new(
             PREVIEW_SIGN_RP_ID,
             client_data_hash,
@@ -598,7 +620,7 @@ impl Client {
         &self,
         info: &AuthenticatorInfo,
         pin: &[u8],
-    ) -> Result<Vec<u8>, CtapError> {
+    ) -> Result<VerifiedMakeCredential, CtapError> {
         if info.option("noMcGaPermissionsWithClientPin") {
             return Err(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()));
         }
@@ -619,7 +641,7 @@ impl Client {
             authorization.protocol.id(),
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
-        parse_make_credential_response(&response)
+        verify_make_credential_response(&response, FIDO2_TEST_RP_ID, &client_data_hash)
     }
 
     #[cfg(all(test, not(feature = "abi-tests")))]
@@ -673,6 +695,7 @@ impl Client {
                 .map(|(parameter, protocol)| (parameter.as_slice(), *protocol)),
         )?;
         let response = self.exchange(AUTHENTICATOR_MAKE_CREDENTIAL, &request)?;
+        verify_make_credential_response(&response, PREVIEW_SIGN_RP_ID, &client_data_hash)?;
         crate::preview_sign::PreviewSignRegistration::new(
             PREVIEW_SIGN_RP_ID,
             client_data_hash,
@@ -1374,13 +1397,16 @@ fn parse_preview_sign_assertion_response(data: &[u8]) -> Result<Vec<u8>, CtapErr
     signature.ok_or(CtapError::Malformed("missing previewSign signature"))
 }
 
-#[cfg(test)]
-fn parse_make_credential_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
+fn verify_make_credential_response(
+    data: &[u8],
+    rp_id: &str,
+    client_data_hash: &[u8; 32],
+) -> Result<VerifiedMakeCredential, CtapError> {
     let mut decoder = Decoder::new(data);
     let count = definite_map(&mut decoder)?;
     let mut format = None;
     let mut authenticator_data = None;
-    let mut attestation_statement = false;
+    let mut attestation_statement = None;
     for _ in 0..count {
         match decoder.u64()? {
             0x01 if format.is_none() => format = Some(decoder.str()?.to_owned()),
@@ -1389,13 +1415,14 @@ fn parse_make_credential_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
                 authenticator_data = Some(decoder.bytes()?.to_vec())
             }
             0x02 => return Err(CtapError::Malformed("duplicate authenticator data")),
-            0x03 if !attestation_statement => {
+            0x03 if attestation_statement.is_none() => {
+                let start = decoder.position();
                 let entries = definite_map(&mut decoder)?;
                 for _ in 0..entries {
                     decoder.skip()?;
                     decoder.skip()?;
                 }
-                attestation_statement = true;
+                attestation_statement = Some(data[start..decoder.position()].to_vec());
             }
             0x03 => return Err(CtapError::Malformed("duplicate attestation statement")),
             _ => decoder.skip()?,
@@ -1406,19 +1433,61 @@ fn parse_make_credential_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
             "trailing makeCredential response data",
         ));
     }
-    let _format = format.ok_or(CtapError::Malformed("missing attestation format"))?;
-    if !attestation_statement {
-        return Err(CtapError::Malformed("missing attestation statement"));
-    }
+    let format = format.ok_or(CtapError::Malformed("missing attestation format"))?;
+    let attestation_statement =
+        attestation_statement.ok_or(CtapError::Malformed("missing attestation statement"))?;
     let authenticator_data =
         authenticator_data.ok_or(CtapError::Malformed("missing authenticator data"))?;
-    if authenticator_data.len() < 55 || authenticator_data[32] & 0x40 == 0 {
+    let credential = parse_attested_credential_data(&authenticator_data, rp_id)?;
+    let (attestation_trust, attestation_certificate_count) = match format.as_str() {
+        "none" => {
+            let mut decoder = Decoder::new(&attestation_statement);
+            if definite_map(&mut decoder)? != 0 || decoder.position() != attestation_statement.len()
+            {
+                return Err(CtapError::Malformed("invalid none attestation statement"));
+            }
+            (FidoAttestationTrust::None, 0)
+        }
+        "packed" => verify_packed_attestation(
+            &attestation_statement,
+            &authenticator_data,
+            client_data_hash,
+            &credential.public_key,
+            &credential.aaguid,
+        )?,
+        _ => return Err(CtapError::Malformed("unsupported attestation format")),
+    };
+    Ok(VerifiedMakeCredential {
+        credential_id: credential.credential_id,
+        aaguid: credential.aaguid,
+        attestation_trust,
+        attestation_certificate_count,
+    })
+}
+
+struct AttestedCredential {
+    credential_id: Vec<u8>,
+    aaguid: [u8; 16],
+    public_key: VerifyingKey,
+}
+
+fn parse_attested_credential_data(
+    authenticator_data: &[u8],
+    rp_id: &str,
+) -> Result<AttestedCredential, CtapError> {
+    if authenticator_data.len() < 55
+        || authenticator_data[32] & 0x01 == 0
+        || authenticator_data[32] & 0x40 == 0
+    {
         return Err(CtapError::Malformed("missing attested credential data"));
     }
-    let expected_rp_id_hash = Sha256::digest(FIDO2_TEST_RP_ID.as_bytes());
+    let expected_rp_id_hash = Sha256::digest(rp_id.as_bytes());
     if authenticator_data[..32] != expected_rp_id_hash[..] {
         return Err(CtapError::Malformed("unexpected relying-party ID hash"));
     }
+    let aaguid = authenticator_data[37..53]
+        .try_into()
+        .map_err(|_| CtapError::Malformed("invalid authenticator AAGUID"))?;
     let credential_id_length = usize::from(u16::from_be_bytes([
         authenticator_data[53],
         authenticator_data[54],
@@ -1429,7 +1498,203 @@ fn parse_make_credential_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
     if credential_id_length == 0 || credential_id_end >= authenticator_data.len() {
         return Err(CtapError::Malformed("invalid credential ID length"));
     }
-    Ok(authenticator_data[55..credential_id_end].to_vec())
+    let public_key = parse_attested_credential_public_key(
+        &authenticator_data[credential_id_end..],
+        authenticator_data[32] & 0x80 != 0,
+    )?;
+    Ok(AttestedCredential {
+        credential_id: authenticator_data[55..credential_id_end].to_vec(),
+        aaguid,
+        public_key,
+    })
+}
+
+fn parse_attested_credential_public_key(
+    data: &[u8],
+    has_extensions: bool,
+) -> Result<VerifyingKey, CtapError> {
+    let mut decoder = Decoder::new(data);
+    let count = definite_map(&mut decoder)?;
+    let mut key_type = None;
+    let mut algorithm = None;
+    let mut curve = None;
+    let mut x = None;
+    let mut y = None;
+    for _ in 0..count {
+        match decoder.i64()? {
+            1 if key_type.is_none() => key_type = Some(decoder.i64()?),
+            3 if algorithm.is_none() => algorithm = Some(decoder.i64()?),
+            -1 if curve.is_none() => curve = Some(decoder.i64()?),
+            -2 if x.is_none() => x = Some(decode_coordinate(&mut decoder)?),
+            -3 if y.is_none() => y = Some(decode_coordinate(&mut decoder)?),
+            1 | 3 | -1 | -2 | -3 => {
+                return Err(CtapError::Malformed(
+                    "duplicate credential public-key field",
+                ))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if key_type != Some(2) || algorithm != Some(-7) || curve != Some(1) {
+        return Err(CtapError::Malformed(
+            "unsupported credential public-key algorithm",
+        ));
+    }
+    let x = x.ok_or(CtapError::Malformed(
+        "missing credential public-key x coordinate",
+    ))?;
+    let y = y.ok_or(CtapError::Malformed(
+        "missing credential public-key y coordinate",
+    ))?;
+    let mut point = [0_u8; 65];
+    point[0] = 0x04;
+    point[1..33].copy_from_slice(&x);
+    point[33..].copy_from_slice(&y);
+    let public_key = VerifyingKey::from_sec1_bytes(&point)
+        .map_err(|_| CtapError::Malformed("invalid credential public key"))?;
+    if has_extensions {
+        let entries = definite_map(&mut decoder)?;
+        for _ in 0..entries {
+            decoder.skip()?;
+            decoder.skip()?;
+        }
+    }
+    if decoder.position() != data.len() {
+        return Err(CtapError::Malformed("trailing attested credential data"));
+    }
+    Ok(public_key)
+}
+
+fn decode_coordinate(decoder: &mut Decoder<'_>) -> Result<[u8; 32], CtapError> {
+    decoder
+        .bytes()?
+        .try_into()
+        .map_err(|_| CtapError::Malformed("invalid credential public-key coordinate"))
+}
+
+fn verify_packed_attestation(
+    statement: &[u8],
+    authenticator_data: &[u8],
+    client_data_hash: &[u8; 32],
+    credential_public_key: &VerifyingKey,
+    credential_aaguid: &[u8; 16],
+) -> Result<(FidoAttestationTrust, usize), CtapError> {
+    let mut decoder = Decoder::new(statement);
+    let count = definite_map(&mut decoder)?;
+    let mut algorithm = None;
+    let mut signature = None;
+    let mut certificates = None;
+    for _ in 0..count {
+        match decoder.str()? {
+            "alg" if algorithm.is_none() => algorithm = Some(decoder.i64()?),
+            "sig" if signature.is_none() => signature = Some(decoder.bytes()?.to_vec()),
+            "x5c" if certificates.is_none() => {
+                let count = definite_array(&mut decoder)?;
+                if count == 0 {
+                    return Err(CtapError::Malformed("empty attestation certificate chain"));
+                }
+                let capacity = usize::try_from(count)
+                    .map_err(|_| CtapError::Malformed("attestation chain length overflow"))?;
+                let mut chain = Vec::with_capacity(capacity);
+                for _ in 0..count {
+                    chain.push(decoder.bytes()?.to_vec());
+                }
+                certificates = Some(chain);
+            }
+            "alg" | "sig" | "x5c" => {
+                return Err(CtapError::Malformed("duplicate packed attestation field"))
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if decoder.position() != statement.len() {
+        return Err(CtapError::Malformed(
+            "trailing packed attestation statement data",
+        ));
+    }
+    if algorithm != Some(-7) {
+        return Err(CtapError::Malformed(
+            "unsupported packed attestation algorithm",
+        ));
+    }
+    let signature = Signature::from_der(
+        &signature.ok_or(CtapError::Malformed("missing packed attestation signature"))?,
+    )
+    .map_err(|_| CtapError::Malformed("invalid packed attestation signature"))?;
+    let mut signed = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
+    signed.extend_from_slice(authenticator_data);
+    signed.extend_from_slice(client_data_hash);
+
+    let Some(certificates) = certificates else {
+        credential_public_key
+            .verify(&signed, &signature)
+            .map_err(|_| CtapError::Malformed("invalid self attestation signature"))?;
+        return Ok((FidoAttestationTrust::SelfAttestation, 0));
+    };
+    let leaf = certificates
+        .first()
+        .ok_or(CtapError::Malformed("empty attestation certificate chain"))?;
+    if crate::certificate_chain::fido_aaguid(leaf)
+        .map_err(|_| CtapError::Malformed("invalid attestation certificate AAGUID"))?
+        .is_some_and(|aaguid| &aaguid != credential_aaguid)
+    {
+        return Err(CtapError::Malformed(
+            "attestation certificate AAGUID mismatch",
+        ));
+    }
+    let (_, _, point) = crate::certificate_chain::public_key_parts(leaf)
+        .map_err(|_| CtapError::Malformed("invalid attestation certificate"))?;
+    let attestation_public_key = VerifyingKey::from_sec1_bytes(&point)
+        .map_err(|_| CtapError::Malformed("unsupported attestation certificate public key"))?;
+    attestation_public_key
+        .verify(&signed, &signature)
+        .map_err(|_| CtapError::Malformed("invalid packed attestation signature"))?;
+
+    let count = certificates.len();
+    let trust = yubico_fido_certificate_trust()
+        .filter(|trust| {
+            let mut chain = certificates.clone();
+            chain.reverse();
+            trust.validate_p256_public_point(&chain).is_ok()
+        })
+        .map_or(FidoAttestationTrust::UntrustedCertificate, |_| {
+            FidoAttestationTrust::YubicoFactory
+        });
+    Ok((trust, count))
+}
+
+fn yubico_fido_certificate_trust() -> Option<&'static crate::certificate_chain::CertificateTrust> {
+    static TRUST: OnceLock<Option<crate::certificate_chain::CertificateTrust>> = OnceLock::new();
+    TRUST
+        .get_or_init(|| {
+            let mut certificates = Vec::new();
+            for encoded in [
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/certificates/yubikey/yubico-attestation-root-1.pem"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/certificates/yubikey/yubico-fido-ca-1.pem"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/certificates/yubikey/yubico-fido-ca-2.pem"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/certificates/yubikey/yubico-intermediate.pem"
+                ))
+                .as_slice(),
+            ] {
+                certificates.extend(crate::certificate_chain::decode_chain(encoded).ok()?);
+            }
+            crate::certificate_chain::CertificateTrust::new(&certificates).ok()
+        })
+        .as_ref()
 }
 
 fn parse_pin_token_response(data: &[u8]) -> Result<Vec<u8>, CtapError> {
@@ -1689,6 +1954,7 @@ fn parse_credential_descriptor(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, Cta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::{signature::Signer, SigningKey};
     use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Debug)]
@@ -1867,16 +2133,60 @@ mod tests {
         response
     }
 
-    fn make_credential_response(credential_id: &[u8]) -> Vec<u8> {
-        let mut authenticator_data = Sha256::digest(FIDO2_TEST_RP_ID.as_bytes()).to_vec();
+    fn test_signing_key(value: u8) -> SigningKey {
+        SigningKey::from(SecretKey::from_slice(&[value; 32]).unwrap())
+    }
+
+    fn test_credential_public_key(signing_key: &SigningKey) -> Vec<u8> {
+        let point = signing_key.verifying_key().to_sec1_point(false);
+        let point = point.as_bytes();
+        let mut encoded = Vec::new();
+        Encoder::new(&mut encoded)
+            .map(5)
+            .unwrap()
+            .i8(1)
+            .unwrap()
+            .i8(2)
+            .unwrap()
+            .i8(3)
+            .unwrap()
+            .i8(-7)
+            .unwrap()
+            .i8(-1)
+            .unwrap()
+            .i8(1)
+            .unwrap()
+            .i8(-2)
+            .unwrap()
+            .bytes(&point[1..33])
+            .unwrap()
+            .i8(-3)
+            .unwrap()
+            .bytes(&point[33..65])
+            .unwrap();
+        encoded
+    }
+
+    fn test_authenticator_data(
+        credential_id: &[u8],
+        signing_key: &SigningKey,
+        rp_id: &str,
+    ) -> Vec<u8> {
+        let mut authenticator_data = Sha256::digest(rp_id.as_bytes()).to_vec();
         authenticator_data.push(0x41);
         authenticator_data.extend_from_slice(&[0; 4]);
         authenticator_data.extend_from_slice(&[0x33; 16]);
         authenticator_data
             .extend_from_slice(&(u16::try_from(credential_id.len()).unwrap()).to_be_bytes());
         authenticator_data.extend_from_slice(credential_id);
-        authenticator_data.push(0xa0);
+        authenticator_data.extend_from_slice(&test_credential_public_key(signing_key));
+        authenticator_data
+    }
 
+    fn make_credential_response(credential_id: &[u8]) -> Vec<u8> {
+        let credential_key = test_signing_key(7);
+        let authenticator_data =
+            test_authenticator_data(credential_id, &credential_key, FIDO2_TEST_RP_ID);
         let mut response = Vec::new();
         Encoder::new(&mut response)
             .map(3)
@@ -1893,6 +2203,85 @@ mod tests {
             .unwrap()
             .map(0)
             .unwrap();
+        response
+    }
+
+    fn packed_make_credential_response(
+        credential_id: &[u8],
+        client_data_hash: &[u8; 32],
+        certificate_attestation: bool,
+    ) -> Vec<u8> {
+        packed_make_credential_response_with_aaguid(
+            credential_id,
+            client_data_hash,
+            certificate_attestation,
+            [0x33; 16],
+        )
+    }
+
+    fn packed_make_credential_response_with_aaguid(
+        credential_id: &[u8],
+        client_data_hash: &[u8; 32],
+        certificate_attestation: bool,
+        certificate_aaguid: [u8; 16],
+    ) -> Vec<u8> {
+        let credential_key = test_signing_key(7);
+        let authenticator_data =
+            test_authenticator_data(credential_id, &credential_key, FIDO2_TEST_RP_ID);
+        let attestation_key = if certificate_attestation {
+            test_signing_key(9)
+        } else {
+            credential_key.clone()
+        };
+        let mut signed = authenticator_data.clone();
+        signed.extend_from_slice(client_data_hash);
+        let signature: Signature = attestation_key.sign(&signed);
+        let signature = signature.to_der();
+        let certificate = certificate_attestation.then(|| {
+            crate::certificate_builder::p256_fido_attestation_certificate(
+                attestation_key.verifying_key(),
+                &attestation_key,
+                "CN=synthetic FIDO attestation",
+                "CN=synthetic FIDO attestation",
+                1,
+                certificate_aaguid,
+            )
+        });
+
+        let mut response = Vec::new();
+        let mut encoder = Encoder::new(&mut response);
+        encoder
+            .map(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .str("packed")
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .map(if certificate.is_some() { 3 } else { 2 })
+            .unwrap()
+            .str("alg")
+            .unwrap()
+            .i8(-7)
+            .unwrap()
+            .str("sig")
+            .unwrap()
+            .bytes(signature.as_bytes())
+            .unwrap();
+        if let Some(certificate) = certificate {
+            encoder
+                .str("x5c")
+                .unwrap()
+                .array(1)
+                .unwrap()
+                .bytes(&certificate)
+                .unwrap();
+        }
         response
     }
 
@@ -2330,11 +2719,14 @@ mod tests {
 
     #[test]
     fn make_credential_response_extracts_and_validates_credential_id() {
+        let client_data_hash = [0x11; 32];
         let response = make_credential_response(&[0x44; 32]);
-        assert_eq!(
-            parse_make_credential_response(&response).unwrap(),
-            [0x44; 32]
-        );
+        let verified =
+            verify_make_credential_response(&response, FIDO2_TEST_RP_ID, &client_data_hash)
+                .unwrap();
+        assert_eq!(verified.credential_id, [0x44; 32]);
+        assert_eq!(verified.aaguid, [0x33; 16]);
+        assert_eq!(verified.attestation_trust, FidoAttestationTrust::None);
 
         let mut wrong_rp = response.clone();
         let hash_offset = wrong_rp
@@ -2343,17 +2735,141 @@ mod tests {
             .unwrap();
         wrong_rp[hash_offset] ^= 1;
         assert!(matches!(
-            parse_make_credential_response(&wrong_rp),
+            verify_make_credential_response(&wrong_rp, FIDO2_TEST_RP_ID, &client_data_hash),
             Err(CtapError::Malformed("unexpected relying-party ID hash"))
         ));
 
         let mut trailing = response;
         trailing.push(0);
         assert!(matches!(
-            parse_make_credential_response(&trailing),
+            verify_make_credential_response(&trailing, FIDO2_TEST_RP_ID, &client_data_hash),
             Err(CtapError::Malformed(
                 "trailing makeCredential response data"
             ))
+        ));
+    }
+
+    #[test]
+    fn packed_self_attestation_vector_is_verified() {
+        let client_data_hash = [0x11; 32];
+        let response = packed_make_credential_response(&[0x44; 32], &client_data_hash, false);
+        let verified =
+            verify_make_credential_response(&response, FIDO2_TEST_RP_ID, &client_data_hash)
+                .unwrap();
+        assert_eq!(verified.credential_id, [0x44; 32]);
+        assert_eq!(
+            verified.attestation_trust,
+            FidoAttestationTrust::SelfAttestation
+        );
+        assert_eq!(verified.attestation_certificate_count, 0);
+
+        let mut wrong_hash = client_data_hash;
+        wrong_hash[0] ^= 1;
+        assert!(matches!(
+            verify_make_credential_response(&response, FIDO2_TEST_RP_ID, &wrong_hash),
+            Err(CtapError::Malformed("invalid self attestation signature"))
+        ));
+    }
+
+    #[test]
+    fn packed_certificate_attestation_vector_is_verified_before_trust() {
+        let client_data_hash = [0x22; 32];
+        let response = packed_make_credential_response(&[0x55; 32], &client_data_hash, true);
+        let verified =
+            verify_make_credential_response(&response, FIDO2_TEST_RP_ID, &client_data_hash)
+                .unwrap();
+        assert_eq!(verified.credential_id, [0x55; 32]);
+        assert_eq!(
+            verified.attestation_trust,
+            FidoAttestationTrust::UntrustedCertificate
+        );
+        assert_eq!(verified.attestation_certificate_count, 1);
+
+        let mismatched_aaguid = packed_make_credential_response_with_aaguid(
+            &[0x55; 32],
+            &client_data_hash,
+            true,
+            [0x34; 16],
+        );
+        assert!(matches!(
+            verify_make_credential_response(
+                &mismatched_aaguid,
+                FIDO2_TEST_RP_ID,
+                &client_data_hash
+            ),
+            Err(CtapError::Malformed(
+                "attestation certificate AAGUID mismatch"
+            ))
+        ));
+
+        let mut damaged = response;
+        let signature_offset = damaged
+            .windows(3)
+            .position(|window| window == [0x63, b's', b'i'])
+            .unwrap();
+        let signature = damaged[signature_offset..]
+            .windows(2)
+            .position(|window| window[0] == 0x58 && window[1] > 8)
+            .map(|offset| signature_offset + offset + 2)
+            .unwrap();
+        damaged[signature] ^= 1;
+        assert!(matches!(
+            verify_make_credential_response(&damaged, FIDO2_TEST_RP_ID, &client_data_hash),
+            Err(CtapError::Malformed("invalid packed attestation signature"))
+        ));
+    }
+
+    #[test]
+    fn malformed_attestation_statements_are_rejected() {
+        let client_data_hash = [0x33; 32];
+        let mut unsupported =
+            packed_make_credential_response(&[0x66; 32], &client_data_hash, false);
+        let algorithm = unsupported
+            .windows(4)
+            .position(|window| window == [0x63, b'a', b'l', b'g'])
+            .unwrap();
+        unsupported[algorithm + 4] = 0x01;
+        assert!(matches!(
+            verify_make_credential_response(&unsupported, FIDO2_TEST_RP_ID, &client_data_hash),
+            Err(CtapError::Malformed(
+                "unsupported packed attestation algorithm"
+            ))
+        ));
+
+        let credential_key = test_signing_key(7);
+        let authenticator_data =
+            test_authenticator_data(&[0x77; 32], &credential_key, FIDO2_TEST_RP_ID);
+        let mut duplicate = Vec::new();
+        Encoder::new(&mut duplicate)
+            .map(3)
+            .unwrap()
+            .u8(1)
+            .unwrap()
+            .str("packed")
+            .unwrap()
+            .u8(2)
+            .unwrap()
+            .bytes(&authenticator_data)
+            .unwrap()
+            .u8(3)
+            .unwrap()
+            .map(3)
+            .unwrap()
+            .str("alg")
+            .unwrap()
+            .i8(-7)
+            .unwrap()
+            .str("alg")
+            .unwrap()
+            .i8(-7)
+            .unwrap()
+            .str("sig")
+            .unwrap()
+            .bytes(&[0x30, 0])
+            .unwrap();
+        assert!(matches!(
+            verify_make_credential_response(&duplicate, FIDO2_TEST_RP_ID, &client_data_hash),
+            Err(CtapError::Malformed("duplicate packed attestation field"))
         ));
     }
 

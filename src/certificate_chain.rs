@@ -1,8 +1,9 @@
 use crate::{Error, CKR_ARGUMENTS_BAD};
 use const_oid::ObjectIdentifier;
 use der::{
-    asn1::ObjectIdentifier as DerObjectIdentifier, pem::LineEnding, Decode, DecodePem, Encode,
-    EncodePem,
+    asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
+    pem::LineEnding,
+    Decode, DecodePem, Encode, EncodePem,
 };
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
@@ -27,6 +28,7 @@ const AUTHORITY_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap(
 const CRL_DISTRIBUTION_POINTS: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.31");
 const AUTHORITY_INFORMATION_ACCESS: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.1");
+const FIDO_AAGUID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.45724.1.1.4");
 
 type Fingerprint = [u8; 32];
 
@@ -385,6 +387,18 @@ pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
+pub(crate) fn decode_chain(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    Certificate::load_pem_chain(encoded)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
+        .into_iter()
+        .map(|certificate| {
+            certificate
+                .to_der()
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+        })
+        .collect()
+}
+
 pub(crate) fn encode_pem(encoded: &[u8]) -> Result<String, Error> {
     Certificate::from_der(encoded)
         .and_then(|certificate| certificate.to_pem(LineEnding::LF))
@@ -418,6 +432,32 @@ pub(crate) fn public_key_parts(
             .ok_or(CKR_ARGUMENTS_BAD)?
             .to_vec(),
     ))
+}
+
+pub(crate) fn fido_aaguid(encoded: &[u8]) -> Result<Option<[u8; 16]>, Error> {
+    let certificate = Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let mut result = None;
+    for extension in certificate
+        .tbs_certificate()
+        .extensions()
+        .map_or(&[][..], Vec::as_slice)
+    {
+        if extension.extn_id != FIDO_AAGUID {
+            continue;
+        }
+        if result.is_some() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let value = <&OctetStringRef>::from_der(extension.extn_value.as_bytes())
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        result = Some(
+            value
+                .as_bytes()
+                .try_into()
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
+        );
+    }
+    Ok(result)
 }
 
 pub(crate) fn subject(encoded: &[u8]) -> Result<Vec<u8>, Error> {
@@ -474,6 +514,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/certificates/yubikey/yubico-attestation-root-1.pem"
     ));
+    const YUBICO_FIDO_ROOT_ONE: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/certificates/yubikey/yubico-fido-ca-1.pem"
+    ));
+    const YUBICO_FIDO_ROOT_TWO: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/certificates/yubikey/yubico-fido-ca-2.pem"
+    ));
     const YUBICO_PIV_ROOT: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/certificates/yubikey/yubico-piv-ca-1.pem"
@@ -528,6 +576,14 @@ mod tests {
             (
                 YUBICO_PIV_ROOT,
                 "63ece914e54dd87915f34033c85af4c0696ba1512f8add66ced738331207b546",
+            ),
+            (
+                YUBICO_FIDO_ROOT_ONE,
+                "0fa1386f80eb8713263ae5c1d84deb455bdf08aea50ab05503cefee82b092d42",
+            ),
+            (
+                YUBICO_FIDO_ROOT_TWO,
+                "35f1a54b353bfb711e6d42adbeb76c0e9dead095018e6a94783ba2192fd6faad",
             ),
             (
                 YUBIHSM_ROOT,
@@ -637,12 +693,14 @@ mod tests {
     #[test]
     fn webpki_trust_store_loads_every_published_yubico_ca() {
         let mut certificates = rustcrypto_der_chain(YUBICO_ATTESTATION_ROOT);
+        certificates.extend(rustcrypto_der_chain(YUBICO_FIDO_ROOT_ONE));
+        certificates.extend(rustcrypto_der_chain(YUBICO_FIDO_ROOT_TWO));
         certificates.extend(rustcrypto_der_chain(YUBICO_INTERMEDIATES));
         let trust = CertificateTrust::new(&certificates).unwrap();
 
-        assert_eq!(trust.trust_anchors.len(), 1);
+        assert_eq!(trust.trust_anchors.len(), 3);
         assert_eq!(trust.local_intermediates.len(), 15);
-        assert_eq!(trust.root_fingerprints.len(), 1);
+        assert_eq!(trust.root_fingerprints.len(), 3);
     }
 
     #[test]
