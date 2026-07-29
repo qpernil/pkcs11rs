@@ -5,8 +5,9 @@ signing seed with an ordinary FIDO credential and later asking the
 authenticator to sign with a key derived from that seed. The implementation in
 this repository includes protocol encoding, structural response validation,
 canonical persistence records, offline ARKG-P256 public-key derivation, and an
-initial PKCS #11 mapping. The mapping is deliberately session/module-local:
-there is still no configured FIDO storage provider or automatic restoration.
+initial PKCS #11 mapping. Imported registration and derived signing-key objects
+use the common storage boundary for both session and token lifetimes. There is
+still no configured durable FIDO token provider or automatic restoration.
 
 The protocol design is based on Yubico's
 [previewSign extension specification](https://yubicolabs.github.io/webauthn-sign-extension/4/)
@@ -114,7 +115,8 @@ The provider-neutral [`BackedKeyMetadata`](storage.md#backed-key-metadata)
 record can embed these exact protocol wrappers as provider-owned backing data
 and describe the corresponding private and optional public PKCS #11 aspects.
 That model does not choose or configure a persistence provider. Session-only
-objects use the same in-memory representation without being stored.
+objects are stored in the current session's memory provider; token objects use
+the slot's provider.
 
 ## Offline ARKG-P256 derivation
 
@@ -183,30 +185,37 @@ The initial lifecycle is:
    exposes the canonical registration through
    `CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION`.
 2. The application reads that attribute and calls `C_CreateObject` to import a
-   session-only private registration object with key type
+   private registration object with key type
    `CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION`. It is derivation-capable but not
-   signing-capable.
+   signing-capable. `CKA_TOKEN` selects session memory or slot token storage.
 3. `C_DeriveKey` on the registration object performs ARKG public derivation in
    software. The mechanism parameter is the raw public context, from zero to
-   64 bytes. The result is a session-only P-256 private-key object whose public
-   key is available through standard public-key information and whose complete
+   64 bytes. The result is a P-256 private-key object whose public key is
+   available through standard public-key information and whose complete
    wrappers are readable as
    `CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION` and
-   `CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY`.
+   `CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY`. Its template independently selects
+   session or token lifetime.
 4. `C_Sign` with `CKM_PKCS11RS_PREVIEW_SIGN` sends the parent credential ID,
    signing-key handle, 32-byte ESP256 digest, and preserved COSE_Sign_Args to
    GetAssertion. It returns the 64-byte raw P-256 `r || s` signature.
 
-The generated credential objects are marked as token objects so they outlive
-the creating session, but without a storage provider their previewSign
-metadata lasts only for the initialized module instance. Imported registration
-objects and derived signing keys are intentionally session objects in this
-phase. No operation creates, modifies, or deletes persisted metadata.
+The generated hardware credential objects are token objects owned by the FIDO
+backend. Imported registration objects and derived signing keys are immutable
+provider-backed objects. With `CKA_TOKEN=CK_FALSE`, they live in the creating
+session's memory provider and disappear when it closes. With
+`CKA_TOKEN=CK_TRUE`, creation, attribute replacement, refresh, and destruction
+use the slot token provider. The default FIDO slot provider is unavailable, so
+durable token creation currently fails with `CKR_TOKEN_WRITE_PROTECTED` until a
+provider is supplied; it never silently degrades to module-local storage.
 
 The in-process mock exercises this complete flow through the exported PKCS #11
 entry points: login with the initial PIN `123456`, GenerateKeyPair, read and
-re-import the registration attribute, DeriveKey, Sign, and ordinary software
-verification with the derived public key.
+re-import the registration attribute as a token object, derive a token signing
+key, refresh both objects, Sign, ordinary software verification with the
+derived public key, and independent destruction. The mock test installs an
+in-memory slot token provider, so it validates token lifecycle semantics
+without claiming durable process-to-process persistence.
 
 ## Hardware status
 
@@ -231,5 +240,5 @@ PKCS11RS_FIDO2_TEST_PIN='' \
 Open hardware questions include positive registration vectors from a
 compatible pre-release device, attestation verification and trust policy,
 end-to-end ARKG derivation/signing interoperability, ticket lifetime and replay
-properties, whether token serial is sufficient routing metadata, and storage
-provider configuration and restoration.
+properties, whether token serial is sufficient routing metadata, and durable
+FIDO storage-provider configuration and restoration.

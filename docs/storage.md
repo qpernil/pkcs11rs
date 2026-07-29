@@ -1,10 +1,12 @@
 # Content-addressed CBOR storage
 
 The public `storage` module defines persistence infrastructure for backed key
-metadata. It is usable as a standalone Rust API through the local provider, and
-the YubiHSM backend uses the same boundary for its internal opaque metadata
-objects. It is not yet connected to FIDO slot discovery, an environment
-variable, resident-credential enumeration, or any signing mechanism.
+metadata. Each PKCS #11 session owns an in-memory provider, each slot owns a
+token provider, and `CKA_TOKEN` selects between them for supported
+provider-backed objects. It is also usable as a standalone Rust API through the
+local provider. YubiHSM implements the same boundary with its internal opaque
+metadata objects. No external configuration currently installs a durable
+provider on FIDO slots.
 
 ## Provider boundary
 
@@ -23,9 +25,22 @@ representation to canonical logical bytes. Providers do not re-encode
 canonical records submitted to `put`.
 
 The trait has no `Send` or `Sync` supertrait. A provider follows its owning
-backend's concurrency model: the local provider is independently thread-safe,
-while the YubiHSM provider is reached through the module and slot locks that
-already serialize access to its single secure-session state.
+context's concurrency model: the local provider is independently thread-safe,
+each memory provider is reached through its owning session context, and the
+YubiHSM provider is reached through the module and slot locks that already
+serialize access to its single secure-session state.
+
+`MemoryStorageProvider` supplies the same immutable, content-addressed
+semantics without filesystem persistence. A fresh instance belongs to each
+session, so two equal session objects may share stored bytes without sharing
+PKCS #11 handles or lifetimes. Closing the session drops its provider and all
+objects created by that session.
+
+Every slot also owns one token provider. The default is
+`UnavailableStorageProvider`, whose mutation operations fail explicitly. A
+backend may expose a native provider, as YubiHSM does, or slot construction may
+supply another implementation. The local provider exists for this purpose but
+is not yet selected by an environment variable or other public configuration.
 
 ## Backed-key metadata
 
@@ -53,13 +68,14 @@ templates are maps using the same representation. Maps are encoded in numeric
 key order.
 
 `CKA_CLASS` is represented by the aspect-map key and cannot occur inside an
-attribute map. `CKA_TOKEN` is also structural: a persisted aspect is a token
-object, while a session aspect is never submitted to a provider. Aspect
-presence alone does not prove that a provider can reconstruct an object: each
-provider must validate the stable material required by its backing model. The
-YubiHSM backend, for example, requires a canonical public aspect containing
-`CKA_PUBLIC_KEY_INFO`; an empty or identity-only public aspect does not create a
-public token object.
+attribute map. `CKA_TOKEN` is structural and is not encoded in the aspect:
+the selected provider supplies the lifetime. The same canonical logical object
+can therefore be held in a session memory provider or a slot token provider.
+Aspect presence alone does not prove that a provider can reconstruct an
+object: each provider must validate the stable material required by its backing
+model. The YubiHSM backend, for example, requires a canonical public aspect
+containing `CKA_PUBLIC_KEY_INFO`; an empty or identity-only public aspect does
+not create a public token object.
 
 The generic layer validates the CBOR representation and the semantic type of
 every standard key attribute supported by pkcs11rs. Provider-specific
@@ -71,7 +87,21 @@ The experimental [`previewSign` protocol model](preview-sign.md) supplies two
 such canonical schema layers: one for exact registration material and one for
 an offline-derived public key plus its algorithm-specific signing arguments.
 Those protocol records can be embedded in the backing data of a backed-key
-record. Neither schema is automatically written to a provider.
+record. The PKCS #11 lifecycle writes those wrappers to the provider selected
+by `CKA_TOKEN`; a derived record's registration dependency is stored before the
+record that references it.
+
+The generic object layer currently recognizes three provider identifiers:
+
+| Provider | Logical object |
+| --- | --- |
+| `pkcs11rs.public-key` | RSA or EC public-key projection with normalized public material |
+| `pkcs11rs.preview-sign-registration` | imported previewSign registration private object |
+| `pkcs11rs.preview-sign-derived` | derived previewSign signing private object |
+
+Unknown well-formed CBOR objects are ignored by PKCS #11 discovery. A record
+that declares the `pkcs11rs.backed-key` schema but is malformed is reported as
+invalid data rather than silently disappearing.
 
 `ContentReference` is algorithm-tagged for hash agility. The currently
 implemented algorithm is SHA3-256. Its canonical CBOR form is the two-element
@@ -115,10 +145,18 @@ does not interpret or traverse them.
 
 ## YubiHSM backend metadata
 
-YubiHSM uses the canonical `pkcs11rs.backed-key` record model but does not
-implement `StorageProvider`. Its opaque-data companions are mutable logical
-records addressed by a back-pointer to a native object, which is a different
-lifecycle from immutable content-addressed blobs.
+YubiHSM implements `StorageProvider` over pkcs11rs-owned opaque-data companion
+objects. The provider's logical interface remains immutable and
+content-addressed: `list` returns references for canonical records, `get`
+returns their exact canonical CBOR, `put` validates and idempotently creates a
+matching companion, and `delete` removes the companion identified by a
+reference.
+
+The physical records retain YubiHSM's useful back-pointer addressing. They are
+labelled for the native target and can be found and understood in
+`yubihsm-shell`; content references do not replace that device-level
+relationship. Backend-native hardware keys also remain backend-native rather
+than being reconstructed by the generic provider decoder.
 
 The provider-owned backing inside the canonical record identifies the native
 object by type, ID, sequence, and domains and records its primary PKCS #11 key
@@ -137,30 +175,39 @@ MDB1 objects retain Yubico's `Meta object for 0x...` label. The separate
 namespaces make ownership clear in `yubihsm-shell` listings and prevent
 Yubico's PKCS #11 module from treating unfamiliar canonical CBOR as MDB1.
 
-Metadata updates are backend-native operations requiring a secure session with
-the applicable YubiHSM capabilities. Replacement remains failure-safe: the new
-canonical companion is written before older pkcs11rs companions are removed,
-and a later update repairs ambiguity left by a failed deletion. Legacy
-companions are not part of this lifecycle. The current PKCS #11 path projects
-only sparse `CKA_ID` and `CKA_LABEL` overrides, while the shared canonical
-model can represent additional supported key attributes for later lifecycle
-work.
+Provider mutation requires a secure session with the applicable YubiHSM
+capabilities. Metadata replacement remains failure-safe: the new canonical
+companion is written before older pkcs11rs companions are removed, and a later
+update repairs ambiguity left by a failed deletion. Legacy companions are not
+part of the provider's list, get, put, delete, or replacement lifecycle.
+Canonical metadata can contain sparse private-key overrides and a complete
+public aspect. Presence of validated public key material creates a genuine
+public token object; removing that public object removes only the public aspect
+and leaves the hardware private key and unrelated metadata intact.
 
 ## Current integration boundary
 
-No storage path is read from configuration, and constructing a provider does
-not create a PKCS #11 slot. The FIDO2 backend exposes credential-management
-response bytes after PIN login and can create session/module-local previewSign
-registration and derived-key objects. It does not persist or restore those
-objects.
+Provider-backed session object lifecycle is complete for public projections
+and previewSign registration and derived-key objects: create/copy or derive,
+read, update where permitted, refresh, and destroy all operate through the
+session memory provider. The same operations use the slot provider when
+`CKA_TOKEN=CK_TRUE`.
+
+YubiHSM installs its native provider and therefore supports persistent public
+projections. Other slots currently receive `UnavailableStorageProvider` by
+default, so a generic token-object request returns
+`CKR_TOKEN_WRITE_PROTECTED`. No storage path is read from configuration, and
+constructing a local provider does not itself create a PKCS #11 slot. In
+particular, FIDO slots do not yet restore saved previewSign records or augment
+rediscovered resident credentials from external metadata.
 
 There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-Future previewSign storage integration must still define configuration,
-ownership and deletion semantics, token binding, private-data protection, and
-restoration before stored FIDO registration material can become a durable
-token object. The current PKCS #11 mapping is documented in
+Future durable previewSign integration must still define configuration, token
+binding, private-data protection, and restoration. Object lifetime, immutable
+replacement, dependency storage, and deletion already use the common provider
+boundary. The current PKCS #11 mapping is documented in
 [Experimental FIDO previewSign boundary](preview-sign.md).
