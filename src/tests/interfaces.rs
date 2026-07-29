@@ -144,14 +144,18 @@ pub fn get_interface_rejects_wrong_version_and_name() {
 }
 #[test]
 pub fn bindgen_test_layout_CK_SLOT_INFO() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
+    let hardware_version_offset = 96 + ck_ulong_size;
+    let firmware_version_offset = hardware_version_offset + 2;
     assert_eq!(
         ::std::mem::size_of::<CK_SLOT_INFO>(),
-        112usize,
+        super::align_offset(firmware_version_offset + 2, ck_ulong_alignment),
         concat!("Size of: ", stringify!(CK_SLOT_INFO))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_SLOT_INFO>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_SLOT_INFO))
     );
     assert_eq!(
@@ -186,7 +190,7 @@ pub fn bindgen_test_layout_CK_SLOT_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_SLOT_INFO, hardwareVersion),
-        104usize,
+        hardware_version_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_SLOT_INFO),
@@ -196,7 +200,7 @@ pub fn bindgen_test_layout_CK_SLOT_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_SLOT_INFO, firmwareVersion),
-        106usize,
+        firmware_version_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_SLOT_INFO),
@@ -207,14 +211,20 @@ pub fn bindgen_test_layout_CK_SLOT_INFO() {
 }
 #[test]
 pub fn bindgen_test_layout_CK_TOKEN_INFO() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
+    let ulong_offset = |index: usize| 96 + index * ck_ulong_size;
+    let hardware_version_offset = ulong_offset(11);
+    let firmware_version_offset = hardware_version_offset + 2;
+    let utc_time_offset = firmware_version_offset + 2;
     assert_eq!(
         ::std::mem::size_of::<CK_TOKEN_INFO>(),
-        208usize,
+        super::align_offset(utc_time_offset + 16, ck_ulong_alignment),
         concat!("Size of: ", stringify!(CK_TOKEN_INFO))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_TOKEN_INFO>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_TOKEN_INFO))
     );
     assert_eq!(
@@ -269,7 +279,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulMaxSessionCount),
-        104usize,
+        ulong_offset(1),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -279,7 +289,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulSessionCount),
-        112usize,
+        ulong_offset(2),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -289,7 +299,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulMaxRwSessionCount),
-        120usize,
+        ulong_offset(3),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -299,7 +309,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulRwSessionCount),
-        128usize,
+        ulong_offset(4),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -309,7 +319,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulMaxPinLen),
-        136usize,
+        ulong_offset(5),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -319,7 +329,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulMinPinLen),
-        144usize,
+        ulong_offset(6),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -329,7 +339,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulTotalPublicMemory),
-        152usize,
+        ulong_offset(7),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -339,7 +349,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulFreePublicMemory),
-        160usize,
+        ulong_offset(8),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -349,7 +359,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulTotalPrivateMemory),
-        168usize,
+        ulong_offset(9),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -359,7 +369,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, ulFreePrivateMemory),
-        176usize,
+        ulong_offset(10),
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -369,7 +379,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, hardwareVersion),
-        184usize,
+        hardware_version_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -379,7 +389,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, firmwareVersion),
-        186usize,
+        firmware_version_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -389,7 +399,7 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_TOKEN_INFO, utcTime),
-        188usize,
+        utc_time_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_TOKEN_INFO),
@@ -400,14 +410,16 @@ pub fn bindgen_test_layout_CK_TOKEN_INFO() {
 }
 #[test]
 pub fn bindgen_test_layout_CK_SESSION_INFO() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
     assert_eq!(
         ::std::mem::size_of::<CK_SESSION_INFO>(),
-        32usize,
+        4 * ck_ulong_size,
         concat!("Size of: ", stringify!(CK_SESSION_INFO))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_SESSION_INFO>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_SESSION_INFO))
     );
     assert_eq!(
@@ -422,7 +434,7 @@ pub fn bindgen_test_layout_CK_SESSION_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_SESSION_INFO, state),
-        8usize,
+        ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_SESSION_INFO),
@@ -432,7 +444,7 @@ pub fn bindgen_test_layout_CK_SESSION_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_SESSION_INFO, flags),
-        16usize,
+        2 * ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_SESSION_INFO),
@@ -442,7 +454,7 @@ pub fn bindgen_test_layout_CK_SESSION_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_SESSION_INFO, ulDeviceError),
-        24usize,
+        3 * ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_SESSION_INFO),
@@ -582,14 +594,16 @@ fn bindgen_test_layout_CK_MECHANISM() {
 }
 #[test]
 fn bindgen_test_layout_CK_MECHANISM_INFO() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
     assert_eq!(
         ::std::mem::size_of::<CK_MECHANISM_INFO>(),
-        24usize,
+        3 * ck_ulong_size,
         concat!("Size of: ", stringify!(CK_MECHANISM_INFO))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_MECHANISM_INFO>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_MECHANISM_INFO))
     );
     assert_eq!(
@@ -604,7 +618,7 @@ fn bindgen_test_layout_CK_MECHANISM_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_MECHANISM_INFO, ulMaxKeySize),
-        8usize,
+        ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_MECHANISM_INFO),
@@ -614,7 +628,7 @@ fn bindgen_test_layout_CK_MECHANISM_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_MECHANISM_INFO, flags),
-        16usize,
+        2 * ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_MECHANISM_INFO),
@@ -625,14 +639,21 @@ fn bindgen_test_layout_CK_MECHANISM_INFO() {
 }
 #[test]
 fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let pointer_size = ::std::mem::size_of::<CK_BYTE_PTR>();
+    let pointer_alignment = ::std::mem::align_of::<CK_BYTE_PTR>();
+    let shared_data_offset = super::align_offset(2 * ck_ulong_size, pointer_alignment);
+    let public_data_length_offset = shared_data_offset + pointer_size;
+    let public_data_offset =
+        super::align_offset(public_data_length_offset + ck_ulong_size, pointer_alignment);
     assert_eq!(
         ::std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>(),
-        40usize,
+        public_data_offset + pointer_size,
         concat!("Size of: ", stringify!(CK_ECDH1_DERIVE_PARAMS))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_ECDH1_DERIVE_PARAMS>(),
-        8usize,
+        pointer_alignment,
         concat!("Alignment of ", stringify!(CK_ECDH1_DERIVE_PARAMS))
     );
     assert_eq!(
@@ -647,7 +668,7 @@ fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_ECDH1_DERIVE_PARAMS, ulSharedDataLen),
-        8usize,
+        ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_ECDH1_DERIVE_PARAMS),
@@ -657,7 +678,7 @@ fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_ECDH1_DERIVE_PARAMS, pSharedData),
-        16usize,
+        shared_data_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_ECDH1_DERIVE_PARAMS),
@@ -667,7 +688,7 @@ fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_ECDH1_DERIVE_PARAMS, ulPublicDataLen),
-        24usize,
+        public_data_length_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_ECDH1_DERIVE_PARAMS),
@@ -677,7 +698,7 @@ fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_ECDH1_DERIVE_PARAMS, pPublicData),
-        32usize,
+        public_data_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_ECDH1_DERIVE_PARAMS),
@@ -688,14 +709,19 @@ fn bindgen_test_layout_CK_ECDH1_DERIVE_PARAMS() {
 }
 #[test]
 fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let pointer_size = ::std::mem::size_of::<CK_VOID_PTR>();
+    let pointer_alignment = ::std::mem::align_of::<CK_VOID_PTR>();
+    let source_data_offset = super::align_offset(3 * ck_ulong_size, pointer_alignment);
+    let source_data_length_offset = source_data_offset + pointer_size;
     assert_eq!(
         ::std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>(),
-        40usize,
+        super::align_offset(source_data_length_offset + ck_ulong_size, pointer_alignment),
         concat!("Size of: ", stringify!(CK_RSA_PKCS_OAEP_PARAMS))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_RSA_PKCS_OAEP_PARAMS>(),
-        8usize,
+        pointer_alignment,
         concat!("Alignment of ", stringify!(CK_RSA_PKCS_OAEP_PARAMS))
     );
     assert_eq!(
@@ -710,7 +736,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_OAEP_PARAMS, mgf),
-        8usize,
+        ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_OAEP_PARAMS),
@@ -720,7 +746,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_OAEP_PARAMS, source),
-        16usize,
+        2 * ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_OAEP_PARAMS),
@@ -730,7 +756,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_OAEP_PARAMS, pSourceData),
-        24usize,
+        source_data_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_OAEP_PARAMS),
@@ -740,7 +766,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_OAEP_PARAMS, ulSourceDataLen),
-        32usize,
+        source_data_length_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_OAEP_PARAMS),
@@ -751,14 +777,16 @@ fn bindgen_test_layout_CK_RSA_PKCS_OAEP_PARAMS() {
 }
 #[test]
 fn bindgen_test_layout_CK_RSA_PKCS_PSS_PARAMS() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
     assert_eq!(
         ::std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>(),
-        24usize,
+        3 * ck_ulong_size,
         concat!("Size of: ", stringify!(CK_RSA_PKCS_PSS_PARAMS))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_RSA_PKCS_PSS_PARAMS>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_RSA_PKCS_PSS_PARAMS))
     );
     assert_eq!(
@@ -773,7 +801,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_PSS_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_PSS_PARAMS, mgf),
-        8usize,
+        ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_PSS_PARAMS),
@@ -783,7 +811,7 @@ fn bindgen_test_layout_CK_RSA_PKCS_PSS_PARAMS() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_RSA_PKCS_PSS_PARAMS, sLen),
-        16usize,
+        2 * ck_ulong_size,
         concat!(
             "Offset of field: ",
             stringify!(CK_RSA_PKCS_PSS_PARAMS),

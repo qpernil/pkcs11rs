@@ -12,6 +12,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -36,16 +41,16 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run Python ABI tests
-        run: python3 test_pkcs11.py
+        run: python test_pkcs11.py
 
       - name: Run OASIS PKCS #11 3.2 profile cases
-        run: python3 conformance/run_oasis.py --results target/oasis-results
+        run: python conformance/run_oasis.py --results target/oasis-results
 
       - name: Upload OASIS profile results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oasis-pkcs11-v3.2-results
+          name: oasis-pkcs11-v3.2-results-linux
           path: target/oasis-results
           if-no-files-found: warn
 
@@ -95,6 +100,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install native dependencies
         run: |
           brew install pkg-config
@@ -114,6 +124,20 @@ jobs:
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests
 
+      - name: Run Python ABI tests
+        run: python test_pkcs11.py
+
+      - name: Run OASIS PKCS #11 3.2 profile cases
+        run: python conformance/run_oasis.py --results target/oasis-results
+
+      - name: Upload OASIS profile results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oasis-pkcs11-v3.2-results-macos
+          path: target/oasis-results
+          if-no-files-found: warn
+
   windows:
     runs-on: windows-latest
     env:
@@ -123,8 +147,27 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Compile Rust tests
-        run: cargo test --locked --no-run
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Rust tests
+        run: cargo test --locked
 
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests
+
+      - name: Run Python ABI tests
+        run: python test_pkcs11.py
+
+      - name: Run OASIS PKCS #11 3.2 profile cases
+        run: python conformance/run_oasis.py --results target/oasis-results
+
+      - name: Upload OASIS profile results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oasis-pkcs11-v3.2-results-windows
+          path: target/oasis-results
+          if-no-files-found: warn

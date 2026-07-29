@@ -2075,28 +2075,42 @@ class Pkcs11AbiTests(unittest.TestCase):
     ) -> None:
         previous = os.environ.get("PKCS11RS_PINENTRY")
         with tempfile.TemporaryDirectory() as directory:
-            pinentry = pathlib.Path(directory) / "pinentry"
-            pinentry.write_text(
-                """#!/bin/sh
-printf '%s\\n' 'OK ready'
-while IFS= read -r command; do
-    case "$command" in
-        GETPIN)
-            printf '%s\\n' 'D password' 'OK'
-            ;;
-        BYE)
-            printf '%s\\n' 'OK'
-            exit 0
-            ;;
-        *)
-            printf '%s\\n' 'OK'
-            ;;
-    esac
-done
+            helper = pathlib.Path(directory) / "pinentry.rs"
+            pinentry = pathlib.Path(directory) / (
+                "pinentry.exe" if os.name == "nt" else "pinentry"
+            )
+            helper.write_text(
+                r"""use std::io::{self, BufRead, Write};
+
+fn respond(lines: &[&str]) {
+    let mut output = io::stdout().lock();
+    for line in lines {
+        writeln!(output, "{line}").expect("write response");
+    }
+    output.flush().expect("flush response");
+}
+
+fn main() {
+    respond(&["OK ready"]);
+    for line in io::stdin().lock().lines() {
+        match line.expect("read command").as_str() {
+            "GETPIN" => respond(&["D password", "OK"]),
+            "BYE" => {
+                respond(&["OK"]);
+                return;
+            }
+            _ => respond(&["OK"]),
+        }
+    }
+}
 """,
                 encoding="utf-8",
             )
-            pinentry.chmod(0o700)
+            subprocess.run(
+                ["rustc", str(helper), "-o", str(pinentry)],
+                cwd=ROOT,
+                check=True,
+            )
             os.environ["PKCS11RS_PINENTRY"] = str(pinentry)
             try:
                 self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
