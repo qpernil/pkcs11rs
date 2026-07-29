@@ -139,16 +139,11 @@ PKCS #11 metadata opaque objects are read because their sparse `CKA_ID` and
 `CKA_LABEL` overrides affect object construction, matching, searches, and later
 operations. Metadata companions remain internal. Before PKCS #11 login the
 module exposes every constructed object whose effective `CKA_PRIVATE` is false,
-including X.509 certificates, standalone or matching public keys, and public
-data and template objects. X.509 opaque values are read immediately for
-certificate validation; other opaque values remain lazy.
-
-A synthetic public key inherits `CKA_ID` and `CKA_LABEL` overrides from its
-physical private key when no explicit public-key override is present. Explicit
-public-key metadata takes precedence. This keeps sparse metadata aligned by
-default while still allowing the two synthetic objects to be named separately.
-An explicit mismatch is treated as a provisioning choice and does not withdraw
-the profile.
+including X.509 certificates, physical public keys, explicitly persisted
+public projections, and public data and template objects. X.509 opaque values
+are read immediately for certificate validation; other opaque values remain
+lazy. A certificate or readable hardware-private public component does not by
+itself create a separate public token object.
 
 The slot retains one native-object cache and one PKCS #11 object set shared by
 pre-login and post-login enumeration. Discovery and ordinary user sessions
@@ -193,9 +188,12 @@ credential.
 
 YubiHSM PKCS #11 metadata objects are internal opaque-data companions and are
 never exposed as PKCS #11 objects. Metadata may contain any subset of the
-private object's `CKA_ID` and `CKA_LABEL` and the corresponding synthetic
-public object's values. Valid overrides apply regardless of whether the target
-was first seen by public discovery, user login, or a successful mutation.
+private object's `CKA_ID` and `CKA_LABEL`. Canonical metadata may additionally
+contain a public aspect with validated `CKA_PUBLIC_KEY_INFO` and supported
+public-object attributes. That complete canonical aspect represents a real
+public token object; an empty or identity-only aspect does not. Valid overrides
+apply regardless of whether the target was first seen by public discovery,
+user login, or a successful mutation.
 
 Metadata is linked from the target's native cache entry. The companion's
 contents identify the target object type, ID, and sequence, while its own
@@ -213,6 +211,17 @@ encoded by the native YubiHSM object. New metadata uses YubiHSM
 auto-allocation. Destroying the main object deletes its pkcs11rs-owned
 companions but leaves legacy companions untouched.
 
+`CKM_PKCS11RS_PROJECT_PUBLIC_KEY` with `CKA_TOKEN=CK_TRUE` creates or replaces
+the canonical public aspect for an asymmetric or RSA wrap key. The object is
+rediscovered by stable hardware identity and its public key is checked against
+the current hardware response before it is exposed. `C_GenerateKeyPair`
+returns a session public object unless its public template explicitly requests
+`CKA_TOKEN=CK_TRUE`, in which case it uses the same persistence path. Destroying
+the public object removes only the public aspect and does not delete the
+hardware private key or legacy metadata. If removing the aspect would otherwise
+reveal a legacy record, pkcs11rs retains an empty canonical shadow so legacy
+input cannot silently regain authority.
+
 Companions have canonical `pkcs11rs.backed-key` logical contents. The
 provider-owned backing binds the target domains and primary key class, and
 private/public aspects hold their sparse attributes. Persistence and
@@ -222,7 +231,8 @@ implementation of the content-addressed `StorageProvider` interface.
 Legacy `MDB1` key metadata is converted to the canonical logical model on the
 fly only when no pkcs11rs metadata exists for the target. It is read-only
 compatibility input: pkcs11rs never writes, rewrites, or deletes legacy
-companions. All new records use canonical CBOR and the
+companions. Legacy public ID and label fields remain identity compatibility
+data and never create a public token object. All new records use canonical CBOR and the
 `pkcs11rs metadata 0x...` namespace. MDB1 records retain Yubico's
 `Meta object for 0x...` convention. This prevents Yubico's PKCS #11 module
 from treating unfamiliar canonical CBOR as MDB1 and makes ownership apparent
