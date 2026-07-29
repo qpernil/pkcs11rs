@@ -23,6 +23,10 @@ const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
 const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
+const fn align_offset(offset: usize, alignment: usize) -> usize {
+    offset.div_ceil(alignment) * alignment
+}
+
 fn scalar_attribute<T>(type_: CK_ATTRIBUTE_TYPE, value: &mut T) -> CK_ATTRIBUTE {
     CK_ATTRIBUTE {
         type_,

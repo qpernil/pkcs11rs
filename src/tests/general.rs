@@ -2,14 +2,19 @@ use super::*;
 
 #[test]
 pub fn bindgen_test_layout_CK_INFO() {
+    let ck_ulong_size = ::std::mem::size_of::<CK_ULONG>();
+    let ck_ulong_alignment = ::std::mem::align_of::<CK_ULONG>();
+    let flags_offset = super::align_offset(34, ck_ulong_alignment);
+    let description_offset = flags_offset + ck_ulong_size;
+    let version_offset = description_offset + 32;
     assert_eq!(
         ::std::mem::size_of::<CK_INFO>(),
-        88usize,
+        super::align_offset(version_offset + 2, ck_ulong_alignment),
         concat!("Size of: ", stringify!(CK_INFO))
     );
     assert_eq!(
         ::std::mem::align_of::<CK_INFO>(),
-        8usize,
+        ck_ulong_alignment,
         concat!("Alignment of ", stringify!(CK_INFO))
     );
     assert_eq!(
@@ -34,7 +39,7 @@ pub fn bindgen_test_layout_CK_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_INFO, flags),
-        40usize,
+        flags_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_INFO),
@@ -44,7 +49,7 @@ pub fn bindgen_test_layout_CK_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_INFO, libraryDescription),
-        48usize,
+        description_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_INFO),
@@ -54,7 +59,7 @@ pub fn bindgen_test_layout_CK_INFO() {
     );
     assert_eq!(
         ::std::mem::offset_of!(CK_INFO, libraryVersion),
-        80usize,
+        version_offset,
         concat!(
             "Offset of field: ",
             stringify!(CK_INFO),
