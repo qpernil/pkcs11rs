@@ -15,7 +15,9 @@ rustls-backed HTTPS.
 
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP
-connector slots. The only accepted values are `0` and `1`.
+connector slots. The only accepted values are `0` and `1`. Direct USB access
+uses usbfs on Linux, IOKit on macOS, and WinUSB on Windows through `nusb`; it
+does not require libusb.
 
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For

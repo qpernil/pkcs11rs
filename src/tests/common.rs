@@ -6291,7 +6291,7 @@ impl crate::Connector for FailingConnector {
         _receive_buffer: &'a mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
-        Err(rusb::Error::NoDevice.into())
+        Err(nusb::transfer::TransferError::Disconnected.into())
     }
 }
 
@@ -6392,7 +6392,7 @@ impl crate::Connector for SelectableConnector {
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
         if !self.present.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(rusb::Error::NoDevice.into());
+            return Err(nusb::transfer::TransferError::Disconnected.into());
         }
         if send_buffer.get(1) == Some(&0xa4)
             && !self.select_ok.load(std::sync::atomic::Ordering::Relaxed)

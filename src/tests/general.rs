@@ -359,6 +359,12 @@ pub fn usb_zlp_is_only_required_on_nonzero_packet_boundaries() {
 }
 
 #[test]
+pub fn usb_bcd_version_extracts_major_and_minor_components() {
+    assert_eq!(crate::usb_bcd_version(0x0210), (2, 1));
+    assert_eq!(crate::usb_bcd_version(0x1234), (12, 3));
+}
+
+#[test]
 pub fn yubikey_login_preserves_connector_errors() {
     let base: crate::SharedConnector = std::sync::Arc::new(FailingConnector);
     let application_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];

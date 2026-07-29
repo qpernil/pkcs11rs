@@ -8,7 +8,8 @@ use crate::{
 pub enum Error {
     Generic(CK_RV),
     Hid(hidapi::HidError),
-    Usb(rusb::Error),
+    Usb(nusb::Error),
+    UsbTransfer(nusb::transfer::TransferError),
     Pcsc(pcsc::Error),
     Http(ureq::Error),
     Io(std::io::Error),
@@ -20,9 +21,15 @@ impl From<hidapi::HidError> for Error {
     }
 }
 
-impl From<rusb::Error> for Error {
-    fn from(e: rusb::Error) -> Self {
+impl From<nusb::Error> for Error {
+    fn from(e: nusb::Error) -> Self {
         Self::Usb(e)
+    }
+}
+
+impl From<nusb::transfer::TransferError> for Error {
+    fn from(e: nusb::transfer::TransferError) -> Self {
+        Self::UsbTransfer(e)
     }
 }
 
@@ -70,6 +77,7 @@ impl From<Error> for CK_RV {
             Error::Generic(rv) => rv,
             Error::Hid(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
+            Error::UsbTransfer(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Http(_) => CKR_DEVICE_REMOVED as CK_RV,
             Error::Io(_) => CKR_FUNCTION_FAILED as CK_RV,

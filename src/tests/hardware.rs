@@ -223,6 +223,97 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     }
 
     #[test]
+    #[ignore = "requires at least one directly connected YubiHSM accessed through nusb"]
+    fn direct_yubihsm_usb_slot_reports_metadata() {
+        assert!(
+            std::env::var_os("PKCS11RS_YUBIHSM_URLS").is_none(),
+            "unset PKCS11RS_YUBIHSM_URLS so the selected slot must use direct USB"
+        );
+        assert_ne!(
+            std::env::var("PKCS11RS_YUBIHSM_USB").as_deref(),
+            Ok("0"),
+            "direct YubiHSM USB discovery must be enabled"
+        );
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        let mut slot_ids = vec![0; count as usize];
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slot_ids.as_mut_ptr(), &mut count),
+            CKR_OK as CK_RV
+        );
+        slot_ids.truncate(count as usize);
+
+        let mut yubihsm_count = 0;
+        for slot_id in slot_ids {
+            let mut slot_info = CK_SLOT_INFO {
+                slotDescription: [0; 64],
+                manufacturerID: [0; 32],
+                flags: 0,
+                hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+                firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+            };
+            assert_eq!(
+                crate::api::C_GetSlotInfo(slot_id, &mut slot_info),
+                CKR_OK as CK_RV
+            );
+            if !String::from_utf8_lossy(&slot_info.slotDescription)
+                .trim_end()
+                .starts_with("Yubico YubiHSM ")
+            {
+                continue;
+            }
+
+            yubihsm_count += 1;
+            let mut token_info = CK_TOKEN_INFO {
+                label: [0; 32],
+                manufacturerID: [0; 32],
+                model: [0; 16],
+                serialNumber: [0; 16],
+                flags: 0,
+                ulMaxSessionCount: 0,
+                ulSessionCount: 0,
+                ulMaxRwSessionCount: 0,
+                ulRwSessionCount: 0,
+                ulMaxPinLen: 0,
+                ulMinPinLen: 0,
+                ulTotalPublicMemory: 0,
+                ulFreePublicMemory: 0,
+                ulTotalPrivateMemory: 0,
+                ulFreePrivateMemory: 0,
+                hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+                firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+                utcTime: [0; 16],
+            };
+            assert_eq!(
+                crate::api::C_GetTokenInfo(slot_id, &mut token_info),
+                CKR_OK as CK_RV
+            );
+            assert!(token_info
+                .serialNumber
+                .iter()
+                .any(|value| !value.is_ascii_whitespace()));
+        }
+        assert!(
+            yubihsm_count > 0,
+            "expected at least one directly connected YubiHSM"
+        );
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
     #[ignore = "runs many concurrent PKCS #11 operations against two present YubiHSM hardware slots"]
     fn concurrent_yubihsm_hardware_slots_survive_many_threaded_operations() {
         const THREAD_COUNT: usize = 16;
