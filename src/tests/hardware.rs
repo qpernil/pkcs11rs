@@ -1451,6 +1451,54 @@ mod fido2_hardware {
         })
     }
 
+    fn paired_hid_fido_and_piv_slot_ids() -> (CK_SLOT_ID, CK_SLOT_ID) {
+        let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
+        crate::with_context(|context| {
+            context.init()?;
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let mut hid_matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
+                let child = child.lock().ok()?;
+                let selected = child.slot.kind() == crate::SlotKind::Fido2
+                    && child.slot.name().contains("HID")
+                    && selector.as_ref().is_none_or(|selector| {
+                        child.slot.serial() == selector || child.slot.name() == *selector
+                    });
+                selected.then(|| (*slot_id, child.device.clone()))
+            });
+            let (hid_slot_id, Some(hid_device)) =
+                hid_matches.next().ok_or(CKR_SLOT_ID_INVALID)?
+            else {
+                return Err(CKR_DEVICE_ERROR.into());
+            };
+            if hid_matches.next().is_some() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            let mut piv_matches = slot_contexts.iter().filter_map(|(slot_id, child)| {
+                let child = child.lock().ok()?;
+                (child.slot.kind()
+                    == crate::SlotKind::Ccid(crate::CcidApplication::Piv)
+                    && child
+                        .device
+                        .as_ref()
+                        .is_some_and(|device| std::sync::Arc::ptr_eq(device, &hid_device)))
+                .then_some(*slot_id)
+            });
+            let piv_slot_id = piv_matches.next().ok_or(CKR_SLOT_ID_INVALID)?;
+            if piv_matches.next().is_some() {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            Ok((hid_slot_id, piv_slot_id))
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "expected one serial-correlated HID FIDO slot and PIV slot matching PKCS11RS_FIDO2_TEST_SOURCE={selector:?}: {error:?}"
+            )
+        })
+    }
+
     #[test]
     #[ignore = "requires a FIDO2 authenticator exposed through USB HID"]
     fn fido2_hid_read_only_get_info() {
@@ -1612,6 +1660,103 @@ mod fido2_hardware {
                 ccid.errors
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires one serial-matched HID/PCSC YubiKey and PKCS11RS_FIDO2_TEST_PIN"]
+    fn pkcs11_dispatch_serializes_fido_hid_login_against_piv_ccid() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        let mut pin = std::env::var(CURRENT_PIN_ENV)
+            .expect("PKCS11RS_FIDO2_TEST_PIN gates the single FIDO PIN verification")
+            .into_bytes();
+        assert_eq!(
+            crate::api::C_Initialize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        let (hid_slot_id, piv_slot_id) = paired_hid_fido_and_piv_slot_ids();
+
+        let mut hid_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                hid_slot_id,
+                CKF_SERIAL_SESSION as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut hid_session,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let hid_ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pcsc_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hid_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let login_result = std::thread::scope(|scope| {
+            let hid_start = start.clone();
+            let hid_ready_for_worker = hid_ready.clone();
+            let pcsc_started_for_hid = pcsc_started.clone();
+            let hid_done_for_worker = hid_done.clone();
+            let hid_worker = scope.spawn(move || {
+                hid_start.wait();
+                hid_ready_for_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+                while !pcsc_started_for_hid.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                let result = crate::api::C_Login(
+                    hid_session,
+                    CKU_USER as CK_USER_TYPE,
+                    pin.as_mut_ptr(),
+                    pin.len() as CK_ULONG,
+                );
+                hid_done_for_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            });
+
+            let pcsc_start = start;
+            let hid_ready_for_pcsc = hid_ready;
+            let pcsc_started_for_worker = pcsc_started;
+            let hid_done_for_pcsc = hid_done;
+            let pcsc_worker = scope.spawn(move || {
+                pcsc_start.wait();
+                while !hid_ready_for_pcsc.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                for _ in 0..CROSS_INTERFACE_ITERATIONS {
+                    pcsc_started_for_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let mut piv_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+                    assert_eq!(
+                        crate::api::C_OpenSession(
+                            piv_slot_id,
+                            CKF_SERIAL_SESSION as CK_FLAGS,
+                            std::ptr::null_mut(),
+                            None,
+                            &mut piv_session,
+                        ),
+                        CKR_OK as CK_RV
+                    );
+                    assert_eq!(crate::api::C_CloseSession(piv_session), CKR_OK as CK_RV);
+                    if hid_done_for_pcsc.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            });
+
+            let login_result = hid_worker.join().expect("HID PKCS #11 worker panicked");
+            pcsc_worker.join().expect("PIV PKCS #11 worker panicked");
+            login_result
+        });
+
+        assert_eq!(
+            login_result, CKR_OK as CK_RV,
+            "the single FIDO PIN verification failed"
+        );
+        assert_eq!(crate::api::C_Logout(hid_session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(hid_session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
     }
 
     #[test]
