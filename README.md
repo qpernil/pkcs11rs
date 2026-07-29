@@ -192,9 +192,10 @@ export PKCS11RS_YUBIHSM_TLS_CA_BUNDLE=/etc/pkcs11rs/connector-ca.pem
 
 The bundle replaces the embedded Mozilla roots for every configured HTTPS
 connector; it is not merged with them. Every certificate in the bundle is
-validated during `C_Initialize`, and an empty, malformed, or unreadable bundle
-fails initialization. The setting can be used with or without a client
-identity. Hostname or IP-address verification is always enforced.
+parsed and accepted as a trust anchor during `C_Initialize`; an empty,
+malformed, or unreadable bundle fails initialization. Certificate-chain,
+hostname, and IP-address verification occurs when the HTTPS connection is
+made. The setting can be used with or without a client identity.
 
 Remote connector slots are added alongside directly attached USB devices. Each
 configured URL always has a slot; an unreachable connector or a connector with
@@ -273,6 +274,15 @@ its slot even if later initialization fails; existing slots reconnect and
 reselect their own AID when sessions are opened. New readers and applets that
 were absent from the original snapshot require `C_Finalize` followed by
 `C_Initialize`.
+
+pkcs11rs opens PC/SC cards with `SCARD_SHARE_EXCLUSIVE` and does not currently
+use PC/SC transactions. A reader already held by another process therefore
+contributes no CCID applet slots to the discovery snapshot. On macOS this
+commonly includes GnuPG `scdaemon`; native FIDO HID discovery is independent
+and may still expose the authenticator. `PKCS11RS_DEBUG=1` logs the reader name
+when it cannot be opened, while level `2` also logs successful reader opens.
+See [CCID applet configuration](docs/ccid.md#pcsc-ownership-and-external-daemons)
+for the exact `scdaemon` configuration boundary.
 
 Limit discovery to selected applets with:
 

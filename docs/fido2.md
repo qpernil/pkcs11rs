@@ -72,7 +72,10 @@ operations issued through this module do not overlap. HID itself remains
 shared: pkcs11rs does not request `CTAPHID_LOCK` or an exclusive HID open, so
 HID-to-HID access by browsers or other processes is unaffected and remains the
 authenticator's responsibility. PC/SC is already opened in exclusive mode and
-serializes its own complete card exchanges.
+serializes its own complete card exchanges inside pkcs11rs. It does not use
+PC/SC transactions, and an external PC/SC owner can prevent CCID discovery or
+reconnection. Native HID discovery is independent of that reader ownership;
+see [PC/SC ownership and external daemons](ccid.md#pcsc-ownership-and-external-daemons).
 
 When GetInfo succeeds, the primary CTAP version is included in the slot
 description and token label. Debug level 2 prints the reported versions,
