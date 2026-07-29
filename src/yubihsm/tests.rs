@@ -2052,7 +2052,7 @@ fn yubihsm_canonical_metadata_rejects_a_mismatched_primary_class() {
     assert_eq!(private.label, "test-rsa");
 }
 
-fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
+fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     insert_metadata(
@@ -2081,9 +2081,9 @@ fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
     assert_eq!(public.id, [0, 1]);
     assert_eq!(public.label, "test-rsa");
     let mut related =
-        Slot::yubihsm_related_metadata_object(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap();
+        Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap();
     related.sort_unstable();
-    assert_eq!(related, [(101, 1), (102, 1)]);
+    assert!(related.is_empty());
 
     let command_start = peer.inner_commands.borrow().len();
     Slot::yubihsm_set_attributes(
@@ -2098,13 +2098,12 @@ fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
     let mutation = &commands[command_start..];
     assert_eq!(mutation[0].0, CommandCode::PutOpaque as u8);
     assert_eq!(&mutation[0].1[..2], &[0, 0]);
-    let mut deleted = mutation[1..]
+    let deleted = mutation[1..]
         .iter()
         .filter(|(command, _)| *command == CommandCode::DeleteObject as u8)
         .map(|(_, value)| u16::from_be_bytes(value[..2].try_into().unwrap()))
         .collect::<Vec<_>>();
-    deleted.sort_unstable();
-    assert_eq!(deleted, [101, 102]);
+    assert!(deleted.is_empty());
     drop(commands);
 
     let repaired = Slot::token_objects(&slot, 7).unwrap();
@@ -2128,16 +2127,24 @@ fn assert_duplicate_metadata_is_repaired(public_discovery: bool) {
             .count(),
         1
     );
+    assert!(peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .find(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
+        .is_some_and(|(_, value)| !value.starts_with(b"MDB1")));
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
+    assert!(peer.metadata_objects.borrow().contains_key(&102));
 }
 
 #[test]
-fn yubihsm_duplicate_metadata_is_repaired_with_public_discovery_credential() {
-    assert_duplicate_metadata_is_repaired(true);
+fn yubihsm_duplicate_legacy_metadata_is_shadowed_with_public_discovery_credential() {
+    assert_duplicate_legacy_metadata_is_shadowed(true);
 }
 
 #[test]
-fn yubihsm_duplicate_metadata_is_repaired_without_public_discovery_credential() {
-    assert_duplicate_metadata_is_repaired(false);
+fn yubihsm_duplicate_legacy_metadata_is_shadowed_without_public_discovery_credential() {
+    assert_duplicate_legacy_metadata_is_shadowed(false);
 }
 
 fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
@@ -2194,7 +2201,24 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     assert_eq!(private.id, b"private-id");
     assert_eq!(private.label, "metadata private key");
 
-    peer.fail_delete_opaque.borrow_mut().insert(101);
+    Slot::yubihsm_set_attributes(
+        &slot,
+        7,
+        &unique_id,
+        Some(b"first-canonical-id"),
+        Some("first canonical"),
+    )
+    .unwrap();
+    let _ = Slot::token_objects(&slot, 7).unwrap();
+    let canonical_id = peer
+        .metadata_objects
+        .borrow()
+        .iter()
+        .find_map(|(id, (info, _))| (info.label == "pkcs11rs metadata 0x01030001").then_some(*id))
+        .unwrap();
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
+
+    peer.fail_delete_opaque.borrow_mut().insert(canonical_id);
     let failed_delete_start = peer.inner_commands.borrow().len();
     assert!(Slot::yubihsm_set_attributes(
         &slot,
@@ -2210,7 +2234,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     assert_eq!(&failed_delete[0].1[..2], &[0, 0]);
     assert!(failed_delete[1..].iter().any(|(command, data)| *command
         == CommandCode::DeleteObject as u8
-        && u16::from_be_bytes(data[..2].try_into().unwrap()) == 101));
+        && u16::from_be_bytes(data[..2].try_into().unwrap()) == canonical_id));
     drop(failed_delete_commands);
 
     let ambiguous = Slot::token_objects(&slot, 7).unwrap();
@@ -2224,10 +2248,11 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
         peer.metadata_objects
             .borrow()
             .values()
-            .filter(|(info, _)| info.label == "Meta object for 0x01030001")
+            .filter(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
             .count(),
         2
     );
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
 
     peer.fail_delete_opaque.borrow_mut().clear();
     Slot::yubihsm_set_attributes(
@@ -2253,6 +2278,7 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
             .count(),
         1
     );
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
 }
 
 #[test]
@@ -2265,7 +2291,7 @@ fn yubihsm_metadata_replacement_is_failure_safe_without_public_discovery_credent
     assert_metadata_replacement_is_failure_safe(false);
 }
 
-fn assert_invalid_metadata_is_replaced(public_discovery: bool) {
+fn assert_invalid_legacy_metadata_is_shadowed(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     peer.metadata_objects.borrow_mut().get_mut(&101).unwrap().1[0] = b'X';
@@ -2280,8 +2306,8 @@ fn assert_invalid_metadata_is_replaced(public_discovery: bool) {
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
     assert_eq!(
-        Slot::yubihsm_related_metadata_object(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap(),
-        [(101, 1)]
+        Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap(),
+        []
     );
 
     Slot::yubihsm_set_attributes(
@@ -2292,7 +2318,13 @@ fn assert_invalid_metadata_is_replaced(public_discovery: bool) {
         Some("valid replacement"),
     )
     .unwrap();
-    assert!(!peer.metadata_objects.borrow().contains_key(&101));
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
+    assert!(peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .any(|(info, value)| info.label == "pkcs11rs metadata 0x01030001"
+            && !value.starts_with(b"MDB1")));
     let repaired = Slot::token_objects(&slot, 7).unwrap();
     let private = repaired
         .iter()
@@ -2303,13 +2335,69 @@ fn assert_invalid_metadata_is_replaced(public_discovery: bool) {
 }
 
 #[test]
-fn yubihsm_invalid_metadata_is_replaced_with_public_discovery_credential() {
-    assert_invalid_metadata_is_replaced(true);
+fn yubihsm_invalid_legacy_metadata_is_shadowed_with_public_discovery_credential() {
+    assert_invalid_legacy_metadata_is_shadowed(true);
 }
 
 #[test]
-fn yubihsm_invalid_metadata_is_replaced_without_public_discovery_credential() {
-    assert_invalid_metadata_is_replaced(false);
+fn yubihsm_invalid_legacy_metadata_is_shadowed_without_public_discovery_credential() {
+    assert_invalid_legacy_metadata_is_shadowed(false);
+}
+
+fn assert_invalid_canonical_metadata_suppresses_legacy_fallback(public_discovery: bool) {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let mut slot = cache_test_slot(peer.clone(), public_discovery);
+    let _ = Slot::token_objects(&slot, 7).unwrap();
+    Slot::login(&mut slot, b"0001password").unwrap();
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+
+    Slot::yubihsm_set_attributes(
+        &slot,
+        7,
+        &private.unique_id,
+        Some(b"canonical-id"),
+        Some("canonical label"),
+    )
+    .unwrap();
+    let _ = Slot::token_objects(&slot, 7).unwrap();
+    let canonical_id = peer
+        .metadata_objects
+        .borrow()
+        .iter()
+        .find_map(|(id, (info, _))| (info.label == "pkcs11rs metadata 0x01030001").then_some(*id))
+        .unwrap();
+    {
+        let mut objects = peer.metadata_objects.borrow_mut();
+        let (info, value) = objects.get_mut(&canonical_id).unwrap();
+        info.sequence = info.sequence.wrapping_add(1);
+        value[0] ^= 0xff;
+    }
+    slot.read_object_info(slot.session.as_ref(), canonical_id, YUBIHSM_OPAQUE, None)
+        .unwrap();
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.id, [0, 1]);
+    assert_eq!(private.label, "test-rsa");
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
+}
+
+#[test]
+fn invalid_canonical_metadata_suppresses_legacy_fallback_with_public_discovery_credential() {
+    assert_invalid_canonical_metadata_suppresses_legacy_fallback(true);
+}
+
+#[test]
+fn invalid_canonical_metadata_suppresses_legacy_fallback_without_public_discovery_credential() {
+    assert_invalid_canonical_metadata_suppresses_legacy_fallback(false);
 }
 
 #[test]
@@ -2665,7 +2753,7 @@ fn public_and_user_discovery_share_one_lazy_native_object_cache() {
 }
 
 #[test]
-fn metadata_back_link_only_applies_to_the_current_target_sequence() {
+fn legacy_metadata_only_applies_to_the_current_target_sequence() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     let mut slot = cache_test_slot(peer.clone(), false);
@@ -2678,8 +2766,8 @@ fn metadata_back_link_only_applies_to_the_current_target_sequence() {
         .unwrap();
     assert_eq!(private.id, b"shared-id");
     assert_eq!(
-        Slot::yubihsm_related_metadata_object(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap(),
-        [(101, 1)]
+        Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap(),
+        []
     );
     assert_eq!(
         inner_object_command_count(&peer, CommandCode::GetOpaque, 101),
@@ -2703,7 +2791,7 @@ fn metadata_back_link_only_applies_to_the_current_target_sequence() {
     slot.read_object_info(slot.session.as_ref(), 101, YUBIHSM_OPAQUE, None)
         .unwrap();
     assert!(
-        Slot::yubihsm_related_metadata_object(&slot, 1, YUBIHSM_ASYMMETRIC_KEY)
+        Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY)
             .unwrap()
             .is_empty()
     );
@@ -2716,7 +2804,7 @@ fn metadata_back_link_only_applies_to_the_current_target_sequence() {
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
     assert!(
-        Slot::yubihsm_related_metadata_object(&slot, 1, YUBIHSM_ASYMMETRIC_KEY)
+        Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY)
             .unwrap()
             .is_empty()
     );

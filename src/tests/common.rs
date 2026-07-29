@@ -3174,15 +3174,10 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         .iter()
         .position(|(command, _)| *command == crate::yubihsm::CommandCode::PutOpaque as u8)
         .unwrap();
-    let delete_index = mutation_commands
-        .iter()
-        .position(|(command, value)| {
-            *command == crate::yubihsm::CommandCode::DeleteObject as u8
-                && value == &[0, 101, crate::YUBIHSM_OPAQUE]
-        })
-        .unwrap();
-    assert!(put_index < delete_index);
     assert_eq!(&mutation_commands[put_index].1[..2], &[0, 0]);
+    assert!(!mutation_commands
+        .iter()
+        .any(|(command, _)| *command == crate::yubihsm::CommandCode::DeleteObject as u8));
 
     let updated = find_yubihsm_object(
         session,
@@ -3314,7 +3309,12 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         .map(|(_, payload)| payload.clone())
         .collect::<Vec<_>>();
     assert!(deletes.contains(&vec![0, 1, crate::YUBIHSM_ASYMMETRIC_KEY]));
-    assert!(deletes.contains(&vec![0, 101, crate::YUBIHSM_OPAQUE]));
+    assert!(!deletes.contains(&vec![0, 101, crate::YUBIHSM_OPAQUE]));
+    assert!(deletes.iter().any(|value| {
+        value.len() == 3
+            && value[2] == crate::YUBIHSM_OPAQUE
+            && value != &[0, 101, crate::YUBIHSM_OPAQUE]
+    }));
     assert!(find_yubihsm_object(
         session,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -3450,7 +3450,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
 }
 
 #[test]
-fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
+fn yubihsm_destroy_leaves_legacy_metadata_companions_untouched() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -3519,13 +3519,9 @@ fn yubihsm_destroy_removes_every_hidden_metadata_companion() {
         .filter(|(command, _)| *command == crate::yubihsm::CommandCode::DeleteObject as u8)
         .map(|(_, value)| value.clone())
         .collect::<Vec<_>>();
-    for expected in [
-        vec![0, 1, crate::YUBIHSM_ASYMMETRIC_KEY],
-        vec![0, 101, crate::YUBIHSM_OPAQUE],
-        vec![0, 102, crate::YUBIHSM_OPAQUE],
-    ] {
-        assert!(deletes.contains(&expected));
-    }
+    assert!(deletes.contains(&vec![0, 1, crate::YUBIHSM_ASYMMETRIC_KEY]));
+    assert!(!deletes.contains(&vec![0, 101, crate::YUBIHSM_OPAQUE]));
+    assert!(!deletes.contains(&vec![0, 102, crate::YUBIHSM_OPAQUE]));
     assert!(find_yubihsm_object(
         session,
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
