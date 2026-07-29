@@ -4,14 +4,15 @@ use crate::{
     key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
     parse_yubihsm_pkcs11_metadata, KeyMaterial, Slot, TokenObject, YubiHsmDiscoveryCache,
     YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot, CKA_LABEL,
-    CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKO_SECRET_KEY,
-    CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
-    CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
-    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
-    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
-    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY,
-    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
+    CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
+    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER,
+    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_KEY_TYPE,
+    CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO, YUBIHSM_ALGO_AES128,
+    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
+    YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
+    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
+    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
+    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
 };
 use std::sync::Arc;
 use std::{
@@ -208,6 +209,10 @@ impl ProtocolPeer {
 
     pub(crate) fn closed_session_count(&self) -> usize {
         self.closed_sessions.get()
+    }
+
+    pub(crate) fn has_metadata_object(&self, id: u16) -> bool {
+        self.metadata_objects.borrow().contains_key(&id)
     }
 
     fn with_bad_card_cryptogram() -> Self {
@@ -2052,6 +2057,140 @@ fn yubihsm_canonical_metadata_rejects_a_mismatched_primary_class() {
     assert_eq!(private.label, "test-rsa");
 }
 
+fn persisted_public_projection(
+    private: &crate::TokenObject,
+    id: &[u8],
+    label: &str,
+) -> crate::TokenObject {
+    let mut public = private.clone();
+    public.unique_id.clear();
+    public.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    public.id = id.to_vec();
+    public.label = label.to_owned();
+    public.token = true;
+    public.private = false;
+    public.encrypt = private.key_type == CKK_RSA as CK_KEY_TYPE;
+    public.decrypt = false;
+    public.sign = false;
+    public.verify = true;
+    public.derive = false;
+    public.sensitive = false;
+    public.extractable = true;
+    public.always_sensitive = false;
+    public.never_extractable = false;
+    public.local = false;
+    public.key_gen_mechanism = None;
+    public.creator_session = None;
+    public
+}
+
+#[test]
+fn mismatched_canonical_public_material_does_not_hide_the_private_key() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    let mut slot = cache_test_slot(peer.clone(), false);
+    Slot::login(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let projection = persisted_public_projection(&private, b"persisted-id", "persisted public");
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    assert!(Slot::token_objects(&slot, 7).unwrap().iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"persisted-id"
+    }));
+
+    {
+        let mut objects = peer.metadata_objects.borrow_mut();
+        let (info, value) = objects
+            .values_mut()
+            .find(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
+            .unwrap();
+        let mut record = BackedKeyMetadata::from_cbor(value).unwrap();
+        let mut public = record.aspect(u64::from(CKO_PUBLIC_KEY)).unwrap().clone();
+        public
+            .insert(
+                u64::from(CKA_PUBLIC_KEY_INFO),
+                KeyAttributeValue::Bytes(vec![0x30, 0x00]),
+            )
+            .unwrap();
+        record
+            .insert_aspect(u64::from(CKO_PUBLIC_KEY), public)
+            .unwrap();
+        *value = record.to_cbor().unwrap();
+        info.length = value.len() as u16;
+        info.sequence = info.sequence.wrapping_add(1);
+    }
+
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    assert!(objects
+        .iter()
+        .any(|object| object.unique_id == private.unique_id));
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"persisted-id"
+    }));
+}
+
+#[test]
+fn deleting_the_only_public_aspect_leaves_a_canonical_legacy_shadow() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.add_public_certificate_pair();
+    replace_metadata(&peer, 101, YUBIHSM_ASYMMETRIC_KEY, 1, 1, &[]);
+    let mut slot = cache_test_slot(peer.clone(), false);
+    Slot::login(&mut slot, b"0001password").unwrap();
+    let private = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    let projection = persisted_public_projection(&private, b"temporary", "temporary public");
+    Slot::yubihsm_persist_public_projection(&slot, 7, &private.unique_id, &projection).unwrap();
+    let public = Slot::token_objects(&slot, 7)
+        .unwrap()
+        .into_iter()
+        .find(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"temporary"
+        })
+        .unwrap();
+
+    Slot::yubihsm_destroy_public_projection(&slot, 7, &public.unique_id).unwrap();
+    let canonical = peer
+        .metadata_objects
+        .borrow()
+        .values()
+        .find_map(|(info, value)| {
+            (info.label == "pkcs11rs metadata 0x01030001").then_some(value.clone())
+        })
+        .unwrap();
+    let record = BackedKeyMetadata::from_cbor(&canonical).unwrap();
+    assert!(record
+        .aspect(u64::from(CKO_PRIVATE_KEY))
+        .unwrap()
+        .is_empty());
+    assert!(record.aspect(u64::from(CKO_PUBLIC_KEY)).is_none());
+    assert!(peer.metadata_objects.borrow().contains_key(&101));
+
+    replace_metadata(
+        &peer,
+        101,
+        YUBIHSM_ASYMMETRIC_KEY,
+        1,
+        1,
+        &[(1, b"must-not-return"), (2, b"must not return")],
+    );
+    let objects = Slot::token_objects(&slot, 7).unwrap();
+    let private = objects
+        .iter()
+        .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        .unwrap();
+    assert_eq!(private.id, [0, 1]);
+    assert_eq!(private.label, "test-rsa");
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"temporary"
+    }));
+}
+
 fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
@@ -2072,14 +2211,11 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
         .unwrap();
-    let public = objects
-        .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-        .unwrap();
     assert_eq!(private.id, [0, 1]);
     assert_eq!(private.label, "test-rsa");
-    assert_eq!(public.id, [0, 1]);
-    assert_eq!(public.label, "test-rsa");
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 1]
+    }));
     let mut related =
         Slot::yubihsm_owned_metadata_objects(&slot, 1, YUBIHSM_ASYMMETRIC_KEY).unwrap();
     related.sort_unstable();
@@ -2111,14 +2247,11 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
         .unwrap();
-    let public = repaired
-        .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-        .unwrap();
     assert_eq!(private.id, b"repaired-id");
     assert_eq!(private.label, "repaired label");
-    assert_eq!(public.id, b"repaired-id");
-    assert_eq!(public.label, "repaired label");
+    assert!(!repaired.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"repaired-id"
+    }));
     assert_eq!(
         peer.metadata_objects
             .borrow()
@@ -2827,14 +2960,9 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
         .find(|object| object.private)
         .cloned()
         .expect("expected a private YubiHSM object");
-    let public = logged_in
-        .iter()
-        .find(|object| {
-            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
-                && object.id == b"shared-id".as_slice()
-        })
-        .cloned()
-        .expect("expected the matching public key");
+    assert!(!logged_in.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
+    }));
     assert!(!Slot::session_objects(&slot, 7).unwrap().is_empty());
     assert!(slot
         .attestation_cache
@@ -2845,9 +2973,9 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     Slot::logout(&mut slot).unwrap();
     let logged_out = Slot::token_objects(&slot, 7).unwrap();
     assert!(logged_out.iter().all(|object| !object.private));
-    assert!(logged_out
-        .iter()
-        .any(|object| object.unique_id == public.unique_id));
+    assert!(!logged_out.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
+    }));
     assert!(Slot::token_object(&slot, 7, &private.unique_id)
         .unwrap()
         .is_none());
@@ -2870,9 +2998,9 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     Slot::login(&mut slot, b"0002password").unwrap();
     let narrower_login = Slot::token_objects(&slot, 7).unwrap();
     assert!(narrower_login.iter().all(|object| !object.private));
-    assert!(narrower_login
-        .iter()
-        .any(|object| object.unique_id == public.unique_id));
+    assert!(!narrower_login.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
+    }));
     Slot::logout(&mut slot).unwrap();
 }
 
@@ -3058,14 +3186,11 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
             .iter()
             .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
             .unwrap();
-        let public_key = prelogin
-            .iter()
-            .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-            .unwrap();
         assert_eq!(certificate.id, b"shared-id");
         assert_eq!(certificate.label, "metadata certificate");
-        assert_eq!(public_key.id, b"shared-id");
-        assert_eq!(public_key.label, "metadata public key");
+        assert!(!prelogin.iter().any(|object| {
+            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
+        }));
     }
 
     Slot::login(&mut slot, b"0001password").unwrap();
@@ -3074,18 +3199,15 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
         .unwrap();
-    let public_key = initial
-        .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-        .unwrap();
     let certificate = initial
         .iter()
         .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .unwrap();
     assert_eq!(private_key.id, b"shared-id");
     assert_eq!(private_key.label, "metadata private key");
-    assert_eq!(public_key.id, b"shared-id");
-    assert_eq!(public_key.label, "metadata public key");
+    assert!(!initial.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
+    }));
     assert_eq!(certificate.id, b"shared-id");
     assert_eq!(certificate.label, "metadata certificate");
     let certificate_unique_id = certificate.unique_id.clone();
@@ -3122,18 +3244,15 @@ fn assert_metadata_overrides_cached_objects(public_discovery: bool) {
         .iter()
         .find(|object| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
         .unwrap();
-    let public_key = updated
-        .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-        .unwrap();
     let certificate = updated
         .iter()
         .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .unwrap();
     assert_eq!(private_key.id, b"updated-shared-id");
     assert_eq!(private_key.label, "updated private key");
-    assert_eq!(public_key.id, b"updated-shared-id");
-    assert_eq!(public_key.label, "updated public key");
+    assert!(!updated.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"updated-shared-id"
+    }));
     assert_eq!(certificate.id, b"updated-shared-id");
     assert_eq!(certificate.label, "updated certificate");
     assert_eq!(certificate.unique_id, certificate_unique_id);
@@ -3179,20 +3298,14 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
         .iter()
         .find(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .unwrap();
-    let public_key = objects
-        .iter()
-        .find(|object| {
-            object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == certificate.id
-        })
-        .unwrap();
-    let standalone_public_key = objects
-        .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 5])
-        .unwrap();
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == certificate.id
+    }));
+    assert!(!objects.iter().any(|object| {
+        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == [0, 5]
+    }));
     let public_data = yubihsm_opaque_object(&objects, 4);
     assert!(!certificate.private);
-    assert!(!public_key.private);
-    assert!(!standalone_public_key.private);
     assert!(!public_data.private);
     assert!(objects.iter().all(|object| !object.private));
     assert!(!objects
@@ -3443,7 +3556,7 @@ fn yubihsm_public_read_reopens_an_invalidated_discovery_session_once() {
 }
 
 #[test]
-fn synthetic_public_key_inherits_sparse_physical_key_metadata() {
+fn legacy_private_key_metadata_does_not_create_a_public_key() {
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
     replace_metadata(
@@ -3465,12 +3578,9 @@ fn synthetic_public_key_inherits_sparse_physical_key_metadata() {
     let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
 
     let objects = Slot::token_objects(&slot, 7).unwrap();
-    let public_key = objects
+    assert!(objects
         .iter()
-        .find(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-        .unwrap();
-    assert_eq!(public_key.id, b"inherited-id");
-    assert_eq!(public_key.label, "inherited key");
+        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
     assert!(objects.iter().any(|object| matches!(
         object.material,
         KeyMaterial::Profile { profile_id }
@@ -3506,9 +3616,9 @@ fn explicit_public_metadata_mismatch_does_not_withdraw_profile() {
     assert!(objects.iter().any(|object| {
         object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS && object.id == b"shared-id"
     }));
-    assert!(objects.iter().any(|object| {
-        object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"different-public-id"
-    }));
+    assert!(objects
+        .iter()
+        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
 }
 
 #[test]
@@ -3574,7 +3684,7 @@ fn public_certificate_profile_does_not_require_provisioned_certificates() {
         .all(|object| object.class != CKO_CERTIFICATE as CK_OBJECT_CLASS));
     assert!(objects
         .iter()
-        .any(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
+        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
 }
 
 #[test]
@@ -3717,13 +3827,9 @@ fn yubihsm_public_discovery_accepts_standalone_ca_certificates() {
     assert!(certificates
         .iter()
         .any(|object| object.label == "standalone CA certificate"));
-    assert_eq!(
-        objects
-            .iter()
-            .filter(|object| object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
-            .count(),
-        1
-    );
+    assert!(objects
+        .iter()
+        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
 }
 
 #[test]

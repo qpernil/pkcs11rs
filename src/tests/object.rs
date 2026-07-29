@@ -380,7 +380,7 @@ pub fn destroy_object_removes_object_from_store_and_search() {
 }
 
 #[test]
-pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
+pub fn yubihsm_persisted_public_objects_require_a_yubihsm_backend() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -445,7 +445,7 @@ pub fn yubihsm_synthetic_public_objects_cannot_be_destroyed() {
         );
         assert_eq!(
             object.attribute_value(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE),
-            Some(crate::bool_attribute(false))
+            Some(crate::bool_attribute(true))
         );
         assert_eq!(
             crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),

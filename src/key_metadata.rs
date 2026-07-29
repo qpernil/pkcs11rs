@@ -182,6 +182,11 @@ impl KeyAttributes {
         self.attributes.get(&attribute)
     }
 
+    /// Remove one attribute from the map.
+    pub fn remove(&mut self, attribute: u64) -> Option<KeyAttributeValue> {
+        self.attributes.remove(&attribute)
+    }
+
     /// Return whether this aspect uses entirely provider-derived defaults.
     pub fn is_empty(&self) -> bool {
         self.attributes.is_empty()

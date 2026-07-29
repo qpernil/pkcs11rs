@@ -821,7 +821,7 @@ pub fn generate_key_reports_mechanism_and_template_errors() {
 }
 
 #[test]
-pub fn yubihsm_key_pair_generation_requires_token_objects() {
+pub fn yubihsm_key_pair_generation_requires_a_token_private_key() {
     let mut modulus_bits = 2048 as CK_ULONG;
     let mut session_object = CK_FALSE as CK_BBOOL;
     let mut token_object = CK_TRUE as CK_BBOOL;
@@ -849,21 +849,27 @@ pub fn yubihsm_key_pair_generation_requires_token_objects() {
         ulParameterLen: 0,
     };
 
-    for (public_template, private_template) in [
-        (&session_public_template[..], &[][..]),
-        (&token_public_template[..], &session_private_template[..]),
-    ] {
-        let rv: CK_RV =
-            crate::yubihsm_generate_key_pair_command(&mechanism, public_template, private_template)
-                .unwrap_err()
-                .into();
-        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
-    }
+    let (private, public, _) =
+        crate::yubihsm_generate_key_pair_command(&mechanism, &session_public_template, &[])
+            .unwrap();
+    assert!(private.token);
+    assert!(!public.token);
+
+    let rv: CK_RV = crate::yubihsm_generate_key_pair_command(
+        &mechanism,
+        &token_public_template,
+        &session_private_template,
+    )
+    .unwrap_err()
+    .into();
+    assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT as CK_RV);
 }
 
 #[test]
 pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     let mut modulus_bits = 2048 as CK_ULONG;
+    let mut token_object = CK_TRUE as CK_BBOOL;
+    let mut session_object = CK_FALSE as CK_BBOOL;
     let mut public_id = [0, 1];
     let mut private_id = [0, 2];
     let modulus_attribute = CK_ATTRIBUTE {
@@ -881,12 +887,22 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
         pValue: private_id.as_mut_ptr().cast(),
         ulValueLen: private_id.len() as CK_ULONG,
     };
+    let token_attribute = CK_ATTRIBUTE {
+        type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut token_object as *mut CK_BBOOL).cast(),
+        ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
+    let session_attribute = CK_ATTRIBUTE {
+        type_: CKA_TOKEN as CK_ATTRIBUTE_TYPE,
+        pValue: (&mut session_object as *mut CK_BBOOL).cast(),
+        ulValueLen: std::mem::size_of::<CK_BBOOL>() as CK_ULONG,
+    };
     let mechanism = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         pParameter: std::ptr::null_mut(),
         ulParameterLen: 0,
     };
-    let public_template = [modulus_attribute, public_id_attribute];
+    let public_template = [modulus_attribute, token_attribute, public_id_attribute];
 
     for private_template in [&[][..], &[private_id_attribute][..]] {
         let rv: CK_RV = crate::yubihsm_generate_key_pair_command(
@@ -908,9 +924,21 @@ pub fn yubihsm_key_pair_generation_requires_matching_ids() {
     .unwrap();
     assert_eq!(object.id, public_id);
 
-    let (object, _, _) =
+    let (object, public, _) =
         crate::yubihsm_generate_key_pair_command(&mechanism, &[modulus_attribute], &[]).unwrap();
     assert!(object.id.is_empty());
+    assert!(!public.token);
+
+    private_id.copy_from_slice(&[0, 2]);
+    let (private, public, _) = crate::yubihsm_generate_key_pair_command(
+        &mechanism,
+        &[modulus_attribute, session_attribute, public_id_attribute],
+        &[private_id_attribute],
+    )
+    .unwrap();
+    assert_eq!(private.id, private_id);
+    assert_eq!(public.id, public_id);
+    assert!(!public.token);
 }
 
 #[test]

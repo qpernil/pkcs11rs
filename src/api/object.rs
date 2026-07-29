@@ -1202,11 +1202,18 @@ fn destroy_object(
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
-        if stored_object.is_yubihsm_synthetic_public() {
-            return Err(CKR_ACTION_PROHIBITED.into());
-        }
         if stored_object.token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        if stored_object.is_yubihsm_public_projection() {
+            if stored_object.token {
+                ctx.get_slot(slot_id)?
+                    .yubihsm_destroy_public_projection(slot_id, &stored_object.unique_id)?;
+                ctx.refresh_slot_token_objects(slot_id)?;
+            } else {
+                ctx.remove_object_handle(object);
+            }
+            return Ok(());
         }
         let piv_action = match &stored_object.material {
             KeyMaterial::PivPrivate { slot, .. } => Some((true, *slot)),

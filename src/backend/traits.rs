@@ -314,6 +314,21 @@ pub(crate) trait Slot {
     ) -> Result<(), Error> {
         Err(CKR_ATTRIBUTE_READ_ONLY.into())
     }
+    fn yubihsm_persist_public_projection(
+        &self,
+        _slot_id: CK_SLOT_ID,
+        _base_unique_id: &str,
+        _projection: &TokenObject,
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn yubihsm_destroy_public_projection(
+        &self,
+        _slot_id: CK_SLOT_ID,
+        _unique_id: &str,
+    ) -> Result<(), Error> {
+        Err(CKR_ACTION_PROHIBITED.into())
+    }
     fn hsmauth_administration(
         &mut self,
         _operation: HsmAuthAdministration<'_>,
