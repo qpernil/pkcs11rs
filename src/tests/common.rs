@@ -142,6 +142,26 @@ fn yubihsm_connector_configuration_retains_order_and_duplicate_entries() {
 }
 
 #[test]
+fn yubihsm_http_client_identity_requires_both_paths() {
+    assert!(!crate::configured_yubihsm_http_tls(None, None, None)
+        .unwrap()
+        .is_configured());
+    assert!(crate::configured_yubihsm_http_tls(Some("client.pem".into()), None, None).is_err());
+    assert!(crate::configured_yubihsm_http_tls(None, Some("client-key.pem".into()), None).is_err());
+    assert!(crate::configured_yubihsm_http_tls(
+        Some("".into()),
+        Some("client-key.pem".into()),
+        None
+    )
+    .is_err());
+    assert!(
+        crate::configured_yubihsm_http_tls(Some("client.pem".into()), Some("".into()), None)
+            .is_err()
+    );
+    assert!(crate::configured_yubihsm_http_tls(None, None, Some("".into())).is_err());
+}
+
+#[test]
 fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
     assert!(crate::configured_yubihsm_usb(None).unwrap());
     assert!(crate::configured_yubihsm_usb(Some("1".into())).unwrap());

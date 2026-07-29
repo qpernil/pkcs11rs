@@ -915,8 +915,8 @@ use abi_test_backend::*;
 
 mod connector;
 pub(crate) use connector::{
-    bulk_out_packet_size, usb_bcd_version, Connector, HttpConnector, PcscAppletConnector,
-    PcscConnector, SharedConnector, UsbConnector,
+    bulk_out_packet_size, usb_bcd_version, Connector, HttpConnector, HttpConnectorTlsConfig,
+    PcscAppletConnector, PcscConnector, SharedConnector, UsbConnector,
 };
 #[cfg(test)]
 pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscReaderState};

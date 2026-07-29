@@ -164,6 +164,38 @@ Add remote YubiHSM Connector instances with a comma-separated URL list:
 export PKCS11RS_YUBIHSM_URLS=http://hsm-a:12345,http://hsm-b:12345
 ```
 
+HTTPS connectors verify the server certificate and hostname against the
+Mozilla roots embedded by the locked `webpki-roots` dependency. To
+authenticate the module to HTTPS connectors with one mutual-TLS identity, set
+both paths:
+
+```sh
+export PKCS11RS_YUBIHSM_URLS=https://hsm-a.example:12345
+export PKCS11RS_YUBIHSM_TLS_CLIENT_CERT=/etc/pkcs11rs/client-chain.pem
+export PKCS11RS_YUBIHSM_TLS_CLIENT_KEY=/etc/pkcs11rs/client-key.pem
+```
+
+The certificate file may contain a PEM chain, with the client certificate
+first. The key must be an unencrypted PEM PKCS#8, SEC1, or PKCS#1 private key
+matching that certificate. Both settings are required together; unreadable,
+malformed, or mismatched material makes `C_Initialize` fail. The identity is
+offered only to `https://` connector URLs. Redirects are disabled whenever a
+client identity is configured so it cannot be offered to a redirected host.
+The client identity does not change server verification.
+
+For a connector whose server certificate is issued by a private CA, configure
+a PEM CA bundle:
+
+```sh
+export PKCS11RS_YUBIHSM_TLS_CA_BUNDLE=/etc/pkcs11rs/connector-ca.pem
+```
+
+The bundle replaces the embedded Mozilla roots for every configured HTTPS
+connector; it is not merged with them. Every certificate in the bundle is
+validated during `C_Initialize`, and an empty, malformed, or unreadable bundle
+fails initialization. The setting can be used with or without a client
+identity. Hostname or IP-address verification is always enforced.
+
 Remote connector slots are added alongside directly attached USB devices. Each
 configured URL always has a slot; an unreachable connector or a connector with
 no device is reported as an empty slot until the module is reinitialized.

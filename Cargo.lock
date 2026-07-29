@@ -902,6 +902,7 @@ dependencies = [
  "pcsc",
  "pkcs8 0.11.0",
  "rsa",
+ "rustls",
  "rustls-pki-types",
  "rustls-webpki",
  "sec1",
