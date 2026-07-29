@@ -334,14 +334,14 @@ fn initial_objects() -> Result<HashMap<(u8, u16), NativeObject>, Error> {
     let mut objects = HashMap::new();
     let private = abi_test_yubihsm_object(ABI_TEST_YUBIHSM_SLOT_ID);
     let public = abi_test_yubihsm_public_object(ABI_TEST_YUBIHSM_SLOT_ID);
-    let public_key = match public.material {
+    let public_key = match &public.material {
         KeyMaterial::YubiHsm {
             algorithm,
             public_key,
             ..
         } => Some(YubiHsmPublicKey {
-            algorithm,
-            key: public_key,
+            algorithm: *algorithm,
+            key: public_key.clone(),
         }),
         _ => return Err(CKR_DEVICE_ERROR.into()),
     };
@@ -371,11 +371,29 @@ fn initial_objects() -> Result<HashMap<(u8, u16), NativeObject>, Error> {
         object.value = abi_yubihsm_opaque_certificate()?;
     }
 
-    let mut metadata = b"MDB1".to_vec();
-    metadata.extend_from_slice(&[YUBIHSM_ASYMMETRIC_KEY, 0, 1, 1]);
-    metadata.extend_from_slice(&[4, 0, 11]);
-    metadata.extend_from_slice(b"testrsa-pub");
-    let metadata_id = 0x7000;
+    insert_projection_metadata(&mut objects, YUBIHSM_ASYMMETRIC_KEY, 1, &public, 0x7000)?;
+    insert_projection_metadata(
+        &mut objects,
+        YUBIHSM_WRAP_KEY,
+        9,
+        &abi_test_yubihsm_rsa_wrap_public_object(ABI_TEST_YUBIHSM_SLOT_ID),
+        0x7001,
+    )?;
+    Ok(objects)
+}
+
+fn insert_projection_metadata(
+    objects: &mut HashMap<(u8, u16), NativeObject>,
+    target_type: u8,
+    target_id: u16,
+    projection: &TokenObject,
+    metadata_id: u16,
+) -> Result<(), Error> {
+    let target = objects
+        .get(&(target_type, target_id))
+        .map(|object| object.info.clone())
+        .ok_or(CKR_DEVICE_ERROR)?;
+    let (metadata_label, metadata) = yubihsm_abi_public_projection_metadata(&target, projection)?;
     objects.insert(
         (YUBIHSM_OPAQUE, metadata_id),
         NativeObject {
@@ -383,19 +401,19 @@ fn initial_objects() -> Result<HashMap<(u8, u16), NativeObject>, Error> {
                 capabilities: [0; 8],
                 id: metadata_id,
                 length: metadata.len() as u16,
-                domains: 0xffff,
+                domains: target.domains,
                 object_type: YUBIHSM_OPAQUE,
                 algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
                 sequence: 1,
                 origin: 1,
-                label: "Meta object for 0x01030001".to_owned(),
+                label: metadata_label,
                 delegated_capabilities: [0; 8],
             },
             value: metadata,
             public_key: None,
         },
     );
-    Ok(objects)
+    Ok(())
 }
 
 fn insert_token_object(

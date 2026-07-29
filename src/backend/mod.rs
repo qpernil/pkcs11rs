@@ -71,5 +71,7 @@ pub(crate) use ccid::IssuerSecurityDomainSession;
 pub(crate) use piv::piv_object_fingerprint;
 #[cfg(test)]
 pub(crate) use piv::{PivDataObject, PivKey};
+#[cfg(feature = "abi-tests")]
+pub(crate) use yubihsm::yubihsm_abi_public_projection_metadata;
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) use yubihsm::yubihsm_token_objects;

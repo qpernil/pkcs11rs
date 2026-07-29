@@ -1158,6 +1158,43 @@ fn abi_test_yubihsm_wrap_objects(slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>
 }
 
 #[cfg(feature = "abi-tests")]
+fn abi_test_yubihsm_rsa_wrap_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
+    TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: "abi-yubihsm-rsa-wrap-public".to_owned(),
+        class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+        key_type: CKK_RSA as CK_KEY_TYPE,
+        label: "rsa-wrap".to_owned(),
+        id: 9u16.to_be_bytes().to_vec(),
+        token: true,
+        private: false,
+        encrypt: false,
+        decrypt: false,
+        sign: false,
+        verify: false,
+        derive: false,
+        sensitive: false,
+        extractable: true,
+        always_sensitive: false,
+        never_extractable: false,
+        local: true,
+        key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
+        creator_session: None,
+        material: KeyMaterial::YubiHsm {
+            id: 9,
+            object_type: YUBIHSM_WRAP_KEY_PUBLIC,
+            algorithm: YUBIHSM_ALGO_RSA_2048,
+            length: 256,
+            domains: 1,
+            capabilities: yubihsm_capabilities(&[0x0c, 0x0d]),
+            delegated_capabilities: [0; 8],
+            public_key: vec![0xa5; 256],
+            value: Rc::new(RefCell::new(None)),
+        },
+    }
+}
+
+#[cfg(feature = "abi-tests")]
 pub(super) fn abi_test_yubihsm_opaque_objects(
     slot_id: CK_SLOT_ID,
 ) -> Result<Vec<TokenObject>, Error> {
