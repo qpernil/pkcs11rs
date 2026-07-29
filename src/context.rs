@@ -1514,11 +1514,11 @@ impl ModuleContext {
                         state: Arc::new(Default::default()),
                     };
                     let name = connector.name();
-                    log!(2, "{}", name);
                     if let Err(error) = connector.refresh() {
-                        log!(1, "PCSC reader has no usable card: {:?}", error);
+                        log!(1, "PCSC reader {} has no usable card: {:?}", name, error);
                         continue;
                     }
+                    log!(2, "PCSC reader {} opened", name);
                     match YubiKeyClient.discover(&connector) {
                         Ok(info) => {
                             if let Err(error) = connector.set_yubikey_device_info(info) {
