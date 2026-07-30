@@ -121,6 +121,11 @@ locking, session ownership, transport sharing, and cache boundaries.
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
 | Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. The Python smoke test covers production slot and token metadata. |
 
+CI runs the complete platform suites on 64-bit `x86_64` Linux and Windows and
+`aarch64` macOS. Additional all-features compilation checks cover `aarch64`
+Linux and `x86_64` macOS. Other architectures, including 32-bit targets and
+Windows ARM64, are not currently qualified.
+
 Protocol tests use deterministic mock transports and official cryptographic
 test vectors where available. Live-device tests are deliberately excluded from
 normal CI and are not a substitute for qualifying the exact hardware and

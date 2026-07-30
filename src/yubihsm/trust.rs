@@ -377,6 +377,33 @@ mod tests {
     }
 
     #[test]
+    fn attestation_replaces_existing_public_key_entry() {
+        let device_key = private_key();
+        let device_point = public_point(&device_key);
+        let signer = private_key();
+        let signer_certificate = signed_certificate(&public_key(&signer), &signer, 1);
+        let attestation = signed_certificate(&public_key(&device_key), &signer, 2);
+        let prefix = unused_prefix();
+        let path = entry_path(&device_point, Some(prefix.as_os_str())).unwrap();
+
+        install_public_key(&device_point, Some(prefix.as_os_str())).unwrap();
+        let public_key_pem = fs::read(&path).unwrap();
+        install_attestation(
+            &device_point,
+            &attestation,
+            &signer_certificate,
+            AttestationValidation::ExplicitSigner,
+            Some(prefix.as_os_str()),
+        )
+        .unwrap();
+
+        let attestation_pem = fs::read(&path).unwrap();
+        assert_ne!(attestation_pem, public_key_pem);
+        validate_device_public_key(&device_point, Some(prefix.as_os_str())).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn rejects_attestation_signed_by_another_key() {
         let device_key = private_key();
         let device_point = public_point(&device_key);
