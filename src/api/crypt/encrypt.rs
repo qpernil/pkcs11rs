@@ -376,6 +376,7 @@ fn crypt_init(
         }
         let operation = CryptOperation {
             key: operation_key,
+            public_key: object.public_key.clone(),
             slot_id,
             requires_login: object.private,
             context_specific_extended: matches!(
@@ -1184,9 +1185,15 @@ fn crypt(
             }
         } else {
             match &operation.key {
-                KeyMaterial::RsaPublic(key) => key.size(),
-                KeyMaterial::PivPrivate { modulus, .. } if !encrypting => modulus.len(),
-                KeyMaterial::OpenPgpPrivate { modulus, .. } if !encrypting => modulus.len(),
+                KeyMaterial::Public(PublicKeyMaterial::Rsa(key)) => key.size(),
+                KeyMaterial::PivPrivate { .. } | KeyMaterial::OpenPgpPrivate { .. }
+                    if !encrypting =>
+                {
+                    match &operation.public_key {
+                        Some(PublicKeyMaterial::Rsa(key)) => key.size(),
+                        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                    }
+                }
                 KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
                     match yubihsm_rsa_length(*algorithm) {
                         Ok(length) => length,

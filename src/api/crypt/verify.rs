@@ -147,19 +147,13 @@ fn verify_init(
                 && (object.key_type != CKK_EC as CK_KEY_TYPE
                     || !matches!(
                         asymmetric_key,
-                        Some(KeyMaterial::FidoKey {
-                            public_key: FidoPublicKey::Ec { .. },
-                            ..
-                        })
+                        Some(KeyMaterial::Public(PublicKeyMaterial::Ec { .. }))
                     )))
             || (eddsa_mechanism
                 && (object.key_type != CKK_EC_EDWARDS as CK_KEY_TYPE
                     || !matches!(
                         asymmetric_key,
-                        Some(KeyMaterial::FidoKey {
-                            public_key: FidoPublicKey::Ec { .. },
-                            ..
-                        })
+                        Some(KeyMaterial::Public(PublicKeyMaterial::Ec { .. }))
                     )))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -168,6 +162,7 @@ fn verify_init(
         ctx.get_session_context_mut(session_handle)?
             .verify_operation = Some(SignatureOperation {
             key: asymmetric_key.unwrap_or_else(|| object.material.clone()),
+            public_key: object.public_key.clone(),
             slot_id,
             requires_login: object.private,
             context_specific_extended: false,
@@ -282,26 +277,15 @@ fn verify(
             );
         }
         match &operation.key {
-            KeyMaterial::FidoKey {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters: _,
-                        public_key,
-                        ..
-                    },
-                ..
-            } if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE => {
+            KeyMaterial::Public(PublicKeyMaterial::Ec { public_key, .. })
+                if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE =>
+            {
                 verify_ed25519(public_key, data, signature)
             }
-            KeyMaterial::FidoKey {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters,
-                        public_key,
-                        ..
-                    },
-                ..
-            } => {
+            KeyMaterial::Public(PublicKeyMaterial::Ec {
+                parameters,
+                public_key,
+            }) => {
                 let curve = ec_curve_from_parameters(parameters)?;
                 let coordinate_length = ec_parameters(curve)?.coordinate_length;
                 let digest = if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {

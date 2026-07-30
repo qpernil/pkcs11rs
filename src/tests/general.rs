@@ -852,6 +852,8 @@ fn openpgp_data_objects_expose_application_tag_and_lazy_value() {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::OpenPgpData {
             tag: 0x005b,
             connector,
@@ -955,12 +957,11 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
         local: true,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::OpenPgpPrivate {
             key_ref: crate::openpgp::KeyRef::Signature,
             algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
-            modulus: vec![0; 256],
-            public_exponent: vec![1, 0, 1],
-            public_key: vec![0; 256],
             pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
             touch_policy: 1,
         },
@@ -975,9 +976,6 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
     object.material = crate::KeyMaterial::OpenPgpPrivate {
         key_ref: crate::openpgp::KeyRef::Authentication,
         algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
-        modulus: vec![0; 256],
-        public_exponent: vec![1, 0, 1],
-        public_key: vec![0; 256],
         pin_policy: crate::openpgp::PW1_ONE_SIGNATURE,
         touch_policy: 2,
     };
@@ -1370,6 +1368,7 @@ pub fn authentication_loss_cancels_active_private_signing() {
             remove_on_refresh: false,
             login_active: Some(login_active.clone()),
             mechanisms: crate::MECHANISMS.to_vec(),
+            token_objects: Vec::new(),
             session_objects: Vec::new(),
         }),
     );
@@ -1619,9 +1618,6 @@ fn context_specific_login_authenticates_an_always_authenticate_operation() {
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
-            modulus: vec![0; 128],
-            public_exponent: vec![1, 0, 1],
-            public_key: Vec::new(),
             pin_policy: 3,
             touch_policy: 1,
         };
@@ -1683,9 +1679,6 @@ fn context_specific_login_does_not_require_always_authenticate_attribute() {
         object.material = crate::KeyMaterial::PivPrivate {
             slot: crate::piv::Slot::Signature,
             algorithm: crate::piv::Algorithm::Rsa1024,
-            modulus: vec![0; 128],
-            public_exponent: vec![1, 0, 1],
-            public_key: Vec::new(),
             pin_policy: 2,
             touch_policy: 1,
         };
@@ -2700,6 +2693,7 @@ pub fn open_session_refreshes_token_presence() {
             remove_on_refresh: true,
             login_active: None,
             mechanisms: crate::MECHANISMS.to_vec(),
+            token_objects: Vec::new(),
             session_objects: Vec::new(),
         }),
     );

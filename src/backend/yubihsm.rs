@@ -2880,7 +2880,7 @@ pub(crate) fn yubihsm_device_public_key_object(
     slot_id: CK_SLOT_ID,
     public_key: &[u8],
 ) -> Result<TokenObject, Error> {
-    let public_key_info = crate::yubihsm::trust::device_spki(public_key)?;
+    crate::yubihsm::trust::device_spki(public_key)?;
     Ok(TokenObject {
         slot_id: Some(slot_id),
         unique_id: "yubihsm-device-public".to_owned(),
@@ -2902,10 +2902,17 @@ pub(crate) fn yubihsm_device_public_key_object(
         local: true,
         key_gen_mechanism: None,
         creator_session: None,
-        material: KeyMaterial::YubiHsmDevicePublic {
-            public_key: public_key.to_vec(),
-            public_key_info,
-        },
+        public_key: None,
+        rp_id: None,
+        material: KeyMaterial::Public(PublicKeyMaterial::Ec {
+            parameters: piv_ec_parameters(piv::Algorithm::EccP256)
+                .ok_or(CKR_DEVICE_ERROR)?
+                .to_vec(),
+            public_key: public_key
+                .strip_prefix(&[0x04])
+                .unwrap_or(public_key)
+                .to_vec(),
+        }),
     })
 }
 
@@ -3118,6 +3125,8 @@ pub(crate) fn yubihsm_token_objects_with_generation(
             .then(|| yubihsm_key_generation_mechanism(info.algorithm))
             .flatten(),
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material,
     }];
 
@@ -3175,6 +3184,8 @@ pub(crate) fn yubihsm_token_objects_with_generation(
             local: generated,
             key_gen_mechanism: objects[0].key_gen_mechanism,
             creator_session: None,
+            public_key: None,
+            rp_id: None,
             material: public_material,
         };
         match apply_yubihsm_public_projection_metadata(&mut public_object, metadata) {
@@ -3829,6 +3840,8 @@ impl Slot for YubiHsmSlot {
                 local: true,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::YubiHsmAttestation {
                     connector: self.connector.clone(),
                     session: self.session.clone(),

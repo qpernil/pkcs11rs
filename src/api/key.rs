@@ -300,14 +300,9 @@ fn generate_key_pair(
             let projected = project_cose_public_key(registration.credential_public_key_cose())
                 .filter(|projected| projected.key_type == CKK_EC as CK_KEY_TYPE)
                 .ok_or(CKR_DEVICE_ERROR)?;
-            public_object.material = KeyMaterial::FidoKey {
-                public_key: projected.public_key.clone(),
-                rp_id: None,
-            };
-            private_object.material = KeyMaterial::FidoPreviewCredential {
-                public_key: projected.public_key,
-                registration,
-            };
+            public_object.material = KeyMaterial::Public(projected.public_key.clone());
+            private_object.public_key = Some(projected.public_key);
+            private_object.material = KeyMaterial::FidoPreviewCredential { registration };
             public_object.local = true;
             private_object.local = true;
             public_object.key_gen_mechanism = Some(mechanism.mechanism);
@@ -1055,7 +1050,7 @@ fn project_public_key_object(
     base: &TokenObject,
     templ: &[CK_ATTRIBUTE],
 ) -> Result<TokenObject, Error> {
-    let material = base.material.projected_public()?;
+    let material = KeyMaterial::Public(base.projected_public_key()?);
     let mut parsed = TokenObjectTemplate {
         class: Some(CKO_PUBLIC_KEY as CK_OBJECT_CLASS),
         key_type: Some(base.key_type),
@@ -1098,6 +1093,7 @@ fn project_public_key_object(
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     projected.material = material;
+    projected.rp_id = base.rp_id.clone();
     projected.local = false;
     projected.key_gen_mechanism = None;
     for attribute in templ {
@@ -1271,10 +1267,10 @@ fn derive_key(
                 )
                 .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
             object.material = KeyMaterial::PreviewSignDerived {
-                public_key: projected.public_key,
                 registration,
                 derived: record,
             };
+            object.public_key = Some(projected.public_key);
             object.local = true;
             object.key_gen_mechanism = Some(mechanism.mechanism);
             *key_handle = ctx.store_backed_object(session_handle, object)?;

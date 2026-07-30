@@ -852,6 +852,8 @@ pub(super) fn abi_test_yubihsm_object(slot_id: CK_SLOT_ID) -> TokenObject {
         local: true,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::YubiHsm {
             id: 1,
             object_type: YUBIHSM_ASYMMETRIC_KEY,
@@ -890,6 +892,8 @@ fn abi_test_yubihsm_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
         local: true,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::YubiHsm {
             id: 1,
             object_type: YUBIHSM_PUBLIC_KEY,
@@ -927,6 +931,8 @@ pub(super) fn abi_test_yubihsm_aes_object(slot_id: CK_SLOT_ID) -> TokenObject {
         local: true,
         key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::YubiHsm {
             id: 2,
             object_type: YUBIHSM_SYMMETRIC_KEY,
@@ -1180,6 +1186,8 @@ fn abi_test_yubihsm_rsa_wrap_public_object(slot_id: CK_SLOT_ID) -> TokenObject {
         local: true,
         key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::YubiHsm {
             id: 9,
             object_type: YUBIHSM_WRAP_KEY_PUBLIC,

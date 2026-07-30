@@ -65,8 +65,8 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
             .ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
         imported.sign = true;
         imported.derive = false;
+        imported.public_key = Some(projected.public_key);
         KeyMaterial::PreviewSignDerived {
-            public_key: projected.public_key,
             registration,
             derived,
         }
@@ -331,14 +331,17 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&without_touch)?;
-        let KeyMaterial::RsaPrivate(key) = parsed.material else {
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) = parsed.material else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
         let bits = key.size() * 8;
         if !matches!(bits, 2048 | 3072 | 4096) {
             return Err(CKR_KEY_SIZE_RANGE.into());
         }
-        (OpenPgpAlgorithm::Rsa { bits }, KeyMaterial::RsaPrivate(key))
+        (
+            OpenPgpAlgorithm::Rsa { bits },
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)),
+        )
     } else {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
         let params = required_template_value(templ, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
@@ -506,7 +509,7 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&filtered)?;
-        let KeyMaterial::RsaPrivate(key) = parsed.material else {
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) = parsed.material else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
         let algorithm = match key.size() {
@@ -705,6 +708,8 @@ fn piv_certificate_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::PivCertificate {
             algorithm,
             value: certificate.clone(),
@@ -821,6 +826,8 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::PivData {
             object_id,
             value: value.clone(),
@@ -920,7 +927,9 @@ fn yubihsm_import_command(
     object: &TokenObject,
 ) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS), Error> {
     match &object.material {
-        KeyMaterial::RsaPrivate(key) if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key))
+            if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
+        {
             let (algorithm, component_length) = match key.size() {
                 256 => (YUBIHSM_ALGO_RSA_2048, 128),
                 384 => (YUBIHSM_ALGO_RSA_3072, 192),
@@ -1086,7 +1095,7 @@ fn build_imported_key_material(
                 required_big_num(&mut components, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)?;
             let key = RsaPublicKey::new(modulus, exponent)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::RsaPublic(key)
+            KeyMaterial::Public(PublicKeyMaterial::Rsa(key))
         }
         (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -1122,7 +1131,7 @@ fn build_imported_key_material(
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             key.precompute()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::RsaPrivate(Box::new(key))
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(Box::new(key)))
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };
@@ -1183,11 +1192,16 @@ fn copy_object(
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
-                | KeyMaterial::HsmAuthPublic { .. }
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
         if matches!(copied_object.material, KeyMaterial::YubiHsm { .. }) {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
+        if copied_object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && ctx.is_native_token_object_handle(object)
+            && matches!(copied_object.material, KeyMaterial::Public(_))
+        {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
 
@@ -1246,10 +1260,7 @@ fn destroy_object(
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
-                | KeyMaterial::HsmAuthPublic { .. }
-                | KeyMaterial::YubiHsmDevicePublic { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
-                | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
         ) {
             return Err(CKR_ACTION_PROHIBITED.into());
@@ -1270,6 +1281,12 @@ fn destroy_object(
         if ctx.destroy_backed_object(object, &stored_object)? {
             return Ok(());
         }
+        if stored_object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && ctx.is_native_token_object_handle(object)
+            && matches!(stored_object.material, KeyMaterial::Public(_))
+        {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
         let piv_action = match &stored_object.material {
             KeyMaterial::PivPrivate { slot, .. } => Some((true, *slot)),
             KeyMaterial::PivCertificate { .. } => {
@@ -1277,11 +1294,6 @@ fn destroy_object(
                     return Err(CKR_DEVICE_ERROR.into());
                 };
                 Some((false, piv::Slot::from_cka_id(*id).ok_or(CKR_DEVICE_ERROR)?))
-            }
-            KeyMaterial::PivPublic { .. } | KeyMaterial::RsaPublic(_)
-                if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) =>
-            {
-                return Err(CKR_ACTION_PROHIBITED.into());
             }
             KeyMaterial::PivAttestation { .. } => {
                 ctx.remove_object_handle(object);
@@ -1428,6 +1440,7 @@ fn get_attribute_value(
     let templ = _from_raw_parts_mut(templ, count as usize)?;
     with_session_context(session_handle, |ctx| {
         let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
+        let object_handle = object;
         let object = ctx
             .resolve_object(object)?
             .filter(|object| object.is_visible_to(logged_in))
@@ -1445,7 +1458,13 @@ fn get_attribute_value(
                 rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
                 continue;
             }
-            match object_attribute_value(ctx, session_handle, &object, attribute.type_)? {
+            match object_attribute_value(
+                ctx,
+                session_handle,
+                object_handle,
+                &object,
+                attribute.type_,
+            )? {
                 Some(value) => {
                     if let Err(e) = write_attribute_value(attribute, &value) {
                         rv = combine_attribute_rv(rv, e);
@@ -1494,6 +1513,7 @@ fn yubihsm_object_value(
 fn object_attribute_value(
     ctx: &SlotContext,
     session_handle: CK_SESSION_HANDLE,
+    object_handle: CK_OBJECT_HANDLE,
     object: &TokenObject,
     attribute_type: CK_ATTRIBUTE_TYPE,
 ) -> Result<Option<Vec<u8>>, Error> {
@@ -1526,6 +1546,18 @@ fn object_attribute_value(
                     .map(Some);
             }
         }
+    }
+    if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+        && ctx.is_native_token_object_handle(object_handle)
+        && matches!(object.material, KeyMaterial::Public(_))
+        && matches!(
+            attribute_type,
+            x if x == CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_COPYABLE as CK_ATTRIBUTE_TYPE
+                || x == CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE
+        )
+    {
+        return Ok(Some(bool_attribute(false)));
     }
     Ok(object.attribute_value(attribute_type))
 }
@@ -1784,7 +1816,8 @@ fn find_objects_init(
             }
             let mut matches = true;
             for (attribute_type, expected) in &templ {
-                if object_attribute_value(ctx, session_handle, &object, *attribute_type)?.as_ref()
+                if object_attribute_value(ctx, session_handle, handle, &object, *attribute_type)?
+                    .as_ref()
                     != Some(expected)
                 {
                     matches = false;

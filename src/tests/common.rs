@@ -3725,6 +3725,8 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
         local: true,
         key_gen_mechanism: Some(CKM_AES_KEY_GEN as CK_MECHANISM_TYPE),
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::YubiHsm {
             id: key_id,
             object_type: crate::YUBIHSM_SYMMETRIC_KEY,
@@ -5690,10 +5692,14 @@ fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
         local: true,
         key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
         creator_session: None,
-        material: crate::KeyMaterial::PivPublic {
-            algorithm: crate::piv::Algorithm::EccP256,
+        public_key: None,
+        rp_id: None,
+        material: crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+            parameters: crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .expect("P-256 parameters")
+                .to_vec(),
             public_key: vec![0x11; 64],
-        },
+        }),
     };
     assert_eq!(
         object.attribute_value(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE),
@@ -6266,6 +6272,7 @@ struct TestSlot {
     remove_on_refresh: bool,
     login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     mechanisms: Vec<crate::MechanismDetails>,
+    token_objects: Vec<crate::TokenObject>,
     session_objects: Vec<crate::TokenObject>,
 }
 
@@ -6875,6 +6882,13 @@ impl crate::Slot for TestSlot {
         self.mechanisms.clone()
     }
 
+    fn backend_token_objects(
+        &self,
+        _slot_id: CK_SLOT_ID,
+    ) -> Result<Vec<crate::TokenObject>, crate::error::Error> {
+        Ok(self.token_objects.clone())
+    }
+
     fn session_objects(
         &self,
         _slot_id: CK_SLOT_ID,
@@ -6889,6 +6903,7 @@ fn test_slot(present: bool) -> TestSlot {
         remove_on_refresh: false,
         login_active: None,
         mechanisms: crate::MECHANISMS.to_vec(),
+        token_objects: Vec::new(),
         session_objects: Vec::new(),
     }
 }
@@ -7632,7 +7647,9 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
             .find(|(_, object)| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
             .unwrap();
         let private = match &object.material {
-            crate::KeyMaterial::RsaPrivate(private) => private.as_ref().clone(),
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(private)) => {
+                private.as_ref().clone()
+            }
             _ => panic!("default private key must be RSA"),
         };
         (*handle, private)

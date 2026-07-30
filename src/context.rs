@@ -24,7 +24,7 @@ use crate::{
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
 #[cfg(any(test, feature = "abi-tests"))]
-use crate::{KeyMaterial, ABI_TEST_SLOT_ID};
+use crate::{KeyMaterial, PublicKeyMaterial, SoftwarePrivateKey, ABI_TEST_SLOT_ID};
 use nusb::MaybeFuture;
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::RsaPublicKey;
@@ -1209,6 +1209,11 @@ impl SlotContext {
         self.slot.token_object(self.slot_id, &locator.unique_id)
     }
 
+    pub(crate) fn is_native_token_object_handle(&self, handle: CK_OBJECT_HANDLE) -> bool {
+        self.token_object_handles.contains_key(&handle)
+            && !self.backed_object_handles.contains_key(&handle)
+    }
+
     pub(crate) fn resolved_objects(&self) -> Result<Vec<(CK_OBJECT_HANDLE, TokenObject)>, Error> {
         let mut objects = self
             .memory_objects
@@ -2039,7 +2044,9 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
                 local: true,
                 key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
                 creator_session: None,
-                material: KeyMaterial::RsaPublic(public_key),
+                public_key: None,
+                rp_id: None,
+                material: KeyMaterial::Public(PublicKeyMaterial::Rsa(public_key)),
             },
         ),
         (
@@ -2065,7 +2072,11 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
                 local: true,
                 key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
                 creator_session: None,
-                material: KeyMaterial::RsaPrivate(Box::new(private_key)),
+                public_key: Some(PublicKeyMaterial::Rsa(RsaPublicKey::from(&private_key))),
+                rp_id: None,
+                material: KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(Box::new(
+                    private_key,
+                ))),
             },
         ),
     ]);

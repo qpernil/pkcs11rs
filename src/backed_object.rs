@@ -128,91 +128,25 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
 }
 
 fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
-    let (kind, first, second, prefix_uncompressed, rp_id) = match &object.material {
-        KeyMaterial::RsaPublic(public) => (
+    let public_key = object.projected_public_key()?;
+    let (kind, first, second, requires_uncompressed_prefix) = match &public_key {
+        PublicKeyMaterial::Rsa(public) => (
             PUBLIC_KEY_KIND_RSA,
             public.n().to_bytes_be(),
             public.e().to_bytes_be(),
             false,
-            None,
         ),
-        KeyMaterial::PivPublic {
-            algorithm,
+        PublicKeyMaterial::Ec {
+            parameters,
             public_key,
         } => (
             PUBLIC_KEY_KIND_EC,
-            piv_ec_parameters(*algorithm)
-                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-                .to_vec(),
+            parameters.clone(),
             public_key.clone(),
             object.key_type == CKK_EC as CK_KEY_TYPE,
-            None,
         ),
-        KeyMaterial::OpenPgpPublic {
-            algorithm,
-            public_key,
-        } => (
-            PUBLIC_KEY_KIND_EC,
-            openpgp_ec_params(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
-            public_key.clone(),
-            object.key_type == CKK_EC as CK_KEY_TYPE,
-            None,
-        ),
-        KeyMaterial::FidoKey { public_key, rp_id } => match public_key {
-            FidoPublicKey::Rsa {
-                modulus,
-                public_exponent,
-            } => (
-                PUBLIC_KEY_KIND_RSA,
-                modulus.clone(),
-                public_exponent.clone(),
-                false,
-                rp_id.clone(),
-            ),
-            FidoPublicKey::Ec {
-                parameters,
-                public_key,
-                prefix_uncompressed,
-            } => (
-                PUBLIC_KEY_KIND_EC,
-                parameters.clone(),
-                public_key.clone(),
-                *prefix_uncompressed,
-                rp_id.clone(),
-            ),
-        },
-        KeyMaterial::YubiHsm {
-            algorithm,
-            public_key,
-            ..
-        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => (
-            PUBLIC_KEY_KIND_RSA,
-            public_key.clone(),
-            vec![0x01, 0x00, 0x01],
-            false,
-            None,
-        ),
-        KeyMaterial::YubiHsm {
-            algorithm,
-            public_key,
-            ..
-        } if !public_key.is_empty()
-            && (is_yubihsm_ec(*algorithm)
-                || is_yubihsm_x25519(*algorithm)
-                || *algorithm == YUBIHSM_ALGO_ED25519) =>
-        {
-            (
-                PUBLIC_KEY_KIND_EC,
-                yubihsm_ec_parameters(*algorithm)
-                    .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-                    .to_vec(),
-                public_key.clone(),
-                is_yubihsm_ec(*algorithm),
-                None,
-            )
-        }
-        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     };
+    let rp_id = object.rp_id.clone();
     let count = 7 + usize::from(rp_id.is_some());
     let mut encoded = Vec::new();
     let mut encoder = Encoder::new(&mut encoded);
@@ -231,7 +165,7 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
         .and_then(|encoder| encoder.u8(6))
         .and_then(|encoder| encoder.bytes(&second))
         .and_then(|encoder| encoder.u8(7))
-        .and_then(|encoder| encoder.bool(prefix_uncompressed))
+        .and_then(|encoder| encoder.bool(requires_uncompressed_prefix))
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     if let Some(rp_id) = rp_id {
         encoder
@@ -256,12 +190,7 @@ fn encode_record(object: &TokenObject, provider: &str, backing: Vec<u8>) -> Resu
 
 pub(crate) fn encode_backed_object(object: &TokenObject) -> Result<EncodedBackedObject, Error> {
     match &object.material {
-        KeyMaterial::RsaPublic(_)
-        | KeyMaterial::PivPublic { .. }
-        | KeyMaterial::OpenPgpPublic { .. }
-        | KeyMaterial::FidoKey { .. }
-            if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS =>
-        {
+        KeyMaterial::Public(_) if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS => {
             Ok(EncodedBackedObject {
                 object: encode_record(
                     object,
@@ -316,10 +245,7 @@ pub(crate) fn supports_backed_object(object: &TokenObject) -> bool {
     matches!(
         (&object.material, object.class),
         (
-            KeyMaterial::RsaPublic(_)
-                | KeyMaterial::PivPublic { .. }
-                | KeyMaterial::OpenPgpPublic { .. }
-                | KeyMaterial::FidoKey { .. },
+            KeyMaterial::Public(_),
             class
         ) if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
     ) || matches!(
@@ -394,7 +320,9 @@ fn optional_unsigned(
     }
 }
 
-fn decode_public_key_material(encoded: &[u8]) -> Result<(CK_KEY_TYPE, KeyMaterial), Error> {
+fn decode_public_key_material(
+    encoded: &[u8],
+) -> Result<(CK_KEY_TYPE, KeyMaterial, Option<String>), Error> {
     let mut decoder = Decoder::new(encoded);
     let count = decoder
         .map()
@@ -469,23 +397,14 @@ fn decode_public_key_material(encoded: &[u8]) -> Result<(CK_KEY_TYPE, KeyMateria
     let second = second.ok_or(CKR_DATA_INVALID)?;
     let prefix = prefix.ok_or(CKR_DATA_INVALID)?;
     let material = match kind.ok_or(CKR_DATA_INVALID)? {
-        PUBLIC_KEY_KIND_RSA if key_type == CKK_RSA as CK_KEY_TYPE && !prefix && rp_id.is_none() => {
-            KeyMaterial::RsaPublic(
+        PUBLIC_KEY_KIND_RSA if key_type == CKK_RSA as CK_KEY_TYPE && !prefix => {
+            KeyMaterial::Public(PublicKeyMaterial::Rsa(
                 RsaPublicKey::new(
                     BigUint::from_bytes_be(&first),
                     BigUint::from_bytes_be(&second),
                 )
                 .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-            )
-        }
-        PUBLIC_KEY_KIND_RSA if key_type == CKK_RSA as CK_KEY_TYPE && !prefix => {
-            KeyMaterial::FidoKey {
-                public_key: FidoPublicKey::Rsa {
-                    modulus: first,
-                    public_exponent: second,
-                },
-                rp_id,
-            }
+            ))
         }
         PUBLIC_KEY_KIND_EC
             if matches!(
@@ -495,18 +414,17 @@ fn decode_public_key_material(encoded: &[u8]) -> Result<(CK_KEY_TYPE, KeyMateria
                     || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
             ) =>
         {
-            KeyMaterial::FidoKey {
-                public_key: FidoPublicKey::Ec {
-                    parameters: first,
-                    public_key: second,
-                    prefix_uncompressed: prefix,
-                },
-                rp_id,
+            if prefix != (key_type == CKK_EC as CK_KEY_TYPE) {
+                return Err(CKR_DATA_INVALID.into());
             }
+            KeyMaterial::Public(PublicKeyMaterial::Ec {
+                parameters: first,
+                public_key: second,
+            })
         }
         _ => return Err(CKR_DATA_INVALID.into()),
     };
-    Ok((key_type, material))
+    Ok((key_type, material, rp_id))
 }
 
 /// Convert any operational public-key object to the canonical software-backed
@@ -515,7 +433,7 @@ pub(crate) fn projected_public_key_material(object: &TokenObject) -> Result<KeyM
     if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
-    let (key_type, material) = decode_public_key_material(&encode_public_key_material(object)?)?;
+    let (key_type, material, _) = decode_public_key_material(&encode_public_key_material(object)?)?;
     if key_type != object.key_type {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
@@ -529,6 +447,7 @@ fn materialize_object(
     class: CK_OBJECT_CLASS,
     attributes: &KeyAttributes,
     material: KeyMaterial,
+    rp_id: Option<String>,
 ) -> Result<TokenObject, Error> {
     let key_type = CK_KEY_TYPE::try_from(required_unsigned(
         attributes,
@@ -561,6 +480,8 @@ fn materialize_object(
         local: required_bool(attributes, CKA_LOCAL as CK_ATTRIBUTE_TYPE)?,
         key_gen_mechanism,
         creator_session: None,
+        public_key: None,
+        rp_id,
         material,
     };
     if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS {
@@ -592,7 +513,8 @@ pub(crate) fn decode_backed_object(
             if record.aspects().count() != 1 {
                 return Err(CKR_DATA_INVALID.into());
             }
-            let (key_type, material) = decode_public_key_material(record.backing().data_cbor())?;
+            let (key_type, material, rp_id) =
+                decode_public_key_material(record.backing().data_cbor())?;
             if required_unsigned(attributes, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)?
                 != cryptoki_ulong_to_u64(key_type)
             {
@@ -605,6 +527,7 @@ pub(crate) fn decode_backed_object(
                 CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
                 attributes,
                 material,
+                rp_id,
             )
             .map(Some)
         }
@@ -629,6 +552,7 @@ pub(crate) fn decode_backed_object(
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 attributes,
                 KeyMaterial::PreviewSignRegistration { registration },
+                None,
             )
             .map(Some)
         }
@@ -665,12 +589,15 @@ pub(crate) fn decode_backed_object(
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
                 attributes,
                 KeyMaterial::PreviewSignDerived {
-                    public_key: projected.public_key,
                     registration,
                     derived,
                 },
+                None,
             )
-            .map(Some)
+            .map(|mut object| {
+                object.public_key = Some(projected.public_key);
+                Some(object)
+            })
         }
         _ => Ok(None),
     }
