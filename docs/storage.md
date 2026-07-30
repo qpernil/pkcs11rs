@@ -48,6 +48,15 @@ a FIDO-only compatibility path when the generic setting is absent. Slots
 without stable identity retain the unavailable provider rather than sharing an
 ambiguously addressed store.
 
+Named software slots use the configured token name as their stable storage
+identity. When `PKCS11RS_TOKEN_STORAGE` is set, each name receives a distinct
+`software-name-<hex-encoded-name>` directory below `tokens-v1`. The provider
+stores supported non-private backed token objects such as public projections.
+Software private keys remain session-only even when that provider is present.
+A future persistent private-key design would require its own explicit
+protection and unlock model; the current implementation never writes private
+software material to this generic local provider.
+
 ## Backed-key metadata
 
 The public `key_metadata` module defines the provider-neutral canonical schema

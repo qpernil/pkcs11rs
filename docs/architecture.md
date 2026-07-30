@@ -64,9 +64,13 @@ software private-key support is an explicit slot capability and is disabled for
 all hardware and applet slots. The typed implementation covers RSA, every
 Weierstrass curve supported by the hardware backends (NIST
 P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
-Ed25519, and X25519 for a future opt-in software slot. `CKA_TOKEN=CK_TRUE` is
-never allowed to fall back to that implementation: the selected backend must
-create a genuine token object or fail. FIDO2 adds an explicit vendor
+Ed25519, and X25519. `PKCS11RS_SOFTWARE_SLOTS` creates one independent
+`SoftwareSlot` and `SoftwareSession` backend for each configured name. These
+slots have no transport, hardware flags, or login state. A configured generic
+token-storage root is scoped by software-token name and stores only supported
+non-private token objects.
+`CKA_TOKEN=CK_TRUE` is never allowed to fall back to the software
+implementation: a persistent private-key request fails. FIDO2 adds an explicit vendor
 GetAssertion mechanism for operational resident credentials; it cannot be
 confused with a bare EC or RSA signing mechanism because its input and
 structured output are separately defined.

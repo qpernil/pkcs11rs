@@ -31,6 +31,7 @@ CKR_ATTRIBUTE_TYPE_INVALID = 0x12
 CKR_DATA_LEN_RANGE = 0x21
 CKR_ENCRYPTED_DATA_INVALID = 0x40
 CKR_FUNCTION_NOT_SUPPORTED = 0x54
+CKR_KEY_HANDLE_INVALID = 0x60
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68
@@ -61,6 +62,11 @@ CKF_SERIAL_SESSION = 0x00000004
 CKF_ASYNC_SESSION = 0x00000008
 CKF_OS_LOCKING_OK = 0x00000002
 CKF_INTERFACE_FORK_SAFE = 0x00000001
+CKF_TOKEN_PRESENT = 0x00000001
+CKF_HW_SLOT = 0x00000004
+CKF_HW = 0x00000001
+CKF_RNG = 0x00000001
+CKF_TOKEN_INITIALIZED = 0x00000400
 CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_SIGN = 0x00000800
 CKF_VERIFY = 0x00002000
@@ -617,6 +623,11 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_TOKEN_INFO),
         ]
         cls.lib.C_GetTokenInfo.restype = CK_RV
+        cls.lib.C_GetSlotInfo.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_SLOT_INFO),
+        ]
+        cls.lib.C_GetSlotInfo.restype = CK_RV
         cls.lib.C_Login.argtypes = [
             CK_ULONG,
             CK_ULONG,
@@ -654,6 +665,17 @@ class Pkcs11AbiTests(unittest.TestCase):
             ctypes.POINTER(CK_ULONG),
         ]
         cls.lib.C_CreateObject.restype = CK_RV
+        cls.lib.C_GenerateKeyPair.argtypes = [
+            CK_ULONG,
+            ctypes.POINTER(CK_MECHANISM),
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ATTRIBUTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_ULONG),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.C_GenerateKeyPair.restype = CK_RV
         cls.lib.C_CopyObject.argtypes = [
             CK_ULONG,
             CK_ULONG,
@@ -1206,6 +1228,530 @@ class Pkcs11AbiTests(unittest.TestCase):
             ABI_TEST_YUBIHSM_SLOT_ID,
             ABI_TEST_SCP11_SLOT_ID,
         ])
+
+    def test_named_software_slots_are_explicit_independent_session_tokens(
+        self,
+    ) -> None:
+        previous = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "build signing,key exchange"
+        try:
+            self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+            count = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GetSlotList(1, None, ctypes.byref(count)),
+                CKR_OK,
+            )
+            slots = (CK_ULONG * count.value)()
+            self.assertEqual(
+                self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+                CKR_OK,
+            )
+
+            named_slots: dict[bytes, int] = {}
+            for slot_id in slots:
+                token_info = CK_TOKEN_INFO()
+                self.assertEqual(
+                    self.lib.C_GetTokenInfo(slot_id, ctypes.byref(token_info)),
+                    CKR_OK,
+                )
+                label = bytes(token_info.label).rstrip(b" ")
+                if label in {b"build signing", b"key exchange"}:
+                    named_slots[label] = slot_id
+                    self.assertEqual(
+                        token_info.flags,
+                        CKF_RNG | CKF_TOKEN_INITIALIZED,
+                    )
+                    self.assertEqual(token_info.ulMinPinLen, 0)
+                    self.assertEqual(token_info.ulMaxPinLen, 0)
+
+                    slot_info = CK_SLOT_INFO()
+                    self.assertEqual(
+                        self.lib.C_GetSlotInfo(slot_id, ctypes.byref(slot_info)),
+                        CKR_OK,
+                    )
+                    self.assertEqual(slot_info.flags, CKF_TOKEN_PRESENT)
+                    self.assertEqual(slot_info.flags & CKF_HW_SLOT, 0)
+                    self.assertEqual(
+                        bytes(slot_info.slotDescription).rstrip(b" "),
+                        b"pkcs11rs software slot: " + label,
+                    )
+
+                    mechanism_info = CK_MECHANISM_INFO()
+                    self.assertEqual(
+                        self.lib.C_GetMechanismInfo(
+                            slot_id,
+                            CKM_RSA_PKCS,
+                            ctypes.byref(mechanism_info),
+                        ),
+                        CKR_OK,
+                    )
+                    self.assertEqual(
+                        (
+                            mechanism_info.ulMinKeySize,
+                            mechanism_info.ulMaxKeySize,
+                        ),
+                        (1024, 4096),
+                    )
+                    self.assertEqual(mechanism_info.flags & CKF_HW, 0)
+
+            self.assertEqual(
+                set(named_slots),
+                {b"build signing", b"key exchange"},
+            )
+
+            signing_session = self.open_slot_session(named_slots[b"build signing"])
+            exchange_session = self.open_slot_session(named_slots[b"key exchange"])
+            modulus_bits = CK_ULONG(1024)
+            session_object = CK_BYTE(0)
+            enabled = CK_BYTE(1)
+            public_label = (CK_BYTE * len(b"client public"))(*b"client public")
+            private_label = (CK_BYTE * len(b"client private"))(*b"client private")
+            object_id = (CK_BYTE * 4)(0x10, 0x20, 0x30, 0x40)
+            public_template = (CK_ATTRIBUTE * 6)(
+                CK_ATTRIBUTE(
+                    CKA_MODULUS_BITS,
+                    ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
+                    ctypes.sizeof(modulus_bits),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                    ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_LABEL,
+                    ctypes.cast(public_label, CK_VOID_PTR),
+                    len(public_label),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ID,
+                    ctypes.cast(object_id, CK_VOID_PTR),
+                    len(object_id),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ENCRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_VERIFY,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+            )
+            private_template = (CK_ATTRIBUTE * 5)(
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                    ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_LABEL,
+                    ctypes.cast(private_label, CK_VOID_PTR),
+                    len(private_label),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ID,
+                    ctypes.cast(object_id, CK_VOID_PTR),
+                    len(object_id),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_DECRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_SIGN,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+            )
+            mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
+            public_key = CK_ULONG()
+            private_key = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GenerateKeyPair(
+                    signing_session,
+                    ctypes.byref(mechanism),
+                    public_template,
+                    len(public_template),
+                    private_template,
+                    len(private_template),
+                    ctypes.byref(public_key),
+                    ctypes.byref(private_key),
+                ),
+                CKR_OK,
+            )
+
+            def read_attribute(handle: int, attribute_type: int) -> bytes:
+                attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        signing_session,
+                        handle,
+                        ctypes.byref(attribute),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                value = (CK_BYTE * attribute.ulValueLen)()
+                attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        signing_session,
+                        handle,
+                        ctypes.byref(attribute),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                return bytes(value)
+
+            self.assertEqual(
+                read_attribute(public_key.value, CKA_LABEL),
+                b"client public",
+            )
+            self.assertEqual(
+                read_attribute(private_key.value, CKA_LABEL),
+                b"client private",
+            )
+            self.assertEqual(
+                read_attribute(public_key.value, CKA_ID),
+                bytes(object_id),
+            )
+            self.assertEqual(
+                read_attribute(private_key.value, CKA_ID),
+                bytes(object_id),
+            )
+
+            sign = CK_MECHANISM(CKM_SHA224_RSA_PKCS, None, 0)
+            self.assertEqual(
+                self.lib.C_SignInit(
+                    exchange_session,
+                    ctypes.byref(sign),
+                    private_key.value,
+                ),
+                CKR_KEY_HANDLE_INVALID,
+            )
+            self.assertEqual(
+                self.lib.C_SignInit(
+                    signing_session,
+                    ctypes.byref(sign),
+                    private_key.value,
+                ),
+                CKR_OK,
+            )
+            message = (CK_BYTE * len(b"software ABI"))(*b"software ABI")
+            signature_length = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_Sign(
+                    signing_session,
+                    message,
+                    len(message),
+                    None,
+                    ctypes.byref(signature_length),
+                ),
+                CKR_OK,
+            )
+            signature = (CK_BYTE * signature_length.value)()
+            self.assertEqual(
+                self.lib.C_Sign(
+                    signing_session,
+                    message,
+                    len(message),
+                    signature,
+                    ctypes.byref(signature_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_VerifyInit(
+                    signing_session,
+                    ctypes.byref(sign),
+                    public_key.value,
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Verify(
+                    signing_session,
+                    message,
+                    len(message),
+                    signature,
+                    signature_length.value,
+                ),
+                CKR_OK,
+            )
+
+            token_object = CK_BYTE(1)
+            token_private_template = (CK_ATTRIBUTE * 1)(
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                    ctypes.sizeof(token_object),
+                ),
+            )
+            rejected_public = CK_ULONG()
+            rejected_private = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GenerateKeyPair(
+                    signing_session,
+                    ctypes.byref(mechanism),
+                    public_template,
+                    len(public_template),
+                    token_private_template,
+                    len(token_private_template),
+                    ctypes.byref(rejected_public),
+                    ctypes.byref(rejected_private),
+                ),
+                CKR_FUNCTION_NOT_SUPPORTED,
+            )
+            self.assertEqual(rejected_public.value, 0)
+            self.assertEqual(rejected_private.value, 0)
+
+            duplicate_private_template = (CK_ATTRIBUTE * 2)(
+                private_template[1],
+                private_template[1],
+            )
+            self.assertEqual(
+                self.lib.C_GenerateKeyPair(
+                    signing_session,
+                    ctypes.byref(mechanism),
+                    public_template,
+                    len(public_template),
+                    duplicate_private_template,
+                    len(duplicate_private_template),
+                    ctypes.byref(rejected_public),
+                    ctypes.byref(rejected_private),
+                ),
+                CKR_TEMPLATE_INCONSISTENT,
+            )
+
+            self.assertEqual(
+                self.lib.C_DestroyObject(signing_session, private_key.value),
+                CKR_OK,
+            )
+            attribute = CK_ATTRIBUTE(CKA_LABEL, None, 0)
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    signing_session,
+                    private_key.value,
+                    ctypes.byref(attribute),
+                    1,
+                ),
+                CKR_OBJECT_HANDLE_INVALID,
+            )
+            self.assertEqual(self.lib.C_CloseSession(signing_session), CKR_OK)
+            reopened = self.open_slot_session(named_slots[b"build signing"])
+            self.assertEqual(
+                self.lib.C_GetAttributeValue(
+                    reopened,
+                    public_key.value,
+                    ctypes.byref(attribute),
+                    1,
+                ),
+                CKR_OBJECT_HANDLE_INVALID,
+            )
+            self.assertEqual(self.lib.C_CloseSession(reopened), CKR_OK)
+            self.assertEqual(self.lib.C_CloseSession(exchange_session), CKR_OK)
+        finally:
+            self.lib.C_Finalize(None)
+            if previous is None:
+                os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
+            else:
+                os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous
+
+    def test_named_software_slot_restores_public_but_not_private_token_state(
+        self,
+    ) -> None:
+        previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        previous_storage = os.environ.get("PKCS11RS_TOKEN_STORAGE")
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "persistent public"
+            os.environ["PKCS11RS_TOKEN_STORAGE"] = directory
+            try:
+                def named_slot() -> int:
+                    count = CK_ULONG()
+                    self.assertEqual(
+                        self.lib.C_GetSlotList(1, None, ctypes.byref(count)),
+                        CKR_OK,
+                    )
+                    slots = (CK_ULONG * count.value)()
+                    self.assertEqual(
+                        self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+                        CKR_OK,
+                    )
+                    for slot_id in slots:
+                        info = CK_TOKEN_INFO()
+                        self.assertEqual(
+                            self.lib.C_GetTokenInfo(
+                                slot_id,
+                                ctypes.byref(info),
+                            ),
+                            CKR_OK,
+                        )
+                        if bytes(info.label).rstrip(b" ") == b"persistent public":
+                            return slot_id
+                    self.fail("configured software slot was not discovered")
+
+                def find_label(session: int, label: bytes) -> list[int]:
+                    value = (CK_BYTE * len(label))(*label)
+                    template = CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(value, CK_VOID_PTR),
+                        len(value),
+                    )
+                    self.assertEqual(
+                        self.lib.C_FindObjectsInit(
+                            session,
+                            ctypes.byref(template),
+                            1,
+                        ),
+                        CKR_OK,
+                    )
+                    handles = (CK_ULONG * 8)()
+                    found = CK_ULONG()
+                    self.assertEqual(
+                        self.lib.C_FindObjects(
+                            session,
+                            handles,
+                            len(handles),
+                            ctypes.byref(found),
+                        ),
+                        CKR_OK,
+                    )
+                    self.assertEqual(
+                        self.lib.C_FindObjectsFinal(session),
+                        CKR_OK,
+                    )
+                    return list(handles[: found.value])
+
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                slot_id = named_slot()
+                session = self.open_slot_session(
+                    slot_id,
+                    CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                )
+                modulus_bits = CK_ULONG(1024)
+                token_object = CK_BYTE(1)
+                session_object = CK_BYTE(0)
+                public_label = (CK_BYTE * len(b"restored public"))(
+                    *b"restored public"
+                )
+                private_label = (CK_BYTE * len(b"ephemeral private"))(
+                    *b"ephemeral private"
+                )
+                object_id = (CK_BYTE * 3)(9, 8, 7)
+                public_template = (CK_ATTRIBUTE * 4)(
+                    CK_ATTRIBUTE(
+                        CKA_MODULUS_BITS,
+                        ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
+                        ctypes.sizeof(modulus_bits),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(public_label, CK_VOID_PTR),
+                        len(public_label),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ID,
+                        ctypes.cast(object_id, CK_VOID_PTR),
+                        len(object_id),
+                    ),
+                )
+                private_template = (CK_ATTRIBUTE * 3)(
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                        ctypes.sizeof(session_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(private_label, CK_VOID_PTR),
+                        len(private_label),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ID,
+                        ctypes.cast(object_id, CK_VOID_PTR),
+                        len(object_id),
+                    ),
+                )
+                mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
+                public_key = CK_ULONG()
+                private_key = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKeyPair(
+                        session,
+                        ctypes.byref(mechanism),
+                        public_template,
+                        len(public_template),
+                        private_template,
+                        len(private_template),
+                        ctypes.byref(public_key),
+                        ctypes.byref(private_key),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    find_label(session, b"restored public"),
+                    [public_key.value],
+                )
+                self.assertEqual(
+                    find_label(session, b"ephemeral private"),
+                    [private_key.value],
+                )
+                self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+                self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                restored_session = self.open_slot_session(named_slot())
+                restored = find_label(restored_session, b"restored public")
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(
+                    find_label(restored_session, b"ephemeral private"),
+                    [],
+                )
+                attribute = CK_ATTRIBUTE(CKA_ID, None, 0)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored_session,
+                        restored[0],
+                        ctypes.byref(attribute),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                restored_id = (CK_BYTE * attribute.ulValueLen)()
+                attribute.pValue = ctypes.cast(restored_id, CK_VOID_PTR)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored_session,
+                        restored[0],
+                        ctypes.byref(attribute),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(bytes(restored_id), bytes(object_id))
+                self.assertEqual(
+                    self.lib.C_CloseSession(restored_session),
+                    CKR_OK,
+                )
+            finally:
+                self.lib.C_Finalize(None)
+                if previous_slots is None:
+                    os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
+                else:
+                    os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous_slots
+                if previous_storage is None:
+                    os.environ.pop("PKCS11RS_TOKEN_STORAGE", None)
+                else:
+                    os.environ["PKCS11RS_TOKEN_STORAGE"] = previous_storage
 
     def test_profile_objects_match_each_slot_capability(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
