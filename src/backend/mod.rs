@@ -3,6 +3,7 @@ mod crypto;
 mod ctap;
 mod openpgp;
 mod piv;
+mod software;
 mod traits;
 mod yubihsm;
 
@@ -29,6 +30,7 @@ pub(crate) use piv::{
     piv_policy_requires_login, piv_public_key_from_certificate, piv_sign_mechanism_supported,
     piv_slot_label, PivPublicKey, PivSlot,
 };
+pub(crate) use software::SoftwareSlot;
 pub(crate) use traits::{apply_device_versions, session_state, BackendSession, Slot, SlotKind};
 pub(crate) use yubihsm::{
     send_yubihsm_secure_command, HsmAuthProvider, HsmAuthProviderRegistry,

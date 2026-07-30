@@ -6633,6 +6633,7 @@ impl crate::Slot for ConcurrentSlot {
     fn name(&self) -> String {
         match self.kind {
             crate::SlotKind::Synthetic => String::from("Concurrent synthetic token"),
+            crate::SlotKind::Software => String::from("Concurrent software token"),
             crate::SlotKind::YubiHsm => String::from("Concurrent YubiHSM"),
             crate::SlotKind::Fido2 => String::from("Concurrent FIDO2"),
             crate::SlotKind::Ccid(application) => {
@@ -6648,6 +6649,7 @@ impl crate::Slot for ConcurrentSlot {
     fn product(&self) -> &str {
         match self.kind {
             crate::SlotKind::Synthetic => "Synthetic token",
+            crate::SlotKind::Software => "Software",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",
@@ -7078,10 +7080,19 @@ fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) 
 }
 
 fn install_software_private_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
-    let mut slot = test_slot(true);
-    slot.software_private_operations = true;
-    install_test_slot_with_backend(slot_id, Box::new(slot));
-    install_test_session(slot_id, session_handle);
+    install_test_slot_with_backend(
+        slot_id,
+        Box::new(crate::SoftwareSlot::new(String::from("test software"), 0)),
+    );
+    with_test_slot_context(slot_id, |context| {
+        context.memory_objects.clear();
+        let flags = (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS;
+        let backend = context.slot.open_session(slot_id, flags);
+        context
+            .sessions
+            .insert(session_handle, crate::SessionContext::new(backend));
+    });
+    crate::register_session_slot(session_handle, slot_id).unwrap();
 }
 
 fn install_public_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {

@@ -61,6 +61,7 @@ pub(crate) fn profile_token_objects(
 pub(crate) enum SlotKind {
     #[cfg(any(test, feature = "abi-tests"))]
     Synthetic,
+    Software,
     YubiHsm,
     Fido2,
     Ccid(CcidApplication),
@@ -84,6 +85,9 @@ pub(crate) trait Slot {
             firmware_version: None,
         }
         .physical_key()
+    }
+    fn software_token_name(&self) -> Option<&str> {
+        None
     }
     fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
         None
@@ -284,6 +288,9 @@ pub(crate) trait Slot {
     }
     fn supports_software_private_operations(&self) -> bool {
         false
+    }
+    fn private_objects_require_login(&self) -> bool {
+        true
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();

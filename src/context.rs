@@ -18,8 +18,8 @@ use crate::{
     BackendSession, CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot,
     FindOperation, HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
     HttpConnectorTlsConfig, IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector,
-    PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot, SlotKind, TokenObject,
-    UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot,
+    TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
@@ -41,6 +41,7 @@ pub(crate) const YUBIHSM_TLS_CLIENT_KEY_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT
 pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUNDLE";
 pub(crate) const TOKEN_STORAGE_ENV: &str = "PKCS11RS_TOKEN_STORAGE";
 pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
+pub(crate) const SOFTWARE_SLOTS_ENV: &str = "PKCS11RS_SOFTWARE_SLOTS";
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
@@ -69,6 +70,18 @@ impl TokenStorageConfig {
         kind: SlotKind,
     ) -> Result<LocalStorageProvider, Error> {
         LocalStorageProvider::open(self.token_root(key, kind))
+            .map_err(crate::backed_object::storage_error)
+    }
+
+    fn software_token_root(&self, name: &str) -> PathBuf {
+        self.root.join(TOKEN_STORAGE_SCHEMA_DIRECTORY).join(format!(
+            "software-name-{}",
+            encode_path_component(name.as_bytes())
+        ))
+    }
+
+    fn software_provider(&self, name: &str) -> Result<LocalStorageProvider, Error> {
+        LocalStorageProvider::open(self.software_token_root(name))
             .map_err(crate::backed_object::storage_error)
     }
 
@@ -155,6 +168,7 @@ fn slot_storage_directory(kind: SlotKind) -> &'static str {
     match kind {
         #[cfg(any(test, feature = "abi-tests"))]
         SlotKind::Synthetic => "synthetic",
+        SlotKind::Software => "software",
         SlotKind::YubiHsm => "yubihsm",
         SlotKind::Fido2 | SlotKind::Ccid(CcidApplication::Fido2) => "fido2",
         SlotKind::Ccid(CcidApplication::Piv) => "piv",
@@ -181,6 +195,20 @@ fn token_storage_for_slot(
 ) -> Result<Box<dyn StorageProvider>, Error> {
     if slot.kind() == SlotKind::YubiHsm {
         return Ok(Box::new(UnavailableStorageProvider));
+    }
+    if slot.kind() == SlotKind::Software {
+        let Some(config) = token_storage else {
+            return Ok(Box::new(UnavailableStorageProvider));
+        };
+        let name = slot.software_token_name().ok_or(CKR_DEVICE_ERROR)?;
+        let provider = config.software_provider(name)?;
+        log!(
+            2,
+            "Token persistence for {} uses {:?}",
+            slot.name(),
+            provider.root()
+        );
+        return Ok(Box::new(provider));
     }
     let configured =
         token_storage.is_some() || (slot.kind() == SlotKind::Fido2 && fido_storage.is_some());
@@ -225,6 +253,24 @@ pub(crate) fn configured_yubihsm_urls(
         urls.push(url.to_owned());
     }
     Ok(urls)
+}
+
+pub(crate) fn configured_software_slots(
+    value: Option<std::ffi::OsString>,
+) -> Result<Vec<String>, Error> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let mut names = Vec::new();
+    for name in value.split(',') {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 32 || names.iter().any(|configured| configured == name) {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
 }
 
 pub(crate) fn configured_yubihsm_http_tls(
@@ -285,6 +331,7 @@ fn read_nusb_string(device: &nusb::Device, index: Option<std::num::NonZeroU8>) -
 pub(crate) struct ModuleContext {
     pub(crate) debug_level: u8,
     pub(crate) yubihsm_usb: bool,
+    pub(crate) software_slots: Vec<String>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
@@ -573,6 +620,7 @@ impl std::fmt::Debug for ModuleContext {
             .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
         fmt.debug_struct("ModuleContext")
             .field("yubihsm_usb", &self.yubihsm_usb)
+            .field("software_slots", &self.software_slots)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
@@ -710,6 +758,7 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
+        let software_slots = configured_software_slots(std::env::var_os(SOFTWARE_SLOTS_ENV))?;
         let token_storage = configured_token_storage(std::env::var_os(TOKEN_STORAGE_ENV))?;
         let fido_storage = if token_storage.is_none() {
             configured_fido_storage(std::env::var_os(FIDO2_STORAGE_ENV))?
@@ -737,6 +786,7 @@ impl ModuleContext {
             yubihsm_usb: false,
             #[cfg(not(feature = "abi-tests"))]
             yubihsm_usb,
+            software_slots,
             #[cfg(feature = "abi-tests")]
             pcsc: None,
             #[cfg(not(feature = "abi-tests"))]
@@ -1244,7 +1294,8 @@ impl SlotContext {
         Ok((
             slot_id,
             session.flags(),
-            self.login_role(slot_id) == Some(LoginRole::User),
+            !self.slot.private_objects_require_login()
+                || self.login_role(slot_id) == Some(LoginRole::User),
         ))
     }
 
@@ -1528,6 +1579,26 @@ impl ModuleContext {
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         if !slot_contexts.begin_discovery() {
             return Ok(());
+        }
+        if !self.software_slots.is_empty() {
+            let first_slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
+            let mut slots = Vec::with_capacity(self.software_slots.len());
+            for (ordinal, name) in self.software_slots.iter().enumerate() {
+                let offset = CK_SLOT_ID::try_from(ordinal).map_err(|_| CKR_DEVICE_ERROR)?;
+                let slot_id = first_slot_id.checked_add(offset).ok_or(CKR_DEVICE_ERROR)?;
+                let mut slot = Box::new(SoftwareSlot::new(name.clone(), ordinal)) as Box<dyn Slot>;
+                slot.init_slot()?;
+                let token_objects = slot.token_objects(slot_id)?;
+                slots.push((slot_id, slot, token_objects));
+            }
+            slot_contexts.insert_slot_contexts(
+                slots,
+                self.handles.clone(),
+                self.pinentry.clone(),
+                self.trust_store.clone(),
+                self.token_storage.as_ref(),
+                None,
+            )?;
         }
         #[cfg(feature = "abi-tests")]
         {
@@ -2297,6 +2368,13 @@ mod discovery_tests {
                 .join("yubico-serial-3132333435363738")
                 .join("piv")
         );
+        assert_eq!(
+            config.software_token_root("build signing"),
+            generic
+                .0
+                .join(TOKEN_STORAGE_SCHEMA_DIRECTORY)
+                .join("software-name-6275696c64207369676e696e67")
+        );
 
         assert!(configured_fido_storage(None).unwrap().is_none());
         assert!(configured_fido_storage(Some(std::ffi::OsString::new())).is_err());
@@ -2324,5 +2402,18 @@ mod discovery_tests {
                 .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
                 .join("yubico-serial-3837363534333231")
         );
+    }
+
+    #[test]
+    fn software_slot_configuration_is_disabled_by_default_and_names_each_slot() {
+        assert!(configured_software_slots(None).unwrap().is_empty());
+        assert_eq!(
+            configured_software_slots(Some("signing, test key exchange ".into())).unwrap(),
+            ["signing", "test key exchange"]
+        );
+        assert!(configured_software_slots(Some(std::ffi::OsString::new())).is_err());
+        assert!(configured_software_slots(Some("signing,".into())).is_err());
+        assert!(configured_software_slots(Some("signing, signing".into())).is_err());
+        assert!(configured_software_slots(Some("x".repeat(33).into())).is_err());
     }
 }
