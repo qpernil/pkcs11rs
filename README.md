@@ -421,6 +421,11 @@ cargo test --locked
 cargo test --locked --all-features
 ```
 
+The Rust suite includes a shared-library integration test. It dynamically
+loads the Cargo-built `.so`, `.dylib`, or `.dll`, resolves the exported PKCS
+#11 entry points, initializes the module with local hardware discovery
+disabled, queries its slots, finalizes it, and unloads it.
+
 Run the hardware-independent Python ABI tests:
 
 ```sh
