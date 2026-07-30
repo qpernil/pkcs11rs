@@ -600,7 +600,26 @@ class CK_FUNCTION_LIST_3_2(ctypes.Structure):
 
 
 class Pkcs11AbiTests(unittest.TestCase):
-    def assert_layout(self, structure, size: int, alignment: int, offsets: dict[str, int]) -> None:
+    def assert_layout(
+        self,
+        structure,
+        size: int,
+        alignment: int,
+        offsets: dict[str, int],
+        *,
+        llp64: tuple[int, int, dict[str, int]] | None = None,
+    ) -> None:
+        widths = (
+            ctypes.sizeof(ctypes.c_void_p),
+            ctypes.sizeof(CK_ULONG),
+        )
+        self.assertIn(
+            widths,
+            {(8, 8), (8, 4)},
+            f"unsupported native ABI widths: {widths}",
+        )
+        if widths == (8, 4) and llp64 is not None:
+            size, alignment, offsets = llp64
         self.assertEqual(ctypes.sizeof(structure), size, structure.__name__)
         self.assertEqual(ctypes.alignment(structure), alignment, structure.__name__)
         for field, offset in offsets.items():
@@ -1298,7 +1317,15 @@ class Pkcs11AbiTests(unittest.TestCase):
     ) -> None:
         previous = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
         try:
-            for invalid in ("", "false", "2"):
+            # Assigning an empty value removes the variable from the Windows
+            # process environment. The empty value is covered directly by
+            # the Rust configuration unit test on every platform.
+            invalid_values = (
+                ("false", "2")
+                if os.name == "nt"
+                else ("", "false", "2")
+            )
+            for invalid in invalid_values:
                 os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = invalid
                 self.assertEqual(
                     self.lib.C_Initialize(None),
@@ -5621,6 +5648,17 @@ fn main() {
                 "libraryDescription": 48,
                 "libraryVersion": 80,
             },
+            llp64=(
+                76,
+                4,
+                {
+                    "cryptokiVersion": 0,
+                    "manufacturerID": 2,
+                    "flags": 36,
+                    "libraryDescription": 40,
+                    "libraryVersion": 72,
+                },
+            ),
         )
 
     def test_layout_ck_slot_info(self) -> None:
@@ -5635,6 +5673,17 @@ fn main() {
                 "hardwareVersion": 104,
                 "firmwareVersion": 106,
             },
+            llp64=(
+                104,
+                4,
+                {
+                    "slotDescription": 0,
+                    "manufacturerID": 64,
+                    "flags": 96,
+                    "hardwareVersion": 100,
+                    "firmwareVersion": 102,
+                },
+            ),
         )
 
     def test_layout_ck_token_info(self) -> None:
@@ -5662,6 +5711,30 @@ fn main() {
                 "firmwareVersion": 186,
                 "utcTime": 188,
             },
+            llp64=(
+                160,
+                4,
+                {
+                    "label": 0,
+                    "manufacturerID": 32,
+                    "model": 64,
+                    "serialNumber": 80,
+                    "flags": 96,
+                    "ulMaxSessionCount": 100,
+                    "ulSessionCount": 104,
+                    "ulMaxRwSessionCount": 108,
+                    "ulRwSessionCount": 112,
+                    "ulMaxPinLen": 116,
+                    "ulMinPinLen": 120,
+                    "ulTotalPublicMemory": 124,
+                    "ulFreePublicMemory": 128,
+                    "ulTotalPrivateMemory": 132,
+                    "ulFreePrivateMemory": 136,
+                    "hardwareVersion": 140,
+                    "firmwareVersion": 142,
+                    "utcTime": 144,
+                },
+            ),
         )
 
     def test_layout_ck_session_info(self) -> None:
@@ -5675,6 +5748,16 @@ fn main() {
                 "flags": 16,
                 "ulDeviceError": 24,
             },
+            llp64=(
+                16,
+                4,
+                {
+                    "slotID": 0,
+                    "state": 4,
+                    "flags": 8,
+                    "ulDeviceError": 12,
+                },
+            ),
         )
 
     def test_layout_ck_attribute(self) -> None:
@@ -5723,6 +5806,15 @@ fn main() {
                 "ulMaxKeySize": 8,
                 "flags": 16,
             },
+            llp64=(
+                12,
+                4,
+                {
+                    "ulMinKeySize": 0,
+                    "ulMaxKeySize": 4,
+                    "flags": 8,
+                },
+            ),
         )
 
     def test_layout_ck_ecdh1_derive_params(self) -> None:
@@ -5737,6 +5829,17 @@ fn main() {
                 "ulPublicDataLen": 24,
                 "pPublicData": 32,
             },
+            llp64=(
+                32,
+                8,
+                {
+                    "kdf": 0,
+                    "ulSharedDataLen": 4,
+                    "pSharedData": 8,
+                    "ulPublicDataLen": 16,
+                    "pPublicData": 24,
+                },
+            ),
         )
 
     def test_layout_ck_rsa_pkcs_oaep_params(self) -> None:
@@ -5751,6 +5854,17 @@ fn main() {
                 "pSourceData": 24,
                 "ulSourceDataLen": 32,
             },
+            llp64=(
+                32,
+                8,
+                {
+                    "hashAlg": 0,
+                    "mgf": 4,
+                    "source": 8,
+                    "pSourceData": 16,
+                    "ulSourceDataLen": 24,
+                },
+            ),
         )
 
     def test_layout_ck_rsa_pkcs_pss_params(self) -> None:
@@ -5763,6 +5877,15 @@ fn main() {
                 "mgf": 8,
                 "sLen": 16,
             },
+            llp64=(
+                12,
+                4,
+                {
+                    "hashAlg": 0,
+                    "mgf": 4,
+                    "sLen": 8,
+                },
+            ),
         )
 
     def test_layout_ck_version(self) -> None:
