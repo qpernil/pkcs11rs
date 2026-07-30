@@ -53,6 +53,11 @@ connector slots. The only accepted values are `0` and `1`. Direct USB access
 uses usbfs on Linux, IOKit on macOS, and WinUSB on Windows through `nusb`; it
 does not require libusb.
 
+`PKCS11RS_HARDWARE_DISCOVERY=0` is the broader local-discovery switch. It
+disables direct YubiHSM USB together with native FIDO HID and PC/SC/CCID
+discovery. It deliberately does not disable `PKCS11RS_YUBIHSM_URLS`, because
+remote HTTP(S) connector slots are explicitly configured.
+
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For
 one YubiKey with all five default applets and one YubiHSM, the result is six

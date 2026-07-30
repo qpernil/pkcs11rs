@@ -44,6 +44,10 @@ pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --list-slots
 pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --show-info
 ```
 
+Set `PKCS11RS_HARDWARE_DISCOVERY=0` to disable both native FIDO HID discovery
+and the FIDO CCID probe along with all other automatic local hardware
+discovery.
+
 A FIDO2 slot is created when the FIDO AID can be selected. As with the other
 CCID applets, the slot remains registered if subsequent initialization or
 `authenticatorGetInfo` discovery fails. In that state `C_GetSlotInfo` still

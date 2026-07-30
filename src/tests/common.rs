@@ -176,6 +176,22 @@ fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
 }
 
 #[test]
+fn local_hardware_discovery_is_enabled_by_default_and_strictly_configured() {
+    assert!(crate::configured_hardware_discovery(None).unwrap());
+    assert!(crate::configured_hardware_discovery(Some("1".into())).unwrap());
+    assert!(!crate::configured_hardware_discovery(Some("0".into())).unwrap());
+    assert!(!crate::context::configured_local_yubihsm_usb(false, Some("1".into())).unwrap());
+    assert!(crate::context::configured_local_yubihsm_usb(false, Some("false".into())).is_err());
+    assert_eq!(
+        crate::configured_yubihsm_urls(Some("http://127.0.0.1:12345".into())).unwrap(),
+        vec![String::from("http://127.0.0.1:12345")]
+    );
+    for invalid in ["", "false", "2"] {
+        assert!(crate::configured_hardware_discovery(Some(invalid.into())).is_err());
+    }
+}
+
+#[test]
 fn yubihsm_public_discovery_configuration_requires_a_complete_valid_credential() {
     assert!(crate::configured_yubihsm_public_discovery_credential(None)
         .unwrap()

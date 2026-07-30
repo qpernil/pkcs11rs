@@ -162,6 +162,21 @@ pkcs11-tool \
 No configuration is required for normal discovery. The module probes supported
 YubiHSM USB devices and the default CCID applets available through PC/SC.
 
+Disable all automatic local hardware discovery with:
+
+```sh
+export PKCS11RS_HARDWARE_DISCOVERY=0
+```
+
+This skips direct YubiHSM USB, native FIDO HID, and PC/SC/CCID reader
+discovery, including PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 applets.
+It does not disable named software slots or URLs explicitly configured through
+`PKCS11RS_YUBIHSM_URLS`; remote HTTP(S) connectors are already opt-in. The
+setting defaults to `1`. Any value other than `0` or `1` makes
+`C_Initialize` return `CKR_ARGUMENTS_BAD`. If neither software slots nor
+remote connectors are configured, disabling local discovery can legitimately
+leave the module with zero slots.
+
 Add one or more independent in-memory software tokens with a comma-separated
 list of names:
 
@@ -233,7 +248,8 @@ no device is reported as an empty slot until the module is reinitialized.
 Repeated URLs intentionally create separate slots, each with its own connector
 client and YubiHSM secure session.
 
-Disable direct YubiHSM USB discovery while retaining configured remote slots:
+Disable only direct YubiHSM USB discovery while retaining other local
+discovery and configured remote slots:
 
 ```sh
 export PKCS11RS_YUBIHSM_USB=0
