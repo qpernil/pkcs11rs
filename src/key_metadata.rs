@@ -19,11 +19,11 @@ const MAX_ATTRIBUTES: usize = 256;
 const MAX_TEMPLATE_DEPTH: usize = 4;
 
 pub(crate) fn cryptoki_ulong_to_u64(value: CK_ULONG) -> u64 {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_pointer_width = "32"))]
     {
         u64::from(value)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
     {
         value
     }

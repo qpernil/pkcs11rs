@@ -11,9 +11,11 @@ targets = [
 [advisories]
 unmaintained = "workspace"
 unsound = "all"
-# Stable rsa has no patched release for the Marvin timing advisory. Production
-# private keys are parsed only for transfer to hardware; software RSA private
-# operations are confined to the synthetic ABI test backend.
+# Stable rsa has no patched release for the Marvin timing advisory. Software
+# token RSA private operations are available only through the local PKCS #11
+# interface; pkcs11rs does not expose or use them for network communication.
+# Callers that relay local PKCS #11 operations over a network must assess that
+# timing threat separately.
 ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
