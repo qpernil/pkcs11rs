@@ -12,15 +12,14 @@ mod yubihsm;
 
 pub use crypt::*;
 pub use general::*;
-pub use hsmauth::*;
 pub use interfaces::*;
 pub use key::*;
 pub use object::*;
-pub use security_domain::*;
 pub use session::*;
-pub use software::*;
 pub use wrap::*;
-pub use yubihsm::*;
+
+#[cfg(test)]
+pub(crate) use hsmauth::*;
 
 pub(crate) use crypt::aes_gcm;
 pub(crate) use crypt::DigestOperation;

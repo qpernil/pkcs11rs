@@ -18,24 +18,26 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceAttestation(
     fingerprint: CK_BYTE_PTR,
     fingerprint_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_YubiHsmEnrollDeviceAttestation called for session {session_handle}, attestation key {attestation_key_id}"
-    );
-    let key_id = match u16::try_from(attestation_key_id) {
-        Ok(key_id) => key_id,
-        Err(_) => return CKR_ARGUMENTS_BAD as CK_RV,
-    };
-    map(yubihsm_enroll_device(
-        session_handle,
-        fingerprint,
-        fingerprint_len,
-        YubiHsmEnrollment::Attestation {
-            key_id,
-            validation: crate::yubihsm::trust::AttestationValidation::ExplicitSigner,
-        },
-        None,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_YubiHsmEnrollDeviceAttestation called for session {session_handle}, attestation key {attestation_key_id}"
+        );
+        let key_id = match u16::try_from(attestation_key_id) {
+            Ok(key_id) => key_id,
+            Err(_) => return CKR_ARGUMENTS_BAD as CK_RV,
+        };
+        map(yubihsm_enroll_device(
+            session_handle,
+            fingerprint,
+            fingerprint_len,
+            YubiHsmEnrollment::Attestation {
+                key_id,
+                validation: crate::yubihsm::trust::AttestationValidation::ExplicitSigner,
+            },
+            None,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -44,20 +46,22 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation(
     fingerprint: CK_BYTE_PTR,
     fingerprint_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation called for session {session_handle}"
-    );
-    map(yubihsm_enroll_device(
-        session_handle,
-        fingerprint,
-        fingerprint_len,
-        YubiHsmEnrollment::Attestation {
-            key_id: 0,
-            validation: crate::yubihsm::trust::AttestationValidation::Yubico,
-        },
-        None,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation called for session {session_handle}"
+        );
+        map(yubihsm_enroll_device(
+            session_handle,
+            fingerprint,
+            fingerprint_len,
+            YubiHsmEnrollment::Attestation {
+                key_id: 0,
+                validation: crate::yubihsm::trust::AttestationValidation::Yubico,
+            },
+            None,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -66,17 +70,19 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDevicePublicKey(
     fingerprint: CK_BYTE_PTR,
     fingerprint_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_YubiHsmEnrollDevicePublicKey called for session {session_handle}"
-    );
-    map(yubihsm_enroll_device(
-        session_handle,
-        fingerprint,
-        fingerprint_len,
-        YubiHsmEnrollment::PublicKey,
-        None,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_YubiHsmEnrollDevicePublicKey called for session {session_handle}"
+        );
+        map(yubihsm_enroll_device(
+            session_handle,
+            fingerprint,
+            fingerprint_len,
+            YubiHsmEnrollment::PublicKey,
+            None,
+        ))
+    })
 }
 
 pub(crate) fn yubihsm_enroll_device(
@@ -86,7 +92,7 @@ pub(crate) fn yubihsm_enroll_device(
     enrollment: YubiHsmEnrollment,
     trust_prefix: Option<&std::ffi::OsStr>,
 ) -> Result<(), Error> {
-    let fingerprint_len = as_mut(fingerprint_len)?;
+    let fingerprint_len = unsafe { as_mut(fingerprint_len) }?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         validate_yubihsm_enrollment(ctx, slot_id, flags, logged_in)?;

@@ -90,15 +90,17 @@ pub extern "C" fn C_CreateObject(
     count: ::std::os::raw::c_ulong,
     object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_CreateObject called with {:?}",
-        (session_handle, templ, count, object)
-    );
-    match create_object(session_handle, templ, count, object) {
-        Ok(()) => CKR_OK as CK_RV,
-        Err(e) => e.into(),
-    }
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_CreateObject called with {:?}",
+            (session_handle, templ, count, object)
+        );
+        match create_object(session_handle, templ, count, object) {
+            Ok(()) => CKR_OK as CK_RV,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 fn create_object(
@@ -107,8 +109,8 @@ fn create_object(
     count: CK_ULONG,
     object: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    let object_handle = as_mut(object)?;
-    let templ = from_raw_parts(templ, count as usize)?;
+    let object_handle = unsafe { as_mut(object) }?;
+    let templ = unsafe { from_raw_parts(templ, count as usize) }?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         let class = template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE)
@@ -1308,15 +1310,17 @@ pub extern "C" fn C_CopyObject(
     count: ::std::os::raw::c_ulong,
     new_object: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_CopyObject called with {:?}",
-        (session_handle, object, templ, count, new_object)
-    );
-    match copy_object(session_handle, object, templ, count, new_object) {
-        Ok(()) => CKR_OK as CK_RV,
-        Err(e) => e.into(),
-    }
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_CopyObject called with {:?}",
+            (session_handle, object, templ, count, new_object)
+        );
+        match copy_object(session_handle, object, templ, count, new_object) {
+            Ok(()) => CKR_OK as CK_RV,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 fn copy_object(
@@ -1326,8 +1330,8 @@ fn copy_object(
     count: CK_ULONG,
     new_object: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    let new_object_handle = as_mut(new_object)?;
-    let templ = from_raw_parts(templ, count as usize)?;
+    let new_object_handle = unsafe { as_mut(new_object) }?;
+    let templ = unsafe { from_raw_parts(templ, count as usize) }?;
     validate_unique_template(templ)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -1386,12 +1390,14 @@ pub extern "C" fn C_DestroyObject(
     session_handle: CK_SESSION_HANDLE,
     object: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_DestroyObject called with {:?}",
-        (session_handle, object)
-    );
-    map(destroy_object(session_handle, object))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_DestroyObject called with {:?}",
+            (session_handle, object)
+        );
+        map(destroy_object(session_handle, object))
+    })
 }
 
 fn destroy_object(
@@ -1550,12 +1556,14 @@ pub extern "C" fn C_GetObjectSize(
     object: CK_OBJECT_HANDLE,
     size: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_GetObjectSize called with {:?}",
-        (session_handle, object, size)
-    );
-    map(get_object_size(session_handle, object, size))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_GetObjectSize called with {:?}",
+            (session_handle, object, size)
+        );
+        map(get_object_size(session_handle, object, size))
+    })
 }
 
 fn get_object_size(
@@ -1563,7 +1571,7 @@ fn get_object_size(
     object: CK_OBJECT_HANDLE,
     size: CK_ULONG_PTR,
 ) -> Result<(), Error> {
-    let size = as_mut(size)?;
+    let size = unsafe { as_mut(size) }?;
     with_session_context(session_handle, |ctx| {
         let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object = ctx
@@ -1582,15 +1590,17 @@ pub extern "C" fn C_GetAttributeValue(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_GetAttributeValue called with {:?}",
-        (session_handle, object, templ, count)
-    );
-    match get_attribute_value(session_handle, object, templ, count) {
-        Ok(()) => CKR_OK as CK_RV,
-        Err(e) => e.into(),
-    }
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_GetAttributeValue called with {:?}",
+            (session_handle, object, templ, count)
+        );
+        match get_attribute_value(session_handle, object, templ, count) {
+            Ok(()) => CKR_OK as CK_RV,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 fn get_attribute_value(
@@ -1599,7 +1609,7 @@ fn get_attribute_value(
     templ: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
 ) -> Result<(), Error> {
-    let templ = _from_raw_parts_mut(templ, count as usize)?;
+    let templ = unsafe { _from_raw_parts_mut(templ, count as usize) }?;
     with_session_context(session_handle, |ctx| {
         let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let object_handle = object;
@@ -1773,15 +1783,17 @@ pub extern "C" fn C_SetAttributeValue(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_SetAttributeValue called with {:?}",
-        (session_handle, object, templ, count)
-    );
-    match set_attribute_value(session_handle, object, templ, count) {
-        Ok(()) => CKR_OK as CK_RV,
-        Err(e) => e.into(),
-    }
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_SetAttributeValue called with {:?}",
+            (session_handle, object, templ, count)
+        );
+        match set_attribute_value(session_handle, object, templ, count) {
+            Ok(()) => CKR_OK as CK_RV,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 fn set_attribute_value(
@@ -1790,7 +1802,7 @@ fn set_attribute_value(
     templ: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
 ) -> Result<(), Error> {
-    let templ = from_raw_parts(templ, count as usize)?;
+    let templ = unsafe { from_raw_parts(templ, count as usize) }?;
     validate_unique_template(templ)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -1934,15 +1946,17 @@ pub extern "C" fn C_FindObjectsInit(
     templ: *mut CK_ATTRIBUTE,
     count: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_FindObjectsInit called with {:?}",
-        (session_handle, templ, count)
-    );
-    if count > 0 && templ.is_null() {
-        return CKR_ARGUMENTS_BAD.into();
-    }
-    map(find_objects_init(session_handle, templ, count))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_FindObjectsInit called with {:?}",
+            (session_handle, templ, count)
+        );
+        if count > 0 && templ.is_null() {
+            return CKR_ARGUMENTS_BAD.into();
+        }
+        map(find_objects_init(session_handle, templ, count))
+    })
 }
 
 fn find_objects_init(
@@ -1950,7 +1964,7 @@ fn find_objects_init(
     templ: CK_ATTRIBUTE_PTR,
     count: CK_ULONG,
 ) -> Result<(), Error> {
-    let templ = from_raw_parts(templ, count as usize)?;
+    let templ = unsafe { from_raw_parts(templ, count as usize) }?;
     let templ: Vec<(CK_ATTRIBUTE_TYPE, Vec<u8>)> = templ
         .iter()
         .map(|attribute| {
@@ -2004,17 +2018,19 @@ pub extern "C" fn C_FindObjects(
     max_object_count: ::std::os::raw::c_ulong,
     object_count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_FindObjects called with {:?}",
-        (session_handle, object, max_object_count, object_count)
-    );
-    map(find_objects(
-        session_handle,
-        object,
-        max_object_count,
-        object_count,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_FindObjects called with {:?}",
+            (session_handle, object, max_object_count, object_count)
+        );
+        map(find_objects(
+            session_handle,
+            object,
+            max_object_count,
+            object_count,
+        ))
+    })
 }
 
 fn find_objects(
@@ -2023,8 +2039,8 @@ fn find_objects(
     max_object_count: CK_ULONG,
     object_count: CK_ULONG_PTR,
 ) -> Result<(), Error> {
-    let object_count = as_mut(object_count)?;
-    let output = _from_raw_parts_mut(object, max_object_count as usize)?;
+    let object_count = unsafe { as_mut(object_count) }?;
+    let output = unsafe { _from_raw_parts_mut(object, max_object_count as usize) }?;
     with_session_context_mut(session_handle, |ctx| {
         let operation = ctx
             .get_session_context_mut(session_handle)?
@@ -2044,8 +2060,10 @@ fn find_objects(
 
 #[no_mangle]
 pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    log!(2, "C_FindObjectsFinal called with {:?}", session_handle);
-    map(find_objects_final(session_handle))
+    crate::ffi_boundary(|| {
+        log!(2, "C_FindObjectsFinal called with {:?}", session_handle);
+        map(find_objects_final(session_handle))
+    })
 }
 
 fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {

@@ -23,16 +23,18 @@ pub extern "C" fn PKCS11RS_SecurityDomainPutScp03KeySet(
     replace_kvn: CK_BYTE,
     keys: *const PKCS11RS_SCP03_KEY_SET,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainPutScp03KeySet called for session {session_handle}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
-    );
-    map(security_domain_put_scp03_key_set(
-        session_handle,
-        new_kvn,
-        replace_kvn,
-        keys,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainPutScp03KeySet called for session {session_handle}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
+        );
+        map(security_domain_put_scp03_key_set(
+            session_handle,
+            new_kvn,
+            replace_kvn,
+            keys,
+        ))
+    })
 }
 
 fn security_domain_put_scp03_key_set(
@@ -41,10 +43,10 @@ fn security_domain_put_scp03_key_set(
     replace_kvn: u8,
     keys: *const PKCS11RS_SCP03_KEY_SET,
 ) -> Result<(), Error> {
-    let keys = _as_ref(keys)?;
-    let enc = from_raw_parts(keys.pEncKey, keys.ulEncKeyLen as usize)?;
-    let mac = from_raw_parts(keys.pMacKey, keys.ulMacKeyLen as usize)?;
-    let dek = from_raw_parts(keys.pDekKey, keys.ulDekKeyLen as usize)?;
+    let keys = unsafe { _as_ref(keys) }?;
+    let enc = unsafe { from_raw_parts(keys.pEncKey, keys.ulEncKeyLen as usize) }?;
+    let mac = unsafe { from_raw_parts(keys.pMacKey, keys.ulMacKeyLen as usize) }?;
+    let dek = unsafe { from_raw_parts(keys.pDekKey, keys.ulDekKeyLen as usize) }?;
     if [enc, mac, dek].iter().any(|key| key.len() != 16) {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
@@ -67,15 +69,17 @@ pub extern "C" fn PKCS11RS_SecurityDomainDeleteScp03KeySet(
     kvn: CK_BYTE,
     delete_last: CK_BBOOL,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainDeleteScp03KeySet called for session {session_handle}, KVN {kvn}, delete last {delete_last}"
-    );
-    map(security_domain_delete_scp03_key_set(
-        session_handle,
-        kvn,
-        delete_last,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainDeleteScp03KeySet called for session {session_handle}, KVN {kvn}, delete last {delete_last}"
+        );
+        map(security_domain_delete_scp03_key_set(
+            session_handle,
+            kvn,
+            delete_last,
+        ))
+    })
 }
 
 fn security_domain_delete_scp03_key_set(
@@ -109,19 +113,21 @@ pub extern "C" fn PKCS11RS_SecurityDomainGenerateScp11Key(
     public_key: CK_BYTE_PTR,
     public_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainGenerateScp11Key called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}, curve {curve}"
-    );
-    map(security_domain_generate_scp11_key(
-        session_handle,
-        kid,
-        new_kvn,
-        replace_kvn,
-        curve,
-        public_key,
-        public_key_len,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainGenerateScp11Key called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}, curve {curve}"
+        );
+        map(security_domain_generate_scp11_key(
+            session_handle,
+            kid,
+            new_kvn,
+            replace_kvn,
+            curve,
+            public_key,
+            public_key_len,
+        ))
+    })
 }
 
 fn security_domain_generate_scp11_key(
@@ -134,7 +140,7 @@ fn security_domain_generate_scp11_key(
     public_key_len: CK_ULONG_PTR,
 ) -> Result<(), Error> {
     let required = security_domain::scp11_public_point_length(curve)?;
-    let public_key_len = as_mut(public_key_len)?;
+    let public_key_len = unsafe { as_mut(public_key_len) }?;
     with_session_context_mut(session_handle, |ctx| {
         let slot_id = validate_security_domain_session(ctx, session_handle)?;
         if public_key.is_null() {
@@ -172,21 +178,23 @@ pub extern "C" fn PKCS11RS_SecurityDomainPutScp11PrivateKey(
     key: *const CK_BYTE,
     key_len: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainPutScp11PrivateKey called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
-    );
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::PutPrivateKey {
-            key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
-            replace_kvn,
-            encoded: Zeroizing::new(match from_raw_parts(key, key_len as usize) {
-                Ok(key) => key.to_vec(),
-                Err(error) => return error.into(),
-            }),
-        },
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainPutScp11PrivateKey called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
+        );
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::PutPrivateKey {
+                key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
+                replace_kvn,
+                encoded: Zeroizing::new(match unsafe { from_raw_parts(key, key_len as usize) } {
+                    Ok(key) => key.to_vec(),
+                    Err(error) => return error.into(),
+                }),
+            },
+        ))
+    })
 }
 
 #[no_mangle]
@@ -198,22 +206,24 @@ pub extern "C" fn PKCS11RS_SecurityDomainPutScp11PublicKey(
     key: *const CK_BYTE,
     key_len: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainPutScp11PublicKey called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
-    );
-    let key = match from_raw_parts(key, key_len as usize) {
-        Ok(key) => key.to_vec(),
-        Err(error) => return error.into(),
-    };
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::PutPublicKey {
-            key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
-            replace_kvn,
-            encoded: key,
-        },
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainPutScp11PublicKey called for session {session_handle}, KID {kid}, new KVN {new_kvn}, replacement KVN {replace_kvn}"
+        );
+        let key = match unsafe { from_raw_parts(key, key_len as usize) } {
+            Ok(key) => key.to_vec(),
+            Err(error) => return error.into(),
+        };
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::PutPublicKey {
+                key_ref: security_domain::KeyRef { kid, kvn: new_kvn },
+                replace_kvn,
+                encoded: key,
+            },
+        ))
+    })
 }
 
 #[no_mangle]
@@ -224,21 +234,23 @@ pub extern "C" fn PKCS11RS_SecurityDomainStoreScp11CertificateChain(
     certificates: *const PKCS11RS_BYTE_BUFFER,
     certificate_count: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainStoreScp11CertificateChain called for session {session_handle}, KID {kid}, KVN {kvn}, certificate count {certificate_count}"
-    );
-    let certificates = match copy_buffers(certificates, certificate_count) {
-        Ok(certificates) => certificates,
-        Err(error) => return error.into(),
-    };
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::StoreCertificateChain {
-            key_ref: security_domain::KeyRef { kid, kvn },
-            certificates,
-        },
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainStoreScp11CertificateChain called for session {session_handle}, KID {kid}, KVN {kvn}, certificate count {certificate_count}"
+        );
+        let certificates = match copy_buffers(certificates, certificate_count) {
+            Ok(certificates) => certificates,
+            Err(error) => return error.into(),
+        };
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::StoreCertificateChain {
+                key_ref: security_domain::KeyRef { kid, kvn },
+                certificates,
+            },
+        ))
+    })
 }
 
 #[no_mangle]
@@ -249,22 +261,25 @@ pub extern "C" fn PKCS11RS_SecurityDomainStoreScp11CaIssuer(
     subject_key_identifier: *const CK_BYTE,
     subject_key_identifier_len: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainStoreScp11CaIssuer called for session {session_handle}, KID {kid}, KVN {kvn}"
-    );
-    let subject_key_identifier =
-        match from_raw_parts(subject_key_identifier, subject_key_identifier_len as usize) {
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainStoreScp11CaIssuer called for session {session_handle}, KID {kid}, KVN {kvn}"
+        );
+        let subject_key_identifier = match unsafe {
+            from_raw_parts(subject_key_identifier, subject_key_identifier_len as usize)
+        } {
             Ok(value) => value.to_vec(),
             Err(error) => return error.into(),
         };
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::StoreCaIssuer {
-            key_ref: security_domain::KeyRef { kid, kvn },
-            subject_key_identifier,
-        },
-    ))
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::StoreCaIssuer {
+                key_ref: security_domain::KeyRef { kid, kvn },
+                subject_key_identifier,
+            },
+        ))
+    })
 }
 
 #[no_mangle]
@@ -275,21 +290,23 @@ pub extern "C" fn PKCS11RS_SecurityDomainSetScp11Allowlist(
     serials: *const PKCS11RS_BYTE_BUFFER,
     serial_count: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainSetScp11Allowlist called for session {session_handle}, KID {kid}, KVN {kvn}, serial count {serial_count}"
-    );
-    let serials = match copy_buffers(serials, serial_count) {
-        Ok(serials) => serials,
-        Err(error) => return error.into(),
-    };
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::SetAllowlist {
-            key_ref: security_domain::KeyRef { kid, kvn },
-            serials,
-        },
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainSetScp11Allowlist called for session {session_handle}, KID {kid}, KVN {kvn}, serial count {serial_count}"
+        );
+        let serials = match copy_buffers(serials, serial_count) {
+            Ok(serials) => serials,
+            Err(error) => return error.into(),
+        };
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::SetAllowlist {
+                key_ref: security_domain::KeyRef { kid, kvn },
+                serials,
+            },
+        ))
+    })
 }
 
 #[no_mangle]
@@ -299,31 +316,34 @@ pub extern "C" fn PKCS11RS_SecurityDomainDeleteScp11Key(
     kvn: CK_BYTE,
     delete_last: CK_BBOOL,
 ) -> CK_RV {
-    log!(
-        2,
-        "PKCS11RS_SecurityDomainDeleteScp11Key called for session {session_handle}, KID {kid}, KVN {kvn}, delete last {delete_last}"
-    );
-    let delete_last = match parse_bool(delete_last) {
-        Ok(value) => value,
-        Err(error) => return error.into(),
-    };
-    map(security_domain_mutation(
-        session_handle,
-        Scp11Administration::DeleteKey {
-            key_ref: security_domain::KeyRef { kid, kvn },
-            delete_last,
-        },
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "PKCS11RS_SecurityDomainDeleteScp11Key called for session {session_handle}, KID {kid}, KVN {kvn}, delete last {delete_last}"
+        );
+        let delete_last = match parse_bool(delete_last) {
+            Ok(value) => value,
+            Err(error) => return error.into(),
+        };
+        map(security_domain_mutation(
+            session_handle,
+            Scp11Administration::DeleteKey {
+                key_ref: security_domain::KeyRef { kid, kvn },
+                delete_last,
+            },
+        ))
+    })
 }
 
 fn copy_buffers(
     buffers: *const PKCS11RS_BYTE_BUFFER,
     count: CK_ULONG,
 ) -> Result<Vec<Vec<u8>>, Error> {
-    from_raw_parts(buffers, count as usize)?
+    unsafe { from_raw_parts(buffers, count as usize) }?
         .iter()
         .map(|buffer| {
-            from_raw_parts(buffer.pValue, buffer.ulValueLen as usize).map(|value| value.to_vec())
+            unsafe { from_raw_parts(buffer.pValue, buffer.ulValueLen as usize) }
+                .map(|value| value.to_vec())
         })
         .collect()
 }

@@ -9,12 +9,14 @@ pub extern "C" fn C_VerifyInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_VerifyInit called with {:?}",
-        (session_handle, mechanism, key)
-    );
-    map(verify_init(session_handle, mechanism, key))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_VerifyInit called with {:?}",
+            (session_handle, mechanism, key)
+        );
+        map(verify_init(session_handle, mechanism, key))
+    })
 }
 
 fn verify_init(
@@ -33,7 +35,7 @@ fn verify_init(
             return Err(CKR_OPERATION_ACTIVE.into());
         }
 
-        let mechanism = _as_ref(mechanism)?;
+        let mechanism = unsafe { _as_ref(mechanism) }?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_VERIFY as CK_FLAGS)?;
         let gmac = aes_gmac_parameters(mechanism)?;
         let mac_length = match &gmac {
@@ -46,7 +48,8 @@ fn verify_init(
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
-            let parameters = _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR)?;
+            let parameters =
+                unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR) }?;
             let mgf = match parameters.mgf {
                 x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
                 x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
@@ -189,18 +192,20 @@ pub extern "C" fn C_Verify(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_Verify called with {:?}",
-        (session_handle, data, data_len, signature, signature_len)
-    );
-    map(verify(
-        session_handle,
-        data,
-        data_len,
-        signature,
-        signature_len,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_Verify called with {:?}",
+            (session_handle, data, data_len, signature, signature_len)
+        );
+        map(verify(
+            session_handle,
+            data,
+            data_len,
+            signature,
+            signature_len,
+        ))
+    })
 }
 
 fn verify(
@@ -220,11 +225,11 @@ fn verify(
             ctx.reconcile_login_state(operation.slot_id);
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        let data = from_raw_parts(data, data_len as usize)?;
+        let data = unsafe { from_raw_parts(data, data_len as usize) }?;
         let mut buffered_data = operation.buffer;
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
-        let signature = from_raw_parts(signature, signature_len as usize)?;
+        let signature = unsafe { from_raw_parts(signature, signature_len as usize) }?;
         if let Some(mac_length) = operation.mac_length {
             if signature.len() != mac_length {
                 return Err(CKR_SIGNATURE_LEN_RANGE.into());
@@ -397,16 +402,18 @@ pub extern "C" fn C_VerifyUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(with_session_context_mut(session_handle, |ctx| {
-        let part = from_raw_parts(part, part_len as usize)?.to_vec();
-        let operation = ctx
-            .get_session_context_mut(session_handle)?
-            .verify_operation
-            .as_mut()
-            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-        operation.buffer.extend_from_slice(&part);
-        Ok(())
-    }))
+    crate::ffi_boundary(|| {
+        map(with_session_context_mut(session_handle, |ctx| {
+            let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
+            let operation = ctx
+                .get_session_context_mut(session_handle)?
+                .verify_operation
+                .as_mut()
+                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            operation.buffer.extend_from_slice(&part);
+            Ok(())
+        }))
+    })
 }
 
 #[no_mangle]
@@ -415,13 +422,15 @@ pub extern "C" fn C_VerifyFinal(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(verify(
-        session_handle,
-        ptr::null(),
-        0,
-        signature,
-        signature_len,
-    ))
+    crate::ffi_boundary(|| {
+        map(verify(
+            session_handle,
+            ptr::null(),
+            0,
+            signature,
+            signature_len,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -430,7 +439,7 @@ pub extern "C" fn C_VerifyRecoverInit(
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -441,5 +450,5 @@ pub extern "C" fn C_VerifyRecover(
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }

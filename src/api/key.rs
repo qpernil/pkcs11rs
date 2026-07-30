@@ -14,15 +14,17 @@ pub extern "C" fn C_GenerateKey(
     count: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_GenerateKey called with {:?}",
-        (session_handle, mechanism, templ, count, key)
-    );
-    match generate_key(session_handle, mechanism, templ, count, key) {
-        Ok(()) => CKR_OK as CK_RV,
-        Err(e) => e.into(),
-    }
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_GenerateKey called with {:?}",
+            (session_handle, mechanism, templ, count, key)
+        );
+        match generate_key(session_handle, mechanism, templ, count, key) {
+            Ok(()) => CKR_OK as CK_RV,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 fn generate_key(
@@ -32,9 +34,9 @@ fn generate_key(
     count: CK_ULONG,
     key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    let key_handle = as_mut(key)?;
-    let mechanism = _as_ref(mechanism)?;
-    let templ = from_raw_parts(templ, count as usize)?;
+    let key_handle = unsafe { as_mut(key) }?;
+    let mechanism = unsafe { _as_ref(mechanism) }?;
+    let templ = unsafe { from_raw_parts(templ, count as usize) }?;
 
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -231,16 +233,18 @@ pub extern "C" fn C_GenerateKeyPair(
     public_key: *mut CK_OBJECT_HANDLE,
     private_key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    map(generate_key_pair(
-        session_handle,
-        mechanism,
-        public_key_template,
-        public_key_attribute_count,
-        private_key_template,
-        private_key_attribute_count,
-        public_key,
-        private_key,
-    ))
+    crate::ffi_boundary(|| {
+        map(generate_key_pair(
+            session_handle,
+            mechanism,
+            public_key_template,
+            public_key_attribute_count,
+            private_key_template,
+            private_key_attribute_count,
+            public_key,
+            private_key,
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -257,11 +261,11 @@ fn generate_key_pair(
     with_session_context(session_handle, |ctx| {
         ctx._get_session(session_handle).map(|_| ())
     })?;
-    let mechanism = _as_ref(mechanism)?;
-    let public_template = from_raw_parts(public_template, public_count as usize)?;
-    let private_template = from_raw_parts(private_template, private_count as usize)?;
-    let public_handle = as_mut(public_key)?;
-    let private_handle = as_mut(private_key)?;
+    let mechanism = unsafe { _as_ref(mechanism) }?;
+    let public_template = unsafe { from_raw_parts(public_template, public_count as usize) }?;
+    let private_template = unsafe { from_raw_parts(private_template, private_count as usize) }?;
+    let public_handle = unsafe { as_mut(public_key) }?;
+    let private_handle = unsafe { as_mut(private_key) }?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
         require_slot_mechanism(
@@ -1249,14 +1253,16 @@ pub extern "C" fn C_DeriveKey(
     attribute_count: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    map(derive_key(
-        session_handle,
-        mechanism,
-        base_key,
-        templ,
-        attribute_count,
-        key,
-    ))
+    crate::ffi_boundary(|| {
+        map(derive_key(
+            session_handle,
+            mechanism,
+            base_key,
+            templ,
+            attribute_count,
+            key,
+        ))
+    })
 }
 
 fn project_public_key_object(
@@ -1369,13 +1375,13 @@ fn derive_key(
     attribute_count: CK_ULONG,
     key: CK_OBJECT_HANDLE_PTR,
 ) -> Result<(), Error> {
-    let key_handle = as_mut(key)?;
-    let mechanism = _as_ref(mechanism)?;
+    let key_handle = unsafe { as_mut(key) }?;
+    let mechanism = unsafe { _as_ref(mechanism) }?;
     if mechanism.mechanism == CKM_PKCS11RS_PROJECT_PUBLIC_KEY {
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
         }
-        let templ = from_raw_parts(templ, attribute_count as usize)?;
+        let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
         validate_unique_template(templ)?;
         return with_session_context_mut(session_handle, |ctx| {
             let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -1453,12 +1459,14 @@ fn derive_key(
         });
     }
     if mechanism.mechanism == CKM_PKCS11RS_PREVIEW_SIGN_DERIVE {
-        let context = from_raw_parts(
-            mechanism.pParameter as *const u8,
-            mechanism.ulParameterLen as usize,
-        )?
+        let context = unsafe {
+            from_raw_parts(
+                mechanism.pParameter as *const u8,
+                mechanism.ulParameterLen as usize,
+            )
+        }?
         .to_vec();
-        let templ = from_raw_parts(templ, attribute_count as usize)?;
+        let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
         validate_unique_template(templ)?;
         return with_session_context_mut(session_handle, |ctx| {
             let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -1529,23 +1537,27 @@ fn derive_key(
     if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let parameters = _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR)?;
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR) }?;
     if parameters.kdf != CKD_NULL as CK_EC_KDF_TYPE {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let shared_data = from_raw_parts(
-        parameters.pSharedData as *const u8,
-        parameters.ulSharedDataLen as usize,
-    )?;
+    let shared_data = unsafe {
+        from_raw_parts(
+            parameters.pSharedData as *const u8,
+            parameters.ulSharedDataLen as usize,
+        )
+    }?;
     if !shared_data.is_empty() {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let public_data = from_raw_parts(
-        parameters.pPublicData as *const u8,
-        parameters.ulPublicDataLen as usize,
-    )?;
+    let public_data = unsafe {
+        from_raw_parts(
+            parameters.pPublicData as *const u8,
+            parameters.ulPublicDataLen as usize,
+        )
+    }?;
     let public_data = der_octet_string_value(public_data).unwrap_or(public_data);
-    let templ = from_raw_parts(templ, attribute_count as usize)?;
+    let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
 
     with_session_context_mut(session_handle, |ctx| {
@@ -1789,12 +1801,14 @@ pub extern "C" fn C_SeedRandom(
     _seed: *mut ::std::os::raw::c_uchar,
     _seed_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(2, "C_SeedRandom called");
-    let result: Result<(), Error> = with_session_context(session, |ctx| {
-        ctx._get_session(session)?;
-        Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
-    });
-    map(result)
+    crate::ffi_boundary(|| {
+        log!(2, "C_SeedRandom called");
+        let result: Result<(), Error> = with_session_context(session, |ctx| {
+            ctx._get_session(session)?;
+            Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
+        });
+        map(result)
+    })
 }
 
 #[no_mangle]
@@ -1803,13 +1817,15 @@ pub extern "C" fn C_GenerateRandom(
     random_data: *mut ::std::os::raw::c_uchar,
     random_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(2, "C_GenerateRandom called");
-    let result: Result<(), Error> = with_session_context_mut(session, |ctx| {
-        let random_data = _from_raw_parts_mut(random_data, random_len as usize)?;
-        let slot_id = ctx._get_session(session)?.1.slotID();
-        ctx.reconcile_login_state(slot_id);
-        ctx.get_slot(slot_id)?.ensure_backend_read_session()?;
-        ctx._get_session(session)?.1.generate_random(random_data)
-    });
-    map(result)
+    crate::ffi_boundary(|| {
+        log!(2, "C_GenerateRandom called");
+        let result: Result<(), Error> = with_session_context_mut(session, |ctx| {
+            let random_data = unsafe { _from_raw_parts_mut(random_data, random_len as usize) }?;
+            let slot_id = ctx._get_session(session)?.1.slotID();
+            ctx.reconcile_login_state(slot_id);
+            ctx.get_slot(slot_id)?.ensure_backend_read_session()?;
+            ctx._get_session(session)?.1.generate_random(random_data)
+        });
+        map(result)
+    })
 }

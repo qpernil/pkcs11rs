@@ -10,7 +10,7 @@ pub extern "C" fn C_EncryptInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    map(crypt_init(session_handle, mechanism, key, true))
+    crate::ffi_boundary(|| map(crypt_init(session_handle, mechanism, key, true)))
 }
 
 #[no_mangle]
@@ -21,15 +21,17 @@ pub extern "C" fn C_Encrypt(
     encrypted_data: *mut ::std::os::raw::c_uchar,
     encrypted_data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt(
-        session_handle,
-        data,
-        data_len,
-        encrypted_data,
-        encrypted_data_len,
-        true,
-        false,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt(
+            session_handle,
+            data,
+            data_len,
+            encrypted_data,
+            encrypted_data_len,
+            true,
+            false,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -40,14 +42,16 @@ pub extern "C" fn C_EncryptUpdate(
     encrypted_part: *mut ::std::os::raw::c_uchar,
     encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt_update(
-        session_handle,
-        part,
-        part_len,
-        encrypted_part,
-        encrypted_part_len,
-        true,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt_update(
+            session_handle,
+            part,
+            part_len,
+            encrypted_part,
+            encrypted_part_len,
+            true,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -56,15 +60,17 @@ pub extern "C" fn C_EncryptFinal(
     last_encrypted_part: *mut ::std::os::raw::c_uchar,
     last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt(
-        session_handle,
-        ptr::null(),
-        0,
-        last_encrypted_part,
-        last_encrypted_part_len,
-        true,
-        true,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt(
+            session_handle,
+            ptr::null(),
+            0,
+            last_encrypted_part,
+            last_encrypted_part_len,
+            true,
+            true,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -73,7 +79,7 @@ pub extern "C" fn C_DecryptInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    map(crypt_init(session_handle, mechanism, key, false))
+    crate::ffi_boundary(|| map(crypt_init(session_handle, mechanism, key, false)))
 }
 
 #[no_mangle]
@@ -84,15 +90,17 @@ pub extern "C" fn C_Decrypt(
     data: *mut ::std::os::raw::c_uchar,
     data_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt(
-        session_handle,
-        encrypted_data,
-        encrypted_data_len,
-        data,
-        data_len,
-        false,
-        false,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt(
+            session_handle,
+            encrypted_data,
+            encrypted_data_len,
+            data,
+            data_len,
+            false,
+            false,
+        ))
+    })
 }
 
 #[cfg_attr(test, allow(private_interfaces))]
@@ -102,7 +110,7 @@ pub(crate) fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParame
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let parameters = _as_ref(mechanism.pParameter as CK_GCM_PARAMS_PTR)?;
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_GCM_PARAMS_PTR) }?;
     let iv_len = usize::try_from(parameters.ulIvLen)
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     let aad_len = usize::try_from(parameters.ulAADLen)
@@ -119,8 +127,8 @@ pub(crate) fn parse_gcm_parameters(mechanism: &CK_MECHANISM) -> Result<GcmParame
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
     Ok(GcmParameters {
-        iv: from_raw_parts(parameters.pIv as *const u8, iv_len)?.to_vec(),
-        aad: from_raw_parts(parameters.pAAD as *const u8, aad_len)?.to_vec(),
+        iv: unsafe { from_raw_parts(parameters.pIv as *const u8, iv_len) }?.to_vec(),
+        aad: unsafe { from_raw_parts(parameters.pAAD as *const u8, aad_len) }?.to_vec(),
         tag_bits,
     })
 }
@@ -131,7 +139,7 @@ fn parse_ctr_parameters(mechanism: &CK_MECHANISM) -> Result<CtrParameters, Error
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let parameters = _as_ref(mechanism.pParameter as CK_AES_CTR_PARAMS_PTR)?;
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_AES_CTR_PARAMS_PTR) }?;
     let counter_bits = usize::try_from(parameters.ulCounterBits)
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     if !(1..=128).contains(&counter_bits) {
@@ -149,7 +157,7 @@ fn parse_ccm_parameters(mechanism: &CK_MECHANISM) -> Result<CcmParameters, Error
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let parameters = _as_ref(mechanism.pParameter as CK_CCM_PARAMS_PTR)?;
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_CCM_PARAMS_PTR) }?;
     let data_len = usize::try_from(parameters.ulDataLen)
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     let nonce_len = usize::try_from(parameters.ulNonceLen)
@@ -172,8 +180,8 @@ fn parse_ccm_parameters(mechanism: &CK_MECHANISM) -> Result<CcmParameters, Error
     }
     Ok(CcmParameters {
         data_len,
-        nonce: from_raw_parts(parameters.pNonce as *const u8, nonce_len)?.to_vec(),
-        aad: from_raw_parts(parameters.pAAD as *const u8, aad_len)?.to_vec(),
+        nonce: unsafe { from_raw_parts(parameters.pNonce as *const u8, nonce_len) }?.to_vec(),
+        aad: unsafe { from_raw_parts(parameters.pAAD as *const u8, aad_len) }?.to_vec(),
         mac_len,
     })
 }
@@ -185,7 +193,7 @@ fn parse_key_wrap_iv(mechanism: &CK_MECHANISM, default: &[u8]) -> Result<Vec<u8>
     if mechanism.pParameter.is_null() || mechanism.ulParameterLen as usize != default.len() {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    Ok(from_raw_parts(mechanism.pParameter.cast::<u8>(), default.len())?.to_vec())
+    Ok(unsafe { from_raw_parts(mechanism.pParameter.cast::<u8>(), default.len()) }?.to_vec())
 }
 
 fn crypt_init(
@@ -213,7 +221,7 @@ fn crypt_init(
         if operation_active {
             return Err(CKR_OPERATION_ACTIVE.into());
         }
-        let mechanism = _as_ref(mechanism)?;
+        let mechanism = unsafe { _as_ref(mechanism) }?;
         require_slot_mechanism(
             ctx,
             slot_id,
@@ -256,7 +264,7 @@ fn crypt_init(
                 if mechanism.ulParameterLen != 16 || mechanism.pParameter.is_null() {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                let bytes = from_raw_parts(mechanism.pParameter as *const u8, 16)?;
+                let bytes = unsafe { from_raw_parts(mechanism.pParameter as *const u8, 16) }?;
                 (
                     Some(bytes.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?),
                     None,
@@ -296,7 +304,8 @@ fn crypt_init(
                 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                let parameters = _as_ref(mechanism.pParameter as CK_RSA_PKCS_OAEP_PARAMS_PTR)?;
+                let parameters =
+                    unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_OAEP_PARAMS_PTR) }?;
                 if parameters.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
@@ -313,10 +322,12 @@ fn crypt_init(
                     x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
                     _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
                 };
-                let label = from_raw_parts(
-                    parameters.pSourceData as *const u8,
-                    parameters.ulSourceDataLen as usize,
-                )?;
+                let label = unsafe {
+                    from_raw_parts(
+                        parameters.pSourceData as *const u8,
+                        parameters.ulSourceDataLen as usize,
+                    )
+                }?;
                 (
                     None,
                     None,
@@ -1043,7 +1054,7 @@ fn crypt(
         });
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    let output_len = as_mut(output_len)?;
+    let output_len = unsafe { as_mut(output_len) }?;
     with_session_context_mut(session_handle, |ctx| {
         let operation = ctx
             .get_session_context(session_handle)?
@@ -1059,7 +1070,7 @@ fn crypt(
                 .clear_crypt_operations();
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        let input = match from_raw_parts(input, input_len as usize) {
+        let input = match unsafe { from_raw_parts(input, input_len as usize) } {
             Ok(input) => input,
             Err(error) => {
                 ctx.get_session_context_mut(session_handle)?
@@ -1486,14 +1497,16 @@ pub extern "C" fn C_DecryptUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt_update(
-        session_handle,
-        encrypted_part,
-        encrypted_part_len,
-        part,
-        part_len,
-        false,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt_update(
+            session_handle,
+            encrypted_part,
+            encrypted_part_len,
+            part,
+            part_len,
+            false,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -1502,15 +1515,17 @@ pub extern "C" fn C_DecryptFinal(
     last_part: *mut ::std::os::raw::c_uchar,
     last_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(crypt(
-        session_handle,
-        ptr::null(),
-        0,
-        last_part,
-        last_part_len,
-        false,
-        true,
-    ))
+    crate::ffi_boundary(|| {
+        map(crypt(
+            session_handle,
+            ptr::null(),
+            0,
+            last_part,
+            last_part_len,
+            false,
+            true,
+        ))
+    })
 }
 
 fn crypt_update(
@@ -1528,7 +1543,7 @@ fn crypt_update(
             Err(CKR_ARGUMENTS_BAD.into())
         });
     }
-    let output_len = as_mut(output_len)?;
+    let output_len = unsafe { as_mut(output_len) }?;
     with_session_context_mut(session_handle, |ctx| {
         let operation = ctx
             .get_session_context(session_handle)?
@@ -1546,7 +1561,7 @@ fn crypt_update(
                 .take_crypt_operation(encrypting);
             return Err(CKR_OPERATION_NOT_INITIALIZED.into());
         }
-        let input = match from_raw_parts(input, input_len as usize) {
+        let input = match unsafe { from_raw_parts(input, input_len as usize) } {
             Ok(input) => input,
             Err(error) => {
                 ctx.get_session_context_mut(session_handle)?

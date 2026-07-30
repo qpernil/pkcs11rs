@@ -16,7 +16,6 @@ use crate::{
     YUBIHSM_ALGO_RSA_PSS_SHA1, YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384,
     YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_X25519,
 };
-use std::slice;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MechanismDetails {
@@ -759,12 +758,14 @@ pub extern "C" fn C_GetMechanismList(
     mechanism_list: *mut CK_MECHANISM_TYPE,
     count: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_GetMechanismList called with {:?}",
-        (slotID, mechanism_list, count)
-    );
-    map(get_mechanism_list(slotID, mechanism_list, count))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_GetMechanismList called with {:?}",
+            (slotID, mechanism_list, count)
+        );
+        map(get_mechanism_list(slotID, mechanism_list, count))
+    })
 }
 
 pub(crate) fn get_mechanism_list(
@@ -772,7 +773,7 @@ pub(crate) fn get_mechanism_list(
     mechanism_list: *mut CK_MECHANISM_TYPE,
     count: CK_ULONG_PTR,
 ) -> Result<(), Error> {
-    let count = as_mut(count)?;
+    let count = unsafe { as_mut(count) }?;
     with_slot_context_mut(slotID, |ctx| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 
@@ -787,7 +788,7 @@ pub(crate) fn get_mechanism_list(
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
 
-        let list = unsafe { slice::from_raw_parts_mut(mechanism_list, mechanisms.len()) };
+        let list = unsafe { crate::_from_raw_parts_mut(mechanism_list, mechanisms.len()) }?;
         for (slot, mechanism) in list.iter_mut().zip(mechanisms) {
             *slot = mechanism.type_;
         }
@@ -803,12 +804,14 @@ pub extern "C" fn C_GetMechanismInfo(
     type_: CK_MECHANISM_TYPE,
     info_ptr: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_GetMechanismInfo called with {:?}",
-        (slotID, type_, info_ptr)
-    );
-    map(get_mechanism_info(slotID, type_, info_ptr))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_GetMechanismInfo called with {:?}",
+            (slotID, type_, info_ptr)
+        );
+        map(get_mechanism_info(slotID, type_, info_ptr))
+    })
 }
 
 pub(crate) fn get_mechanism_info(
@@ -816,7 +819,7 @@ pub(crate) fn get_mechanism_info(
     type_: CK_MECHANISM_TYPE,
     info_ptr: CK_MECHANISM_INFO_PTR,
 ) -> Result<(), Error> {
-    let info = as_mut(info_ptr)?;
+    let info = unsafe { as_mut(info_ptr) }?;
     with_slot_context_mut(slotID, |ctx| {
         let mechanisms = ctx.get_present_slot(slotID)?.mechanisms();
 

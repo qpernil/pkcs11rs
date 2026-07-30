@@ -18,14 +18,16 @@ pub extern "C" fn PKCS11RS_SoftwareExportPrivateKey(
     encrypted_key: CK_BYTE_PTR,
     encrypted_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    map(software_export_private_key(
-        session_handle,
-        key,
-        password,
-        password_len,
-        encrypted_key,
-        encrypted_key_len,
-    ))
+    crate::ffi_boundary(|| {
+        map(software_export_private_key(
+            session_handle,
+            key,
+            password,
+            password_len,
+            encrypted_key,
+            encrypted_key_len,
+        ))
+    })
 }
 
 fn software_export_private_key(
@@ -40,8 +42,8 @@ fn software_export_private_key(
     if !(MIN_EXPORT_PASSWORD_LENGTH..=MAX_EXPORT_PASSWORD_LENGTH).contains(&password_len) {
         return Err(CKR_PIN_LEN_RANGE.into());
     }
-    let password = Zeroizing::new(from_raw_parts(password, password_len)?.to_vec());
-    let output_len = as_mut(encrypted_key_len)?;
+    let password = Zeroizing::new(unsafe { from_raw_parts(password, password_len) }?.to_vec());
+    let output_len = unsafe { as_mut(encrypted_key_len) }?;
 
     with_session_context(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
@@ -78,7 +80,7 @@ fn software_export_private_key(
         if encrypted.len() != required_len as usize {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        let output = _from_raw_parts_mut(encrypted_key, encrypted.len())?;
+        let output = unsafe { _from_raw_parts_mut(encrypted_key, encrypted.len()) }?;
         output.copy_from_slice(encrypted.as_ref());
         *output_len = required_len;
         Ok(())
