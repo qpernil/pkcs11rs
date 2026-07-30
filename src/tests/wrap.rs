@@ -825,19 +825,21 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    let imported_object = crate::with_session_context(session, |ctx| {
-        ctx.resolve_object(imported)?
-            .ok_or(CKR_OBJECT_HANDLE_INVALID.into())
+    let imported_is_expected = crate::with_session_context(session, |ctx| {
+        let object = ctx
+            .resolve_object(imported)?
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        Ok(matches!(
+            object.material,
+            KeyMaterial::YubiHsm {
+                id: 20,
+                object_type: crate::YUBIHSM_SYMMETRIC_KEY,
+                ..
+            }
+        ))
     })
     .unwrap();
-    assert!(matches!(
-        imported_object.material,
-        KeyMaterial::YubiHsm {
-            id: 20,
-            object_type: crate::YUBIHSM_SYMMETRIC_KEY,
-            ..
-        }
-    ));
+    assert!(imported_is_expected);
 
     for (full_object, wrapper, expected_command) in [
         (
@@ -991,15 +993,23 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    let imported_object = crate::with_session_context(session, |ctx| {
-        ctx.resolve_object(imported)?
-            .ok_or(CKR_OBJECT_HANDLE_INVALID.into())
-    })
-    .unwrap();
-    assert_eq!(imported_object.id, id);
-    assert_eq!(imported_object.label, "unwrapped AES");
-    assert!(imported_object.extractable);
-    assert!(!imported_object.never_extractable);
+    let (imported_id, imported_label, extractable, never_extractable) =
+        crate::with_session_context(session, |ctx| {
+            let object = ctx
+                .resolve_object(imported)?
+                .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+            Ok((
+                object.id,
+                object.label,
+                object.extractable,
+                object.never_extractable,
+            ))
+        })
+        .unwrap();
+    assert_eq!(imported_id, id);
+    assert_eq!(imported_label, "unwrapped AES");
+    assert!(extractable);
+    assert!(!never_extractable);
     assert_eq!(
         commands
             .borrow()
