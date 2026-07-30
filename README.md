@@ -414,6 +414,53 @@ Other values cause `C_Initialize` to return `CKR_ARGUMENTS_BAD`.
 
 ## Testing
 
+### Rust test prerequisites
+
+The hardware-independent Rust test suite has the following external
+requirements:
+
+| Platform | Requirements |
+| --- | --- |
+| Linux | Rust 1.85 or newer, a working C compiler/linker, `pkg-config`, PC/SC development files, libudev development files, and `/bin/sh` |
+| macOS | Rust 1.85 or newer, Xcode Command Line Tools, `pkg-config`, and `/bin/sh`; PC/SC and IOKit are system frameworks |
+| Windows | Rust 1.85 or newer using the MSVC target, Visual Studio C++ Build Tools, and the Windows SDK; no separately installed PC/SC, HID, or libudev package is required |
+
+For example, on Debian or Ubuntu:
+
+```sh
+sudo apt-get install build-essential pkg-config libpcsclite-dev libudev-dev
+cargo test --locked
+```
+
+The first Cargo invocation needs access to the crate registry unless all
+dependencies are already cached or vendored. Once the dependencies are
+available, the Rust tests require no Internet access, although loopback TCP
+connections must be permitted for the in-process HTTP and TLS test servers.
+Unix tests use `/bin/sh` to emulate `pinentry`.
+
+Neither normal nor all-features Rust test runs require:
+
+- Python or a Python environment
+- the OpenSSL executable or OpenSSL libraries
+- OpenSC or `pkcs11-tool`
+- Clang or libclang
+- libusb
+- a separately installed `hidapi`
+- physical hardware
+- a running `pcscd`
+
+The shared-library integration test uses the operating system's native dynamic
+loader through the Rust `libloading` crate; it does not require a separate
+loader executable or system library package. It disables automatic hardware
+discovery before initializing the module, so it does not contact USB, HID, or
+PC/SC devices.
+
+The Linux CI image additionally installs Clang, libclang, and OpenSC because
+the complete validation job also checks regenerated PKCS #11 bindings and runs
+the Python ABI, OpenSSL, and OpenSC tests. Those packages are not prerequisites
+for the Rust test suite itself. Clang and libclang are required only when
+running `cargo xtask bindings` or `cargo xtask bindings --check`.
+
 Run the Rust test suite:
 
 ```sh
@@ -457,6 +504,12 @@ retain persistent device objects. Each mutating test documents and checks its
 own environment-variable gate; the FIDO2 tests are documented in
 [FIDO2 support](docs/fido2.md), and YubiHSM Auth and SCP11 provisioning tests
 are documented in their backend guides.
+
+Running an ignored hardware test also requires the selected device, its
+platform driver, and access permissions. PC/SC-backed tests require the
+platform smart-card service (`pcscd` on Linux). Direct YubiHSM USB tests on
+Windows require the YubiHSM interface to be bound to WinUSB. These requirements
+do not apply to the default `cargo test` run.
 
 The read-only FIDO cross-interface diagnostic deliberately overlaps HID and
 CCID operations on the same serial-numbered YubiKey and reports whether the
