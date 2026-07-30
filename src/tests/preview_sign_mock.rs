@@ -71,7 +71,11 @@ fn bytes_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut [u8]) -> CK_ATTRIBUTE {
     }
 }
 
-fn read_attribute(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE, type_: u64) -> Vec<u8> {
+fn read_attribute(
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE,
+    type_: CK_ATTRIBUTE_TYPE,
+) -> Vec<u8> {
     let mut attribute = CK_ATTRIBUTE {
         type_,
         pValue: std::ptr::null_mut(),

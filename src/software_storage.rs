@@ -27,6 +27,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+use crate::key_metadata::cryptoki_ulong_to_u64;
 use crate::storage::{ContentReference, LocalStorageProvider, StorageProvider};
 
 const HEADER_PREFIX: &str = "header-";
@@ -64,6 +65,17 @@ const PKCS11RS_ATTRIBUTES_OID_VALUE: &[u8] = &[
 ];
 
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
+
+fn stored_u64_to_cryptoki_ulong(value: u64) -> Result<crate::CK_ULONG, Error> {
+    #[cfg(windows)]
+    {
+        value.try_into().map_err(|_| Error::from(CKR_DATA_INVALID))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(value)
+    }
+}
 
 #[derive(Debug)]
 struct Header {
@@ -622,19 +634,12 @@ fn decode_record(
     let plaintext = decrypt(master_key, &nonce, &record_aad(name), ciphertext)
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     let (attributes, material) = decode_stored_private_key_info(plaintext.as_ref())?;
-    let class: crate::CK_OBJECT_CLASS = attributes
-        .class
-        .try_into()
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
-    let key_type: crate::CK_KEY_TYPE = attributes
-        .key_type
-        .try_into()
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let class: crate::CK_OBJECT_CLASS = stored_u64_to_cryptoki_ulong(attributes.class)?;
+    let key_type: crate::CK_KEY_TYPE = stored_u64_to_cryptoki_ulong(attributes.key_type)?;
     let key_gen_mechanism: Option<crate::CK_MECHANISM_TYPE> = attributes
         .key_gen_mechanism
-        .map(TryInto::try_into)
-        .transpose()
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+        .map(stored_u64_to_cryptoki_ulong)
+        .transpose()?;
     if class != crate::CKO_PRIVATE_KEY as crate::CK_OBJECT_CLASS || key_type != material.key_type()
     {
         return Err(CKR_DATA_INVALID.into());
@@ -681,8 +686,8 @@ fn encode_record_envelope(nonce: &[u8; NONCE_LENGTH], ciphertext: &[u8]) -> Resu
 
 fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
     Ok(StoredAttributes {
-        class: object.class.into(),
-        key_type: object.key_type.into(),
+        class: cryptoki_ulong_to_u64(object.class),
+        key_type: cryptoki_ulong_to_u64(object.key_type),
         label: object.label.clone(),
         id: object.id.clone(),
         private: object.private,
@@ -696,7 +701,7 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
         always_sensitive: object.always_sensitive,
         never_extractable: object.never_extractable,
         local: object.local,
-        key_gen_mechanism: object.key_gen_mechanism.map(Into::into),
+        key_gen_mechanism: object.key_gen_mechanism.map(cryptoki_ulong_to_u64),
     })
 }
 
