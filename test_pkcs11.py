@@ -35,6 +35,7 @@ CKR_KEY_HANDLE_INVALID = 0x60
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68
+CKR_KEY_UNEXTRACTABLE = 0x6A
 CKR_MECHANISM_INVALID = 0x70
 CKR_MECHANISM_PARAM_INVALID = 0x71
 CKR_OBJECT_HANDLE_INVALID = 0x82
@@ -146,6 +147,13 @@ CKA_VERIFY = 0x0000010A
 CKA_DERIVE = 0x0000010C
 CKA_MODULUS = 0x00000120
 CKA_MODULUS_BITS = 0x00000121
+CKA_PUBLIC_EXPONENT = 0x00000122
+CKA_PRIVATE_EXPONENT = 0x00000123
+CKA_PRIME_1 = 0x00000124
+CKA_PRIME_2 = 0x00000125
+CKA_EXPONENT_1 = 0x00000126
+CKA_EXPONENT_2 = 0x00000127
+CKA_COEFFICIENT = 0x00000128
 CKA_VALUE_LEN = 0x00000161
 CKA_EXTRACTABLE = 0x00000162
 CKA_LOCAL = 0x00000163
@@ -1058,6 +1066,15 @@ class Pkcs11AbiTests(unittest.TestCase):
         cls.lib.PKCS11RS_HsmAuthChangeManagementPassword.restype = CK_RV
         cls.lib.PKCS11RS_HsmAuthReset.argtypes = [CK_ULONG]
         cls.lib.PKCS11RS_HsmAuthReset.restype = CK_RV
+        cls.lib.PKCS11RS_SoftwareExportPrivateKey.argtypes = [
+            CK_ULONG,
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            CK_ULONG,
+            ctypes.POINTER(CK_BYTE),
+            ctypes.POINTER(CK_ULONG),
+        ]
+        cls.lib.PKCS11RS_SoftwareExportPrivateKey.restype = CK_RV
 
     def setUp(self) -> None:
         self.lib.C_Finalize(None)
@@ -2175,6 +2192,654 @@ class Pkcs11AbiTests(unittest.TestCase):
                     self.assertNotIn(id_bytes, contents)
                     if os.name == "posix":
                         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            finally:
+                self.lib.C_Finalize(None)
+                if previous_slots is None:
+                    os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
+                else:
+                    os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous_slots
+                if previous_storage is None:
+                    os.environ.pop("PKCS11RS_TOKEN_STORAGE", None)
+                else:
+                    os.environ["PKCS11RS_TOKEN_STORAGE"] = previous_storage
+
+    @unittest.skipUnless(shutil.which("openssl"), "OpenSSL is unavailable")
+    def test_named_software_private_key_export_imports_and_prints_in_openssl(
+        self,
+    ) -> None:
+        previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        previous_storage = os.environ.get("PKCS11RS_TOKEN_STORAGE")
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "openssl export"
+            os.environ["PKCS11RS_TOKEN_STORAGE"] = directory
+            login_pin = b"software token login password"
+            export_password = b"OpenSSL export password"
+            label_bytes = b"OpenSSL attributed private key"
+            id_bytes = b"\x00openssl-id\x80\xff"
+
+            def export_key(
+                session: int,
+                handle: int,
+                password_bytes: bytes = export_password,
+                output: ctypes.Array[CK_BYTE] | None = None,
+                output_len: CK_ULONG | None = None,
+            ) -> tuple[int, CK_ULONG]:
+                password = (CK_BYTE * len(password_bytes))(*password_bytes)
+                length = output_len if output_len is not None else CK_ULONG()
+                return (
+                    self.lib.PKCS11RS_SoftwareExportPrivateKey(
+                        session,
+                        handle,
+                        password,
+                        len(password),
+                        output,
+                        ctypes.byref(length),
+                    ),
+                    length,
+                )
+
+            def parse_pkcs1_rsa_private_key(
+                encoded: bytes,
+            ) -> list[bytes]:
+                def item(offset: int) -> tuple[int, bytes, int]:
+                    self.assertLess(offset + 2, len(encoded))
+                    tag = encoded[offset]
+                    offset += 1
+                    length = encoded[offset]
+                    offset += 1
+                    if length & 0x80:
+                        length_bytes = length & 0x7F
+                        self.assertGreater(length_bytes, 0)
+                        self.assertLessEqual(length_bytes, 4)
+                        self.assertLessEqual(
+                            offset + length_bytes,
+                            len(encoded),
+                        )
+                        length = int.from_bytes(
+                            encoded[offset : offset + length_bytes],
+                            "big",
+                        )
+                        offset += length_bytes
+                    end = offset + length
+                    self.assertLessEqual(end, len(encoded))
+                    return tag, encoded[offset:end], end
+
+                tag, sequence, end = item(0)
+                self.assertEqual(tag, 0x30)
+                self.assertEqual(end, len(encoded))
+                values: list[bytes] = []
+                offset = 0
+                while offset < len(sequence):
+                    tag = sequence[offset]
+                    self.assertEqual(tag, 0x02)
+                    length_offset = offset + 1
+                    length = sequence[length_offset]
+                    content_offset = length_offset + 1
+                    if length & 0x80:
+                        length_bytes = length & 0x7F
+                        self.assertGreater(length_bytes, 0)
+                        self.assertLessEqual(length_bytes, 4)
+                        length = int.from_bytes(
+                            sequence[
+                                content_offset : content_offset + length_bytes
+                            ],
+                            "big",
+                        )
+                        content_offset += length_bytes
+                    next_offset = content_offset + length
+                    self.assertLessEqual(next_offset, len(sequence))
+                    value = sequence[content_offset:next_offset]
+                    self.assertTrue(value)
+                    values.append(value.lstrip(b"\x00") or b"\x00")
+                    offset = next_offset
+                self.assertEqual(len(values), 9)
+                self.assertEqual(values[0], b"\x00")
+                return values[1:]
+
+            try:
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                count = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GetSlotList(1, None, ctypes.byref(count)),
+                    CKR_OK,
+                )
+                slots = (CK_ULONG * count.value)()
+                self.assertEqual(
+                    self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+                    CKR_OK,
+                )
+                software_slot = None
+                for slot_id in slots:
+                    info = CK_TOKEN_INFO()
+                    self.assertEqual(
+                        self.lib.C_GetTokenInfo(slot_id, ctypes.byref(info)),
+                        CKR_OK,
+                    )
+                    if bytes(info.label).rstrip(b" ") == b"openssl export":
+                        software_slot = slot_id
+                        break
+                self.assertIsNotNone(software_slot)
+
+                hardware_session = self.open_slot_session(ABI_TEST_SLOT_ID)
+                rv, _ = export_key(hardware_session, 1)
+                self.assertEqual(rv, CKR_FUNCTION_NOT_SUPPORTED)
+                self.assertEqual(
+                    self.lib.C_CloseSession(hardware_session),
+                    CKR_OK,
+                )
+
+                session = self.open_slot_session(
+                    software_slot,
+                    CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                )
+                rv, _ = export_key(session, 1)
+                self.assertEqual(rv, CKR_USER_NOT_LOGGED_IN)
+                self.login_with_pin(session, login_pin)
+
+                modulus_bits = CK_ULONG(1024)
+                true_value = CK_BYTE(1)
+                label = (CK_BYTE * len(label_bytes))(*label_bytes)
+                object_id = (CK_BYTE * len(id_bytes))(*id_bytes)
+                public_template = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_MODULUS_BITS,
+                        ctypes.cast(ctypes.byref(modulus_bits), CK_VOID_PTR),
+                        ctypes.sizeof(modulus_bits),
+                    ),
+                )
+                private_template = (CK_ATTRIBUTE * 5)(
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(true_value), CK_VOID_PTR),
+                        ctypes.sizeof(true_value),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(label, CK_VOID_PTR),
+                        len(label),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ID,
+                        ctypes.cast(object_id, CK_VOID_PTR),
+                        len(object_id),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SIGN,
+                        ctypes.cast(ctypes.byref(true_value), CK_VOID_PTR),
+                        ctypes.sizeof(true_value),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_EXTRACTABLE,
+                        ctypes.cast(ctypes.byref(true_value), CK_VOID_PTR),
+                        ctypes.sizeof(true_value),
+                    ),
+                )
+                mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
+                public_key = CK_ULONG()
+                private_key = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKeyPair(
+                        session,
+                        ctypes.byref(mechanism),
+                        public_template,
+                        len(public_template),
+                        private_template,
+                        len(private_template),
+                        ctypes.byref(public_key),
+                        ctypes.byref(private_key),
+                    ),
+                    CKR_OK,
+                )
+
+                nonextractable_private = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKeyPair(
+                        session,
+                        ctypes.byref(mechanism),
+                        public_template,
+                        len(public_template),
+                        private_template,
+                        len(private_template) - 1,
+                        ctypes.byref(public_key),
+                        ctypes.byref(nonextractable_private),
+                    ),
+                    CKR_OK,
+                )
+                rv, _ = export_key(session, nonextractable_private.value)
+                self.assertEqual(rv, CKR_KEY_UNEXTRACTABLE)
+                rv, _ = export_key(session, private_key.value, b"short")
+                self.assertEqual(rv, CKR_PIN_LEN_RANGE)
+
+                rv, required = export_key(session, private_key.value)
+                self.assertEqual(rv, CKR_OK)
+                self.assertGreater(required.value, 0)
+                too_small = (CK_BYTE * (required.value - 1))()
+                rv, corrected = export_key(
+                    session,
+                    private_key.value,
+                    output=too_small,
+                    output_len=CK_ULONG(len(too_small)),
+                )
+                self.assertEqual(rv, CKR_BUFFER_TOO_SMALL)
+                self.assertEqual(corrected.value, required.value)
+                exported = (CK_BYTE * required.value)()
+                rv, actual = export_key(
+                    session,
+                    private_key.value,
+                    output=exported,
+                    output_len=CK_ULONG(len(exported)),
+                )
+                self.assertEqual(rv, CKR_OK)
+                self.assertEqual(actual.value, required.value)
+                encrypted_der = bytes(exported[: actual.value])
+
+                self.assertEqual(self.lib.C_Logout(session), CKR_OK)
+                rv, _ = export_key(session, private_key.value)
+                self.assertEqual(rv, CKR_USER_NOT_LOGGED_IN)
+                self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+
+                encrypted_path = pathlib.Path(directory) / "exported-key.der"
+                imported_path = pathlib.Path(directory) / "openssl-imported-key.pem"
+                reencoded_path = pathlib.Path(directory) / "openssl-reencoded-key.der"
+                public_path = pathlib.Path(directory) / "openssl-public-key.der"
+                round_trip_export_path = (
+                    pathlib.Path(directory) / "round-trip-export.der"
+                )
+                round_trip_public_path = (
+                    pathlib.Path(directory) / "round-trip-public-key.der"
+                )
+                encrypted_path.write_bytes(encrypted_der)
+                parsed = subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "asn1parse",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(encrypted_path),
+                        "-i",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                printed_envelope = parsed.stdout.lower()
+                self.assertIn("pbes2", printed_envelope)
+                self.assertIn("scrypt", printed_envelope)
+                self.assertIn("aes-256-cbc", printed_envelope)
+
+                wrong_password = subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(encrypted_path),
+                        "-passin",
+                        "pass:wrong export password",
+                        "-noout",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(wrong_password.returncode, 0)
+                subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(encrypted_path),
+                        "-passin",
+                        f"pass:{export_password.decode()}",
+                        "-out",
+                        str(imported_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                imported_asn1 = subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "asn1parse",
+                        "-in",
+                        str(imported_path),
+                        "-i",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotIn(
+                    "1.2.840.113549.1.9.20",
+                    imported_asn1.stdout,
+                )
+                self.assertNotIn("friendlyName", imported_asn1.stdout)
+                self.assertNotIn(
+                    "1.2.840.113549.1.9.21",
+                    imported_asn1.stdout,
+                )
+                self.assertNotIn("localKeyID", imported_asn1.stdout)
+                self.assertNotIn(
+                    "2.25.143450012756208704387410405620256874559",
+                    imported_asn1.stdout,
+                )
+                printed_key = subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-in",
+                        str(imported_path),
+                        "-check",
+                        "-text",
+                        "-noout",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                key_text = (printed_key.stdout + printed_key.stderr).lower()
+                self.assertIn("private-key: (1024 bit, 2 primes)", key_text)
+                self.assertTrue(
+                    "key is valid" in key_text or "rsa key ok" in key_text
+                )
+
+                subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-in",
+                        str(imported_path),
+                        "-traditional",
+                        "-outform",
+                        "DER",
+                        "-out",
+                        str(reencoded_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                components = parse_pkcs1_rsa_private_key(
+                    reencoded_path.read_bytes()
+                )
+
+                round_trip_session = self.open_slot_session(
+                    software_slot,
+                    CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                )
+                self.login_with_pin(round_trip_session, login_pin)
+                private_class = CK_ULONG(CKO_PRIVATE_KEY)
+                rsa_key_type = CK_ULONG(CKK_RSA)
+                round_trip_label_bytes = b"OpenSSL round-trip import"
+                round_trip_id_bytes = b"\x00round-trip-id\xff"
+                round_trip_label = (
+                    CK_BYTE * len(round_trip_label_bytes)
+                )(*round_trip_label_bytes)
+                round_trip_id = (
+                    CK_BYTE * len(round_trip_id_bytes)
+                )(*round_trip_id_bytes)
+                component_buffers = [
+                    (CK_BYTE * len(component))(*component)
+                    for component in components
+                ]
+                component_types = [
+                    CKA_MODULUS,
+                    CKA_PUBLIC_EXPONENT,
+                    CKA_PRIVATE_EXPONENT,
+                    CKA_PRIME_1,
+                    CKA_PRIME_2,
+                    CKA_EXPONENT_1,
+                    CKA_EXPONENT_2,
+                    CKA_COEFFICIENT,
+                ]
+                import_attributes = [
+                    CK_ATTRIBUTE(
+                        CKA_CLASS,
+                        ctypes.cast(
+                            ctypes.byref(private_class),
+                            CK_VOID_PTR,
+                        ),
+                        ctypes.sizeof(private_class),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(
+                            ctypes.byref(rsa_key_type),
+                            CK_VOID_PTR,
+                        ),
+                        ctypes.sizeof(rsa_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(
+                            ctypes.byref(true_value),
+                            CK_VOID_PTR,
+                        ),
+                        ctypes.sizeof(true_value),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(round_trip_label, CK_VOID_PTR),
+                        len(round_trip_label),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ID,
+                        ctypes.cast(round_trip_id, CK_VOID_PTR),
+                        len(round_trip_id),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SIGN,
+                        ctypes.cast(
+                            ctypes.byref(true_value),
+                            CK_VOID_PTR,
+                        ),
+                        ctypes.sizeof(true_value),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_EXTRACTABLE,
+                        ctypes.cast(
+                            ctypes.byref(true_value),
+                            CK_VOID_PTR,
+                        ),
+                        ctypes.sizeof(true_value),
+                    ),
+                ]
+                import_attributes.extend(
+                    CK_ATTRIBUTE(
+                        attribute_type,
+                        ctypes.cast(component, CK_VOID_PTR),
+                        len(component),
+                    )
+                    for attribute_type, component in zip(
+                        component_types,
+                        component_buffers,
+                        strict=True,
+                    )
+                )
+                import_template = (CK_ATTRIBUTE * len(import_attributes))(
+                    *import_attributes
+                )
+                round_trip_key = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_CreateObject(
+                        round_trip_session,
+                        import_template,
+                        len(import_template),
+                        ctypes.byref(round_trip_key),
+                    ),
+                    CKR_OK,
+                )
+
+                for attribute_type, expected in (
+                    (CKA_LABEL, round_trip_label_bytes),
+                    (CKA_ID, round_trip_id_bytes),
+                ):
+                    imported_attribute = CK_ATTRIBUTE(
+                        attribute_type,
+                        None,
+                        0,
+                    )
+                    self.assertEqual(
+                        self.lib.C_GetAttributeValue(
+                            round_trip_session,
+                            round_trip_key.value,
+                            ctypes.byref(imported_attribute),
+                            1,
+                        ),
+                        CKR_OK,
+                    )
+                    imported_value = (
+                        CK_BYTE * imported_attribute.ulValueLen
+                    )()
+                    imported_attribute.pValue = ctypes.cast(
+                        imported_value,
+                        CK_VOID_PTR,
+                    )
+                    self.assertEqual(
+                        self.lib.C_GetAttributeValue(
+                            round_trip_session,
+                            round_trip_key.value,
+                            ctypes.byref(imported_attribute),
+                            1,
+                        ),
+                        CKR_OK,
+                    )
+                    self.assertEqual(bytes(imported_value), expected)
+
+                public_info = CK_ATTRIBUTE(CKA_PUBLIC_KEY_INFO, None, 0)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        round_trip_session,
+                        round_trip_key.value,
+                        ctypes.byref(public_info),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                public_info_value = (CK_BYTE * public_info.ulValueLen)()
+                public_info.pValue = ctypes.cast(
+                    public_info_value,
+                    CK_VOID_PTR,
+                )
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        round_trip_session,
+                        round_trip_key.value,
+                        ctypes.byref(public_info),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-in",
+                        str(imported_path),
+                        "-pubout",
+                        "-outform",
+                        "DER",
+                        "-out",
+                        str(public_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    bytes(public_info_value),
+                    public_path.read_bytes(),
+                )
+
+                rv, round_trip_length = export_key(
+                    round_trip_session,
+                    round_trip_key.value,
+                )
+                self.assertEqual(rv, CKR_OK)
+                round_trip_export = (
+                    CK_BYTE * round_trip_length.value
+                )()
+                rv, round_trip_actual = export_key(
+                    round_trip_session,
+                    round_trip_key.value,
+                    output=round_trip_export,
+                    output_len=CK_ULONG(len(round_trip_export)),
+                )
+                self.assertEqual(rv, CKR_OK)
+                round_trip_export_path.write_bytes(
+                    bytes(
+                        round_trip_export[
+                            : round_trip_actual.value
+                        ]
+                    )
+                )
+                round_trip_check = subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(round_trip_export_path),
+                        "-passin",
+                        f"pass:{export_password.decode()}",
+                        "-check",
+                        "-noout",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                round_trip_check_text = (
+                    round_trip_check.stdout + round_trip_check.stderr
+                ).lower()
+                self.assertTrue(
+                    "key is valid" in round_trip_check_text
+                    or "rsa key ok" in round_trip_check_text
+                )
+                subprocess.run(
+                    [
+                        shutil.which("openssl"),
+                        "pkey",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(round_trip_export_path),
+                        "-passin",
+                        f"pass:{export_password.decode()}",
+                        "-pubout",
+                        "-outform",
+                        "DER",
+                        "-out",
+                        str(round_trip_public_path),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    round_trip_public_path.read_bytes(),
+                    public_path.read_bytes(),
+                )
+                self.assertEqual(
+                    self.lib.C_DestroyObject(
+                        round_trip_session,
+                        round_trip_key.value,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Logout(round_trip_session),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_CloseSession(round_trip_session),
+                    CKR_OK,
+                )
             finally:
                 self.lib.C_Finalize(None)
                 if previous_slots is None:
