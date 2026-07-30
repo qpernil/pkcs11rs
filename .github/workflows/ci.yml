@@ -43,6 +43,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Run Python ABI tests
         run: python test_pkcs11.py
 
@@ -143,6 +146,39 @@ jobs:
           name: oasis-pkcs11-v3.2-results-macos
           path: target/oasis-results
           if-no-files-found: warn
+
+  architecture-check:
+    name: Architecture check (${{ matrix.name }})
+    strategy:
+      matrix:
+        include:
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            platform: linux
+          - name: macOS Intel
+            runner: macos-15-intel
+            platform: macos
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux native dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libpcsclite-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install macOS native dependencies
+        if: matrix.platform == 'macos'
+        run: brew install pkg-config
+
+      - name: Check all features
+        run: cargo check --locked --all-features
 
   windows:
     runs-on: windows-latest

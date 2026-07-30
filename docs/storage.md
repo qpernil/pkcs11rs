@@ -171,7 +171,10 @@ Concurrent identical writes are idempotent; different bytes under the same
 reference are a conflict. After publication or deletion, the objects directory
 is synchronized on Unix so the directory entry reaches durable storage. On
 non-Unix systems the file is synchronized, but there is currently no
-directory-sync operation.
+directory-sync operation. The configured storage location must therefore be
+on a filesystem that supports hard links. Local NTFS, APFS, and common Linux
+filesystems satisfy this requirement; removable filesystems such as exFAT and
+network filesystems are not assumed to do so.
 
 Deletion removes the content-named file. There are no tombstones, mutable
 aliases, garbage collection, or reference tracking. References between future

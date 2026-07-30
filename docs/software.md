@@ -182,7 +182,10 @@ missing, pkcs11rs refuses to initialize a replacement master key.
 The private directory and its subdirectories are mode `0700` on Unix; header
 and record files are mode `0600`. New immutable files are written under unique
 temporary names, flushed, atomically published with a hard link, and followed
-by a directory sync. Deletes are also followed by a directory sync.
+by a directory sync. Deletes are also followed by a directory sync. Persistent
+software-token storage requires a filesystem with hard-link support; local
+NTFS, APFS, and common Linux filesystems are suitable, while removable
+filesystems such as exFAT and network filesystems are not assumed to be.
 
 PIN changes use monotonically increasing immutable header generations. The
 new generation is published durably before older generations are removed.
