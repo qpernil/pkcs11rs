@@ -95,6 +95,7 @@ pub(crate) trait FidoEndpoint: std::fmt::Debug {
         Ok(())
     }
     fn clear(&self) {}
+    #[allow(dead_code)]
     fn set_applet_present(&self, _present: bool) {}
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
@@ -688,6 +689,9 @@ impl Slot for Fido2Slot {
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Fido2
+    }
+    fn physical_device_key(&self) -> Option<PhysicalDeviceKey> {
+        Fido2Slot::physical_device_key(self)
     }
 
     fn name(&self) -> String {

@@ -1,7 +1,9 @@
 use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::pkcs11::*;
-use crate::storage::{MemoryStorageProvider, StorageProvider, UnavailableStorageProvider};
+use crate::storage::{
+    LocalStorageProvider, MemoryStorageProvider, StorageProvider, UnavailableStorageProvider,
+};
 #[cfg(feature = "mock-yubikey")]
 use crate::MockYubiKeyConnector;
 #[cfg(feature = "abi-tests")]
@@ -28,6 +30,7 @@ use nusb::MaybeFuture;
 use rsa::RsaPublicKey;
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
 };
@@ -36,6 +39,99 @@ use zeroize::Zeroizing;
 pub(crate) const YUBIHSM_TLS_CLIENT_CERT_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_CERT";
 pub(crate) const YUBIHSM_TLS_CLIENT_KEY_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_KEY";
 pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUNDLE";
+pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
+
+const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
+
+#[derive(Clone, Debug)]
+pub(crate) struct FidoStorageConfig {
+    root: PathBuf,
+}
+
+impl FidoStorageConfig {
+    fn open(root: PathBuf) -> Result<Self, Error> {
+        std::fs::create_dir_all(&root)?;
+        if !std::fs::metadata(&root)?.is_dir() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Self { root })
+    }
+
+    fn token_root(&self, key: &PhysicalDeviceKey) -> PathBuf {
+        let identity = match key {
+            PhysicalDeviceKey::YubicoSerial(serial) => {
+                format!("yubico-serial-{}", encode_path_component(serial.as_bytes()))
+            }
+        };
+        self.root
+            .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
+            .join(identity)
+    }
+
+    fn provider(&self, key: &PhysicalDeviceKey) -> Result<LocalStorageProvider, Error> {
+        LocalStorageProvider::open(self.token_root(key))
+            .map_err(crate::backed_object::storage_error)
+    }
+
+    #[cfg(test)]
+    fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+pub(crate) fn configured_fido_storage(
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<FidoStorageConfig>, Error> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let root = PathBuf::from(value);
+    if !root.is_absolute() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    FidoStorageConfig::open(root).map(Some)
+}
+
+fn encode_path_component(value: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value {
+        encoded.push(DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn token_storage_for_slot(
+    slot: &dyn Slot,
+    fido_storage: Option<&FidoStorageConfig>,
+) -> Result<Box<dyn StorageProvider>, Error> {
+    if slot.kind() != SlotKind::Fido2 {
+        return Ok(Box::new(UnavailableStorageProvider));
+    }
+    let Some(config) = fido_storage else {
+        return Ok(Box::new(UnavailableStorageProvider));
+    };
+    let Some(key) = slot.physical_device_key() else {
+        log!(
+            1,
+            "FIDO persistence disabled for {} because no stable physical token identity is available",
+            slot.name()
+        );
+        return Ok(Box::new(UnavailableStorageProvider));
+    };
+    let provider = config.provider(&key)?;
+    log!(
+        2,
+        "FIDO persistence for {} uses {:?}",
+        slot.name(),
+        provider.root()
+    );
+    Ok(Box::new(provider))
+}
 
 pub(crate) fn configured_yubihsm_urls(
     value: Option<std::ffi::OsString>,
@@ -117,6 +213,7 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
+    pub(crate) fido_storage: Option<FidoStorageConfig>,
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
@@ -245,6 +342,7 @@ impl SlotContextRegistry {
         handles: Arc<HandleCounters>,
         pinentry: Arc<pinentry::Pinentry>,
         trust_store: Arc<crate::yubihsm::trust::TrustStore>,
+        fido_storage: Option<&FidoStorageConfig>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
         // Each discovered application or authenticator is a separate PKCS
         // token with its own logical state.
@@ -261,24 +359,47 @@ impl SlotContextRegistry {
         {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        let contexts = slots
-            .into_iter()
-            .map(|(slot_id, slot, token_objects)| {
-                let context = SlotContext::new(
-                    slot_id,
-                    slot,
-                    token_objects,
-                    handles.clone(),
-                    pinentry.clone(),
-                    trust_store.clone(),
-                )?;
-                Ok((slot_id, Arc::new(Mutex::new(context))))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let mut contexts = Vec::with_capacity(slots.len());
+        let mut storage_error = None;
+        for (slot_id, slot, token_objects) in slots {
+            let is_configured_fido = slot.kind() == SlotKind::Fido2 && fido_storage.is_some();
+            let context =
+                token_storage_for_slot(slot.as_ref(), fido_storage).and_then(|token_storage| {
+                    SlotContext::new_with_storage(
+                        slot_id,
+                        slot,
+                        token_objects,
+                        handles.clone(),
+                        pinentry.clone(),
+                        trust_store.clone(),
+                        token_storage,
+                    )
+                });
+            match context {
+                Ok(context) => contexts.push((slot_id, Arc::new(Mutex::new(context)))),
+                Err(error) if is_configured_fido => {
+                    log!(
+                        1,
+                        "FIDO slot {} rejected its configured storage: {:?}",
+                        slot_id,
+                        error
+                    );
+                    storage_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if contexts.is_empty() {
+            return Err(storage_error.unwrap_or_else(|| Error::from(CKR_ARGUMENTS_BAD)));
+        }
+        let inserted_slot_ids = contexts
+            .iter()
+            .map(|(slot_id, _)| *slot_id)
+            .collect::<Vec<_>>();
         for (slot_id, context) in contexts {
             self.slots.insert(slot_id, context);
         }
-        Ok(slot_ids)
+        Ok(inserted_slot_ids)
     }
 
     fn next_slot_id(&self) -> Option<CK_SLOT_ID> {
@@ -380,6 +501,7 @@ impl std::fmt::Debug for ModuleContext {
                 "yubihsm_public_discovery_config",
                 &self.yubihsm_public_discovery_config,
             )
+            .field("fido_storage", &self.fido_storage)
             .field("slot_contexts", &slot_ids)
             .finish()
     }
@@ -508,6 +630,7 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
+        let fido_storage = configured_fido_storage(std::env::var_os(FIDO2_STORAGE_ENV))?;
         let yubihsm_http_tls = configured_yubihsm_http_tls(
             std::env::var_os(YUBIHSM_TLS_CLIENT_CERT_ENV),
             std::env::var_os(YUBIHSM_TLS_CLIENT_KEY_ENV),
@@ -542,6 +665,7 @@ impl ModuleContext {
             yubihsm_urls,
             yubihsm_http_tls,
             yubihsm_public_discovery_config,
+            fido_storage,
             handles: handles.clone(),
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
@@ -674,6 +798,7 @@ impl ModuleContext {
                 self.handles.clone(),
                 self.pinentry.clone(),
                 self.trust_store.clone(),
+                self.fido_storage.as_ref(),
             )
             .map(|_| ())
     }
@@ -1318,7 +1443,7 @@ impl ModuleContext {
         }
         #[cfg(feature = "mock-yubikey")]
         {
-            let connector = Rc::new(MockYubiKeyConnector::new()?);
+            let connector = Rc::new(MockYubiKeyConnector::process_device()?);
             select_application(connector.as_ref(), &crate::ctap::FIDO2_AID)?;
             let slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
             let device = Arc::new(crate::device::DeviceContext::new(
@@ -1342,6 +1467,7 @@ impl ModuleContext {
                 self.handles.clone(),
                 self.pinentry.clone(),
                 self.trust_store.clone(),
+                self.fido_storage.as_ref(),
             )?;
             // A mock build is a deterministic, self-contained PKCS #11
             // artifact. Do not mix its synthetic slot with USB, HTTP, or
@@ -1704,10 +1830,13 @@ impl ModuleContext {
                             self.handles.clone(),
                             self.pinentry.clone(),
                             self.trust_store.clone(),
+                            self.fido_storage.as_ref(),
                         ) {
-                            Ok(_) => {
+                            Ok(inserted_slot_ids) => {
                                 for (key, slot_id, secure_channel) in reader_fido_slots {
-                                    ccid_fido_slots.insert(key, (slot_id, secure_channel));
+                                    if inserted_slot_ids.contains(&slot_id) {
+                                        ccid_fido_slots.insert(key, (slot_id, secure_channel));
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -1849,6 +1978,7 @@ impl ModuleContext {
                 self.handles.clone(),
                 self.pinentry.clone(),
                 self.trust_store.clone(),
+                self.fido_storage.as_ref(),
             ) {
                 log!(1, "FIDO HID slot context registration: {:?}", error);
             }
@@ -1956,6 +2086,29 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_STORAGE_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let id = NEXT_STORAGE_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "pkcs11rs-fido-config-test-{}-{id}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn identity(serial: &str) -> DeviceIdentity {
         DeviceIdentity {
@@ -2014,5 +2167,35 @@ mod discovery_tests {
         let (hid_device, shared) = hid_device_context(&devices, identity("87654321"));
         assert!(!shared);
         assert!(!Arc::ptr_eq(&hid_device, &pcsc_device));
+    }
+
+    #[test]
+    fn fido_storage_configuration_is_explicit_and_token_scoped() {
+        assert!(configured_fido_storage(None).unwrap().is_none());
+        assert!(configured_fido_storage(Some(std::ffi::OsString::new())).is_err());
+        assert!(configured_fido_storage(Some("relative/path".into())).is_err());
+
+        let directory = TestDirectory::new();
+        let file = directory.0.join("not-a-directory");
+        std::fs::write(&file, []).unwrap();
+        assert!(configured_fido_storage(Some(file.into_os_string())).is_err());
+        let config = configured_fido_storage(Some(directory.0.clone().into_os_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.root(), directory.0);
+        assert_eq!(
+            config.token_root(&key("12345678")),
+            directory
+                .0
+                .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
+                .join("yubico-serial-3132333435363738")
+        );
+        assert_eq!(
+            config.token_root(&key("87654321")),
+            directory
+                .0
+                .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
+                .join("yubico-serial-3837363534333231")
+        );
     }
 }

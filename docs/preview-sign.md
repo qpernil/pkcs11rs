@@ -224,9 +224,11 @@ re-import the registration attribute as a token object, derive a token signing
 key, export both wrappers, destroy the signing key, reject incomplete and
 mismatched restoration attempts, restore the exact signing key as a session
 object, project its public key, Sign, `C_Verify`, and independently destroy the
-objects. The mock test installs an in-memory slot token provider, so it
-validates token lifecycle semantics without claiming durable
-process-to-process persistence.
+objects. A separate test configures local FIDO storage, finalizes and
+reinitializes the module, discovers the token registration and derived key
+again, signs and verifies with the restored key, destroys both token objects,
+and verifies after another restart that they no longer appear. Corrupt
+content-addressed data is rejected rather than treated as an empty store.
 
 ## Hardware status
 
@@ -251,5 +253,5 @@ PKCS11RS_FIDO2_TEST_PIN='' \
 Open hardware questions include positive registration vectors from a
 compatible pre-release device, attestation verification and trust policy,
 end-to-end ARKG derivation/signing interoperability, ticket lifetime and replay
-properties, whether token serial is sufficient routing metadata, and durable
-FIDO storage-provider configuration and restoration.
+properties, and whether the validated physical YubiKey serial is sufficient
+routing metadata for the configured local provider.
