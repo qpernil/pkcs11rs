@@ -10,8 +10,9 @@ use der::{
 };
 use minicbor::{Decoder, Encoder};
 use pkcs8::{
+    pkcs5::pbes2,
     spki::{AlgorithmIdentifierOwned, AlgorithmIdentifierRef, ObjectIdentifier},
-    PrivateKeyInfoRef,
+    EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
 };
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::RsaPrivateKey;
@@ -43,6 +44,11 @@ const TAG_LENGTH: usize = 16;
 const MAX_RECORD_LENGTH: usize = 1024 * 1024;
 const MIN_PIN_LENGTH: usize = 8;
 const MAX_PIN_LENGTH: usize = 1024;
+const EXPORT_SCRYPT_LOG_N: u8 = 14;
+const EXPORT_SCRYPT_R: u32 = 8;
+const EXPORT_SCRYPT_P: u32 = 1;
+const EXPORT_SALT_LENGTH: usize = 16;
+const EXPORT_IV_LENGTH: usize = 16;
 const EC_PUBLIC_KEY_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
@@ -827,6 +833,63 @@ fn encode_stored_private_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<
     ))
 }
 
+/// Export the attributed private-key representation in a standard password-
+/// encrypted PKCS #8 `EncryptedPrivateKeyInfo`.
+///
+/// PBES2 uses scrypt (N=16384, r=8, p=1) and AES-256-CBC with a fresh
+/// 16-byte salt and IV, matching the interoperable parameters recommended by
+/// RustCrypto's PKCS #5 implementation.
+pub(crate) fn export_encrypted_private_key_info(
+    object: &TokenObject,
+    password: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let plaintext = encode_stored_private_key_info(object)?;
+    let mut salt = [0; EXPORT_SALT_LENGTH];
+    let mut iv = [0; EXPORT_IV_LENGTH];
+    getrandom::fill(&mut salt).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    getrandom::fill(&mut iv).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let parameters = export_pbes2_parameters(&salt, iv)?;
+    let encrypted_data = parameters
+        .encrypt(password, plaintext.as_ref())
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let encrypted = EncryptedPrivateKeyInfoOwned {
+        encryption_algorithm: parameters.into(),
+        encrypted_data: OctetString::new(encrypted_data).map_err(|_| CKR_DEVICE_ERROR)?,
+    };
+    let document =
+        SecretDocument::encode_msg(&encrypted).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(Zeroizing::new(document.as_bytes().to_vec()))
+}
+
+pub(crate) fn encrypted_private_key_info_len(object: &TokenObject) -> Result<usize, Error> {
+    let plaintext = encode_stored_private_key_info(object)?;
+    let encrypted_len = plaintext
+        .len()
+        .checked_div(EXPORT_IV_LENGTH)
+        .and_then(|blocks| blocks.checked_add(1))
+        .and_then(|blocks| blocks.checked_mul(EXPORT_IV_LENGTH))
+        .ok_or(CKR_DEVICE_ERROR)?;
+    let parameters = export_pbes2_parameters(&[0; EXPORT_SALT_LENGTH], [0; EXPORT_IV_LENGTH])?;
+    let encrypted = EncryptedPrivateKeyInfoOwned {
+        encryption_algorithm: parameters.into(),
+        encrypted_data: OctetString::new(vec![0; encrypted_len]).map_err(|_| CKR_DEVICE_ERROR)?,
+    };
+    let document =
+        SecretDocument::encode_msg(&encrypted).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(document.as_bytes().len())
+}
+
+fn export_pbes2_parameters(
+    salt: &[u8; EXPORT_SALT_LENGTH],
+    iv: [u8; EXPORT_IV_LENGTH],
+) -> Result<pbes2::Parameters, Error> {
+    let scrypt_parameters =
+        pkcs8::pkcs5::scrypt::Params::new(EXPORT_SCRYPT_LOG_N, EXPORT_SCRYPT_R, EXPORT_SCRYPT_P)
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    pbes2::Parameters::generate_scrypt_aes256cbc(scrypt_parameters, salt, iv)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))
+}
+
 fn decode_stored_private_key_info(
     encoded: &[u8],
 ) -> Result<(StoredAttributes, SoftwarePrivateKeyMaterial), Error> {
@@ -1043,6 +1106,7 @@ fn material_from_ec_scalar(
 mod tests {
     use super::*;
     use crate::CKM_RSA_PKCS_KEY_PAIR_GEN;
+    use pkcs8::EncryptedPrivateKeyInfoRef;
     use rsa::traits::{PrivateKeyParts, PublicKeyParts};
     use std::sync::{
         atomic::{AtomicU64, Ordering},
@@ -1165,6 +1229,45 @@ mod tests {
                     || info.algorithm.oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1")
             );
         }
+    }
+
+    #[test]
+    fn exported_encrypted_private_key_info_round_trips_attributed_pkcs8() {
+        let material =
+            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
+        let mut original = object(material);
+        original.extractable = true;
+        original.never_extractable = false;
+        let password = b"OpenSSL compatible export password";
+
+        let expected_len = encrypted_private_key_info_len(&original).unwrap();
+        let exported = export_encrypted_private_key_info(&original, password).unwrap();
+        assert_eq!(exported.len(), expected_len);
+        let encrypted = EncryptedPrivateKeyInfoRef::from_der(exported.as_ref()).unwrap();
+        let parameters = match &encrypted.encryption_algorithm {
+            pkcs8::pkcs5::EncryptionScheme::Pbes2(parameters) => parameters,
+            _ => panic!("export did not use PBES2"),
+        };
+        let scrypt = parameters.kdf.scrypt().unwrap();
+        assert_eq!(scrypt.cost_parameter, 16_384);
+        assert_eq!(scrypt.block_size, 8);
+        assert_eq!(scrypt.parallelization, 1);
+        assert_eq!(scrypt.salt.as_bytes().len(), 16);
+        assert!(matches!(
+            parameters.encryption,
+            pbes2::EncryptionScheme::Aes256Cbc { iv } if iv.len() == 16
+        ));
+
+        let decrypted = encrypted.decrypt(password).unwrap();
+        let info = StoredPrivateKeyInfo::from_der(decrypted.as_bytes()).unwrap();
+        assert_eq!(info.attributes.as_ref().unwrap().len(), 3);
+        let (attributes, material) = decode_stored_private_key_info(decrypted.as_bytes()).unwrap();
+        assert_eq!(attributes.label, original.label);
+        assert_eq!(attributes.id, original.id);
+        assert!(attributes.extractable);
+        assert_eq!(material.private_value().unwrap(), scalar(32));
+
+        assert!(encrypted.decrypt(b"wrong export password").is_err());
     }
 
     #[test]

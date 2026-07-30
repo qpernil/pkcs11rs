@@ -251,6 +251,28 @@ CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_HsmAuthReset)(
   CK_SESSION_HANDLE hSession
 );
 
+/*
+ * Export an extractable private key from a named software slot as a DER
+ * PKCS #8 EncryptedPrivateKeyInfo. The session must have an active CKU_USER
+ * login. The export password must contain 8 through 1024 bytes.
+ *
+ * PBES2 uses scrypt (N=16384, r=8, p=1) and AES-256-CBC. The decrypted
+ * OneAsymmetricKey includes PKCS #9 friendlyName/localKeyId attributes and
+ * pkcs11rs' private attribute payload.
+ *
+ * If pEncryptedKey is NULL, pulEncryptedKeyLen receives the required length.
+ * If the supplied buffer is too small, the function returns
+ * CKR_BUFFER_TOO_SMALL and updates pulEncryptedKeyLen.
+ */
+CK_DECLARE_FUNCTION(CK_RV, PKCS11RS_SoftwareExportPrivateKey)(
+  CK_SESSION_HANDLE hSession,
+  CK_OBJECT_HANDLE hKey,
+  const CK_UTF8CHAR *pPassword,
+  CK_ULONG ulPasswordLen,
+  CK_BYTE_PTR pEncryptedKey,
+  CK_ULONG_PTR pulEncryptedKeyLen
+);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@ mod key;
 mod object;
 mod security_domain;
 mod session;
+mod software;
 mod wrap;
 mod yubihsm;
 
@@ -17,6 +18,7 @@ pub use key::*;
 pub use object::*;
 pub use security_domain::*;
 pub use session::*;
+pub use software::*;
 pub use wrap::*;
 pub use yubihsm::*;
 

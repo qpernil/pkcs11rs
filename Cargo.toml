@@ -50,7 +50,7 @@ bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arit
 bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "sha384", "std"] }
 k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 num-bigint-dig = "0.8.6"
-pkcs8 = { version = "0.11.0", features = ["alloc", "pem", "std"] }
+pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "pem", "std"] }
 primefield = "0.14.0"
 primeorder = "0.14.0"
 rsa = { version = "0.9.10", features = ["pem", "sha2"] }
