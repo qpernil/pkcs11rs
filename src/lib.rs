@@ -655,8 +655,6 @@ pub mod pkcs11 {
 }
 use pkcs11::*;
 
-unsafe impl Sync for CK_INTERFACE {}
-
 #[cfg(test)]
 mod test;
 
@@ -861,35 +859,119 @@ fn with_session_context_mut_in_context<T: Send>(
     f(&mut child)
 }
 
-// TODO: Make these raw-pointer conversion helpers unsafe and document their
-// validity, alignment, lifetime, and aliasing contracts. The generated PKCS
-// #11 function tables already expose unsafe FFI function pointers, so this is
-// an internal safety-boundary cleanup rather than a C ABI change.
-fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
+fn ffi_boundary(call: impl FnOnce() -> CK_RV) -> CK_RV {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(rv) => rv,
+        Err(_) => CKR_FUNCTION_FAILED as CK_RV,
+    }
+}
+
+fn valid_raw_slice_length<T>(len: usize) -> bool {
+    let element_size = std::mem::size_of::<T>();
+    element_size == 0 || len <= isize::MAX as usize / element_size
+}
+
+/// Converts a caller-owned pointer to a shared reference.
+///
+/// # Safety
+///
+/// `ptr` must be properly aligned and point to an initialized `T` that remains
+/// valid and is not mutated for the returned reference's complete lifetime.
+unsafe fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
+    if ptr.is_null() || !ptr.is_aligned() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     unsafe { ptr.as_ref() }.ok_or(CKR_ARGUMENTS_BAD.into())
 }
 
-fn as_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, Error> {
+/// Converts a caller-owned pointer to an exclusive reference.
+///
+/// # Safety
+///
+/// `ptr` must be properly aligned and point to an initialized `T` that remains
+/// valid and is exclusively accessible for the returned reference's complete
+/// lifetime.
+unsafe fn as_mut<'a, T>(ptr: *mut T) -> Result<&'a mut T, Error> {
+    if ptr.is_null() || !ptr.is_aligned() {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     unsafe { ptr.as_mut() }.ok_or(CKR_ARGUMENTS_BAD.into())
 }
 
-fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
+/// Converts a caller-owned pointer and element count to a shared slice.
+///
+/// # Safety
+///
+/// For a nonzero `len`, `ptr` must be aligned and point to `len` initialized,
+/// contiguous `T` values whose total size does not exceed `isize::MAX`. The
+/// memory must remain valid and must not be mutated for the returned slice's
+/// complete lifetime.
+unsafe fn from_raw_parts<'a, T>(ptr: *const T, len: usize) -> Result<&'a [T], Error> {
     if len == 0 {
         Ok(&[])
-    } else if ptr.is_null() {
+    } else if ptr.is_null() || !ptr.is_aligned() || !valid_raw_slice_length::<T>(len) {
         Err(CKR_ARGUMENTS_BAD.into())
     } else {
         Ok(unsafe { slice::from_raw_parts(ptr, len) })
     }
 }
 
-fn _from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], Error> {
+/// Converts a caller-owned pointer and element count to an exclusive slice.
+///
+/// # Safety
+///
+/// For a nonzero `len`, `ptr` must be aligned and point to `len` initialized,
+/// contiguous `T` values whose total size does not exceed `isize::MAX`. The
+/// memory must remain valid and be exclusively accessible for the returned
+/// slice's complete lifetime.
+unsafe fn _from_raw_parts_mut<'a, T>(ptr: *mut T, len: usize) -> Result<&'a mut [T], Error> {
     if len == 0 {
         Ok(&mut [])
-    } else if ptr.is_null() {
+    } else if ptr.is_null() || !ptr.is_aligned() || !valid_raw_slice_length::<T>(len) {
         Err(CKR_ARGUMENTS_BAD.into())
     } else {
         Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
+    }
+}
+
+#[cfg(test)]
+mod ffi_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn panic_is_mapped_to_function_failed() {
+        assert_eq!(
+            ffi_boundary(|| panic!("test FFI boundary panic")),
+            CKR_FUNCTION_FAILED as CK_RV
+        );
+    }
+
+    #[test]
+    fn oversized_raw_slice_is_rejected() {
+        let pointer = std::ptr::NonNull::<u16>::dangling().as_ptr();
+        let oversized = isize::MAX as usize / std::mem::size_of::<u16>() + 1;
+        let error = unsafe { from_raw_parts(pointer, oversized) }.unwrap_err();
+        let rv: CK_RV = error.into();
+        assert_eq!(rv, CKR_ARGUMENTS_BAD as CK_RV);
+    }
+
+    #[test]
+    fn misaligned_raw_pointers_are_rejected_before_dereference() {
+        let mut storage = [0u16; 2];
+        let pointer = unsafe { storage.as_mut_ptr().cast::<u8>().add(1).cast::<u16>() };
+        assert!(!pointer.is_aligned());
+
+        let shared_error = unsafe { _as_ref(pointer.cast_const()) }.unwrap_err();
+        assert_eq!(CK_RV::from(shared_error), CKR_ARGUMENTS_BAD as CK_RV);
+
+        let mutable_error = unsafe { as_mut(pointer) }.unwrap_err();
+        assert_eq!(CK_RV::from(mutable_error), CKR_ARGUMENTS_BAD as CK_RV);
+
+        let slice_error = unsafe { from_raw_parts(pointer.cast_const(), 1) }.unwrap_err();
+        assert_eq!(CK_RV::from(slice_error), CKR_ARGUMENTS_BAD as CK_RV);
+
+        let mutable_slice_error = unsafe { _from_raw_parts_mut(pointer, 1) }.unwrap_err();
+        assert_eq!(CK_RV::from(mutable_slice_error), CKR_ARGUMENTS_BAD as CK_RV);
     }
 }
 
@@ -941,9 +1023,10 @@ pub(crate) use object::*;
 
 mod mechanism;
 pub(crate) use mechanism::*;
-pub use mechanism::{C_GetMechanismInfo, C_GetMechanismList};
+#[cfg(test)]
+use mechanism::{C_GetMechanismInfo, C_GetMechanismList};
 
-pub mod api;
+mod api;
 use api::DigestOperation;
 #[cfg(feature = "abi-tests")]
 use api::AES_BLOCK_LENGTH;

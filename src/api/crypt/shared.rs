@@ -145,7 +145,7 @@ pub extern "C" fn C_DigestEncryptUpdate(
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -156,7 +156,7 @@ pub extern "C" fn C_DecryptDigestUpdate(
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -167,7 +167,7 @@ pub extern "C" fn C_SignEncryptUpdate(
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -178,5 +178,5 @@ pub extern "C" fn C_DecryptVerifyUpdate(
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }

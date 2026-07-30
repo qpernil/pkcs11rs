@@ -148,7 +148,7 @@ pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>,
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ULONG>() {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
-            let length = *_as_ref(mechanism.pParameter.cast::<CK_ULONG>())
+            let length = *unsafe { _as_ref(mechanism.pParameter.cast::<CK_ULONG>()) }
                 .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
                 as usize;
             if length > AES_CMAC_LENGTH {
@@ -256,12 +256,14 @@ pub extern "C" fn C_SignInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_SignInit called with {:?}",
-        (session_handle, mechanism, key)
-    );
-    map(sign_init(session_handle, mechanism, key))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_SignInit called with {:?}",
+            (session_handle, mechanism, key)
+        );
+        map(sign_init(session_handle, mechanism, key))
+    })
 }
 
 fn sign_init(
@@ -280,7 +282,7 @@ fn sign_init(
             return Err(CKR_OPERATION_ACTIVE.into());
         }
 
-        let mechanism = _as_ref(mechanism)?;
+        let mechanism = unsafe { _as_ref(mechanism) }?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_SIGN as CK_FLAGS)?;
         let gmac = aes_gmac_parameters(mechanism)?;
         let mac_length = match &gmac {
@@ -293,7 +295,8 @@ fn sign_init(
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
                 return Err(CKR_MECHANISM_PARAM_INVALID.into());
             }
-            let parameters = _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR)?;
+            let parameters =
+                unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_PSS_PARAMS_PTR) }?;
             let mgf = match parameters.mgf {
                 x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
                 x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
@@ -502,18 +505,20 @@ pub extern "C" fn C_Sign(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_Sign called with {:?}",
-        (session_handle, data, data_len, signature, signature_len)
-    );
-    map(sign(
-        session_handle,
-        data,
-        data_len,
-        signature,
-        signature_len,
-    ))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_Sign called with {:?}",
+            (session_handle, data, data_len, signature, signature_len)
+        );
+        map(sign(
+            session_handle,
+            data,
+            data_len,
+            signature,
+            signature_len,
+        ))
+    })
 }
 
 fn sign(
@@ -532,7 +537,7 @@ fn sign(
         });
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    let signature_len = as_mut(signature_len)?;
+    let signature_len = unsafe { as_mut(signature_len) }?;
     with_session_context_mut(session_handle, |ctx| {
         let operation = ctx
             .get_session_context(session_handle)?
@@ -545,7 +550,7 @@ fn sign(
             ctx.get_session_context_mut(session_handle)?.sign_operation = None;
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
-        let data = match from_raw_parts(data, data_len as usize) {
+        let data = match unsafe { from_raw_parts(data, data_len as usize) } {
             Ok(data) => data,
             Err(error) => {
                 ctx.get_session_context_mut(session_handle)?.sign_operation = None;
@@ -887,20 +892,22 @@ pub extern "C" fn C_SignUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(with_session_context_mut(session_handle, |ctx| {
-        let part = from_raw_parts(part, part_len as usize)?.to_vec();
-        let session = ctx.get_session_context_mut(session_handle)?;
-        let operation = session
-            .sign_operation
-            .as_mut()
-            .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
-        if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION {
-            session.sign_operation = None;
-            return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
-        }
-        operation.buffer.extend_from_slice(&part);
-        Ok(())
-    }))
+    crate::ffi_boundary(|| {
+        map(with_session_context_mut(session_handle, |ctx| {
+            let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
+            let session = ctx.get_session_context_mut(session_handle)?;
+            let operation = session
+                .sign_operation
+                .as_mut()
+                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?;
+            if operation.mechanism == CKM_PKCS11RS_FIDO_ASSERTION {
+                session.sign_operation = None;
+                return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
+            }
+            operation.buffer.extend_from_slice(&part);
+            Ok(())
+        }))
+    })
 }
 
 #[no_mangle]
@@ -909,13 +916,15 @@ pub extern "C" fn C_SignFinal(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    map(sign(
-        session_handle,
-        ptr::null(),
-        0,
-        signature,
-        signature_len,
-    ))
+    crate::ffi_boundary(|| {
+        map(sign(
+            session_handle,
+            ptr::null(),
+            0,
+            signature,
+            signature_len,
+        ))
+    })
 }
 
 #[no_mangle]
@@ -924,7 +933,7 @@ pub extern "C" fn C_SignRecoverInit(
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -935,5 +944,5 @@ pub extern "C" fn C_SignRecover(
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }

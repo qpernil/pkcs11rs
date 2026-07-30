@@ -77,7 +77,7 @@ fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParam
     {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    let parameters = _as_ref(mechanism.pParameter as CK_RSA_AES_KEY_WRAP_PARAMS_PTR)
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_RSA_AES_KEY_WRAP_PARAMS_PTR) }
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     let aes_algorithm = match parameters.ulAESKeyBits {
         128 => YUBIHSM_ALGO_AES128,
@@ -85,15 +85,16 @@ fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParam
         256 => YUBIHSM_ALGO_AES256,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
-    let oaep =
-        _as_ref(parameters.pOAEPParams).map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let oaep = unsafe { _as_ref(parameters.pOAEPParams) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     if oaep.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
     let (hash_algorithm, digest) = rsa_wrap_hash_algorithm(oaep.hashAlg)?;
     let mgf1_algorithm = rsa_wrap_mgf_algorithm(oaep.mgf)?;
-    let label = from_raw_parts(oaep.pSourceData as *const u8, oaep.ulSourceDataLen as usize)
-        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let label =
+        unsafe { from_raw_parts(oaep.pSourceData as *const u8, oaep.ulSourceDataLen as usize) }
+            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
     Ok(RsaAesWrapParameters {
         aes_algorithm,
         hash_algorithm,
@@ -118,11 +119,13 @@ pub(crate) fn parse_yubihsm_wrap_mechanism(
                 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
-                let parameters = _as_ref(
-                    mechanism
-                        .pParameter
-                        .cast::<CKM_YUBICO_AES_CCM_WRAP_PARAMS>(),
-                )
+                let parameters = unsafe {
+                    _as_ref(
+                        mechanism
+                            .pParameter
+                            .cast::<CKM_YUBICO_AES_CCM_WRAP_PARAMS>(),
+                    )
+                }
                 .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
                 u8::try_from(parameters.format)
                     .ok()
@@ -199,14 +202,16 @@ pub extern "C" fn C_WrapKey(
     wrapped_key: CK_BYTE_PTR,
     wrapped_key_len: CK_ULONG_PTR,
 ) -> CK_RV {
-    map(wrap_key(
-        session_handle,
-        mechanism,
-        wrapping_key,
-        key,
-        wrapped_key,
-        wrapped_key_len,
-    ))
+    crate::ffi_boundary(|| {
+        map(wrap_key(
+            session_handle,
+            mechanism,
+            wrapping_key,
+            key,
+            wrapped_key,
+            wrapped_key_len,
+        ))
+    })
 }
 
 fn wrap_key(
@@ -219,8 +224,8 @@ fn wrap_key(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
-        let mechanism = _as_ref(mechanism)?;
-        let output_len = as_mut(wrapped_key_len)?;
+        let mechanism = unsafe { _as_ref(mechanism) }?;
+        let output_len = unsafe { as_mut(wrapped_key_len) }?;
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
         if slot.kind() != SlotKind::YubiHsm {
@@ -285,7 +290,7 @@ fn wrap_key(
             *output_len = response.len() as CK_ULONG;
             return Err(CKR_BUFFER_TOO_SMALL.into());
         }
-        let output = _from_raw_parts_mut(wrapped_key, response.len())?;
+        let output = unsafe { _from_raw_parts_mut(wrapped_key, response.len()) }?;
         output.copy_from_slice(&response);
         *output_len = response.len() as CK_ULONG;
         Ok(())
@@ -303,16 +308,18 @@ pub extern "C" fn C_UnwrapKey(
     attribute_count: CK_ULONG,
     key: CK_OBJECT_HANDLE_PTR,
 ) -> CK_RV {
-    map(unwrap_key(
-        session_handle,
-        mechanism,
-        unwrapping_key,
-        wrapped_key,
-        wrapped_key_len,
-        templ,
-        attribute_count,
-        key,
-    ))
+    crate::ffi_boundary(|| {
+        map(unwrap_key(
+            session_handle,
+            mechanism,
+            unwrapping_key,
+            wrapped_key,
+            wrapped_key_len,
+            templ,
+            attribute_count,
+            key,
+        ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,13 +335,14 @@ fn unwrap_key(
 ) -> Result<(), Error> {
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
-        let mechanism = _as_ref(mechanism)?;
-        let output_handle = as_mut(key)?;
+        let mechanism = unsafe { _as_ref(mechanism) }?;
+        let output_handle = unsafe { as_mut(key) }?;
         if wrapped_key.is_null() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        let wrapped = from_raw_parts(wrapped_key as *const u8, wrapped_key_len as usize)?;
-        let template = from_raw_parts(templ, attribute_count as usize)?;
+        let wrapped =
+            unsafe { from_raw_parts(wrapped_key as *const u8, wrapped_key_len as usize) }?;
+        let template = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
         if slot.kind() != SlotKind::YubiHsm {

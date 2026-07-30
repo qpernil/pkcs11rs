@@ -5810,6 +5810,93 @@ fn main() {
         self.assertEqual(info.cryptokiVersion.minor, 2)
         self.assertEqual(info.flags, 0)
 
+    def test_misaligned_caller_pointers_are_rejected_at_abi_boundary(self) -> None:
+        backing = []
+
+        def misaligned_pointer(value_type):
+            alignment = ctypes.alignment(value_type)
+            self.assertGreater(alignment, 1)
+            storage = ctypes.create_string_buffer(
+                ctypes.sizeof(value_type) + alignment
+            )
+            base = ctypes.addressof(storage)
+            aligned = (base + alignment - 1) & ~(alignment - 1)
+            pointer = ctypes.cast(aligned + 1, ctypes.POINTER(value_type))
+            address = ctypes.cast(pointer, ctypes.c_void_p).value
+            self.assertIsNotNone(address)
+            self.assertNotEqual(address % alignment, 0)
+            backing.append(storage)
+            return pointer
+
+        init_args = misaligned_pointer(CK_C_INITIALIZE_ARGS)
+        self.assertEqual(
+            self.lib.C_Initialize(ctypes.cast(init_args, ctypes.c_void_p)),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        function_list = misaligned_pointer(ctypes.POINTER(CK_FUNCTION_LIST))
+        self.assertEqual(self.lib.C_GetFunctionList(function_list), CKR_ARGUMENTS_BAD)
+
+        interface_count = misaligned_pointer(CK_ULONG)
+        self.assertEqual(
+            self.lib.C_GetInterfaceList(None, interface_count),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        interface_count = CK_ULONG(4)
+        interfaces = misaligned_pointer(CK_INTERFACE)
+        self.assertEqual(
+            self.lib.C_GetInterfaceList(
+                interfaces,
+                ctypes.byref(interface_count),
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        interface_output = misaligned_pointer(ctypes.POINTER(CK_INTERFACE))
+        self.assertEqual(
+            self.lib.C_GetInterface(b"PKCS 11", None, interface_output, 0),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+
+        slot_count = misaligned_pointer(CK_ULONG)
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, None, slot_count),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        slot_count = CK_ULONG(32)
+        slot_list = misaligned_pointer(CK_ULONG)
+        self.assertEqual(
+            self.lib.C_GetSlotList(1, slot_list, ctypes.byref(slot_count)),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        session = misaligned_pointer(CK_ULONG)
+        self.assertEqual(
+            self.lib.C_OpenSession(
+                ABI_TEST_SLOT_ID,
+                CKF_SERIAL_SESSION,
+                None,
+                None,
+                session,
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+
+        mechanism_count = CK_ULONG(256)
+        mechanisms = misaligned_pointer(CK_ULONG)
+        self.assertEqual(
+            self.lib.C_GetMechanismList(
+                ABI_TEST_SLOT_ID,
+                mechanisms,
+                ctypes.byref(mechanism_count),
+            ),
+            CKR_ARGUMENTS_BAD,
+        )
+
     def test_initialize_accepts_opaque_reserved_args_without_dereferencing(
         self,
     ) -> None:

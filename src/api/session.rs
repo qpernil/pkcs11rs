@@ -8,7 +8,7 @@ pub extern "C" fn C_InitToken(
     _pin_len: ::std::os::raw::c_ulong,
     _label: *mut ::std::os::raw::c_uchar,
 ) -> CK_RV {
-    CKR_FUNCTION_NOT_SUPPORTED.into()
+    crate::ffi_boundary(|| CKR_FUNCTION_NOT_SUPPORTED.into())
 }
 
 #[no_mangle]
@@ -17,12 +17,14 @@ pub extern "C" fn C_InitPIN(
     pin: *mut ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_InitPIN called with {:?}",
-        (session_handle, pin, pin_len)
-    );
-    map(init_pin(session_handle, pin, pin_len))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_InitPIN called with {:?}",
+            (session_handle, pin, pin_len)
+        );
+        map(init_pin(session_handle, pin, pin_len))
+    })
 }
 
 fn init_pin(
@@ -53,12 +55,14 @@ pub extern "C" fn C_SetPIN(
     new_pin: *mut ::std::os::raw::c_uchar,
     new_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_SetPIN called with {:?}",
-        (session_handle, old_pin, old_len, new_pin, new_len)
-    );
-    map(set_pin(session_handle, old_pin, old_len, new_pin, new_len))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_SetPIN called with {:?}",
+            (session_handle, old_pin, old_len, new_pin, new_len)
+        );
+        map(set_pin(session_handle, old_pin, old_len, new_pin, new_len))
+    })
 }
 
 fn set_pin(
@@ -91,7 +95,6 @@ fn set_pin(
     })
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn C_OpenSession(
     slotID: CK_SLOT_ID,
@@ -100,12 +103,78 @@ pub extern "C" fn C_OpenSession(
     _notify: CK_NOTIFY,
     session: *mut CK_SESSION_HANDLE,
 ) -> CK_RV {
-    log!(2, "C_OpenSession called with {:?}", (slotID, flags));
-    unsafe {
-        let session = match session.as_mut() {
-            Some(session) => session,
-            None => return CKR_ARGUMENTS_BAD.into(),
-        };
+    crate::ffi_boundary(|| {
+        log!(2, "C_OpenSession called with {:?}", (slotID, flags));
+        unsafe {
+            let session = match as_mut(session) {
+                Ok(session) => session,
+                Err(error) => return error.into(),
+            };
+            let module = match lock_context_read() {
+                Ok(guard) => guard,
+                Err(error) => return error.into(),
+            };
+            let context = match module.as_ref() {
+                Some(context) => context,
+                None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
+            };
+            let mut opened_handle = None;
+            let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
+                if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
+                    return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
+                }
+                if flags & CKF_ASYNC_SESSION as CK_FLAGS != 0 {
+                    return Ok(CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV);
+                }
+                ctx.reconcile_login_state(slotID);
+                if flags & CKF_RW_SESSION as CK_FLAGS == 0
+                    && ctx.login_role(slotID) == Some(LoginRole::So)
+                {
+                    return Ok(CKR_SESSION_READ_WRITE_SO_EXISTS as CK_RV);
+                }
+
+                let _ = ctx.slot.refresh();
+                log!(2, "{:?}", ctx.slot);
+                if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
+                    let k = context.handles.allocate_session()?;
+                    log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
+                    ctx.sessions
+                        .insert(k, SessionContext::new(ctx.slot.open_session(slotID, flags)));
+                    log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
+                    log!(2, "C_OpenSession returning {:?}", k);
+                    opened_handle = Some(k);
+                    Ok(CKR_OK as CK_RV)
+                } else {
+                    Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
+                }
+            });
+            match (result, opened_handle) {
+                (Ok(rv), None) => rv,
+                (Ok(_), Some(handle)) => {
+                    match register_session_slot_in_context(context, handle, slotID) {
+                        Ok(()) => {
+                            *session = handle;
+                            CKR_OK as CK_RV
+                        }
+                        Err(error) => {
+                            let _ = with_slot_context_mut_in_context(context, slotID, |ctx| {
+                                ctx.sessions.remove(&handle);
+                                Ok(())
+                            });
+                            error.into()
+                        }
+                    }
+                }
+                (Err(error), _) => error.into(),
+            }
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    crate::ffi_boundary(|| {
+        log!(2, "C_CloseSession called with {:?}", session_handle);
         let module = match lock_context_read() {
             Ok(guard) => guard,
             Err(error) => return error.into(),
@@ -114,178 +183,118 @@ pub extern "C" fn C_OpenSession(
             Some(context) => context,
             None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
         };
-        let mut opened_handle = None;
-        let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
-            if flags & CKF_SERIAL_SESSION as CK_FLAGS == 0 {
-                return Ok(CKR_SESSION_PARALLEL_NOT_SUPPORTED as CK_RV);
-            }
-            if flags & CKF_ASYNC_SESSION as CK_FLAGS != 0 {
-                return Ok(CKR_SESSION_ASYNC_NOT_SUPPORTED as CK_RV);
-            }
-            ctx.reconcile_login_state(slotID);
-            if flags & CKF_RW_SESSION as CK_FLAGS == 0
-                && ctx.login_role(slotID) == Some(LoginRole::So)
-            {
-                return Ok(CKR_SESSION_READ_WRITE_SO_EXISTS as CK_RV);
-            }
-
-            let _ = ctx.slot.refresh();
-            log!(2, "{:?}", ctx.slot);
-            if ctx.slot.flags() & CKF_TOKEN_PRESENT as CK_FLAGS != 0 {
-                let k = context.handles.allocate_session()?;
-                log!(2, "C_OpenSession sessions before {:?}", ctx.sessions);
-                ctx.sessions
-                    .insert(k, SessionContext::new(ctx.slot.open_session(slotID, flags)));
-                log!(2, "C_OpenSession sessions after {:?}", ctx.sessions);
-                log!(2, "C_OpenSession returning {:?}", k);
-                opened_handle = Some(k);
-                Ok(CKR_OK as CK_RV)
-            } else {
-                Ok(CKR_TOKEN_NOT_PRESENT as CK_RV)
-            }
-        });
-        match (result, opened_handle) {
-            (Ok(rv), None) => rv,
-            (Ok(_), Some(handle)) => {
-                match register_session_slot_in_context(context, handle, slotID) {
-                    Ok(()) => {
-                        *session = handle;
-                        CKR_OK as CK_RV
-                    }
+        let mut removed = false;
+        let result = with_session_context_mut_in_context(context, session_handle, |ctx| {
+            log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
+            let slot_id = match ctx.sessions.get(&session_handle) {
+                Some(session) => session.backend().slotID(),
+                None => return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
+            };
+            let is_last_session = !ctx.sessions.iter().any(|(handle, session)| {
+                *handle != session_handle && session.backend().slotID() == slot_id
+            });
+            ctx.reconcile_login_state(slot_id);
+            let logout_error = if is_last_session && ctx.is_slot_logged_in(slot_id) {
+                match ctx.logout_slot(slot_id) {
+                    Ok(()) => None,
                     Err(error) => {
-                        let _ = with_slot_context_mut_in_context(context, slotID, |ctx| {
-                            ctx.sessions.remove(&handle);
-                            Ok(())
-                        });
-                        error.into()
+                        ctx.clear_login_state(slot_id);
+                        ctx.slot.clear_session();
+                        Some(error)
                     }
                 }
+            } else {
+                None
+            };
+            let session = ctx
+                .sessions
+                .remove(&session_handle)
+                .ok_or(CKR_SESSION_HANDLE_INVALID)?;
+            removed = true;
+            let creator_objects = ctx
+                .memory_objects
+                .iter()
+                .filter_map(|(handle, object)| {
+                    (object.creator_session == Some(session_handle)).then_some(*handle)
+                })
+                .collect::<Vec<_>>();
+            for handle in creator_objects {
+                ctx.remove_object_handle(handle);
             }
-            (Err(error), _) => error.into(),
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    log!(2, "C_CloseSession called with {:?}", session_handle);
-    let module = match lock_context_read() {
-        Ok(guard) => guard,
-        Err(error) => return error.into(),
-    };
-    let context = match module.as_ref() {
-        Some(context) => context,
-        None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
-    };
-    let mut removed = false;
-    let result = with_session_context_mut_in_context(context, session_handle, |ctx| {
-        log!(2, "C_CloseSession sessions before {:?}", ctx.sessions);
-        let slot_id = match ctx.sessions.get(&session_handle) {
-            Some(session) => session.backend().slotID(),
-            None => return Ok(CKR_SESSION_HANDLE_INVALID as CK_RV),
-        };
-        let is_last_session = !ctx.sessions.iter().any(|(handle, session)| {
-            *handle != session_handle && session.backend().slotID() == slot_id
+            log!(2, "C_CloseSession removed {:?}", (session_handle, session));
+            log!(2, "C_CloseSession sessions after {:?}", ctx.sessions);
+            match logout_error {
+                Some(error) => Err(error),
+                None => Ok(CKR_OK as CK_RV),
+            }
         });
-        ctx.reconcile_login_state(slot_id);
-        let logout_error = if is_last_session && ctx.is_slot_logged_in(slot_id) {
-            match ctx.logout_slot(slot_id) {
-                Ok(()) => None,
-                Err(error) => {
-                    ctx.clear_login_state(slot_id);
-                    ctx.slot.clear_session();
-                    Some(error)
-                }
+        if removed {
+            if let Err(error) = unregister_session_slot_in_context(context, session_handle) {
+                return error.into();
             }
-        } else {
-            None
-        };
-        let session = ctx
-            .sessions
-            .remove(&session_handle)
-            .ok_or(CKR_SESSION_HANDLE_INVALID)?;
-        removed = true;
-        let creator_objects = ctx
-            .memory_objects
-            .iter()
-            .filter_map(|(handle, object)| {
-                (object.creator_session == Some(session_handle)).then_some(*handle)
-            })
-            .collect::<Vec<_>>();
-        for handle in creator_objects {
-            ctx.remove_object_handle(handle);
         }
-        log!(2, "C_CloseSession removed {:?}", (session_handle, session));
-        log!(2, "C_CloseSession sessions after {:?}", ctx.sessions);
-        match logout_error {
-            Some(error) => Err(error),
-            None => Ok(CKR_OK as CK_RV),
+        match result {
+            Ok(rv) => rv,
+            Err(error) => error.into(),
         }
-    });
-    if removed {
-        if let Err(error) = unregister_session_slot_in_context(context, session_handle) {
-            return error.into();
-        }
-    }
-    match result {
-        Ok(rv) => rv,
-        Err(error) => error.into(),
-    }
+    })
 }
 
 #[no_mangle]
 pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
-    log!(2, "C_CloseAllSessions called with {:?}", slotID);
-    let module = match lock_context_read() {
-        Ok(guard) => guard,
-        Err(error) => return error.into(),
-    };
-    let context = match module.as_ref() {
-        Some(context) => context,
-        None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
-    };
-    let mut closed_sessions = HashSet::new();
-    let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
-        log!(2, "C_CloseAllSessions sessions before {:?}", ctx.sessions);
-        closed_sessions.extend(
-            ctx.sessions
-                .iter()
-                .filter(|(_k, v)| v.backend().slotID() == slotID)
-                .map(|(k, _v)| *k),
-        );
-        ctx.reconcile_login_state(slotID);
-        let logout_error = if ctx.is_slot_logged_in(slotID) {
-            match ctx.logout_slot(slotID) {
-                Ok(()) => None,
-                Err(error) => {
-                    ctx.clear_login_state(slotID);
-                    ctx.slot.clear_session();
-                    Some(error)
-                }
-            }
-        } else {
-            None
+    crate::ffi_boundary(|| {
+        log!(2, "C_CloseAllSessions called with {:?}", slotID);
+        let module = match lock_context_read() {
+            Ok(guard) => guard,
+            Err(error) => return error.into(),
         };
-        ctx.sessions.retain(|_k, v| v.backend().slotID() != slotID);
-        ctx.memory_objects.retain(|_, object| {
-            object
-                .creator_session
-                .map(|owner| !closed_sessions.contains(&owner))
-                .unwrap_or(true)
+        let context = match module.as_ref() {
+            Some(context) => context,
+            None => return CKR_CRYPTOKI_NOT_INITIALIZED.into(),
+        };
+        let mut closed_sessions = HashSet::new();
+        let result = with_slot_context_mut_in_context(context, slotID, |ctx| {
+            log!(2, "C_CloseAllSessions sessions before {:?}", ctx.sessions);
+            closed_sessions.extend(
+                ctx.sessions
+                    .iter()
+                    .filter(|(_k, v)| v.backend().slotID() == slotID)
+                    .map(|(k, _v)| *k),
+            );
+            ctx.reconcile_login_state(slotID);
+            let logout_error = if ctx.is_slot_logged_in(slotID) {
+                match ctx.logout_slot(slotID) {
+                    Ok(()) => None,
+                    Err(error) => {
+                        ctx.clear_login_state(slotID);
+                        ctx.slot.clear_session();
+                        Some(error)
+                    }
+                }
+            } else {
+                None
+            };
+            ctx.sessions.retain(|_k, v| v.backend().slotID() != slotID);
+            ctx.memory_objects.retain(|_, object| {
+                object
+                    .creator_session
+                    .map(|owner| !closed_sessions.contains(&owner))
+                    .unwrap_or(true)
+            });
+            log!(2, "C_CloseAllSessions sessions after {:?}", ctx.sessions);
+            match logout_error {
+                Some(error) => Err(error),
+                None => Ok(CKR_OK as CK_RV),
+            }
         });
-        log!(2, "C_CloseAllSessions sessions after {:?}", ctx.sessions);
-        match logout_error {
-            Some(error) => Err(error),
-            None => Ok(CKR_OK as CK_RV),
+        if let Err(error) = unregister_session_slots_in_context(context, &closed_sessions) {
+            return error.into();
         }
-    });
-    if let Err(error) = unregister_session_slots_in_context(context, &closed_sessions) {
-        return error.into();
-    }
-    match result {
-        Ok(rv) => rv,
-        Err(error) => error.into(),
-    }
+        match result {
+            Ok(rv) => rv,
+            Err(error) => error.into(),
+        }
+    })
 }
 
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -294,15 +303,17 @@ pub extern "C" fn C_GetSessionInfo(
     session_handle: CK_SESSION_HANDLE,
     info_ptr: *mut CK_SESSION_INFO,
 ) -> CK_RV {
-    log!(2, "C_GetSessionInfo called with {:?}", session_handle);
-    map(get_session_info(session_handle, info_ptr))
+    crate::ffi_boundary(|| {
+        log!(2, "C_GetSessionInfo called with {:?}", session_handle);
+        map(get_session_info(session_handle, info_ptr))
+    })
 }
 
 fn get_session_info(
     session_handle: CK_SESSION_HANDLE,
     info_ptr: *mut CK_SESSION_INFO,
 ) -> Result<(), Error> {
-    let info = as_mut(info_ptr)?;
+    let info = unsafe { as_mut(info_ptr) }?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags) = {
             let session = ctx._get_session(session_handle)?.1;
@@ -331,7 +342,7 @@ pub extern "C" fn C_GetOperationState(
     _operation_state: *mut ::std::os::raw::c_uchar,
     _operation_state_len: *mut ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 #[no_mangle]
@@ -342,7 +353,7 @@ pub extern "C" fn C_SetOperationState(
     _encryption_key: CK_OBJECT_HANDLE,
     _authentiation_key: CK_OBJECT_HANDLE,
 ) -> CK_RV {
-    session_function_not_supported(session_handle)
+    crate::ffi_boundary(|| session_function_not_supported(session_handle))
 }
 
 fn login_role(
@@ -480,7 +491,7 @@ fn with_pin<R>(
     pin_len: CK_ULONG,
     use_pin: impl for<'a> FnOnce(&'a [u8]) -> Result<R, Error>,
 ) -> Result<R, Error> {
-    let pin = from_raw_parts(pin, pin_len as usize)?;
+    let pin = unsafe { from_raw_parts(pin, pin_len as usize) }?;
     if std::str::from_utf8(pin).is_err() {
         return Err(CKR_PIN_INVALID.into());
     }
@@ -494,12 +505,14 @@ pub extern "C" fn C_Login(
     pin: *mut ::std::os::raw::c_uchar,
     pin_len: ::std::os::raw::c_ulong,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_Login called with {:?}",
-        (session_handle, user_type, pin, pin_len)
-    );
-    map(login(session_handle, user_type, pin, pin_len))
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_Login called with {:?}",
+            (session_handle, user_type, pin, pin_len)
+        );
+        map(login(session_handle, user_type, pin, pin_len))
+    })
 }
 
 fn login_user(
@@ -519,7 +532,7 @@ fn login_user(
         if !ctx.get_slot(slot_id)?.supports_login_user() {
             return Err(CKR_FUNCTION_NOT_SUPPORTED.into());
         }
-        let username = from_raw_parts(username, username_len as usize)?;
+        let username = unsafe { from_raw_parts(username, username_len as usize) }?;
         let username = std::str::from_utf8(username).map_err(|_| CKR_ARGUMENTS_BAD)?;
         with_optional_pin(pin, pin_len, |pin| {
             login_role(ctx, session_handle, slot_id, LoginRole::User, |slot| {
@@ -541,26 +554,28 @@ pub extern "C" fn C_LoginUser(
     username: *mut CK_UTF8CHAR,
     username_len: CK_ULONG,
 ) -> CK_RV {
-    log!(
-        2,
-        "C_LoginUser called with {:?}",
-        (
+    crate::ffi_boundary(|| {
+        log!(
+            2,
+            "C_LoginUser called with {:?}",
+            (
+                session_handle,
+                user_type,
+                pin,
+                pin_len,
+                username,
+                username_len
+            )
+        );
+        map(login_user(
             session_handle,
             user_type,
             pin,
             pin_len,
             username,
-            username_len
-        )
-    );
-    map(login_user(
-        session_handle,
-        user_type,
-        pin,
-        pin_len,
-        username,
-        username_len,
-    ))
+            username_len,
+        ))
+    })
 }
 
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
@@ -576,8 +591,10 @@ fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
 
 #[no_mangle]
 pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    log!(2, "C_Logout called with {:?}", session_handle);
-    map(logout(session_handle))
+    crate::ffi_boundary(|| {
+        log!(2, "C_Logout called with {:?}", session_handle);
+        map(logout(session_handle))
+    })
 }
 
 #[cfg(test)]
