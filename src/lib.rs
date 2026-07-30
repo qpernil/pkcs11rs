@@ -861,6 +861,10 @@ fn with_session_context_mut_in_context<T>(
     f(&mut child)
 }
 
+// TODO: Make these raw-pointer conversion helpers unsafe and document their
+// validity, alignment, lifetime, and aliasing contracts. The generated PKCS
+// #11 function tables already expose unsafe FFI function pointers, so this is
+// an internal safety-boundary cleanup rather than a C ABI change.
 fn _as_ref<'a, T>(ptr: *const T) -> Result<&'a T, Error> {
     unsafe { ptr.as_ref() }.ok_or(CKR_ARGUMENTS_BAD.into())
 }

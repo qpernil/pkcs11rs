@@ -67,11 +67,11 @@ const PKCS11RS_ATTRIBUTES_OID_VALUE: &[u8] = &[
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
 fn stored_u64_to_cryptoki_ulong(value: u64) -> Result<crate::CK_ULONG, Error> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_pointer_width = "32"))]
     {
         value.try_into().map_err(|_| Error::from(CKR_DATA_INVALID))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
     {
         Ok(value)
     }
