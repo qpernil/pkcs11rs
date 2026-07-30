@@ -164,7 +164,8 @@ fn verify_init(
             key: asymmetric_key.unwrap_or_else(|| object.material.clone()),
             public_key: object.public_key.clone(),
             slot_id,
-            requires_login: object.private,
+            requires_login: object.private
+                && ctx.get_slot(slot_id)?.private_objects_require_login(),
             context_specific_extended: false,
             context_specific_rp_id: None,
             fido_authorization: None,

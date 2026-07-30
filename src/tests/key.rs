@@ -520,6 +520,50 @@ fn software_private_keys_remain_session_objects_while_public_keys_may_be_persist
     assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
     assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
 
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+    let mut value = [0u8; 32];
+    value[31] = 1;
+    let mut import_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+    ];
+    let mut imported = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            import_template.as_mut_ptr(),
+            import_template.len() as CK_ULONG,
+            &mut imported,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(imported, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    let mut session_token = CK_FALSE as CK_BBOOL;
+    import_template[2] = scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_token);
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            import_template.as_mut_ptr(),
+            import_template.len() as CK_ULONG,
+            &mut imported,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let imported_object = context.resolve_object(imported).unwrap().unwrap();
+        assert!(!imported_object.token);
+        assert!(matches!(
+            imported_object.material,
+            crate::KeyMaterial::SoftwarePrivate(_)
+        ));
+    });
+
     assert_eq!(
         crate::api::C_GenerateKeyPair(
             TEST_SESSION_HANDLE,
