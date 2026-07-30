@@ -7093,6 +7093,16 @@ fn install_software_private_test_session(slot_id: CK_SLOT_ID, session_handle: CK
             .insert(session_handle, crate::SessionContext::new(backend));
     });
     crate::register_session_slot(session_handle, slot_id).unwrap();
+    let mut pin = b"test software pin".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session_handle,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
 }
 
 fn install_public_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {

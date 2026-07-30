@@ -1,13 +1,20 @@
+use crate::storage::ContentReference;
 use crate::*;
+use std::{collections::HashMap, path::PathBuf};
+use zeroize::Zeroizing;
 
 const SOFTWARE_SLOT_DESCRIPTION_PREFIX: &str = "pkcs11rs software slot: ";
 const SOFTWARE_MANUFACTURER: &str = "pkcs11rs";
 const SOFTWARE_MODEL: &str = "Software";
 
-#[derive(Debug)]
 pub(crate) struct SoftwareSlot {
     name: String,
     serial: String,
+    store: Option<SoftwareTokenStore>,
+    master_key: Option<Zeroizing<[u8; 32]>>,
+    token_objects: Vec<TokenObject>,
+    token_references: HashMap<String, ContentReference>,
+    logged_in: bool,
 }
 
 #[derive(Debug)]
@@ -17,15 +24,60 @@ struct SoftwareSession {
 }
 
 impl SoftwareSlot {
+    #[cfg(test)]
     pub(crate) fn new(name: String, ordinal: usize) -> Self {
         Self {
             name,
             serial: format!("SOFTWARE{ordinal:08}"),
+            store: None,
+            master_key: None,
+            token_objects: Vec::new(),
+            token_references: HashMap::new(),
+            logged_in: false,
         }
+    }
+
+    pub(crate) fn new_with_storage(
+        name: String,
+        ordinal: usize,
+        token_root: Option<PathBuf>,
+    ) -> Result<Self, Error> {
+        let store = token_root
+            .map(|root| SoftwareTokenStore::open(name.clone(), root))
+            .transpose()?;
+        Ok(Self {
+            name,
+            serial: format!("SOFTWARE{ordinal:08}"),
+            store,
+            master_key: None,
+            token_objects: Vec::new(),
+            token_references: HashMap::new(),
+            logged_in: false,
+        })
     }
 
     fn description(&self) -> String {
         format!("{SOFTWARE_SLOT_DESCRIPTION_PREFIX}{}", self.name)
+    }
+
+    fn clear_sensitive_state(&mut self) {
+        self.token_objects.clear();
+        self.token_references.clear();
+        self.master_key = None;
+        self.logged_in = false;
+    }
+}
+
+impl std::fmt::Debug for SoftwareSlot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SoftwareSlot")
+            .field("name", &self.name)
+            .field("serial", &self.serial)
+            .field("persistent_store", &self.store.is_some())
+            .field("logged_in", &self.logged_in)
+            .field("token_object_count", &self.token_objects.len())
+            .finish()
     }
 }
 
@@ -86,12 +138,26 @@ impl Slot for SoftwareSlot {
         Box::new(SoftwareSession { slot_id, flags })
     }
 
-    fn login(&mut self, _pin: &[u8]) -> Result<(), Error> {
-        Err(CKR_USER_TYPE_INVALID.into())
+    fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
+        crate::software_storage::validate_software_pin(pin)?;
+        self.clear_sensitive_state();
+        if let Some(store) = &self.store {
+            let master_key = store.login(pin)?;
+            let (objects, references) = store.load_objects(0, &master_key)?;
+            self.master_key = Some(master_key);
+            self.token_objects = objects;
+            self.token_references = references;
+        }
+        self.logged_in = true;
+        Ok(())
     }
 
     fn logout(&mut self) -> Result<(), Error> {
-        Err(CKR_USER_NOT_LOGGED_IN.into())
+        if !self.logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        self.clear_sensitive_state();
+        Ok(())
     }
 
     fn init_slot(&mut self) -> Result<(), Error> {
@@ -114,13 +180,18 @@ impl Slot for SoftwareSlot {
         str_pad(SOFTWARE_MANUFACTURER, &mut info.manufacturerID);
         str_pad(SOFTWARE_MODEL, &mut info.model);
         str_pad(&self.serial, &mut info.serialNumber);
-        info.flags = (CKF_RNG | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
+        if let Some(store) = &self.store {
+            if store.is_initialized()? {
+                info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
+            }
+        }
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = 0;
         info.ulMaxRwSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulRwSessionCount = 0;
-        info.ulMaxPinLen = 0;
-        info.ulMinPinLen = 0;
+        info.ulMaxPinLen = 1024;
+        info.ulMinPinLen = 8;
         info.ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
         info.ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
@@ -142,7 +213,94 @@ impl Slot for SoftwareSlot {
     }
 
     fn private_objects_require_login(&self) -> bool {
-        false
+        true
+    }
+
+    fn refresh_token_objects_after_login(&self) -> bool {
+        true
+    }
+
+    fn refresh_token_objects_after_logout(&self) -> bool {
+        true
+    }
+
+    fn backend_token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
+        if !self.logged_in {
+            return Ok(Vec::new());
+        }
+        let mut objects = self.token_objects.clone();
+        for object in &mut objects {
+            object.slot_id = Some(slot_id);
+        }
+        Ok(objects)
+    }
+
+    fn backend_token_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<TokenObject>, Error> {
+        if !self.logged_in {
+            return Ok(None);
+        }
+        Ok(self
+            .token_objects
+            .iter()
+            .find(|object| object.unique_id == unique_id)
+            .cloned()
+            .map(|mut object| {
+                object.slot_id = Some(slot_id);
+                object
+            }))
+    }
+
+    fn store_software_private_key(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        object: &TokenObject,
+    ) -> Result<TokenObject, Error> {
+        if !self.logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        let master_key = self.master_key.as_ref().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let (stored, reference) = store.put_object(slot_id, master_key, object)?;
+        self.token_references
+            .insert(stored.unique_id.clone(), reference);
+        self.token_objects.push(stored.clone());
+        Ok(stored)
+    }
+
+    fn destroy_software_private_key(&mut self, unique_id: &str) -> Result<(), Error> {
+        if !self.logged_in {
+            return Err(CKR_USER_NOT_LOGGED_IN.into());
+        }
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        let reference = self
+            .token_references
+            .get(unique_id)
+            .cloned()
+            .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        store.delete_object(&reference)?;
+        self.token_references.remove(unique_id);
+        self.token_objects
+            .retain(|object| object.unique_id != unique_id);
+        Ok(())
+    }
+
+    fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        self.clear_sensitive_state();
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        let _master_key = store.change_pin(old_pin, new_pin)?;
+        Ok(())
+    }
+
+    fn login_is_active(&self) -> bool {
+        self.logged_in
+    }
+
+    fn clear_session(&mut self) {
+        self.clear_sensitive_state();
     }
 
     fn flags(&self) -> CK_FLAGS {
@@ -196,12 +354,12 @@ mod tests {
         slot.get_token_info(&mut token_info).unwrap();
         assert_eq!(
             token_info.flags,
-            (CKF_RNG | CKF_TOKEN_INITIALIZED) as CK_FLAGS
+            (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS
         );
         assert_eq!(&token_info.label[..b"signing".len()], b"signing");
         assert_eq!(&token_info.serialNumber, b"SOFTWARE00000003");
-        assert_eq!(token_info.ulMinPinLen, 0);
-        assert_eq!(token_info.ulMaxPinLen, 0);
+        assert_eq!(token_info.ulMinPinLen, 8);
+        assert_eq!(token_info.ulMaxPinLen, 1024);
     }
 
     #[test]

@@ -30,7 +30,7 @@ hmac = "0.13.0"
 hkdf = "0.13.0"
 hidapi = { version = "2.6.6", default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
 minicbor = { version = "2.3.0", features = ["alloc"] }
-pbkdf2 = "0.13.0"
+pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 nusb = "0.2.5"
 pcsc = "2.9.0"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
@@ -38,7 +38,7 @@ flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
 zeroize = "1.9.0"
 const-oid = "0.10.2"
-der = { version = "0.8.1", features = ["alloc", "pem", "std"] }
+der = { version = "0.8.1", features = ["alloc", "derive", "pem", "std"] }
 ecdsa = "0.17.0"
 elliptic-curve = { version = "0.14.1", features = ["ecdh"] }
 ed25519-dalek = "3.0.0"

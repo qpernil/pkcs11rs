@@ -73,7 +73,7 @@ impl TokenStorageConfig {
             .map_err(crate::backed_object::storage_error)
     }
 
-    fn software_token_root(&self, name: &str) -> PathBuf {
+    pub(crate) fn software_token_root(&self, name: &str) -> PathBuf {
         self.root.join(TOKEN_STORAGE_SCHEMA_DIRECTORY).join(format!(
             "software-name-{}",
             encode_path_component(name.as_bytes())
@@ -1544,6 +1544,9 @@ impl SlotContext {
     pub(crate) fn logout_slot(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
         self._get_slot_mut(slot_id)?.logout()?;
         self.clear_login_state(slot_id);
+        if self.get_slot(slot_id)?.refresh_token_objects_after_logout() {
+            self.refresh_slot_token_objects(slot_id)?;
+        }
         Ok(())
     }
 
@@ -1586,7 +1589,15 @@ impl ModuleContext {
             for (ordinal, name) in self.software_slots.iter().enumerate() {
                 let offset = CK_SLOT_ID::try_from(ordinal).map_err(|_| CKR_DEVICE_ERROR)?;
                 let slot_id = first_slot_id.checked_add(offset).ok_or(CKR_DEVICE_ERROR)?;
-                let mut slot = Box::new(SoftwareSlot::new(name.clone(), ordinal)) as Box<dyn Slot>;
+                let private_root = self
+                    .token_storage
+                    .as_ref()
+                    .map(|config| config.software_token_root(name));
+                let mut slot = Box::new(SoftwareSlot::new_with_storage(
+                    name.clone(),
+                    ordinal,
+                    private_root,
+                )?) as Box<dyn Slot>;
                 slot.init_slot()?;
                 let token_objects = slot.token_objects(slot_id)?;
                 slots.push((slot_id, slot, token_objects));
