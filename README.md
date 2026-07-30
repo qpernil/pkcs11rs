@@ -181,9 +181,12 @@ unlocks private-key operations. Session keys are removed with their creating
 session. With `PKCS11RS_TOKEN_STORAGE` configured, `CKA_TOKEN=CK_TRUE` private
 keys are encrypted below a name-scoped root and survive restart; without that
 configuration the request returns `CKR_TOKEN_WRITE_PROTECTED` and never falls
-back to session storage. This capability is not enabled on any hardware or
-applet slot. See [Named software slots](docs/software.md) for the exact PIN,
-storage, format, mechanism, metadata, and lifecycle semantics.
+back to session storage. Extractable software private keys can be exported
+through `PKCS11RS_SoftwareExportPrivateKey` as password-encrypted,
+OpenSSL-compatible PKCS #8 while a user login is active. This capability is
+not enabled on any hardware or applet slot. See
+[Named software slots](docs/software.md) for the exact PIN, export, storage,
+format, mechanism, metadata, and lifecycle semantics.
 
 Add remote YubiHSM Connector instances with a comma-separated URL list:
 
@@ -553,6 +556,10 @@ implementation remains available for projected and imported public objects.
 A private template with `CKA_TOKEN=CK_TRUE` never falls back to software
 session storage. Encrypted persistent software private keys exist only in an
 explicitly named software slot with `PKCS11RS_TOKEN_STORAGE` configured.
+The low-level `PKCS11RS_SoftwareExportPrivateKey` extension exports only
+`CKA_EXTRACTABLE=CK_TRUE` software private keys after `CKU_USER` login. Its
+standard PKCS #8 `EncryptedPrivateKeyInfo` uses PBES2 with scrypt and
+AES-256-CBC and retains the inner PKCS #9 label and ID attributes.
 
 ## Known Limitations
 

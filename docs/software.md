@@ -116,9 +116,54 @@ record is DER-encoded PKCS #8 `OneAsymmetricKey` version 0:
 
 The private attribute preserves labels outside PKCS #9's BMPString range.
 Conflicting, duplicate, unknown, noncanonical, or malformed attributes are
-rejected. This inner object can be used as the plaintext of a standard
-`EncryptedPrivateKeyInfo` export in the future; this release does not add a
-private-key export ABI.
+rejected.
+
+## Password-encrypted PKCS #8 export
+
+The low-level `PKCS11RS_SoftwareExportPrivateKey` extension exports an
+extractable software private key as a DER-encoded PKCS #8
+`EncryptedPrivateKeyInfo`. It is deliberately not part of the standard
+PKCS #11 function table.
+
+The selected session must belong to a named software slot and have an active
+`CKU_USER` login. The target must be a visible software private key with
+`CKA_EXTRACTABLE=CK_TRUE`. A false `CKA_EXTRACTABLE` returns
+`CKR_KEY_UNEXTRACTABLE`; a hardware or applet slot returns
+`CKR_FUNCTION_NOT_SUPPORTED`. This extension does not enable software private
+keys or export on any hardware or applet slot.
+
+The export password is supplied directly to the extension and can be the same
+bytes the caller passed to `C_Login` if that is the desired interface. It is
+not recovered from or retained by the login implementation. It must contain
+8–1024 bytes. The output uses:
+
+- PBES2;
+- scrypt with `N=16384`, `r=8`, `p=1`, and a fresh 16-byte salt; and
+- AES-256-CBC with a fresh 16-byte IV.
+
+The encrypted plaintext is the complete attributed `OneAsymmetricKey`
+described above, so caller-supplied `CKA_LABEL` and `CKA_ID` remain available
+in its PKCS #9 and private attributes. Consumers which do not understand the
+private pkcs11rs OID can still import and use the standard key material.
+OpenSSL's `pkey` decode/re-encode path retains that key material but emits a
+new PKCS #8 object without the input attributes. Consequently, a key
+round-tripped through OpenSSL must be given its label, ID, and other PKCS #11
+policy attributes again when it is imported. Copying the encrypted DER
+unchanged retains all attributes.
+
+The function follows the normal PKCS #11 output convention: pass
+`pEncryptedKey=NULL` to query the DER length. A short buffer returns
+`CKR_BUFFER_TOO_SMALL` and the required length.
+
+For example, after writing the returned bytes to `exported-key.der`, OpenSSL 3
+can inspect the envelope and import the key:
+
+```sh
+openssl asn1parse -inform DER -in exported-key.der -i
+openssl pkey -inform DER -in exported-key.der -passin pass:'export password' \
+  -out imported-key.pem
+openssl pkey -in imported-key.pem -check -text -noout
+```
 
 An incorrect login PIN, or corruption that prevents authentication of the
 wrapped master key, returns `CKR_PIN_INCORRECT` without exposing which case
