@@ -271,7 +271,7 @@ fn sign_init(
                 && object.key_type != expected_key_type)
             || !matches!(
                 object.material,
-                KeyMaterial::RsaPrivate(_)
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(_))
                     | KeyMaterial::PivPrivate { .. }
                     | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
@@ -308,7 +308,8 @@ fn sign_init(
             && !fido_assertion_mechanism_supported
             && !matches!(
                 &object.material,
-                KeyMaterial::RsaPrivate(_) if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(_))
+                    if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
             )
         {
             return Err(CKR_MECHANISM_INVALID.into());
@@ -326,12 +327,13 @@ fn sign_init(
             return Err(CKR_MECHANISM_INVALID.into());
         }
 
-        let context_specific_rp_id = match &object.material {
-            KeyMaterial::FidoResidentPrivate { rp_id, .. } => Some(rp_id.clone()),
-            _ => None,
-        };
+        let context_specific_rp_id =
+            matches!(object.material, KeyMaterial::FidoResidentPrivate { .. })
+                .then(|| object.rp_id.clone())
+                .flatten();
         ctx.get_session_context_mut(session_handle)?.sign_operation = Some(SignatureOperation {
             key: object.material.clone(),
+            public_key: object.public_key.clone(),
             slot_id,
             requires_login: object.private,
             context_specific_extended: false,
@@ -410,12 +412,11 @@ fn sign(
                 return Err(error);
             }
         };
-        if let KeyMaterial::FidoResidentPrivate {
-            rp_id,
-            credential_id,
-            ..
-        } = &operation.key
-        {
+        if let KeyMaterial::FidoResidentPrivate { credential_id } = &operation.key {
+            let rp_id = operation
+                .context_specific_rp_id
+                .as_deref()
+                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
             if data.len() != 32 || (!operation.buffer.is_empty() && operation.buffer != data) {
                 ctx.get_session_context_mut(session_handle)?.sign_operation = None;
                 return Err(CKR_DATA_LEN_RANGE.into());
@@ -476,23 +477,25 @@ fn sign(
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let required = match &operation.key {
-            KeyMaterial::RsaPrivate(key) => key.size(),
-            KeyMaterial::PivPrivate {
-                algorithm, modulus, ..
-            } => match algorithm {
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => key.size(),
+            KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
                 piv::Algorithm::Rsa1024
                 | piv::Algorithm::Rsa2048
                 | piv::Algorithm::Rsa3072
-                | piv::Algorithm::Rsa4096 => modulus.len(),
+                | piv::Algorithm::Rsa4096 => match &operation.public_key {
+                    Some(PublicKeyMaterial::Rsa(key)) => key.size(),
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                },
                 piv::Algorithm::EccP256 => 64,
                 piv::Algorithm::EccP384 => 96,
                 piv::Algorithm::Ed25519 => 64,
                 piv::Algorithm::X25519 => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
-            KeyMaterial::OpenPgpPrivate {
-                algorithm, modulus, ..
-            } => match algorithm {
-                OpenPgpAlgorithm::Rsa { .. } => modulus.len(),
+            KeyMaterial::OpenPgpPrivate { algorithm, .. } => match algorithm {
+                OpenPgpAlgorithm::Rsa { .. } => match &operation.public_key {
+                    Some(PublicKeyMaterial::Rsa(key)) => key.size(),
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                },
                 OpenPgpAlgorithm::Ecdsa(_) => {
                     openpgp_ec_coordinate_length(*algorithm).ok_or(CKR_KEY_TYPE_INCONSISTENT)? * 2
                 }
@@ -560,7 +563,9 @@ fn sign(
 
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
-                KeyMaterial::RsaPrivate(private_key) => rsa_pkcs1_sign(private_key, data),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(private_key)) => {
+                    rsa_pkcs1_sign(private_key, data)
+                }
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {

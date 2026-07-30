@@ -1,10 +1,9 @@
 use crate::piv;
 use crate::pkcs11::*;
 use crate::{
-    der_octet_string, hash, is_yubihsm_ec, is_yubihsm_rsa, is_yubihsm_x25519, openpgp_ec_params,
+    der_octet_string, hash, is_yubihsm_ec, is_yubihsm_rsa, is_yubihsm_x25519,
     openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
-    piv_ec_coordinate_length, piv_ec_parameters, piv_effective_pin_policy,
-    piv_public_key_from_certificate, send_yubihsm_secure_command,
+    piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
     yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
     Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
     PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_FIDO_RP_ID,
@@ -43,20 +42,31 @@ pub(crate) struct TokenObject {
     pub(crate) local: bool,
     pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
     pub(crate) creator_session: Option<CK_SESSION_HANDLE>,
+    pub(crate) public_key: Option<PublicKeyMaterial>,
+    pub(crate) rp_id: Option<String>,
     pub(crate) material: KeyMaterial,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum FidoPublicKey {
+pub(crate) enum PublicKeyMaterial {
+    Rsa(RsaPublicKey),
     Ec {
         parameters: Vec<u8>,
         public_key: Vec<u8>,
-        prefix_uncompressed: bool,
     },
-    Rsa {
-        modulus: Vec<u8>,
-        public_exponent: Vec<u8>,
-    },
+}
+
+#[derive(Clone)]
+pub(crate) enum SoftwarePrivateKey {
+    Rsa(Box<RsaPrivateKey>),
+}
+
+impl std::fmt::Debug for SoftwarePrivateKey {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rsa(key) => fmt.debug_tuple("Rsa").field(&key.size()).finish(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -89,34 +99,19 @@ pub(crate) enum KeyMaterial {
     Profile {
         profile_id: CK_PROFILE_ID,
     },
-    RsaPrivate(Box<RsaPrivateKey>),
-    RsaPublic(RsaPublicKey),
+    Public(PublicKeyMaterial),
+    SoftwarePrivate(SoftwarePrivateKey),
     PivPrivate {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
-        modulus: Vec<u8>,
-        public_exponent: Vec<u8>,
-        public_key: Vec<u8>,
         pin_policy: u8,
         touch_policy: u8,
-    },
-    PivPublic {
-        algorithm: piv::Algorithm,
-        public_key: Vec<u8>,
     },
     OpenPgpPrivate {
         key_ref: OpenPgpKeyRef,
         algorithm: OpenPgpAlgorithm,
-        modulus: Vec<u8>,
-        public_exponent: Vec<u8>,
-        #[allow(dead_code)]
-        public_key: Vec<u8>,
         pin_policy: u8,
         touch_policy: u8,
-    },
-    OpenPgpPublic {
-        algorithm: OpenPgpAlgorithm,
-        public_key: Vec<u8>,
     },
     PivCertificate {
         algorithm: piv::Algorithm,
@@ -150,28 +145,19 @@ pub(crate) enum KeyMaterial {
         value: Vec<u8>,
     },
     FidoCredential {
-        rp_id: Option<String>,
         rp_id_hash: [u8; 32],
         response_cbor: Vec<u8>,
     },
-    FidoKey {
-        public_key: FidoPublicKey,
-        rp_id: Option<String>,
-    },
     FidoResidentPrivate {
-        public_key: FidoPublicKey,
-        rp_id: String,
         credential_id: Vec<u8>,
     },
     FidoPreviewCredential {
-        public_key: FidoPublicKey,
         registration: crate::preview_sign::PreviewSignRegistration,
     },
     PreviewSignRegistration {
         registration: crate::preview_sign::PreviewSignRegistration,
     },
     PreviewSignDerived {
-        public_key: FidoPublicKey,
         registration: crate::preview_sign::PreviewSignRegistration,
         derived: crate::preview_sign::PreviewSignDerivedKeyRecord,
     },
@@ -179,9 +165,6 @@ pub(crate) enum KeyMaterial {
         algorithm: HsmAuthAlgorithm,
         retries: u8,
         touch_required: bool,
-    },
-    HsmAuthPublic {
-        public_key: Vec<u8>,
     },
     YubiHsm {
         id: u16,
@@ -196,10 +179,6 @@ pub(crate) enum KeyMaterial {
         public_key: Vec<u8>,
         value: Rc<RefCell<Option<Vec<u8>>>>,
     },
-    YubiHsmDevicePublic {
-        public_key: Vec<u8>,
-        public_key_info: Vec<u8>,
-    },
     YubiHsmAttestation {
         connector: Rc<dyn Connector>,
         session: Rc<RefCell<YubiHsmSessionState>>,
@@ -211,98 +190,6 @@ pub(crate) enum KeyMaterial {
     DerivedSecret(Zeroizing<Vec<u8>>),
 }
 
-impl KeyMaterial {
-    pub(crate) fn projected_public(&self) -> Result<Self, Error> {
-        match self {
-            Self::RsaPrivate(private) => Ok(Self::RsaPublic(RsaPublicKey::from(private.as_ref()))),
-            Self::PivPrivate {
-                algorithm,
-                modulus,
-                public_exponent,
-                public_key,
-                ..
-            } => {
-                if !modulus.is_empty() {
-                    Ok(Self::RsaPublic(
-                        RsaPublicKey::new(
-                            BigUint::from_bytes_be(modulus),
-                            BigUint::from_bytes_be(public_exponent),
-                        )
-                        .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                    ))
-                } else {
-                    Ok(Self::PivPublic {
-                        algorithm: *algorithm,
-                        public_key: public_key.clone(),
-                    })
-                }
-            }
-            Self::OpenPgpPrivate {
-                algorithm,
-                modulus,
-                public_exponent,
-                public_key,
-                ..
-            } => {
-                if !modulus.is_empty() {
-                    Ok(Self::RsaPublic(
-                        RsaPublicKey::new(
-                            BigUint::from_bytes_be(modulus),
-                            BigUint::from_bytes_be(public_exponent),
-                        )
-                        .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                    ))
-                } else {
-                    Ok(Self::OpenPgpPublic {
-                        algorithm: *algorithm,
-                        public_key: public_key.clone(),
-                    })
-                }
-            }
-            Self::YubiHsm {
-                algorithm,
-                public_key,
-                ..
-            } if !public_key.is_empty() && is_yubihsm_rsa(*algorithm) => Ok(Self::RsaPublic(
-                RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
-                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-            )),
-            Self::YubiHsm {
-                algorithm,
-                public_key,
-                ..
-            } if !public_key.is_empty()
-                && (is_yubihsm_ec(*algorithm)
-                    || is_yubihsm_x25519(*algorithm)
-                    || *algorithm == YUBIHSM_ALGO_ED25519) =>
-            {
-                Ok(Self::FidoKey {
-                    public_key: FidoPublicKey::Ec {
-                        parameters: yubihsm_ec_parameters(*algorithm)
-                            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
-                            .to_vec(),
-                        public_key: public_key.clone(),
-                        prefix_uncompressed: is_yubihsm_ec(*algorithm),
-                    },
-                    rp_id: None,
-                })
-            }
-            Self::FidoResidentPrivate {
-                public_key, rp_id, ..
-            } => Ok(Self::FidoKey {
-                public_key: public_key.clone(),
-                rp_id: Some(rp_id.clone()),
-            }),
-            Self::FidoPreviewCredential { public_key, .. }
-            | Self::PreviewSignDerived { public_key, .. } => Ok(Self::FidoKey {
-                public_key: public_key.clone(),
-                rp_id: None,
-            }),
-            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        }
-    }
-}
-
 impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -311,50 +198,29 @@ impl std::fmt::Debug for KeyMaterial {
                 .debug_struct("Profile")
                 .field("profile_id", profile_id)
                 .finish(),
-            Self::RsaPrivate(key) => fmt.debug_tuple("RsaPrivate").field(&key.size()).finish(),
-            Self::RsaPublic(key) => fmt.debug_tuple("RsaPublic").field(&key.size()).finish(),
+            Self::Public(key) => fmt.debug_tuple("Public").field(key).finish(),
+            Self::SoftwarePrivate(key) => fmt.debug_tuple("SoftwarePrivate").field(key).finish(),
             Self::PivPrivate {
                 slot,
                 algorithm,
-                modulus,
-                public_exponent: _,
                 touch_policy,
                 ..
             } => fmt
                 .debug_struct("PivPrivate")
                 .field("slot", slot)
                 .field("algorithm", algorithm)
-                .field("size", &modulus.len())
                 .field("touch_policy", touch_policy)
-                .finish(),
-            Self::PivPublic {
-                algorithm,
-                public_key,
-            } => fmt
-                .debug_struct("PivPublic")
-                .field("algorithm", algorithm)
-                .field("size", &public_key.len())
                 .finish(),
             Self::OpenPgpPrivate {
                 key_ref,
                 algorithm,
-                modulus,
                 pin_policy,
                 ..
             } => fmt
                 .debug_struct("OpenPgpPrivate")
                 .field("key_ref", key_ref)
                 .field("algorithm", algorithm)
-                .field("size", &modulus.len())
                 .field("pin_policy", pin_policy)
-                .finish(),
-            Self::OpenPgpPublic {
-                algorithm,
-                public_key,
-            } => fmt
-                .debug_struct("OpenPgpPublic")
-                .field("algorithm", algorithm)
-                .field("size", &public_key.len())
                 .finish(),
             Self::YubiHsm {
                 id,
@@ -368,10 +234,6 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("object_type", object_type)
                 .field("algorithm", algorithm)
                 .field("length", length)
-                .finish(),
-            Self::YubiHsmDevicePublic { public_key, .. } => fmt
-                .debug_struct("YubiHsmDevicePublic")
-                .field("size", &public_key.len())
                 .finish(),
             Self::YubiHsmAttestation {
                 id,
@@ -444,27 +306,17 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("rp_id_hash", rp_id_hash)
                 .field("response_size", &response_cbor.len())
                 .finish(),
-            Self::FidoKey { public_key, .. } => fmt
-                .debug_struct("FidoKey")
-                .field("public_key", public_key)
-                .finish(),
-            Self::FidoResidentPrivate {
-                public_key, rp_id, ..
-            } => fmt
+            Self::FidoResidentPrivate { .. } => fmt
                 .debug_struct("FidoResidentPrivate")
-                .field("public_key", public_key)
-                .field("rp_id", rp_id)
                 .finish_non_exhaustive(),
-            Self::FidoPreviewCredential { public_key, .. } => fmt
+            Self::FidoPreviewCredential { .. } => fmt
                 .debug_struct("FidoPreviewCredential")
-                .field("public_key", public_key)
                 .finish_non_exhaustive(),
             Self::PreviewSignRegistration { .. } => fmt
                 .debug_struct("PreviewSignRegistration")
                 .finish_non_exhaustive(),
-            Self::PreviewSignDerived { public_key, .. } => fmt
+            Self::PreviewSignDerived { .. } => fmt
                 .debug_struct("PreviewSignDerived")
-                .field("public_key", public_key)
                 .finish_non_exhaustive(),
             Self::HsmAuthCredential {
                 algorithm,
@@ -475,10 +327,6 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("algorithm", algorithm)
                 .field("retries", retries)
                 .field("touch_required", touch_required)
-                .finish(),
-            Self::HsmAuthPublic { public_key } => fmt
-                .debug_struct("HsmAuthPublic")
-                .field("size", &public_key.len())
                 .finish(),
         }
     }
@@ -510,6 +358,7 @@ pub(crate) struct FindOperation {
 #[derive(Debug, Clone)]
 pub(crate) struct SignatureOperation {
     pub(crate) key: KeyMaterial,
+    pub(crate) public_key: Option<PublicKeyMaterial>,
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
@@ -548,6 +397,7 @@ pub(crate) struct CcmParameters {
 #[derive(Clone)]
 pub(crate) struct CryptOperation {
     pub(crate) key: KeyMaterial,
+    pub(crate) public_key: Option<PublicKeyMaterial>,
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) requires_login: bool,
     pub(crate) context_specific_extended: bool,
@@ -568,6 +418,7 @@ impl std::fmt::Debug for CryptOperation {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("CryptOperation")
             .field("key", &self.key)
+            .field("public_key", &self.public_key)
             .field("slot_id", &self.slot_id)
             .field("requires_login", &self.requires_login)
             .field("context_specific_extended", &self.context_specific_extended)
@@ -926,7 +777,6 @@ pub(crate) fn ec_public_key_info(
     key_type: CK_KEY_TYPE,
     parameters: Option<&[u8]>,
     public_key: &[u8],
-    prefix_uncompressed: bool,
 ) -> Option<Vec<u8>> {
     if public_key.is_empty() {
         return None;
@@ -944,7 +794,7 @@ pub(crate) fn ec_public_key_info(
         _ => return None,
     };
     let mut subject_public_key = vec![0];
-    if prefix_uncompressed {
+    if key_type == CKK_EC as CK_KEY_TYPE {
         subject_public_key.push(0x04);
     }
     subject_public_key.extend_from_slice(public_key);
@@ -1091,6 +941,9 @@ impl TokenObject {
     }
 
     fn supports_vendor_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+        if attribute_type == CKA_PKCS11RS_FIDO_RP_ID {
+            return self.rp_id.is_some();
+        }
         match &self.material {
             KeyMaterial::PivData { .. } => attribute_type == CKA_PKCS11RS_PIV_OBJECT_TAG,
             KeyMaterial::PivPrivate { .. } => {
@@ -1111,10 +964,6 @@ impl TokenObject {
                 attribute_type,
                 CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION | CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY
             ),
-            KeyMaterial::FidoCredential { rp_id, .. } | KeyMaterial::FidoKey { rp_id, .. } => {
-                attribute_type == CKA_PKCS11RS_FIDO_RP_ID && rp_id.is_some()
-            }
-            KeyMaterial::FidoResidentPrivate { .. } => attribute_type == CKA_PKCS11RS_FIDO_RP_ID,
             _ => false,
         }
     }
@@ -1183,158 +1032,49 @@ impl TokenObject {
         ) {
             return None;
         }
+        if let Ok(public_key) = self.projected_public_key() {
+            return match &public_key {
+                PublicKeyMaterial::Rsa(key) => {
+                    rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
+                }
+                PublicKeyMaterial::Ec {
+                    parameters,
+                    public_key,
+                } => ec_public_key_info(self.key_type, Some(parameters), public_key),
+            };
+        }
+        None
+    }
+
+    pub(crate) fn projected_public_key(&self) -> Result<PublicKeyMaterial, Error> {
+        if let Some(public_key) = &self.public_key {
+            return Ok(public_key.clone());
+        }
         match &self.material {
-            KeyMaterial::RsaPrivate(key) => {
-                rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
+            KeyMaterial::Public(public_key) => Ok(public_key.clone()),
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                Ok(PublicKeyMaterial::Rsa(RsaPublicKey::from(key.as_ref())))
             }
-            KeyMaterial::RsaPublic(key) => {
-                rsa_public_key_info(&key.n().to_bytes_be(), &key.e().to_bytes_be())
-            }
-            KeyMaterial::PivPrivate {
-                algorithm,
-                modulus,
-                public_exponent,
-                public_key,
-                ..
-            } => {
-                if !modulus.is_empty() {
-                    rsa_public_key_info(modulus, public_exponent)
-                } else {
-                    ec_public_key_info(
-                        self.key_type,
-                        piv_ec_parameters(*algorithm),
-                        public_key,
-                        matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
-                    )
-                }
-            }
-            KeyMaterial::PivPublic {
-                algorithm,
-                public_key,
-            } => ec_public_key_info(
-                self.key_type,
-                piv_ec_parameters(*algorithm),
-                public_key,
-                matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
-            ),
-            KeyMaterial::OpenPgpPrivate {
-                algorithm,
-                modulus,
-                public_exponent,
-                public_key,
-                ..
-            } => {
-                if !modulus.is_empty() {
-                    rsa_public_key_info(modulus, public_exponent)
-                } else {
-                    ec_public_key_info(
-                        self.key_type,
-                        openpgp_ec_params(*algorithm).as_deref(),
-                        public_key,
-                        matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
-                    )
-                }
-            }
-            KeyMaterial::OpenPgpPublic {
-                algorithm,
-                public_key,
-            } => ec_public_key_info(
-                self.key_type,
-                openpgp_ec_params(*algorithm).as_deref(),
-                public_key,
-                matches!(self.key_type, x if x == CKK_EC as CK_KEY_TYPE),
-            ),
             KeyMaterial::YubiHsm {
                 algorithm,
                 public_key,
                 ..
-            } if is_yubihsm_rsa(*algorithm) => rsa_public_key_info(public_key, &[0x01, 0x00, 0x01]),
+            } if is_yubihsm_rsa(*algorithm) => {
+                RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
+                    .map(PublicKeyMaterial::Rsa)
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))
+            }
             KeyMaterial::YubiHsm {
                 algorithm,
                 public_key,
                 ..
-            } => ec_public_key_info(
-                self.key_type,
-                yubihsm_ec_parameters(*algorithm),
-                public_key,
-                is_yubihsm_ec(*algorithm),
-            ),
-            KeyMaterial::HsmAuthPublic { public_key }
-                if public_key.len() == 65 && public_key[0] == 0x04 =>
-            {
-                ec_public_key_info(
-                    CKK_EC as CK_KEY_TYPE,
-                    piv_ec_parameters(piv::Algorithm::EccP256),
-                    &public_key[1..],
-                    true,
-                )
-            }
-            KeyMaterial::YubiHsmDevicePublic {
-                public_key_info, ..
-            } => Some(public_key_info.clone()),
-            KeyMaterial::FidoKey {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters,
-                        public_key,
-                        prefix_uncompressed,
-                    },
-                ..
-            }
-            | KeyMaterial::FidoResidentPrivate {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters,
-                        public_key,
-                        prefix_uncompressed,
-                    },
-                ..
-            } => ec_public_key_info(
-                self.key_type,
-                Some(parameters),
-                public_key,
-                *prefix_uncompressed,
-            ),
-            KeyMaterial::FidoKey {
-                public_key:
-                    FidoPublicKey::Rsa {
-                        modulus,
-                        public_exponent,
-                    },
-                ..
-            }
-            | KeyMaterial::FidoResidentPrivate {
-                public_key:
-                    FidoPublicKey::Rsa {
-                        modulus,
-                        public_exponent,
-                    },
-                ..
-            } => rsa_public_key_info(modulus, public_exponent),
-            KeyMaterial::FidoPreviewCredential {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters,
-                        public_key,
-                        prefix_uncompressed,
-                    },
-                ..
-            }
-            | KeyMaterial::PreviewSignDerived {
-                public_key:
-                    FidoPublicKey::Ec {
-                        parameters,
-                        public_key,
-                        prefix_uncompressed,
-                    },
-                ..
-            } => ec_public_key_info(
-                self.key_type,
-                Some(parameters),
-                public_key,
-                *prefix_uncompressed,
-            ),
-            _ => None,
+            } => yubihsm_ec_parameters(*algorithm)
+                .map(|parameters| PublicKeyMaterial::Ec {
+                    parameters: parameters.to_vec(),
+                    public_key: public_key.clone(),
+                })
+                .ok_or_else(|| Error::from(CKR_KEY_TYPE_INCONSISTENT)),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }
     }
 
@@ -1512,16 +1252,9 @@ impl TokenObject {
                 KeyMaterial::PreviewSignDerived { derived, .. } => derived.to_cbor().ok(),
                 _ => None,
             },
-            x if x == CKA_PKCS11RS_FIDO_RP_ID => match &self.material {
-                KeyMaterial::FidoCredential {
-                    rp_id: Some(rp_id), ..
-                }
-                | KeyMaterial::FidoKey {
-                    rp_id: Some(rp_id), ..
-                }
-                | KeyMaterial::FidoResidentPrivate { rp_id, .. } => Some(rp_id.as_bytes().to_vec()),
-                _ => None,
-            },
+            x if x == CKA_PKCS11RS_FIDO_RP_ID => {
+                self.rp_id.as_ref().map(|rp_id| rp_id.as_bytes().to_vec())
+            }
             x if x == CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE && self.is_certificate_object() => {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
@@ -1587,239 +1320,136 @@ impl TokenObject {
                 Some(ulong_attribute(CKM_SHA_1 as CK_ULONG))
             }
             x if x == CKA_SUBJECT as CK_ATTRIBUTE_TYPE && self.is_key_object() => Some(Vec::new()),
-            x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(key.n().to_bytes_be()),
-                KeyMaterial::RsaPublic(key) => Some(key.n().to_bytes_be()),
-                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
-                    Some(modulus.clone())
-                }
-                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
-                    Some(modulus.clone())
-                }
-                KeyMaterial::YubiHsm {
-                    algorithm,
-                    public_key,
-                    ..
-                } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
-                    Some(public_key.clone())
-                }
-                KeyMaterial::FidoKey {
-                    public_key: FidoPublicKey::Rsa { modulus, .. },
-                    ..
-                }
-                | KeyMaterial::FidoResidentPrivate {
-                    public_key: FidoPublicKey::Rsa { modulus, .. },
-                    ..
-                } => Some(modulus.clone()),
-                _ => None,
+            x if x == CKA_MODULUS as CK_ATTRIBUTE_TYPE => match self.projected_public_key().ok() {
+                Some(PublicKeyMaterial::Rsa(key)) => Some(key.n().to_bytes_be()),
+                _ => match &self.material {
+                    KeyMaterial::YubiHsm {
+                        algorithm,
+                        public_key,
+                        ..
+                    } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+                        Some(public_key.clone())
+                    }
+                    _ => None,
+                },
             },
-            x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(key.e().to_bytes_be()),
-                KeyMaterial::RsaPublic(key) => Some(key.e().to_bytes_be()),
-                KeyMaterial::PivPrivate {
-                    public_exponent, ..
-                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
-                KeyMaterial::OpenPgpPrivate {
-                    public_exponent, ..
-                } if !public_exponent.is_empty() => Some(public_exponent.clone()),
-                KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
-                    Some(vec![0x01, 0x00, 0x01])
+            x if x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE => {
+                match self.projected_public_key().ok() {
+                    Some(PublicKeyMaterial::Rsa(key)) => Some(key.e().to_bytes_be()),
+                    _ => match &self.material {
+                        KeyMaterial::YubiHsm { algorithm, .. } if is_yubihsm_rsa(*algorithm) => {
+                            Some(vec![0x01, 0x00, 0x01])
+                        }
+                        _ => None,
+                    },
                 }
-                KeyMaterial::FidoKey {
-                    public_key:
-                        FidoPublicKey::Rsa {
-                            public_exponent, ..
-                        },
-                    ..
-                }
-                | KeyMaterial::FidoResidentPrivate {
-                    public_key:
-                        FidoPublicKey::Rsa {
-                            public_exponent, ..
-                        },
-                    ..
-                } => Some(public_exponent.clone()),
-                _ => None,
-            },
+            }
             x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(key.d().to_bytes_be()),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    Some(key.d().to_bytes_be())
+                }
                 _ => None,
             },
             x if x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => key.primes().first().map(BigUint::to_bytes_be),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    key.primes().first().map(BigUint::to_bytes_be)
+                }
                 _ => None,
             },
             x if x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => key.primes().get(1).map(BigUint::to_bytes_be),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    key.primes().get(1).map(BigUint::to_bytes_be)
+                }
                 _ => None,
             },
             x if x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => key.dp().map(BigUint::to_bytes_be),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    key.dp().map(BigUint::to_bytes_be)
+                }
                 _ => None,
             },
             x if x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => key.dq().map(BigUint::to_bytes_be),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    key.dq().map(BigUint::to_bytes_be)
+                }
                 _ => None,
             },
             x if x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => key.qinv().map(|value| value.to_signed_bytes_be()),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                    key.qinv().map(|value| value.to_signed_bytes_be())
+                }
                 _ => None,
             },
-            x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::RsaPrivate(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
-                KeyMaterial::RsaPublic(key) => Some(ulong_attribute((key.size() * 8) as CK_ULONG)),
-                KeyMaterial::PivPrivate { modulus, .. } if !modulus.is_empty() => {
-                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+            x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => {
+                match self.projected_public_key().ok() {
+                    Some(PublicKeyMaterial::Rsa(key)) => {
+                        Some(ulong_attribute((key.size() * 8) as CK_ULONG))
+                    }
+                    _ => match &self.material {
+                        KeyMaterial::YubiHsm {
+                            algorithm,
+                            public_key,
+                            ..
+                        } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
+                            Some(ulong_attribute((public_key.len() * 8) as CK_ULONG))
+                        }
+                        _ => None,
+                    },
                 }
-                KeyMaterial::OpenPgpPrivate { modulus, .. } if !modulus.is_empty() => {
-                    Some(ulong_attribute((modulus.len() * 8) as CK_ULONG))
+            }
+            x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => {
+                match self.projected_public_key().ok() {
+                    Some(PublicKeyMaterial::Ec { parameters, .. }) => Some(parameters),
+                    _ => match &self.material {
+                        KeyMaterial::YubiHsm { algorithm, .. } => {
+                            yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
+                        }
+                        _ => None,
+                    },
                 }
-                KeyMaterial::YubiHsm {
-                    algorithm,
-                    public_key,
-                    ..
-                } if is_yubihsm_rsa(*algorithm) && !public_key.is_empty() => {
-                    Some(ulong_attribute((public_key.len() * 8) as CK_ULONG))
-                }
-                KeyMaterial::FidoKey {
-                    public_key: FidoPublicKey::Rsa { modulus, .. },
-                    ..
-                }
-                | KeyMaterial::FidoResidentPrivate {
-                    public_key: FidoPublicKey::Rsa { modulus, .. },
-                    ..
-                } => Some(ulong_attribute((modulus.len() * 8) as CK_ULONG)),
-                _ => None,
-            },
-            x if x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::YubiHsm { algorithm, .. } => {
-                    yubihsm_ec_parameters(*algorithm).map(<[u8]>::to_vec)
-                }
-                KeyMaterial::YubiHsmDevicePublic { .. } => {
-                    piv_ec_parameters(piv::Algorithm::EccP256).map(<[u8]>::to_vec)
-                }
-                KeyMaterial::PivPrivate { algorithm, .. }
-                | KeyMaterial::PivPublic { algorithm, .. } => {
-                    piv_ec_parameters(*algorithm).map(<[u8]>::to_vec)
-                }
-                KeyMaterial::OpenPgpPrivate { algorithm, .. }
-                | KeyMaterial::OpenPgpPublic { algorithm, .. } => openpgp_ec_params(*algorithm),
-                KeyMaterial::HsmAuthPublic { .. } => {
-                    piv_ec_parameters(piv::Algorithm::EccP256).map(<[u8]>::to_vec)
-                }
-                KeyMaterial::FidoKey {
-                    public_key: FidoPublicKey::Ec { parameters, .. },
-                    ..
-                }
-                | KeyMaterial::FidoResidentPrivate {
-                    public_key: FidoPublicKey::Ec { parameters, .. },
-                    ..
-                } => Some(parameters.clone()),
-                KeyMaterial::FidoPreviewCredential {
-                    public_key: FidoPublicKey::Ec { parameters, .. },
-                    ..
-                }
-                | KeyMaterial::PreviewSignDerived {
-                    public_key: FidoPublicKey::Ec { parameters, .. },
-                    ..
-                } => Some(parameters.clone()),
-                _ => None,
-            },
+            }
             x if x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
                 && self.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS =>
             {
-                match &self.material {
-                    KeyMaterial::YubiHsm {
-                        algorithm,
-                        public_key,
-                        ..
-                    } if is_yubihsm_ec(*algorithm) && !public_key.is_empty() => {
-                        let mut point = Vec::with_capacity(public_key.len() + 1);
-                        point.push(0x04);
-                        point.extend_from_slice(public_key);
-                        der_octet_string(&point)
-                    }
-                    KeyMaterial::YubiHsm {
-                        algorithm,
-                        public_key,
-                        ..
-                    } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
-                        der_octet_string(public_key)
-                    }
-                    KeyMaterial::YubiHsm {
-                        algorithm,
-                        public_key,
-                        ..
-                    } if is_yubihsm_x25519(*algorithm) && !public_key.is_empty() => {
-                        der_octet_string(public_key)
-                    }
-                    KeyMaterial::PivPublic {
-                        algorithm,
-                        public_key,
-                    } if !public_key.is_empty() => {
-                        let point = if piv_ec_coordinate_length(*algorithm).is_some() {
+                match self.projected_public_key().ok() {
+                    Some(PublicKeyMaterial::Ec { public_key, .. }) if !public_key.is_empty() => {
+                        let point = if self.key_type == CKK_EC as CK_KEY_TYPE {
                             let mut point = Vec::with_capacity(public_key.len() + 1);
                             point.push(0x04);
-                            point.extend_from_slice(public_key);
+                            point.extend_from_slice(&public_key);
                             point
                         } else {
-                            public_key.clone()
+                            public_key
                         };
                         der_octet_string(&point)
                     }
-                    KeyMaterial::OpenPgpPublic {
-                        algorithm,
-                        public_key,
-                    } if !public_key.is_empty() => {
-                        let point = if matches!(
+                    _ => match &self.material {
+                        KeyMaterial::YubiHsm {
                             algorithm,
-                            OpenPgpAlgorithm::Ecdsa(_) | OpenPgpAlgorithm::Ecdh(_)
-                        ) {
+                            public_key,
+                            ..
+                        } if is_yubihsm_ec(*algorithm) && !public_key.is_empty() => {
                             let mut point = Vec::with_capacity(public_key.len() + 1);
                             point.push(0x04);
                             point.extend_from_slice(public_key);
-                            point
-                        } else {
-                            public_key.clone()
-                        };
-                        der_octet_string(&point)
-                    }
-                    KeyMaterial::HsmAuthPublic { public_key }
-                        if public_key.len() == 65 && public_key[0] == 0x04 =>
-                    {
-                        der_octet_string(public_key)
-                    }
-                    KeyMaterial::YubiHsmDevicePublic { public_key, .. } => {
-                        der_octet_string(public_key)
-                    }
-                    KeyMaterial::FidoKey {
-                        public_key:
-                            FidoPublicKey::Ec {
-                                public_key,
-                                prefix_uncompressed,
-                                ..
-                            },
-                        ..
-                    }
-                    | KeyMaterial::FidoResidentPrivate {
-                        public_key:
-                            FidoPublicKey::Ec {
-                                public_key,
-                                prefix_uncompressed,
-                                ..
-                            },
-                        ..
-                    } if !public_key.is_empty() => {
-                        let mut point = Vec::with_capacity(
-                            public_key.len() + usize::from(*prefix_uncompressed),
-                        );
-                        if *prefix_uncompressed {
-                            point.push(0x04);
+                            der_octet_string(&point)
                         }
-                        point.extend_from_slice(public_key);
-                        der_octet_string(&point)
-                    }
-                    _ => None,
+                        KeyMaterial::YubiHsm {
+                            algorithm,
+                            public_key,
+                            ..
+                        } if *algorithm == YUBIHSM_ALGO_ED25519 && !public_key.is_empty() => {
+                            der_octet_string(public_key)
+                        }
+                        KeyMaterial::YubiHsm {
+                            algorithm,
+                            public_key,
+                            ..
+                        } if is_yubihsm_x25519(*algorithm) && !public_key.is_empty() => {
+                            der_octet_string(public_key)
+                        }
+                        _ => None,
+                    },
                 }
             }
             x if x == CKA_YUBICO_HSMAUTH_ALGORITHM => match &self.material {
@@ -1908,11 +1538,6 @@ impl TokenObject {
                                 };
                         }
                         Some(cache.borrow().value().cloned().unwrap_or_default())
-                    }
-                    KeyMaterial::YubiHsmDevicePublic {
-                        public_key_info, ..
-                    } if x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE => {
-                        Some(public_key_info.clone())
                     }
                     KeyMaterial::PivAttestation {
                         connector,
@@ -2016,22 +1641,17 @@ impl TokenObject {
             &self.material,
             KeyMaterial::Profile { .. }
                 | KeyMaterial::PivPrivate { .. }
-                | KeyMaterial::PivPublic { .. }
                 | KeyMaterial::PivCertificate { .. }
                 | KeyMaterial::PivAttestation { .. }
                 | KeyMaterial::PivData { .. }
                 | KeyMaterial::OpenPgpPrivate { .. }
-                | KeyMaterial::OpenPgpPublic { .. }
                 | KeyMaterial::OpenPgpCertificate { .. }
                 | KeyMaterial::OpenPgpData { .. }
                 | KeyMaterial::IssuerSecurityDomainData { .. }
                 | KeyMaterial::IssuerSecurityDomainCertificate { .. }
                 | KeyMaterial::FidoCredential { .. }
-                | KeyMaterial::FidoKey { .. }
                 | KeyMaterial::FidoResidentPrivate { .. }
                 | KeyMaterial::HsmAuthCredential { .. }
-                | KeyMaterial::HsmAuthPublic { .. }
-                | KeyMaterial::YubiHsmDevicePublic { .. }
                 | KeyMaterial::YubiHsmAttestation { .. }
                 | KeyMaterial::DerivedSecret(_)
         )
@@ -2101,28 +1721,7 @@ pub(crate) fn rsa_public_key_material(
     material: &KeyMaterial,
 ) -> Result<Option<RsaPublicKey>, Error> {
     match material {
-        KeyMaterial::RsaPublic(key) => Ok(Some(key.clone())),
-        KeyMaterial::FidoKey {
-            public_key:
-                FidoPublicKey::Rsa {
-                    modulus,
-                    public_exponent,
-                },
-            ..
-        }
-        | KeyMaterial::FidoResidentPrivate {
-            public_key:
-                FidoPublicKey::Rsa {
-                    modulus,
-                    public_exponent,
-                },
-            ..
-        } => RsaPublicKey::new(
-            BigUint::from_bytes_be(modulus),
-            BigUint::from_bytes_be(public_exponent),
-        )
-        .map(Some)
-        .map_err(|_| Error::from(CKR_DATA_INVALID)),
+        KeyMaterial::Public(PublicKeyMaterial::Rsa(key)) => Ok(Some(key.clone())),
         KeyMaterial::YubiHsm {
             object_type: YUBIHSM_PUBLIC_KEY,
             algorithm,
@@ -2241,6 +1840,8 @@ impl TokenObjectTemplate {
             local: false,
             key_gen_mechanism: None,
             creator_session: None,
+            public_key: None,
+            rp_id: None,
             material: KeyMaterial::None,
         })
     }

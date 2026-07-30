@@ -444,7 +444,7 @@ fn hex(value: &[u8]) -> String {
 
 pub(crate) struct ProjectedFidoKey {
     pub(crate) key_type: CK_KEY_TYPE,
-    pub(crate) public_key: FidoPublicKey,
+    pub(crate) public_key: PublicKeyMaterial,
 }
 
 fn decode_cbor_u64(value: &[u8]) -> Option<u64> {
@@ -498,10 +498,9 @@ pub(crate) fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey
             }
             Some(ProjectedFidoKey {
                 key_type: CKK_EC_EDWARDS as CK_KEY_TYPE,
-                public_key: FidoPublicKey::Ec {
+                public_key: PublicKeyMaterial::Ec {
                     parameters: piv_ec_parameters(piv::Algorithm::Ed25519)?.to_vec(),
                     public_key,
-                    prefix_uncompressed: false,
                 },
             })
         }
@@ -526,10 +525,9 @@ pub(crate) fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey
             public_key.extend(y);
             Some(ProjectedFidoKey {
                 key_type: CKK_EC as CK_KEY_TYPE,
-                public_key: FidoPublicKey::Ec {
+                public_key: PublicKeyMaterial::Ec {
                     parameters: parameters.to_vec(),
                     public_key,
-                    prefix_uncompressed: true,
                 },
             })
         }
@@ -541,10 +539,13 @@ pub(crate) fn project_cose_public_key(encoded: &[u8]) -> Option<ProjectedFidoKey
             }
             Some(ProjectedFidoKey {
                 key_type: CKK_RSA as CK_KEY_TYPE,
-                public_key: FidoPublicKey::Rsa {
-                    modulus,
-                    public_exponent,
-                },
+                public_key: PublicKeyMaterial::Rsa(
+                    RsaPublicKey::new(
+                        BigUint::from_bytes_be(&modulus),
+                        BigUint::from_bytes_be(&public_exponent),
+                    )
+                    .ok()?,
+                ),
             })
         }
         _ => None,
@@ -606,21 +607,12 @@ fn fido2_token_objects(
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
-                material: KeyMaterial::FidoKey {
-                    public_key: projected.public_key.clone(),
-                    rp_id: credential.relying_party.id.clone(),
-                },
+                public_key: None,
+                rp_id: credential.relying_party.id.clone(),
+                material: KeyMaterial::Public(projected.public_key.clone()),
             });
-            let private_material = match credential.relying_party.id.as_ref() {
-                Some(rp_id) => KeyMaterial::FidoResidentPrivate {
-                    public_key: projected.public_key,
-                    rp_id: rp_id.clone(),
-                    credential_id: credential.credential_id.clone(),
-                },
-                None => KeyMaterial::FidoKey {
-                    public_key: projected.public_key,
-                    rp_id: None,
-                },
+            let private_material = KeyMaterial::FidoResidentPrivate {
+                credential_id: credential.credential_id.clone(),
             };
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
@@ -643,6 +635,8 @@ fn fido2_token_objects(
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: Some(projected.public_key),
+                rp_id: credential.relying_party.id.clone(),
                 material: private_material,
             });
         }
@@ -667,8 +661,9 @@ fn fido2_token_objects(
             local: false,
             key_gen_mechanism: None,
             creator_session: None,
+            public_key: None,
+            rp_id: credential.relying_party.id.clone(),
             material: KeyMaterial::FidoCredential {
-                rp_id: credential.relying_party.id.clone(),
                 rp_id_hash: credential.relying_party.id_hash,
                 response_cbor: credential.response_cbor.clone(),
             },
@@ -1443,7 +1438,7 @@ mod tests {
         assert!(objects.iter().all(|object| object.slot_id == Some(7)));
         assert!(objects.iter().all(|object| object.id == [0x22; 32]));
         assert!(objects.iter().all(|object| object.private));
-        assert!(objects.iter().all(TokenObject::is_immutable_object));
+        assert!(objects.iter().all(|object| object.token));
 
         let public = objects
             .iter()
@@ -1552,24 +1547,19 @@ mod tests {
         assert_eq!(projected.key_type, CKK_EC_EDWARDS as CK_KEY_TYPE);
         assert!(matches!(
             projected.public_key,
-            FidoPublicKey::Ec {
-                public_key,
-                prefix_uncompressed: false,
-                ..
-            } if public_key == [0x55; 32]
+            PublicKeyMaterial::Ec { public_key, .. } if public_key == [0x55; 32]
         ));
 
-        let mut rsa = vec![0xa3, 0x01, 0x03, 0x20, 0x58, 0x20];
-        rsa.extend([0x66; 32]);
+        let mut rsa = vec![0xa3, 0x01, 0x03, 0x20, 0x59, 0x01, 0x00];
+        rsa.extend([0x67; 256]);
         rsa.extend([0x21, 0x43, 0x01, 0x00, 0x01]);
         let projected = project_cose_public_key(&rsa).unwrap();
         assert_eq!(projected.key_type, CKK_RSA as CK_KEY_TYPE);
         assert!(matches!(
             projected.public_key,
-            FidoPublicKey::Rsa {
-                modulus,
-                public_exponent
-            } if modulus == [0x66; 32] && public_exponent == [0x01, 0x00, 0x01]
+            PublicKeyMaterial::Rsa(public)
+                if public.n().to_bytes_be() == [0x67; 256]
+                    && public.e().to_bytes_be() == [0x01, 0x00, 0x01]
         ));
 
         assert!(project_cose_public_key(&[0xa2, 0x01, 0x02, 0x01, 0x02]).is_none());

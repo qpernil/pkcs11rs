@@ -559,6 +559,8 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
             local: false,
             key_gen_mechanism: None,
             creator_session: None,
+            public_key: None,
+            rp_id: None,
             material: KeyMaterial::HsmAuthCredential {
                 algorithm: credential.algorithm,
                 retries: credential.retries,
@@ -587,9 +589,17 @@ pub(crate) fn hsmauth_token_objects(slot_id: CK_SLOT_ID, info: &HsmAuthInfo) -> 
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
-                material: KeyMaterial::HsmAuthPublic {
-                    public_key: public_key.clone(),
-                },
+                public_key: None,
+                rp_id: None,
+                material: KeyMaterial::Public(PublicKeyMaterial::Ec {
+                    parameters: piv_ec_parameters(piv::Algorithm::EccP256)
+                        .unwrap_or_default()
+                        .to_vec(),
+                    public_key: public_key
+                        .strip_prefix(&[0x04])
+                        .unwrap_or(public_key)
+                        .to_vec(),
+                }),
             });
         }
     }
@@ -807,6 +817,8 @@ pub(crate) fn issuer_security_domain_data_object(
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: KeyMaterial::IssuerSecurityDomainData {
             value,
             application: ISSUER_SECURITY_DOMAIN_APPLICATION.to_owned(),
@@ -941,6 +953,8 @@ pub(crate) fn issuer_security_domain_token_objects(
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::IssuerSecurityDomainCertificate {
                     value: certificate.clone(),
                 },

@@ -644,12 +644,17 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 local: true,
                 key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 creator_session: None,
+                public_key: Some(crate::PublicKeyMaterial::Rsa(
+                    rsa::RsaPublicKey::new(
+                        rsa::BigUint::from_bytes_be(&[0x81; 128]),
+                        rsa::BigUint::from(65537u32),
+                    )
+                    .expect("test RSA public key"),
+                )),
+                rp_id: None,
                 material: crate::KeyMaterial::PivPrivate {
                     slot: crate::piv::Slot::Signature,
                     algorithm: crate::piv::Algorithm::Rsa1024,
-                    modulus: vec![0x80; 128],
-                    public_exponent: vec![1, 0, 1],
-                    public_key: Vec::new(),
                     pin_policy: 0,
                     touch_policy: 0,
                 },
@@ -761,7 +766,7 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
 
     let private_key = with_test_slot_context(TEST_SLOT_ID, |context| {
         match &context.memory_objects.get(&2).unwrap().material {
-            crate::KeyMaterial::RsaPrivate(key) => key.clone(),
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(key)) => key.clone(),
             _ => panic!("test private key is not RSA"),
         }
     });
@@ -1138,7 +1143,9 @@ pub fn verify_accepts_yubihsm_rsa_public_material() {
 
     with_test_slot_context(TEST_SLOT_ID, |context| {
         let object = context.memory_objects.get_mut(&1).unwrap();
-        let crate::KeyMaterial::RsaPublic(public_key) = &object.material else {
+        let crate::KeyMaterial::Public(crate::PublicKeyMaterial::Rsa(public_key)) =
+            &object.material
+        else {
             panic!("test public key is not RSA");
         };
         object.material = crate::KeyMaterial::YubiHsm {
@@ -1237,10 +1244,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     let mut signature = signature;
 
     for material in [
-        crate::KeyMaterial::PivPublic {
-            algorithm: crate::piv::Algorithm::EccP256,
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+            parameters: crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .expect("P-256 parameters")
+                .to_vec(),
             public_key: public_key.clone(),
-        },
+        }),
         crate::KeyMaterial::YubiHsm {
             id: 1,
             object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
@@ -1252,10 +1261,13 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             public_key: public_key.clone(),
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
-        crate::KeyMaterial::OpenPgpPublic {
-            algorithm: crate::OpenPgpAlgorithm::Ecdsa(crate::openpgp::Curve::P256),
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+            parameters: crate::openpgp_ec_params(crate::OpenPgpAlgorithm::Ecdsa(
+                crate::openpgp::Curve::P256,
+            ))
+            .expect("P-256 parameters"),
             public_key,
-        },
+        }),
     ] {
         with_test_slot_context(TEST_SLOT_ID, |context| {
             let object = context.memory_objects.get_mut(&1).unwrap();
@@ -1290,10 +1302,12 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
         ulParameterLen: 0,
     };
     for material in [
-        crate::KeyMaterial::PivPublic {
-            algorithm: crate::piv::Algorithm::Ed25519,
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+            parameters: crate::piv_ec_parameters(crate::piv::Algorithm::Ed25519)
+                .expect("Ed25519 parameters")
+                .to_vec(),
             public_key: public_key.clone(),
-        },
+        }),
         crate::KeyMaterial::YubiHsm {
             id: 1,
             object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
@@ -1305,10 +1319,11 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
             public_key: public_key.clone(),
             value: std::rc::Rc::new(std::cell::RefCell::new(None)),
         },
-        crate::KeyMaterial::OpenPgpPublic {
-            algorithm: crate::OpenPgpAlgorithm::Ed25519,
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+            parameters: crate::openpgp_ec_params(crate::OpenPgpAlgorithm::Ed25519)
+                .expect("Ed25519 parameters"),
             public_key,
-        },
+        }),
     ] {
         with_test_slot_context(TEST_SLOT_ID, |context| {
             let object = context.memory_objects.get_mut(&1).unwrap();
@@ -1448,6 +1463,8 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
         local: true,
         key_gen_mechanism: None,
         creator_session: Some(2),
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::PivAttestation {
             connector,
             slot: crate::piv::Slot::Signature,

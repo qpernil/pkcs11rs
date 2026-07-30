@@ -1030,26 +1030,24 @@ impl Slot for PivSlot {
                         | piv::Slot::Retired19
                         | piv::Slot::Retired20
                 );
-            let (modulus, public_exponent) = match &key.public_key {
-                PivPublicKey::Rsa(public_key) => {
-                    (public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
-                }
-                _ => (Vec::new(), Vec::new()),
-            };
             let public_key = match &key.public_key {
-                PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => public_key.clone(),
-                PivPublicKey::Rsa(_) => Vec::new(),
+                PivPublicKey::Rsa(public_key) => PublicKeyMaterial::Rsa(public_key.clone()),
+                PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
+                    PublicKeyMaterial::Ec {
+                        parameters: piv_ec_parameters(key.algorithm)
+                            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                            .to_vec(),
+                        public_key: public_key.clone(),
+                    }
+                }
             };
             let private_material = KeyMaterial::PivPrivate {
                 slot: key.slot,
                 algorithm: key.algorithm,
-                modulus,
-                public_exponent,
-                public_key,
                 pin_policy: key.pin_policy,
                 touch_policy: key.touch_policy,
             };
-            let public_material = private_material.projected_public()?;
+            let public_material = KeyMaterial::Public(public_key.clone());
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-{:02x}-{fingerprint}-public", key.slot as u8),
@@ -1071,6 +1069,8 @@ impl Slot for PivSlot {
                 local,
                 key_gen_mechanism,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: public_material,
             });
             objects.push(TokenObject {
@@ -1097,6 +1097,8 @@ impl Slot for PivSlot {
                 local,
                 key_gen_mechanism,
                 creator_session: None,
+                public_key: Some(public_key),
+                rp_id: None,
                 material: private_material,
             });
         }
@@ -1140,6 +1142,8 @@ impl Slot for PivSlot {
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::PivCertificate {
                     algorithm: certificate.algorithm,
                     value: certificate.value.clone(),
@@ -1174,6 +1178,8 @@ impl Slot for PivSlot {
                 local: true,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::PivAttestation {
                     connector: self.connector.clone(),
                     slot: key.slot,
@@ -1207,6 +1213,8 @@ impl Slot for PivSlot {
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::PivData {
                     object_id: data.object_id,
                     value: data.value.clone(),

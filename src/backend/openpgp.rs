@@ -105,22 +105,6 @@ impl OpenPgpSlot {
     }
 }
 
-pub(crate) fn openpgp_public_material(key: &OpenPgpPublicKey) -> Vec<u8> {
-    match key {
-        OpenPgpPublicKey::Rsa(key) => key.n().to_bytes_be(),
-        OpenPgpPublicKey::Ec { point, .. } | OpenPgpPublicKey::Raw { key: point, .. } => {
-            point.clone()
-        }
-    }
-}
-
-pub(crate) fn openpgp_rsa_components(key: &OpenPgpPublicKey) -> (Vec<u8>, Vec<u8>) {
-    match key {
-        OpenPgpPublicKey::Rsa(key) => (key.n().to_bytes_be(), key.e().to_bytes_be()),
-        _ => (Vec::new(), Vec::new()),
-    }
-}
-
 pub(crate) fn openpgp_key_can_sign(key_ref: OpenPgpKeyRef, algorithm: OpenPgpAlgorithm) -> bool {
     matches!(
         key_ref,
@@ -640,9 +624,7 @@ impl Slot for OpenPgpSlot {
             self.keys.len() * 2 + self.certificates.len() + self.data_objects.len(),
         );
         for key in &self.keys {
-            let public_bytes = openpgp_public_material(&key.public_key);
             let key_type = key.algorithm.key_type() as CK_KEY_TYPE;
-            let (modulus, public_exponent) = openpgp_rsa_components(&key.public_key);
             let can_sign = openpgp_key_can_sign(key.key_ref, key.algorithm);
             let can_verify = openpgp_key_can_verify(key.key_ref, key.algorithm);
             let can_decrypt = key.key_ref == OpenPgpKeyRef::Decipher && key.algorithm.is_rsa();
@@ -652,16 +634,28 @@ impl Slot for OpenPgpSlot {
                 .flatten();
             let label = format!("OpenPGP {:?} key", key.key_ref);
             let id = vec![key.key_ref as u8];
+            let public_key = match &key.public_key {
+                OpenPgpPublicKey::Rsa(public_key) => PublicKeyMaterial::Rsa(public_key.clone()),
+                OpenPgpPublicKey::Ec { point, .. } => PublicKeyMaterial::Ec {
+                    parameters: openpgp_ec_params(key.algorithm)
+                        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                    public_key: point.clone(),
+                },
+                OpenPgpPublicKey::Raw {
+                    key: public_key, ..
+                } => PublicKeyMaterial::Ec {
+                    parameters: openpgp_ec_params(key.algorithm)
+                        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
+                    public_key: public_key.clone(),
+                },
+            };
             let private_material = KeyMaterial::OpenPgpPrivate {
                 key_ref: key.key_ref,
                 algorithm: key.algorithm,
-                modulus,
-                public_exponent,
-                public_key: public_bytes,
                 pin_policy: key.pin_policy,
                 touch_policy: key.touch_policy,
             };
-            let public_material = private_material.projected_public()?;
+            let public_material = KeyMaterial::Public(public_key.clone());
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8),
@@ -683,6 +677,8 @@ impl Slot for OpenPgpSlot {
                 local: key.local,
                 key_gen_mechanism,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: public_material,
             });
             objects.push(TokenObject {
@@ -707,6 +703,8 @@ impl Slot for OpenPgpSlot {
                 local: key.local,
                 key_gen_mechanism,
                 creator_session: None,
+                public_key: Some(public_key),
+                rp_id: None,
                 material: private_material,
             });
         }
@@ -732,6 +730,8 @@ impl Slot for OpenPgpSlot {
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::OpenPgpCertificate {
                     value: certificate.value.clone(),
                 },
@@ -759,6 +759,8 @@ impl Slot for OpenPgpSlot {
                 local: false,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: KeyMaterial::OpenPgpData {
                     tag: data_object.tag,
                     connector: self.connector.clone(),
@@ -785,7 +787,10 @@ pub(crate) fn openpgp_private_key_template(
         Ok(())
     };
     match (algorithm, material) {
-        (OpenPgpAlgorithm::Rsa { bits }, KeyMaterial::RsaPrivate(key)) => {
+        (
+            OpenPgpAlgorithm::Rsa { bits },
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)),
+        ) => {
             if key.size() * 8 != bits
                 || algorithm_attributes.len() < 6
                 || algorithm_attributes[0] != 1

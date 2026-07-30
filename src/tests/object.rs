@@ -413,6 +413,8 @@ pub fn yubihsm_persisted_public_objects_require_a_yubihsm_backend() {
                 local: true,
                 key_gen_mechanism: None,
                 creator_session: None,
+                public_key: None,
+                rp_id: None,
                 material: crate::KeyMaterial::YubiHsm {
                     id: object_type as u16,
                     object_type,
@@ -549,6 +551,8 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::OpenPgpCertificate {
             value: vec![0x30, 0],
         },
@@ -556,40 +560,55 @@ pub fn destroy_openpgp_objects_is_prohibited() {
     let mut public = base.clone();
     public.unique_id = "openpgp-01-public".to_owned();
     public.class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
-    public.material = crate::KeyMaterial::OpenPgpPublic {
-        algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
-        public_key: vec![0x11; 256],
-    };
+    public.material = crate::KeyMaterial::Public(crate::PublicKeyMaterial::Rsa(
+        rsa::RsaPublicKey::new(
+            rsa::BigUint::from_bytes_be(&vec![0x11; 256]),
+            rsa::BigUint::from(65537u32),
+        )
+        .expect("test RSA public key"),
+    ));
     let mut private = base.clone();
     private.unique_id = "openpgp-01-private".to_owned();
     private.class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     private.private = true;
     private.sensitive = true;
     private.extractable = false;
+    private.public_key = match &public.material {
+        crate::KeyMaterial::Public(public_key) => Some(public_key.clone()),
+        _ => None,
+    };
     private.material = crate::KeyMaterial::OpenPgpPrivate {
         key_ref: crate::OpenPgpKeyRef::Signature,
         algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
-        modulus: vec![0x11; 256],
-        public_exponent: vec![1, 0, 1],
-        public_key: Vec::new(),
         pin_policy: 0,
         touch_policy: 1,
     };
     let handles = with_test_slot_context(TEST_SLOT_ID, |context| {
         [base, public, private]
             .into_iter()
-            .map(|object| context.insert_object(object).unwrap())
+            .map(|object| {
+                let class = object.class;
+                (class, context.insert_object(object).unwrap())
+            })
             .collect::<Vec<_>>()
     });
 
-    for handle in handles {
+    for (class, handle) in handles {
+        let expected = if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS {
+            CKR_OK as CK_RV
+        } else {
+            CKR_ACTION_PROHIBITED as CK_RV
+        };
         assert_eq!(
             crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),
-            CKR_ACTION_PROHIBITED as CK_RV
+            expected
         );
-        assert!(with_test_slot_context(TEST_SLOT_ID, |context| {
-            context.memory_objects.contains_key(&handle)
-        }));
+        assert_eq!(
+            with_test_slot_context(TEST_SLOT_ID, |context| {
+                context.memory_objects.contains_key(&handle)
+            }),
+            class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+        );
     }
 
     assert_eq!(
@@ -1374,7 +1393,10 @@ pub fn create_object_requires_and_imports_real_key_material() {
         public_exponent_attribute,
     ];
     let public = crate::parse_create_object_template(&public_template).unwrap();
-    assert!(matches!(public.material, crate::KeyMaterial::RsaPublic(_)));
+    assert!(matches!(
+        public.material,
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::Rsa(_))
+    ));
     let public_key_info = public
         .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
         .unwrap();
@@ -1400,7 +1422,7 @@ pub fn create_object_requires_and_imports_real_key_material() {
     let imported = crate::parse_create_object_template(&private_template).unwrap();
     assert!(matches!(
         imported.material,
-        crate::KeyMaterial::RsaPrivate(_)
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(_))
     ));
     assert_eq!(
         imported.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE),
@@ -1444,16 +1466,15 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
     let cases = [
         (
             CKK_EC as CK_KEY_TYPE,
-            crate::KeyMaterial::PivPublic {
-                algorithm: crate::piv::Algorithm::EccP256,
+            crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+                parameters: crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                    .expect("P-256 parameters")
+                    .to_vec(),
                 public_key: vec![0x11; 64],
-            },
+            }),
             crate::KeyMaterial::PivPrivate {
                 slot: crate::piv::Slot::Authentication,
                 algorithm: crate::piv::Algorithm::EccP256,
-                modulus: Vec::new(),
-                public_exponent: Vec::new(),
-                public_key: vec![0x11; 64],
                 pin_policy: 0,
                 touch_policy: 0,
             },
@@ -1461,16 +1482,14 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
         ),
         (
             CKK_EC_EDWARDS as CK_KEY_TYPE,
-            crate::KeyMaterial::OpenPgpPublic {
-                algorithm: crate::OpenPgpAlgorithm::Ed25519,
+            crate::KeyMaterial::Public(crate::PublicKeyMaterial::Ec {
+                parameters: crate::openpgp_ec_params(crate::OpenPgpAlgorithm::Ed25519)
+                    .expect("Ed25519 parameters"),
                 public_key: vec![0x22; 32],
-            },
+            }),
             crate::KeyMaterial::OpenPgpPrivate {
                 key_ref: crate::OpenPgpKeyRef::Authentication,
                 algorithm: crate::OpenPgpAlgorithm::Ed25519,
-                modulus: Vec::new(),
-                public_exponent: Vec::new(),
-                public_key: vec![0x22; 32],
                 pin_policy: 0,
                 touch_policy: 0,
             },
@@ -1512,6 +1531,10 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
         let mut private = base.clone();
         private.class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
         private.key_type = key_type;
+        private.public_key = match &public.material {
+            crate::KeyMaterial::Public(public_key) => Some(public_key.clone()),
+            _ => None,
+        };
         private.material = private_material;
 
         let public_key_info = public
@@ -1697,6 +1720,80 @@ pub fn copy_object_clones_and_overrides_mutable_attributes() {
     assert_eq!(
         crate::api::C_FindObjectsFinal(TEST_SESSION_HANDLE),
         CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+pub fn native_projected_public_keys_cannot_be_copied_or_destroyed() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let mut slot = test_slot(true);
+    let mut object = crate::default_objects().unwrap().remove(&1).unwrap();
+    object.unique_id = "native-public-key".to_owned();
+    object.slot_id = Some(TEST_SLOT_ID);
+    object.token = true;
+    slot.token_objects.push(object);
+    install_test_slot_with_backend(TEST_SLOT_ID, Box::new(slot));
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        context.refresh_slot_token_objects(TEST_SLOT_ID).unwrap();
+    });
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let handle = with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .resolved_objects()
+            .unwrap()
+            .into_iter()
+            .find_map(|(handle, object)| {
+                (object.unique_id == "native-public-key").then_some(handle)
+            })
+            .unwrap()
+    });
+    let mut modifiable = CK_TRUE as CK_BBOOL;
+    let mut copyable = CK_TRUE as CK_BBOOL;
+    let mut destroyable = CK_TRUE as CK_BBOOL;
+    let mut attributes = [
+        scalar_attribute(CKA_MODIFIABLE as CK_ATTRIBUTE_TYPE, &mut modifiable),
+        scalar_attribute(CKA_COPYABLE as CK_ATTRIBUTE_TYPE, &mut copyable),
+        scalar_attribute(CKA_DESTROYABLE as CK_ATTRIBUTE_TYPE, &mut destroyable),
+    ];
+    assert_eq!(
+        crate::api::C_GetAttributeValue(
+            TEST_SESSION_HANDLE,
+            handle,
+            attributes.as_mut_ptr(),
+            attributes.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(modifiable, CK_FALSE as CK_BBOOL);
+    assert_eq!(copyable, CK_FALSE as CK_BBOOL);
+    assert_eq!(destroyable, CK_FALSE as CK_BBOOL);
+
+    let mut copied = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CopyObject(
+            TEST_SESSION_HANDLE,
+            handle,
+            std::ptr::null_mut(),
+            0,
+            &mut copied,
+        ),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(TEST_SESSION_HANDLE, handle),
+        CKR_ACTION_PROHIBITED as CK_RV
     );
 
     assert_eq!(
@@ -2107,6 +2204,8 @@ pub fn get_attribute_value_reads_certificate_values() {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::OpenPgpCertificate {
             value: certificate.clone(),
         },
@@ -2183,6 +2282,8 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         local: false,
         key_gen_mechanism: None,
         creator_session: None,
+        public_key: None,
+        rp_id: None,
         material: crate::KeyMaterial::IssuerSecurityDomainData {
             value: value.clone(),
             application: "Issuer SD".to_owned(),
