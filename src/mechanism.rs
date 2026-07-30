@@ -144,11 +144,13 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         CKM_SHA3_512_RSA_PKCS_PSS,
     ] {
         let encrypt = matches!(type_, CKM_RSA_X_509 | CKM_RSA_PKCS | CKM_RSA_PKCS_OAEP);
+        let verify = type_ != CKM_RSA_PKCS_OAEP;
         mechanisms.push(MechanismDetails {
             type_: type_ as CK_MECHANISM_TYPE,
             min_key_size: 1024,
             max_key_size: 4096,
-            flags: (CKF_VERIFY | if encrypt { CKF_ENCRYPT } else { 0 }) as CK_FLAGS,
+            flags: ((if verify { CKF_VERIFY } else { 0 }) | if encrypt { CKF_ENCRYPT } else { 0 })
+                as CK_FLAGS,
         });
     }
     for type_ in [
@@ -182,6 +184,107 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         max_key_size: 0,
         flags: CKF_DERIVE as CK_FLAGS,
     });
+    mechanisms
+}
+
+pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
+    let mut mechanisms = vec![
+        MechanismDetails {
+            type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 1024,
+            max_key_size: 4096,
+            flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 255,
+            max_key_size: 255,
+            flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 255,
+            max_key_size: 255,
+            flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+            min_key_size: 255,
+            max_key_size: 384,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_EDDSA as CK_MECHANISM_TYPE,
+            min_key_size: 255,
+            max_key_size: 255,
+            flags: CKF_SIGN as CK_FLAGS,
+        },
+    ];
+    for type_ in [
+        CKM_RSA_X_509,
+        CKM_RSA_PKCS,
+        CKM_RSA_PKCS_OAEP,
+        CKM_RSA_PKCS_PSS,
+        CKM_SHA1_RSA_PKCS,
+        CKM_SHA224_RSA_PKCS,
+        CKM_SHA256_RSA_PKCS,
+        CKM_SHA384_RSA_PKCS,
+        CKM_SHA512_RSA_PKCS,
+        CKM_SHA3_224_RSA_PKCS,
+        CKM_SHA3_256_RSA_PKCS,
+        CKM_SHA3_384_RSA_PKCS,
+        CKM_SHA3_512_RSA_PKCS,
+        CKM_SHA1_RSA_PKCS_PSS,
+        CKM_SHA224_RSA_PKCS_PSS,
+        CKM_SHA256_RSA_PKCS_PSS,
+        CKM_SHA384_RSA_PKCS_PSS,
+        CKM_SHA512_RSA_PKCS_PSS,
+        CKM_SHA3_224_RSA_PKCS_PSS,
+        CKM_SHA3_256_RSA_PKCS_PSS,
+        CKM_SHA3_384_RSA_PKCS_PSS,
+        CKM_SHA3_512_RSA_PKCS_PSS,
+    ] {
+        let decrypt = matches!(type_, CKM_RSA_X_509 | CKM_RSA_PKCS | CKM_RSA_PKCS_OAEP);
+        let sign = type_ != CKM_RSA_PKCS_OAEP;
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 1024,
+            max_key_size: 4096,
+            flags: ((if sign { CKF_SIGN } else { 0 }) | if decrypt { CKF_DECRYPT } else { 0 })
+                as CK_FLAGS,
+        });
+    }
+    for type_ in [
+        CKM_ECDSA,
+        CKM_ECDSA_SHA1,
+        CKM_ECDSA_SHA224,
+        CKM_ECDSA_SHA256,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
+        CKM_ECDSA_SHA3_224,
+        CKM_ECDSA_SHA3_256,
+        CKM_ECDSA_SHA3_384,
+        CKM_ECDSA_SHA3_512,
+    ] {
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: (CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+        });
+    }
     mechanisms
 }
 

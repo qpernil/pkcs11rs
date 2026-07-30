@@ -1,5 +1,509 @@
 use super::*;
 
+fn generate_software_key_pair(
+    session: CK_SESSION_HANDLE,
+    mechanism_type: CK_MECHANISM_TYPE,
+    parameters: Option<&mut [u8]>,
+) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    let mut public_template = Vec::new();
+    let mut modulus_bits = 1024 as CK_ULONG;
+    if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        public_template.push(scalar_attribute(
+            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+            &mut modulus_bits,
+        ));
+    }
+    if let Some(parameters) = parameters {
+        public_template.push(bytes_attribute(
+            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            parameters,
+        ));
+    }
+    let mut public_verify = CK_TRUE as CK_BBOOL;
+    let mut public_encrypt = CK_TRUE as CK_BBOOL;
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        public_template.push(scalar_attribute(
+            CKA_VERIFY as CK_ATTRIBUTE_TYPE,
+            &mut public_verify,
+        ));
+    }
+    if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        public_template.push(scalar_attribute(
+            CKA_ENCRYPT as CK_ATTRIBUTE_TYPE,
+            &mut public_encrypt,
+        ));
+    }
+
+    let mut private_template = Vec::new();
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut decrypt = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_TRUE as CK_BBOOL;
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        private_template.push(scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign));
+    }
+    if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        private_template.push(scalar_attribute(
+            CKA_DECRYPT as CK_ATTRIBUTE_TYPE,
+            &mut decrypt,
+        ));
+    }
+    if matches!(
+        mechanism_type,
+        x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            || x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+    ) {
+        private_template.push(scalar_attribute(
+            CKA_DERIVE as CK_ATTRIBUTE_TYPE,
+            &mut derive,
+        ));
+    }
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: mechanism_type,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV
+    );
+    (public, private)
+}
+
+fn sign_and_verify(
+    session: CK_SESSION_HANDLE,
+    public: CK_OBJECT_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    mechanism_type: CK_MECHANISM_TYPE,
+) {
+    let message = b"software session private key";
+    let mut mechanism = CK_MECHANISM {
+        mechanism: mechanism_type,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private),
+        CKR_OK as CK_RV
+    );
+    let mut signature_length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0; signature_length as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut mechanism, public),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+}
+
+fn object_ec_point(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> Vec<u8> {
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut point = vec![0; attribute.ulValueLen as usize];
+    attribute.pValue = point.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    point
+}
+
+fn derive_secret(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    peer: &mut [u8],
+) -> Vec<u8> {
+    let mut parameters = CK_ECDH1_DERIVE_PARAMS {
+        kdf: CKD_NULL as CK_EC_KDF_TYPE,
+        pSharedData: std::ptr::null_mut(),
+        ulSharedDataLen: 0,
+        pPublicData: peer.as_mut_ptr(),
+        ulPublicDataLen: peer.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    };
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut mechanism,
+            private,
+            std::ptr::null_mut(),
+            0,
+            &mut object,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut value = vec![0; attribute.ulValueLen as usize];
+    attribute.pValue = value.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    value
+}
+
+#[test]
+fn software_session_key_pairs_cover_rsa_ec_and_ed25519_operations() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let (rsa_public, rsa_private) = generate_software_key_pair(
+        TEST_SESSION_HANDLE,
+        CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        None,
+    );
+    sign_and_verify(
+        TEST_SESSION_HANDLE,
+        rsa_public,
+        rsa_private,
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+    );
+    sign_and_verify(
+        TEST_SESSION_HANDLE,
+        rsa_public,
+        rsa_private,
+        CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    );
+    let plaintext = b"software RSA decryption";
+    let mut rsa = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut rsa, rsa_public),
+        CKR_OK as CK_RV
+    );
+    let mut encrypted_length = 0;
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut encrypted_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut encrypted = vec![0; encrypted_length as usize];
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            encrypted.as_mut_ptr(),
+            &mut encrypted_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut rsa, rsa_private),
+        CKR_OK as CK_RV
+    );
+    let mut recovered_length = 0;
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            encrypted.as_mut_ptr(),
+            encrypted_length,
+            std::ptr::null_mut(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut recovered = vec![0; recovered_length as usize];
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            encrypted.as_mut_ptr(),
+            encrypted_length,
+            recovered.as_mut_ptr(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    recovered.truncate(recovered_length as usize);
+    assert_eq!(recovered, plaintext);
+
+    let mut oaep_parameters = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+        source: CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+        pSourceData: std::ptr::null_mut(),
+        ulSourceDataLen: 0,
+    };
+    let mut oaep = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE,
+        pParameter: (&mut oaep_parameters as *mut CK_RSA_PKCS_OAEP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut oaep, rsa_public),
+        CKR_OK as CK_RV
+    );
+    encrypted_length = 0;
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut encrypted_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    encrypted.resize(encrypted_length as usize, 0);
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            encrypted.as_mut_ptr(),
+            &mut encrypted_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut oaep, rsa_private),
+        CKR_OK as CK_RV
+    );
+    recovered_length = 0;
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            encrypted.as_mut_ptr(),
+            encrypted_length,
+            std::ptr::null_mut(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    recovered.resize(recovered_length as usize, 0);
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            encrypted.as_mut_ptr(),
+            encrypted_length,
+            recovered.as_mut_ptr(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    recovered.truncate(recovered_length as usize);
+    assert_eq!(recovered, plaintext);
+
+    for (algorithm, mut parameters, sign_mechanism) in [
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .unwrap()
+                .to_vec(),
+            CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::EccP384)
+                .unwrap()
+                .to_vec(),
+            CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::Ed25519)
+                .unwrap()
+                .to_vec(),
+            CKM_EDDSA as CK_MECHANISM_TYPE,
+        ),
+    ] {
+        let (public, private) =
+            generate_software_key_pair(TEST_SESSION_HANDLE, algorithm, Some(&mut parameters));
+        sign_and_verify(TEST_SESSION_HANDLE, public, private, sign_mechanism);
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn software_session_ecdh_covers_nist_curves_and_x25519() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    for (algorithm, mut parameters) in [
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::EccP384)
+                .unwrap()
+                .to_vec(),
+        ),
+        (
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::piv_ec_parameters(crate::piv::Algorithm::X25519)
+                .unwrap()
+                .to_vec(),
+        ),
+    ] {
+        let (first_public, first_private) =
+            generate_software_key_pair(TEST_SESSION_HANDLE, algorithm, Some(&mut parameters));
+        let (second_public, second_private) =
+            generate_software_key_pair(TEST_SESSION_HANDLE, algorithm, Some(&mut parameters));
+        let mut first_point = object_ec_point(TEST_SESSION_HANDLE, first_public);
+        let mut second_point = object_ec_point(TEST_SESSION_HANDLE, second_public);
+        let first = derive_secret(TEST_SESSION_HANDLE, first_private, &mut second_point);
+        let second = derive_secret(TEST_SESSION_HANDLE, second_private, &mut first_point);
+        assert_eq!(first, second);
+        assert!(first.iter().any(|byte| *byte != 0));
+    }
+    finalize_for_test();
+}
+
+#[test]
+fn software_private_keys_remain_session_objects_while_public_keys_may_be_persisted() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        context
+            .set_token_storage_provider(Box::new(crate::storage::MemoryStorageProvider::new()))
+            .unwrap();
+    });
+
+    let mut modulus_bits = 1024 as CK_ULONG;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+    ];
+    let mut private_template = [scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token)];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public,
+            &mut private,
+        ),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let public_object = context.resolve_object(public).unwrap().unwrap();
+        assert!(public_object.token);
+        assert!(matches!(
+            public_object.material,
+            crate::KeyMaterial::Public(_)
+        ));
+        let private_object = context.resolve_object(private).unwrap().unwrap();
+        assert!(!private_object.token);
+        assert!(matches!(
+            private_object.material,
+            crate::KeyMaterial::SoftwarePrivate(_)
+        ));
+    });
+    finalize_for_test();
+}
+
 #[test]
 pub fn openpgp_generation_templates_select_reference_algorithm_and_touch_policy() {
     let mechanism = CK_MECHANISM {

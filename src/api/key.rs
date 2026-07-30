@@ -4,6 +4,7 @@ use super::object::{
     yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
 };
 use crate::*;
+use p256::elliptic_curve::Generate;
 
 #[no_mangle]
 pub extern "C" fn C_GenerateKey(
@@ -269,6 +270,35 @@ fn generate_key_pair(
             mechanism.mechanism,
             CKF_GENERATE_KEY_PAIR as CK_FLAGS,
         )?;
+        let private_token =
+            optional_bool_template_attribute(private_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
+                .unwrap_or(false);
+        if !private_token
+            && matches!(
+                mechanism.mechanism,
+                x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            )
+        {
+            let (public_object, mut private_object) =
+                software_generate_key_pair(mechanism, public_template, private_template)?;
+            validate_new_object_access(&public_object, flags, logged_in)?;
+            validate_new_object_access(&private_object, flags, logged_in)?;
+            private_object.set_creator(session_handle, slot_id);
+            let private = ctx.insert_object(private_object)?;
+            let public = match ctx.store_backed_object(session_handle, public_object) {
+                Ok(public) => public,
+                Err(error) => {
+                    ctx.remove_object_handle(private);
+                    return Err(error);
+                }
+            };
+            *public_handle = public;
+            *private_handle = private;
+            return Ok(());
+        }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
             if mechanism.mechanism != CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN
                 || !mechanism.pParameter.is_null()
@@ -797,6 +827,144 @@ pub(super) fn key_pair_object(
     Ok(object)
 }
 
+fn software_key_pair_object(
+    templ: &[CK_ATTRIBUTE],
+    class: CK_OBJECT_CLASS,
+    key_type: CK_KEY_TYPE,
+) -> Result<TokenObject, Error> {
+    validate_unique_template(templ)?;
+    let private = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut parsed = TokenObjectTemplate {
+        class: Some(class),
+        key_type: Some(key_type),
+        token: false,
+        private,
+        sensitive: private.then_some(true),
+        extractable: private.then_some(false),
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in templ {
+        if matches!(
+            attribute.type_,
+            x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
+                || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
+                || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+        ) {
+            continue;
+        }
+        parsed.apply_attribute(attribute).map_err(Error::from)?;
+    }
+    let object = parsed.into_object().map_err(Error::from)?;
+    if object.class != class || object.key_type != key_type || private && object.token {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    Ok(object)
+}
+
+fn software_generate_key_pair(
+    mechanism: &CK_MECHANISM,
+    public_template: &[CK_ATTRIBUTE],
+    private_template: &[CK_ATTRIBUTE],
+) -> Result<(TokenObject, TokenObject), Error> {
+    if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let (key_type, private_material) = match mechanism.mechanism {
+        x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let bits = read_ulong_template_attribute(
+                template_attribute(public_template, CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            if !(1024..=4096).contains(&bits) || bits % 256 != 0 {
+                return Err(CKR_KEY_SIZE_RANGE.into());
+            }
+            if let Some(exponent) =
+                template_attribute(public_template, CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE)
+            {
+                if read_attribute_value(exponent).map_err(Error::from)? != [0x01, 0x00, 0x01] {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+                }
+            }
+            let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, bits as usize)
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            key.precompute()
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
+            (
+                CKK_RSA as CK_KEY_TYPE,
+                SoftwarePrivateKeyMaterial::Rsa(Box::new(key)),
+            )
+        }
+        x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameters =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if parameters.as_slice()
+                == piv_ec_parameters(piv::Algorithm::EccP256).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+            {
+                (
+                    CKK_EC as CK_KEY_TYPE,
+                    SoftwarePrivateKeyMaterial::P256(p256::SecretKey::generate()),
+                )
+            } else if parameters.as_slice()
+                == piv_ec_parameters(piv::Algorithm::EccP384).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+            {
+                (
+                    CKK_EC as CK_KEY_TYPE,
+                    SoftwarePrivateKeyMaterial::P384(p384::SecretKey::generate()),
+                )
+            } else {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+        }
+        x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameters =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if parameters.as_slice()
+                != piv_ec_parameters(piv::Algorithm::Ed25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+            {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            let mut seed = Zeroizing::new([0u8; 32]);
+            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+            (
+                CKK_EC_EDWARDS as CK_KEY_TYPE,
+                SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&seed)),
+            )
+        }
+        x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameters =
+                required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
+            if parameters.as_slice()
+                != piv_ec_parameters(piv::Algorithm::X25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+            {
+                return Err(CKR_CURVE_NOT_SUPPORTED.into());
+            }
+            let mut scalar = Zeroizing::new([0u8; 32]);
+            getrandom::fill(scalar.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+            (
+                CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+                SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(*scalar)),
+            )
+        }
+        _ => return Err(CKR_MECHANISM_INVALID.into()),
+    };
+    let public_material = private_material.public_key()?;
+    let mut public_object =
+        software_key_pair_object(public_template, CKO_PUBLIC_KEY as CK_OBJECT_CLASS, key_type)?;
+    let mut private_object = software_key_pair_object(
+        private_template,
+        CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+        key_type,
+    )?;
+    public_object.material = KeyMaterial::Public(public_material);
+    private_object.material = KeyMaterial::SoftwarePrivate(private_material);
+    public_object.local = true;
+    private_object.local = true;
+    public_object.key_gen_mechanism = Some(mechanism.mechanism);
+    private_object.key_gen_mechanism = Some(mechanism.mechanism);
+    Ok((public_object, private_object))
+}
+
 pub(super) fn template_attribute(
     templ: &[CK_ATTRIBUTE],
     attribute_type: CK_ATTRIBUTE_TYPE,
@@ -1317,8 +1485,9 @@ fn derive_key(
         if !object.derive {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        #[derive(Clone, Copy)]
+        #[derive(Clone)]
         enum DeriveSource {
+            Software(Box<SoftwarePrivateKeyMaterial>),
             Piv {
                 slot: piv::Slot,
                 algorithm: piv::Algorithm,
@@ -1335,6 +1504,11 @@ fn derive_key(
             },
         }
         let source = match &object.material {
+            KeyMaterial::SoftwarePrivate(
+                key @ (SoftwarePrivateKeyMaterial::P256(_)
+                | SoftwarePrivateKeyMaterial::P384(_)
+                | SoftwarePrivateKeyMaterial::X25519(_)),
+            ) => DeriveSource::Software(Box::new(key.clone())),
             KeyMaterial::PivPrivate {
                 slot,
                 algorithm,
@@ -1365,10 +1539,24 @@ fn derive_key(
             }
             _ => return Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
         };
-        match source {
+        let source_is_x25519 = match &source {
+            DeriveSource::Software(key) => {
+                matches!(key.as_ref(), SoftwarePrivateKeyMaterial::X25519(_))
+            }
+            DeriveSource::Piv { algorithm, .. } => *algorithm == piv::Algorithm::X25519,
+            DeriveSource::OpenPgp { algorithm, .. } => {
+                *algorithm == OpenPgpAlgorithm::Ecdh(openpgp::Curve::X25519)
+            }
+            DeriveSource::YubiHsm { algorithm, .. } => is_yubihsm_x25519(*algorithm),
+        };
+        if mechanism.mechanism == CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE && source_is_x25519
+        {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        match &source {
             DeriveSource::Piv {
                 slot, pin_policy, ..
-            } if piv_policy_requires_login(slot, pin_policy) && !logged_in => {
+            } if piv_policy_requires_login(*slot, *pin_policy) && !logged_in => {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             DeriveSource::OpenPgp { .. } if !logged_in => {
@@ -1376,14 +1564,20 @@ fn derive_key(
             }
             _ => {}
         }
-        let (expected_length, expected_public_length, requires_uncompressed) = match source {
-            DeriveSource::Piv { algorithm, .. } => match algorithm {
+        let (expected_length, expected_public_length, requires_uncompressed) = match &source {
+            DeriveSource::Software(key) => match key.as_ref() {
+                SoftwarePrivateKeyMaterial::P256(_) => (32, 65, true),
+                SoftwarePrivateKeyMaterial::P384(_) => (48, 97, true),
+                SoftwarePrivateKeyMaterial::X25519(_) => (32, 32, false),
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+            },
+            DeriveSource::Piv { algorithm, .. } => match *algorithm {
                 piv::Algorithm::EccP256 => (32, 65, true),
                 piv::Algorithm::EccP384 => (48, 97, true),
                 piv::Algorithm::X25519 => (32, 32, false),
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
-            DeriveSource::OpenPgp { algorithm, .. } => match algorithm {
+            DeriveSource::OpenPgp { algorithm, .. } => match *algorithm {
                 OpenPgpAlgorithm::Ecdh(curve) => {
                     let coordinate_length = curve.coordinate_length();
                     (
@@ -1394,11 +1588,11 @@ fn derive_key(
                 }
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             },
-            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_x25519(algorithm) => {
+            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_x25519(*algorithm) => {
                 (32, 32, false)
             }
-            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_ec(algorithm) => {
-                let coordinate_length = yubihsm_ec_coordinate_length(algorithm)?;
+            DeriveSource::YubiHsm { algorithm, .. } if is_yubihsm_ec(*algorithm) => {
+                let coordinate_length = yubihsm_ec_coordinate_length(*algorithm)?;
                 (coordinate_length, coordinate_length * 2 + 1, true)
             }
             DeriveSource::YubiHsm { .. } => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
@@ -1413,6 +1607,31 @@ fn derive_key(
 
         let derived =
             match source {
+                DeriveSource::Software(key) => match key.as_ref() {
+                    SoftwarePrivateKeyMaterial::P256(key) => {
+                        let peer = p256::PublicKey::from_sec1_bytes(public_data)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+                        p256::ecdh::diffie_hellman(key.to_nonzero_scalar(), peer.as_affine())
+                            .raw_secret_bytes()
+                            .to_vec()
+                    }
+                    SoftwarePrivateKeyMaterial::P384(key) => {
+                        let peer = p384::PublicKey::from_sec1_bytes(public_data)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+                        p384::ecdh::diffie_hellman(key.to_nonzero_scalar(), peer.as_affine())
+                            .raw_secret_bytes()
+                            .to_vec()
+                    }
+                    SoftwarePrivateKeyMaterial::X25519(key) => {
+                        let peer: [u8; 32] = public_data
+                            .try_into()
+                            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+                        key.diffie_hellman(&x25519_dalek::PublicKey::from(peer))
+                            .as_bytes()
+                            .to_vec()
+                    }
+                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                },
                 DeriveSource::Piv {
                     slot,
                     algorithm,

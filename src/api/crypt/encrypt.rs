@@ -360,7 +360,8 @@ fn crypt_init(
                     } else {
                         matches!(
                             object.material,
-                            KeyMaterial::YubiHsm { .. }
+                            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(_))
+                                | KeyMaterial::YubiHsm { .. }
                                 | KeyMaterial::PivPrivate { .. }
                                 | KeyMaterial::OpenPgpPrivate { .. }
                         )
@@ -1186,6 +1187,11 @@ fn crypt(
         } else {
             match &operation.key {
                 KeyMaterial::Public(PublicKeyMaterial::Rsa(key)) => key.size(),
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
+                    if !encrypting =>
+                {
+                    key.size()
+                }
                 KeyMaterial::PivPrivate { .. } | KeyMaterial::OpenPgpPrivate { .. }
                     if !encrypting =>
                 {
@@ -1227,6 +1233,26 @@ fn crypt(
                     }
                 }
                 match &operation.key {
+                    KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
+                        if !encrypting =>
+                    {
+                        if input.len() != key.size() {
+                            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+                        }
+                        let raw = rsa_private_operation(key, input)?;
+                        match operation.mechanism {
+                            x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE => Ok(raw),
+                            x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
+                                rsa_pkcs1_v1_5_unpad(&raw)
+                            }
+                            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
+                                let (mgf, hash_mechanism, label_digest) =
+                                    operation.oaep.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                                rsa_oaep_unpad(&raw, *mgf, *hash_mechanism, label_digest)
+                            }
+                            _ => Err(CKR_MECHANISM_INVALID.into()),
+                        }
+                    }
                     KeyMaterial::PivPrivate {
                         slot, algorithm, ..
                     } if !encrypting => {

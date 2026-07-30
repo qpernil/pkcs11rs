@@ -58,11 +58,13 @@ implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
 Backend mechanism lists describe hardware operations. The default `Slot`
-implementation augments them with the module's software digest and public-key
-mechanisms, whose active state is still stored in the calling session. FIDO2
-adds an explicit vendor GetAssertion mechanism for operational resident
-credentials; it cannot be confused with a bare EC or RSA signing mechanism
-because its input and structured output are separately defined.
+implementation augments them with the module's software digest, public-key,
+and private session-key mechanisms, whose active state is still stored in the
+calling session. Software RSA, P-256, P-384, Ed25519, and X25519 private
+material is typed explicitly and never enters token storage. FIDO2 adds an
+explicit vendor GetAssertion mechanism for operational resident credentials;
+it cannot be confused with a bare EC or RSA signing mechanism because its
+input and structured output are separately defined.
 
 The `abi-tests` feature uses synthetic slots that identify the real backend
 kind they model. Production dispatch therefore does not contain a generic
@@ -112,11 +114,12 @@ device identity used for correlation. A HID authenticator absent from the
 initial discovery snapshot creates no slot; a previously discovered endpoint
 can reopen the same device and allocate a fresh channel after reinsertion.
 
-When `PKCS11RS_FIDO2_STORAGE` is configured, that same validated physical
-Yubico serial selects a versioned local token provider. Stored canonical backed
-objects are decoded and reconciled during slot construction. An endpoint
-without a stable validated identity retains an unavailable provider, so
-durable objects cannot accidentally cross authenticators.
+When `PKCS11RS_TOKEN_STORAGE` is configured, a stable physical Yubico serial
+selects a versioned local token provider separately for each applet. Stored
+canonical backed objects are decoded and reconciled during slot construction.
+`PKCS11RS_FIDO2_STORAGE` remains a FIDO-only compatibility setting. An endpoint
+without a stable identity retains an unavailable provider, so durable objects
+cannot accidentally cross tokens or applets.
 
 The validated Yubico physical serial also associates the HID endpoint with the
 shared PC/SC `DeviceContext`, even when the FIDO CCID applet is unavailable or

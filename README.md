@@ -262,24 +262,29 @@ Callers request the protected path with a null PIN pointer. Combined YubiHSM
 Auth `C_Login` selectors may omit their password separator instead. See
 [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md) for the exact forms.
 
-## FIDO Token Storage
+## Token Storage
 
-FIDO slots use no durable software storage by default. Set
-`PKCS11RS_FIDO2_STORAGE` to an absolute path to opt into local persistence for
-provider-backed token objects:
+Slots use no durable software storage by default. Set `PKCS11RS_TOKEN_STORAGE`
+to an absolute path to opt into local persistence for provider-backed public
+token objects on every slot with a stable physical Yubico serial:
 
 ```sh
-export PKCS11RS_FIDO2_STORAGE="$HOME/.local/share/pkcs11rs"
+export PKCS11RS_TOKEN_STORAGE="$HOME/.local/share/pkcs11rs"
 ```
 
-The configured root is created during `C_Initialize`. A FIDO slot receives a
-local provider only when YubiKey device-information discovery supplied a
-validated physical serial. Its canonical registration, derived signing-key,
-and projected public-key objects are stored below a versioned, serial-scoped
-directory and restored automatically on the next module initialization.
-`CKA_TOKEN=CK_FALSE` remains session-only; `CKA_TOKEN=CK_TRUE` selects this
-provider. Tokens without a stable validated identity continue to return
+The configured root is created during `C_Initialize`. Objects are separated by
+physical token identity and applet, stored below a versioned directory, and
+restored automatically on the next module initialization. FIDO registration
+and derived signing-key records use the same provider. The older
+`PKCS11RS_FIDO2_STORAGE` setting remains supported as a FIDO-only compatibility
+option when `PKCS11RS_TOKEN_STORAGE` is unset.
+
+`CKA_TOKEN=CK_FALSE` remains session-only; `CKA_TOKEN=CK_TRUE` selects the slot
+provider. Tokens without a stable identity continue to return
 `CKR_TOKEN_WRITE_PROTECTED` for provider-backed token-object creation.
+Software private keys are always session objects. A private-key request with
+`CKA_TOKEN=CK_TRUE` must be fulfilled by the applet or HSM as a real hardware
+object, otherwise it fails.
 
 The files contain unencrypted private previewSign protocol metadata. On Unix,
 new object files use mode `0600`, but the caller remains responsible for
@@ -486,10 +491,12 @@ by `CKA_TOKEN`: session objects use the current session's memory provider,
 while token objects use the slot provider. Slots without configured or native
 storage use `UnavailableStorageProvider`, so unsupported token persistence
 fails explicitly instead of silently becoming session-local. When
-`PKCS11RS_FIDO2_STORAGE` is configured, FIDO slots with a validated Yubico
-physical serial install a durable local provider and automatically restore
-their saved backed objects. Applications can also restore exported previewSign
-registration or derived-key wrappers manually through `C_CreateObject`.
+`PKCS11RS_TOKEN_STORAGE` is configured, slots with a stable Yubico physical
+serial install separate durable local providers for each applet and
+automatically restore their saved backed objects. `PKCS11RS_FIDO2_STORAGE`
+retains its earlier FIDO-only behavior for compatibility. Applications can
+also restore exported previewSign registration or derived-key wrappers
+manually through `C_CreateObject`.
 
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct
@@ -506,6 +513,15 @@ also removes its pkcs11rs-owned companion metadata. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.
+
+Every slot also advertises software session-key support for RSA, P-256, P-384,
+Ed25519, and X25519. `C_GenerateKeyPair` and `C_CreateObject` create typed
+software private objects only when `CKA_TOKEN=CK_FALSE` (the PKCS #11 default).
+They support the applicable signing, RSA decryption, and ECDH mechanisms.
+Their public counterparts use the shared projection implementation and may be
+session objects or persisted token objects. A private template with
+`CKA_TOKEN=CK_TRUE` bypasses software creation: the selected backend must create
+a genuine hardware private key or the call fails.
 
 ## Known Limitations
 

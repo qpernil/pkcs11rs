@@ -1781,7 +1781,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_rejects_sign_mechanism_advertised_for_verify_only(
+    def test_abi_yubihsm_rejects_software_only_sign_mechanism_for_hardware_key(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -1815,7 +1815,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(info.flags & CKF_VERIFY, CKF_VERIFY)
-        self.assertEqual(info.flags & CKF_SIGN, 0)
+        self.assertEqual(info.flags & CKF_SIGN, CKF_SIGN)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -2172,7 +2172,7 @@ fn main() {
                 else:
                     os.environ["PKCS11RS_PINENTRY"] = previous
 
-    def test_yubihsm_key_pair_generation_requires_a_token_private_key(self) -> None:
+    def test_yubihsm_key_pair_generation_supports_a_session_private_key(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(
             ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
@@ -2209,8 +2209,10 @@ fn main() {
                 ctypes.byref(public_key),
                 ctypes.byref(private_key),
             ),
-            CKR_TEMPLATE_INCONSISTENT,
+            CKR_OK,
         )
+        self.assertNotEqual(public_key.value, 0)
+        self.assertNotEqual(private_key.value, 0)
 
     def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -2235,14 +2237,29 @@ fn main() {
             ),
             CK_ATTRIBUTE(CKA_ID, ctypes.cast(public_id, CK_VOID_PTR), len(public_id)),
         )
-        private_template = (CK_ATTRIBUTE * 1)(
-            CK_ATTRIBUTE(CKA_ID, ctypes.cast(private_id, CK_VOID_PTR), len(private_id))
+        private_token_only = (CK_ATTRIBUTE * 1)(
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                ctypes.sizeof(token_object),
+            ),
+        )
+        private_template = (CK_ATTRIBUTE * 2)(
+            CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                ctypes.sizeof(token_object),
+            ),
+            CK_ATTRIBUTE(CKA_ID, ctypes.cast(private_id, CK_VOID_PTR), len(private_id)),
         )
         mechanism = CK_MECHANISM(CKM_RSA_PKCS_KEY_PAIR_GEN, None, 0)
         public_key = CK_ULONG()
         private_key = CK_ULONG()
 
-        for candidate, count in ((None, 0), (private_template, len(private_template))):
+        for candidate, count in (
+            (private_token_only, len(private_token_only)),
+            (private_template, len(private_template)),
+        ):
             self.assertEqual(
                 self.lib.C_GenerateKeyPair(
                     session,

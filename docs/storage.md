@@ -5,8 +5,8 @@ metadata. Each PKCS #11 session owns an in-memory provider, each slot owns a
 token provider, and `CKA_TOKEN` selects between them for supported
 provider-backed objects. It is also usable as a standalone Rust API through the
 local provider. YubiHSM implements the same boundary with its internal opaque
-metadata objects. `PKCS11RS_FIDO2_STORAGE` installs the local provider on FIDO
-slots whose physical Yubico serial has been validated.
+metadata objects. `PKCS11RS_TOKEN_STORAGE` installs applet-separated local
+providers on slots with a stable physical Yubico serial.
 
 ## Provider boundary
 
@@ -39,10 +39,14 @@ objects created by that session.
 Every slot also owns one token provider. The default is
 `UnavailableStorageProvider`, whose mutation operations fail explicitly. A
 backend may expose a native provider, as YubiHSM does, or slot construction may
-supply another implementation. FIDO discovery selects the local provider when
-`PKCS11RS_FIDO2_STORAGE` contains an absolute path and the endpoint has a
-validated physical Yubico serial. Other FIDO authenticators retain the
-unavailable provider rather than sharing an ambiguously addressed store.
+supply another implementation. Discovery selects a local provider when
+`PKCS11RS_TOKEN_STORAGE` contains an absolute path and the slot has a stable
+physical Yubico serial. The provider path includes both the physical identity
+and the applet kind, so PIV, OpenPGP, YubiHSM Auth, issuer security-domain, and
+FIDO objects cannot collide. The older `PKCS11RS_FIDO2_STORAGE` setting remains
+a FIDO-only compatibility path when the generic setting is absent. Slots
+without stable identity retain the unavailable provider rather than sharing an
+ambiguously addressed store.
 
 ## Backed-key metadata
 
@@ -126,16 +130,20 @@ root/
     └── sha3-256-<lowercase digest>.cbor
 ```
 
-For FIDO configuration, the provider root is derived as:
+For generic token-storage configuration, the provider root is derived as:
 
 ```text
-$PKCS11RS_FIDO2_STORAGE/
-└── fido2-v1/
+$PKCS11RS_TOKEN_STORAGE/
+└── tokens-v1/
     └── yubico-serial-<lowercase hex UTF-8 serial>/
-        └── objects/
-            └── sha3-256-<lowercase digest>.cbor
+        └── <applet>/
+            └── objects/
+                └── sha3-256-<lowercase digest>.cbor
 ```
 
+`<applet>` is one of `fido2`, `piv`, `openpgp`, `yubihsm-auth`, or
+`issuer-security-domain`. The FIDO-only compatibility setting retains the
+earlier `$PKCS11RS_FIDO2_STORAGE/fido2-v1/yubico-serial-.../objects` layout.
 Hex encoding makes the physical identity a safe, reversible path component on
 every supported platform. The version directory permits a future binding
 scheme to coexist without silently reinterpreting an existing store.
@@ -216,21 +224,21 @@ canonical public key and signing arguments before the object enters either
 provider. This manual import path is independent of automatic slot discovery.
 
 YubiHSM installs its native provider and therefore supports persistent public
-projections. FIDO slots use `UnavailableStorageProvider` unless
-`PKCS11RS_FIDO2_STORAGE` is configured and discovery establishes a validated
-Yubico physical serial. A configured slot loads valid backed records while its
-`SlotContext` is constructed, so previewSign registration, derived signing
-keys, and generic public projections reappear as token objects after
-`C_Finalize`/`C_Initialize`. The provider does not invent metadata for ordinary
-resident credentials or attach previewSign data to a credential merely because
-their identifiers look similar.
+projections without filesystem configuration. Other slots use
+`UnavailableStorageProvider` unless `PKCS11RS_TOKEN_STORAGE` is configured and
+discovery establishes a stable physical Yubico serial. A configured slot loads
+valid backed records while its `SlotContext` is constructed, so public
+projections—and, on FIDO, previewSign registration and derived signing
+keys—reappear as token objects after `C_Finalize`/`C_Initialize`. The provider
+does not invent metadata for ordinary resident credentials or attach
+previewSign data to a credential merely because their identifiers look
+similar.
 
 Failure is closed: a configured object with a malformed reference, invalid
-CBOR, or mismatched content digest prevents that FIDO slot from being
+CBOR, or mismatched content digest prevents that applet slot from being
 registered. It is never treated as an empty store. An unavailable or
-unidentified FIDO slot remains usable for its hardware objects, but
-provider-backed `CKA_TOKEN=CK_TRUE` creation returns
-`CKR_TOKEN_WRITE_PROTECTED`.
+unidentified slot remains usable for its hardware objects, but provider-backed
+`CKA_TOKEN=CK_TRUE` creation returns `CKR_TOKEN_WRITE_PROTECTED`.
 
 There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may

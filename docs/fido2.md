@@ -505,11 +505,12 @@ ignored capability-gated registration test. It also exposes an experimental
 vendor PKCS #11 flow and a complete in-process mock. Registration and derived
 metadata use the [content-addressed CBOR storage boundary](storage.md).
 Applications can export and strictly re-import both wrappers with
-`C_CreateObject`. Setting `PKCS11RS_FIDO2_STORAGE` installs a serial-scoped
-local provider on validated YubiKey FIDO slots, and backed token objects are
-restored automatically after module finalization. Positive hardware
-qualification of that serial binding and the previewSign flow remains
-deferred.
+`C_CreateObject`. Setting `PKCS11RS_TOKEN_STORAGE` installs an applet- and
+serial-scoped local provider on validated YubiKey slots; the older
+`PKCS11RS_FIDO2_STORAGE` setting remains a FIDO-only compatibility path. Backed
+token objects are restored automatically after module finalization. Positive
+hardware qualification of that serial binding and the previewSign flow
+remains deferred.
 
 See Yubico's [SDK release notes](https://docs.yubico.com/yesdk/users-manual/getting-started/whats-new.html)
 and [credential-management documentation](https://docs.yubico.com/yesdk/users-manual/application-fido2/fido2-cred-mgmt.html)

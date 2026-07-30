@@ -789,7 +789,7 @@ pub(crate) fn openpgp_private_key_template(
     match (algorithm, material) {
         (
             OpenPgpAlgorithm::Rsa { bits },
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)),
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)),
         ) => {
             if key.size() * 8 != bits
                 || algorithm_attributes.len() < 6

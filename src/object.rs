@@ -57,14 +57,95 @@ pub(crate) enum PublicKeyMaterial {
 }
 
 #[derive(Clone)]
-pub(crate) enum SoftwarePrivateKey {
+pub(crate) enum SoftwarePrivateKeyMaterial {
     Rsa(Box<RsaPrivateKey>),
+    P256(p256::SecretKey),
+    P384(p384::SecretKey),
+    Ed25519(ed25519_dalek::SigningKey),
+    X25519(x25519_dalek::StaticSecret),
 }
 
-impl std::fmt::Debug for SoftwarePrivateKey {
+impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rsa(key) => fmt.debug_tuple("Rsa").field(&key.size()).finish(),
+            Self::P256(_) => fmt.write_str("P256([REDACTED])"),
+            Self::P384(_) => fmt.write_str("P384([REDACTED])"),
+            Self::Ed25519(_) => fmt.write_str("Ed25519([REDACTED])"),
+            Self::X25519(_) => fmt.write_str("X25519([REDACTED])"),
+        }
+    }
+}
+
+impl SoftwarePrivateKeyMaterial {
+    pub(crate) fn key_type(&self) -> CK_KEY_TYPE {
+        match self {
+            Self::Rsa(_) => CKK_RSA as CK_KEY_TYPE,
+            Self::P256(_) | Self::P384(_) => CKK_EC as CK_KEY_TYPE,
+            Self::Ed25519(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
+            Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+        }
+    }
+
+    pub(crate) fn public_key(&self) -> Result<PublicKeyMaterial, Error> {
+        match self {
+            Self::Rsa(key) => Ok(PublicKeyMaterial::Rsa(RsaPublicKey::from(key.as_ref()))),
+            Self::P256(key) => {
+                let encoded = p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
+                    &key.public_key(),
+                    false,
+                );
+                let public_key = encoded
+                    .as_bytes()
+                    .strip_prefix(&[0x04])
+                    .ok_or(CKR_DATA_INVALID)?
+                    .to_vec();
+                Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::piv_ec_parameters(piv::Algorithm::EccP256)
+                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                        .to_vec(),
+                    public_key,
+                })
+            }
+            Self::P384(key) => {
+                let encoded = p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
+                    &key.public_key(),
+                    false,
+                );
+                let public_key = encoded
+                    .as_bytes()
+                    .strip_prefix(&[0x04])
+                    .ok_or(CKR_DATA_INVALID)?
+                    .to_vec();
+                Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::piv_ec_parameters(piv::Algorithm::EccP384)
+                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                        .to_vec(),
+                    public_key,
+                })
+            }
+            Self::Ed25519(key) => Ok(PublicKeyMaterial::Ec {
+                parameters: crate::piv_ec_parameters(piv::Algorithm::Ed25519)
+                    .ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                    .to_vec(),
+                public_key: key.verifying_key().to_bytes().to_vec(),
+            }),
+            Self::X25519(key) => Ok(PublicKeyMaterial::Ec {
+                parameters: crate::piv_ec_parameters(piv::Algorithm::X25519)
+                    .ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                    .to_vec(),
+                public_key: x25519_dalek::PublicKey::from(key).as_bytes().to_vec(),
+            }),
+        }
+    }
+
+    pub(crate) fn private_value(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Rsa(_) => None,
+            Self::P256(key) => Some(key.to_bytes().to_vec()),
+            Self::P384(key) => Some(key.to_bytes().to_vec()),
+            Self::Ed25519(key) => Some(key.to_bytes().to_vec()),
+            Self::X25519(key) => Some(key.to_bytes().to_vec()),
         }
     }
 }
@@ -100,7 +181,7 @@ pub(crate) enum KeyMaterial {
         profile_id: CK_PROFILE_ID,
     },
     Public(PublicKeyMaterial),
-    SoftwarePrivate(SoftwarePrivateKey),
+    SoftwarePrivate(SoftwarePrivateKeyMaterial),
     PivPrivate {
         slot: piv::Slot,
         algorithm: piv::Algorithm,
@@ -1052,9 +1133,7 @@ impl TokenObject {
         }
         match &self.material {
             KeyMaterial::Public(public_key) => Ok(public_key.clone()),
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
-                Ok(PublicKeyMaterial::Rsa(RsaPublicKey::from(key.as_ref())))
-            }
+            KeyMaterial::SoftwarePrivate(key) => key.public_key(),
             KeyMaterial::YubiHsm {
                 algorithm,
                 public_key,
@@ -1345,37 +1424,37 @@ impl TokenObject {
                 }
             }
             x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     Some(key.d().to_bytes_be())
                 }
                 _ => None,
             },
             x if x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     key.primes().first().map(BigUint::to_bytes_be)
                 }
                 _ => None,
             },
             x if x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     key.primes().get(1).map(BigUint::to_bytes_be)
                 }
                 _ => None,
             },
             x if x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     key.dp().map(BigUint::to_bytes_be)
                 }
                 _ => None,
             },
             x if x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     key.dq().map(BigUint::to_bytes_be)
                 }
                 _ => None,
             },
             x if x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => {
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
                     key.qinv().map(|value| value.to_signed_bytes_be())
                 }
                 _ => None,
@@ -1502,6 +1581,9 @@ impl TokenObject {
                 || x == CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE =>
             {
                 match &self.material {
+                    KeyMaterial::SoftwarePrivate(key) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
+                        key.private_value()
+                    }
                     KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value)
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
@@ -1605,6 +1687,7 @@ impl TokenObject {
         (self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
             && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
+            && !matches!(&self.material, KeyMaterial::SoftwarePrivate(_))
             && !matches!(
                 &self.material,
                 KeyMaterial::YubiHsm { capabilities, .. }
@@ -1813,9 +1896,11 @@ impl TokenObjectTemplate {
     pub(crate) fn into_object(self) -> Result<TokenObject, CK_RV> {
         let sensitive = self.sensitive.unwrap_or(false);
         let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
-        let nonextractable_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
-            || class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
-        let extractable = self.extractable.unwrap_or(!nonextractable_key);
+        let nonextractable_key = class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
+        let private_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let extractable = self
+            .extractable
+            .unwrap_or(!(nonextractable_key || private_key));
         if nonextractable_key && extractable {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
         }

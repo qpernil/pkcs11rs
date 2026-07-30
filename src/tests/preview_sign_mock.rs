@@ -22,15 +22,16 @@ impl TestFidoStorage {
             std::process::id()
         ));
         std::fs::create_dir(&root).unwrap();
-        let previous = std::env::var_os(crate::FIDO2_STORAGE_ENV);
-        std::env::set_var(crate::FIDO2_STORAGE_ENV, &root);
+        let previous = std::env::var_os(crate::TOKEN_STORAGE_ENV);
+        std::env::set_var(crate::TOKEN_STORAGE_ENV, &root);
         Self { root, previous }
     }
 
     fn mock_objects(&self) -> PathBuf {
         self.root
-            .join("fido2-v1")
+            .join("tokens-v1")
             .join("yubico-serial-4d4f434b30303031")
+            .join("fido2")
             .join("objects")
     }
 }
@@ -39,8 +40,8 @@ impl Drop for TestFidoStorage {
     fn drop(&mut self) {
         let _ = crate::api::C_Finalize(std::ptr::null_mut());
         match self.previous.as_ref() {
-            Some(previous) => std::env::set_var(crate::FIDO2_STORAGE_ENV, previous),
-            None => std::env::remove_var(crate::FIDO2_STORAGE_ENV),
+            Some(previous) => std::env::set_var(crate::TOKEN_STORAGE_ENV, previous),
+            None => std::env::remove_var(crate::TOKEN_STORAGE_ENV),
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
