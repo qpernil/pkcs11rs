@@ -198,6 +198,48 @@ def library_path() -> pathlib.Path:
     return ABI_TARGET / "debug" / name
 
 
+def openssl_pkcs11_provider_path() -> pathlib.Path | None:
+    override = os.environ.get("PKCS11RS_OPENSSL_PKCS11_PROVIDER")
+    if override:
+        path = pathlib.Path(override)
+        return path if path.is_file() else None
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        return None
+    roots = [
+        pathlib.Path(openssl).parent.parent / "lib" / "ossl-modules",
+        pathlib.Path(openssl).resolve().parent.parent / "lib" / "ossl-modules",
+        pathlib.Path("/usr/lib64/ossl-modules"),
+        pathlib.Path("/usr/lib/x86_64-linux-gnu/ossl-modules"),
+        pathlib.Path("/usr/local/lib/ossl-modules"),
+        pathlib.Path("/opt/homebrew/lib/ossl-modules"),
+    ]
+    configured_modules = os.environ.get("OPENSSL_MODULES")
+    if configured_modules:
+        roots.insert(0, pathlib.Path(configured_modules))
+    version = subprocess.run(
+        [openssl, "version", "-m"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r'MODULESDIR: "([^"]+)"', version.stdout)
+    if match:
+        roots.insert(0, pathlib.Path(match.group(1)))
+
+    suffixes = [".dylib"] if platform.system() == "Darwin" else [".so"]
+    if platform.system() == "Windows":
+        suffixes = [".dll"]
+    for root in roots:
+        for stem in ("pkcs11prov", "libpkcs11"):
+            for suffix in suffixes:
+                candidate = root / f"{stem}{suffix}"
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
 def load_library() -> ctypes.CDLL:
     path = library_path()
     subprocess.run(
@@ -5768,12 +5810,92 @@ fn main() {
         self.assertEqual(info.cryptokiVersion.minor, 2)
         self.assertEqual(info.flags, 0)
 
-    def test_initialize_and_finalize_reject_reserved_args(self) -> None:
+    def test_initialize_accepts_opaque_reserved_args_without_dereferencing(
+        self,
+    ) -> None:
         init_args = CK_C_INITIALIZE_ARGS()
         init_args.pReserved = ctypes.c_void_p(1)
 
-        self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_ARGUMENTS_BAD)
+        self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_OK)
+        info = CK_INFO()
+        self.assertEqual(self.lib.C_GetInfo(ctypes.byref(info)), CKR_OK)
+        self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+    def test_finalize_rejects_reserved_arg(self) -> None:
+        self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         self.assertEqual(self.lib.C_Finalize(ctypes.c_void_p(1)), CKR_ARGUMENTS_BAD)
+
+    @unittest.skipUnless(shutil.which("openssl"), "OpenSSL is unavailable")
+    def test_openssl_provider_sends_and_pkcs11rs_accepts_init_args(self) -> None:
+        provider = openssl_pkcs11_provider_path()
+        if provider is None:
+            self.skipTest("the libp11 OpenSSL PKCS #11 provider is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = pathlib.Path(directory) / "openssl.cnf"
+            init_args = "pkcs11rs-openssl-reserved-regression"
+            environment = os.environ.copy()
+            environment["OPENSSL_CONF"] = str(config)
+            environment["PKCS11RS_DEBUG"] = "1"
+            environment["PKCS11RS_HARDWARE_DISCOVERY"] = "0"
+
+            def run_openssl(
+                configured_init_args: str | None,
+            ) -> subprocess.CompletedProcess[str]:
+                lines = [
+                    "openssl_conf = openssl_init",
+                    "",
+                    "[openssl_init]",
+                    "providers = provider_sect",
+                    "",
+                    "[provider_sect]",
+                    "default = default_sect",
+                    "pkcs11 = pkcs11_sect",
+                    "",
+                    "[default_sect]",
+                    "activate = 1",
+                    "",
+                    "[pkcs11_sect]",
+                    "identity = pkcs11prov",
+                    f"module = {provider}",
+                    f"pkcs11_module = {library_path()}",
+                ]
+                if configured_init_args is not None:
+                    lines.append(f"init_args = {configured_init_args}")
+                lines.extend(["debug_level = 7", "activate = 1", ""])
+                config.write_text("\n".join(lines))
+                return subprocess.run(
+                    [shutil.which("openssl"), "storeutl", "-noout", "pkcs11:"],
+                    cwd=ROOT,
+                    env=environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+
+            baseline = run_openssl(None)
+            result = run_openssl(init_args)
+
+        self.assertEqual(
+            baseline.returncode,
+            0,
+            baseline.stdout + baseline.stderr,
+        )
+        self.assertNotIn(
+            "C_Initialize received opaque pReserved data",
+            baseline.stderr,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            result.stdout + result.stderr,
+        )
+        self.assertIn(
+            "C_Initialize received opaque pReserved data",
+            result.stderr,
+            result.stdout + result.stderr,
+        )
 
     def test_initialize_validates_mutex_callback_configuration(self) -> None:
         partial_callbacks = CK_C_INITIALIZE_ARGS()

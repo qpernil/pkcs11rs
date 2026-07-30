@@ -35,8 +35,12 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
     }
 
     let args = unsafe { &*(init_args as CK_C_INITIALIZE_ARGS_PTR) };
-    if !args.pReserved.is_null() {
-        return Err(CKR_ARGUMENTS_BAD as CK_RV);
+    // Some callers, including OpenSSL integrations, use pReserved to pass
+    // module-specific configuration. Treat it as opaque compatibility data:
+    // pkcs11rs configuration remains environment-based, and the pointer must
+    // never be dereferenced or retained.
+    if !args.pReserved.is_null() && crate::configured_debug_level().is_ok_and(|level| level >= 1) {
+        eprintln!("C_Initialize received opaque pReserved data");
     }
 
     let callbacks = [

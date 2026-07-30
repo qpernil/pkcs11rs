@@ -86,6 +86,12 @@ context containing its sessions, login state, and object-handle state.
 Searches and active cryptographic operations belong to their individual
 sessions.
 
+For compatibility with OpenSSL PKCS #11 integrations, a non-null
+`CK_C_INITIALIZE_ARGS.pReserved` is accepted as opaque caller configuration.
+pkcs11rs neither dereferences nor retains it; module configuration continues to
+come from the documented environment variables. `C_Finalize` still requires
+its reserved argument to be null.
+
 Initialization and finalization are nonblocking lifecycle transitions. They
 return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
 calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
