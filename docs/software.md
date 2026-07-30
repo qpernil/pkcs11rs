@@ -98,7 +98,7 @@ that material and clear active private-key operations.
 Persistent private records use envelope encryption. A PIN is not applied
 independently to every PKCS #8 key:
 
-- PBKDF2-HMAC-SHA-256 with 600,000 iterations and a random 16-byte salt derives
+- PBKDF2-HMAC-SHA-256 with 10,000 iterations and a random 16-byte salt derives
   a 256-bit wrapping key.
 - AES-256-GCM with a random 12-byte nonce and a 128-bit tag wraps the random
   256-bit master key.
@@ -109,8 +109,12 @@ independently to every PKCS #8 key:
   names.
 
 Headers and record envelopes are strict canonical CBOR with explicit schema,
-version, KDF, AEAD, and parameter identifiers. The complete plaintext of each
-record is DER-encoded PKCS #8 `OneAsymmetricKey` version 0:
+version, KDF, AEAD, and parameter identifiers. Headers declaring any other
+PBKDF2 iteration count are rejected; storage created with an earlier iteration
+count must be recreated.
+
+The complete plaintext of each record is DER-encoded PKCS #8
+`OneAsymmetricKey` version 0:
 
 - the algorithm-specific private key is the normal PKCS #8 private-key value;
 - PKCS #9 `friendlyName` mirrors `CKA_LABEL` when it fits the standard
