@@ -14,9 +14,11 @@ MODULE_CONTEXT: RwLock<Option<ModuleContext>>
         │   └── SlotContext
         │       ├── Box<dyn Slot>
         │       ├── slot login role
+        │       ├── token StorageProvider
         │       ├── token and session object handles
         │       └── session handle -> SessionContext
         │           ├── Box<dyn BackendSession>
+        │           ├── memory StorageProvider
         │           ├── find operation
         │           ├── digest operation
         │           ├── encrypt/decrypt operation
@@ -109,6 +111,12 @@ Applet serials remain applet metadata and cannot overwrite the physical
 device identity used for correlation. A HID authenticator absent from the
 initial discovery snapshot creates no slot; a previously discovered endpoint
 can reopen the same device and allocate a fresh channel after reinsertion.
+
+When `PKCS11RS_FIDO2_STORAGE` is configured, that same validated physical
+Yubico serial selects a versioned local token provider. Stored canonical backed
+objects are decoded and reconciled during slot construction. An endpoint
+without a stable validated identity retains an unavailable provider, so
+durable objects cannot accidentally cross authenticators.
 
 The validated Yubico physical serial also associates the HID endpoint with the
 shared PC/SC `DeviceContext`, even when the FIDO CCID applet is unavailable or

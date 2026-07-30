@@ -1,6 +1,50 @@
 use crate::pkcs11::*;
 use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_STORAGE_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+struct TestFidoStorage {
+    root: PathBuf,
+    previous: Option<OsString>,
+}
+
+impl TestFidoStorage {
+    fn new() -> Self {
+        let id = NEXT_STORAGE_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "pkcs11rs-preview-sign-storage-test-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let previous = std::env::var_os(crate::FIDO2_STORAGE_ENV);
+        std::env::set_var(crate::FIDO2_STORAGE_ENV, &root);
+        Self { root, previous }
+    }
+
+    fn mock_objects(&self) -> PathBuf {
+        self.root
+            .join("fido2-v1")
+            .join("yubico-serial-4d4f434b30303031")
+            .join("objects")
+    }
+}
+
+impl Drop for TestFidoStorage {
+    fn drop(&mut self) {
+        let _ = crate::api::C_Finalize(std::ptr::null_mut());
+        match self.previous.as_ref() {
+            Some(previous) => std::env::set_var(crate::FIDO2_STORAGE_ENV, previous),
+            None => std::env::remove_var(crate::FIDO2_STORAGE_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
 
 fn ulong_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut CK_ULONG) -> CK_ATTRIBUTE {
     CK_ATTRIBUTE {
@@ -43,6 +87,69 @@ fn read_attribute(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE, type_: u
         CKR_OK as CK_RV
     );
     value
+}
+
+fn open_logged_in_mock() -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(count, 1);
+    let mut slot = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut count),
+        CKR_OK as CK_RV
+    );
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            slot,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = b"123456".to_vec();
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    (slot, session)
+}
+
+fn find_objects(
+    session: CK_SESSION_HANDLE,
+    template: &mut [CK_ATTRIBUTE],
+) -> Vec<CK_OBJECT_HANDLE> {
+    assert_eq!(
+        crate::api::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG,),
+        CKR_OK as CK_RV
+    );
+    let mut handles = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 16];
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_FindObjects(
+            session,
+            handles.as_mut_ptr(),
+            handles.len() as CK_ULONG,
+            &mut count,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+    handles[..count as usize].to_vec()
 }
 
 #[test]
@@ -460,6 +567,294 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
         CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    let storage = TestFidoStorage::new();
+    let (_, session) = open_logged_in_mock();
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut ec = CKK_EC as CK_ULONG;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut private = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+    ];
+    let mut private_template = [
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bool_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+    ];
+    let mut credential_public_key = 0;
+    let mut credential_private_key = 0;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut credential_public_key,
+            &mut credential_private_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    let registration = read_attribute(
+        session,
+        credential_private_key,
+        crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+    );
+
+    let mut class = CKO_PRIVATE_KEY as CK_ULONG;
+    let mut registration_key_type = crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION as CK_ULONG;
+    let mut derive = CK_TRUE as CK_BBOOL;
+    let mut registration_value = registration.clone();
+    let mut registration_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            &mut registration_key_type,
+        ),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bool_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+        bool_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut derive),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            &mut registration_value,
+        ),
+    ];
+    let mut registration_key = 0;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            registration_template.as_mut_ptr(),
+            registration_template.len() as CK_ULONG,
+            &mut registration_key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut context = b"pkcs11rs persisted previewSign demo".to_vec();
+    mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+        pParameter: context.as_mut_ptr().cast(),
+        ulParameterLen: context.len() as CK_ULONG,
+    };
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut derived_template = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bool_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+        bool_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+    ];
+    let mut signing_key = 0;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut mechanism,
+            registration_key,
+            derived_template.as_mut_ptr(),
+            derived_template.len() as CK_ULONG,
+            &mut signing_key,
+        ),
+        CKR_OK as CK_RV
+    );
+    let derived = read_attribute(
+        session,
+        signing_key,
+        crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+    );
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let object_files = std::fs::read_dir(storage.mock_objects())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "cbor")
+        })
+        .count();
+    assert!(object_files >= 3);
+
+    let (_, session) = open_logged_in_mock();
+    let mut registration_match = registration.clone();
+    let mut registration_find = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        ulong_attribute(
+            CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+            &mut registration_key_type,
+        ),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+            &mut registration_match,
+        ),
+    ];
+    let registration_keys = find_objects(session, &mut registration_find);
+    assert_eq!(registration_keys.len(), 1);
+    registration_key = registration_keys[0];
+
+    let mut derived_match = derived.clone();
+    let mut derived_find = [
+        ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        bytes_attribute(
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            &mut derived_match,
+        ),
+    ];
+    let signing_keys = find_objects(session, &mut derived_find);
+    assert_eq!(signing_keys.len(), 1);
+    signing_key = signing_keys[0];
+    assert_eq!(
+        read_attribute(
+            session,
+            signing_key,
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+        ),
+        registration
+    );
+
+    let mut project = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut session_object = CK_FALSE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut projected_template = [
+        bool_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_object),
+        bool_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+    ];
+    let mut projected_key = 0;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut project,
+            signing_key,
+            projected_template.as_mut_ptr(),
+            projected_template.len() as CK_ULONG,
+            &mut projected_key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let digest: [u8; 32] = Sha256::digest(b"persisted previewSign signing").into();
+    mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, signing_key),
+        CKR_OK as CK_RV
+    );
+    let mut signature_length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            digest.as_ptr().cast_mut(),
+            digest.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0; signature_length as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            digest.as_ptr().cast_mut(),
+            digest.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut verify_mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_VerifyInit(session, &mut verify_mechanism, projected_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            session,
+            digest.as_ptr().cast_mut(),
+            digest.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            signature.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_DestroyObject(session, projected_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, signing_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, registration_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let (_, session) = open_logged_in_mock();
+    assert!(find_objects(session, &mut registration_find).is_empty());
+    assert!(find_objects(session, &mut derived_find).is_empty());
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn corrupt_local_fido_storage_fails_discovery_closed() {
+    let _guard = super::TEST_LOCK.lock().unwrap();
+    super::finalize_for_test();
+    let storage = TestFidoStorage::new();
+    let objects = storage.mock_objects();
+    std::fs::create_dir_all(&objects).unwrap();
+    std::fs::write(
+        objects.join(format!("sha3-256-{}.cbor", "00".repeat(32))),
+        [0xf6],
+    )
+    .unwrap();
+
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count,),
+        CKR_DEVICE_ERROR as CK_RV
     );
 }
 

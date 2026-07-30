@@ -10,8 +10,8 @@
 //! slot owns a token provider, which is unavailable by default unless the
 //! backend or its construction supplies one. Provider-backed public
 //! projections and previewSign registration and derived-key objects use this
-//! boundary. Provider selection through external configuration and automatic
-//! FIDO restoration remain future work.
+//! boundary. FIDO slots can select the local provider through explicit
+//! configuration and restore their canonical backed objects automatically.
 
 use minicbor::{Decoder, Encoder};
 use sha3::{Digest, Sha3_256};

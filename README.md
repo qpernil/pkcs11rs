@@ -105,8 +105,8 @@ locking, session ownership, transport sharing, and cache boundaries.
 | --- | --- |
 | PKCS #11 ABI | Function-list layouts and behavior for 2.40, 3.0, 3.1, and 3.2 are covered by Rust and Python tests. |
 | Linux | The complete hardware-independent Rust and Python suites run in GitHub Actions. |
-| Windows | Rust tests and the synthetic ABI backend are compiled with warnings denied on a native Windows runner. |
-| macOS | The `.dylib`, Rust tests, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
+| Windows | Rust tests, Python ABI tests, and OASIS profile cases run with warnings denied on a native Windows runner. |
+| macOS | The `.dylib`, Rust tests, Python ABI tests, OASIS profile cases, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
 | MSRV | An all-features build is checked with Rust 1.85. |
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
 | Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. The Python smoke test covers production slot and token metadata. |
@@ -261,6 +261,32 @@ Windows. On macOS, `pinentry-mac` is recommended because Homebrew's plain
 Callers request the protected path with a null PIN pointer. Combined YubiHSM
 Auth `C_Login` selectors may omit their password separator instead. See
 [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md) for the exact forms.
+
+## FIDO Token Storage
+
+FIDO slots use no durable software storage by default. Set
+`PKCS11RS_FIDO2_STORAGE` to an absolute path to opt into local persistence for
+provider-backed token objects:
+
+```sh
+export PKCS11RS_FIDO2_STORAGE="$HOME/.local/share/pkcs11rs"
+```
+
+The configured root is created during `C_Initialize`. A FIDO slot receives a
+local provider only when YubiKey device-information discovery supplied a
+validated physical serial. Its canonical registration, derived signing-key,
+and projected public-key objects are stored below a versioned, serial-scoped
+directory and restored automatically on the next module initialization.
+`CKA_TOKEN=CK_FALSE` remains session-only; `CKA_TOKEN=CK_TRUE` selects this
+provider. Tokens without a stable validated identity continue to return
+`CKR_TOKEN_WRITE_PROTECTED` for provider-backed token-object creation.
+
+The files contain unencrypted private previewSign protocol metadata. On Unix,
+new object files use mode `0600`, but the caller remains responsible for
+protecting and backing up the configured directory. Storage corruption is
+reported instead of silently ignored. The serial binding and positive
+previewSign interoperability still require qualification with compatible
+hardware. See [Content-addressed CBOR storage](docs/storage.md).
 
 ## CCID Configuration
 
@@ -439,9 +465,10 @@ cargo build --release --features mock-yubikey
 pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
 ```
 
-The initial PIN is `123456`. Mock state, including PIN changes, currently lasts
-only for the lifetime of the loaded module and resets when the client process
-unloads or reinitializes it. The mock begins with one deterministic resident
+The initial PIN is `123456`. Mock device state, including PIN changes and
+created credentials, lasts for the client process and survives
+`C_Finalize`/`C_Initialize`; unloading the library or ending the process resets
+it. The mock begins with one deterministic resident
 credential and implements credential-management enumeration, RP-bound
 context-specific login, a genuine ES256 GetAssertion response, and verification
 through its projected public key. It also implements the complete experimental
@@ -458,11 +485,11 @@ derived-key objects are encoded as canonical, content-addressed CBOR and routed
 by `CKA_TOKEN`: session objects use the current session's memory provider,
 while token objects use the slot provider. Slots without configured or native
 storage use `UnavailableStorageProvider`, so unsupported token persistence
-fails explicitly instead of silently becoming session-local. A durable local
-provider exists, but no environment/configuration path installs it on FIDO
-slots or automatically restores saved FIDO objects yet. Applications can
-manually restore exported previewSign registration or derived-key wrappers
-through `C_CreateObject`.
+fails explicitly instead of silently becoming session-local. When
+`PKCS11RS_FIDO2_STORAGE` is configured, FIDO slots with a validated Yubico
+physical serial install a durable local provider and automatically restore
+their saved backed objects. Applications can also restore exported previewSign
+registration or derived-key wrappers manually through `C_CreateObject`.
 
 YubiHSM implements the token-provider boundary with pkcs11rs-owned opaque
 metadata objects on the device. Its canonical CBOR uses the distinct

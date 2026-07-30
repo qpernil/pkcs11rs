@@ -6616,6 +6616,11 @@ impl crate::Slot for ConcurrentSlot {
     fn kind(&self) -> crate::SlotKind {
         self.kind
     }
+    fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
+        (self.kind == crate::SlotKind::Fido2).then(|| {
+            crate::device::PhysicalDeviceKey::YubicoSerial(format!("CONCURRENT{}", self.slot_index))
+        })
+    }
 
     fn name(&self) -> String {
         match self.kind {

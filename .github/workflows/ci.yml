@@ -37,6 +37,9 @@ jobs:
       - name: Run release Rust tests
         run: cargo test --release --locked --all-features
 
+      - name: Run mock YubiKey PKCS #11 tests
+        run: cargo test --locked --features mock-yubikey preview_sign_mock
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -118,6 +121,9 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Run mock YubiKey PKCS #11 tests
+        run: cargo test --locked --features mock-yubikey preview_sign_mock
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -154,6 +160,9 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --locked
+
+      - name: Run mock YubiKey PKCS #11 tests
+        run: cargo test --locked --features mock-yubikey preview_sign_mock
 
       - name: Check ABI test backend
         run: cargo check --locked --features abi-tests

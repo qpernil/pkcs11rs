@@ -15,7 +15,10 @@ use p256::ecdsa::{DerSignature, SigningKey};
 use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 use signature::Signer;
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -97,20 +100,46 @@ impl MockYubiKeyState {
             preview_credential: None,
         })
     }
+
+    fn reset_connection(&mut self) {
+        self.fido_selected = false;
+        self.chained_command.clear();
+        self.pending_response.clear();
+        self.key_agreement = None;
+    }
 }
+
+static PROCESS_MOCK_STATE: OnceLock<Arc<Mutex<MockYubiKeyState>>> = OnceLock::new();
 
 /// An in-process YubiKey FIDO2 applet visible only through a pkcs11rs build
 /// compiled with the `mock-yubikey` feature.
 #[derive(Debug)]
 pub(crate) struct MockYubiKeyConnector {
-    state: Mutex<MockYubiKeyState>,
+    state: Arc<Mutex<MockYubiKeyState>>,
 }
 
 impl MockYubiKeyConnector {
+    #[cfg(test)]
     pub(crate) fn new() -> Result<Self, Error> {
         Ok(Self {
-            state: Mutex::new(MockYubiKeyState::new()?),
+            state: Arc::new(Mutex::new(MockYubiKeyState::new()?)),
         })
+    }
+
+    pub(crate) fn process_device() -> Result<Self, Error> {
+        let state = match PROCESS_MOCK_STATE.get() {
+            Some(state) => state.clone(),
+            None => {
+                let candidate = Arc::new(Mutex::new(MockYubiKeyState::new()?));
+                let _ = PROCESS_MOCK_STATE.set(candidate.clone());
+                PROCESS_MOCK_STATE.get().cloned().unwrap_or(candidate)
+            }
+        };
+        state
+            .lock()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .reset_connection();
+        Ok(Self { state })
     }
 
     #[cfg(test)]
@@ -120,7 +149,7 @@ impl MockYubiKeyConnector {
         state.pin_uv_auth_token = Zeroizing::new(vec![0x5a; 16]);
         state.permissioned_pin_uv_auth_tokens = false;
         Ok(Self {
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
         })
     }
 

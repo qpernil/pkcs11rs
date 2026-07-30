@@ -5,8 +5,8 @@ metadata. Each PKCS #11 session owns an in-memory provider, each slot owns a
 token provider, and `CKA_TOKEN` selects between them for supported
 provider-backed objects. It is also usable as a standalone Rust API through the
 local provider. YubiHSM implements the same boundary with its internal opaque
-metadata objects. No external configuration currently installs a durable
-provider on FIDO slots.
+metadata objects. `PKCS11RS_FIDO2_STORAGE` installs the local provider on FIDO
+slots whose physical Yubico serial has been validated.
 
 ## Provider boundary
 
@@ -39,8 +39,10 @@ objects created by that session.
 Every slot also owns one token provider. The default is
 `UnavailableStorageProvider`, whose mutation operations fail explicitly. A
 backend may expose a native provider, as YubiHSM does, or slot construction may
-supply another implementation. The local provider exists for this purpose but
-is not yet selected by an environment variable or other public configuration.
+supply another implementation. FIDO discovery selects the local provider when
+`PKCS11RS_FIDO2_STORAGE` contains an absolute path and the endpoint has a
+validated physical Yubico serial. Other FIDO authenticators retain the
+unavailable provider rather than sharing an ambiguously addressed store.
 
 ## Backed-key metadata
 
@@ -124,6 +126,20 @@ root/
     └── sha3-256-<lowercase digest>.cbor
 ```
 
+For FIDO configuration, the provider root is derived as:
+
+```text
+$PKCS11RS_FIDO2_STORAGE/
+└── fido2-v1/
+    └── yubico-serial-<lowercase hex UTF-8 serial>/
+        └── objects/
+            └── sha3-256-<lowercase digest>.cbor
+```
+
+Hex encoding makes the physical identity a safe, reversible path component on
+every supported platform. The version directory permits a future binding
+scheme to coexist without silently reinterpreting an existing store.
+
 Object filenames are derived only from validated references. Listing ignores
 temporary files and unrelated non-CBOR files, but treats a malformed
 `.cbor` filename or a referenced file with invalid CBOR or mismatched content
@@ -200,20 +216,31 @@ canonical public key and signing arguments before the object enters either
 provider. This manual import path is independent of automatic slot discovery.
 
 YubiHSM installs its native provider and therefore supports persistent public
-projections. Other slots currently receive `UnavailableStorageProvider` by
-default, so a generic token-object request returns
-`CKR_TOKEN_WRITE_PROTECTED`. No storage path is read from configuration, and
-constructing a local provider does not itself create a PKCS #11 slot. In
-particular, FIDO slots do not yet automatically restore saved previewSign
-records or augment rediscovered resident credentials from external metadata.
+projections. FIDO slots use `UnavailableStorageProvider` unless
+`PKCS11RS_FIDO2_STORAGE` is configured and discovery establishes a validated
+Yubico physical serial. A configured slot loads valid backed records while its
+`SlotContext` is constructed, so previewSign registration, derived signing
+keys, and generic public projections reappear as token objects after
+`C_Finalize`/`C_Initialize`. The provider does not invent metadata for ordinary
+resident credentials or attach previewSign data to a credential merely because
+their identifiers look similar.
+
+Failure is closed: a configured object with a malformed reference, invalid
+CBOR, or mismatched content digest prevents that FIDO slot from being
+registered. It is never treated as an empty store. An unavailable or
+unidentified FIDO slot remains usable for its hardware objects, but
+provider-backed `CKA_TOKEN=CK_TRUE` creation returns
+`CKR_TOKEN_WRITE_PROTECTED`.
 
 There is no Git, HTTP, cloud, encrypted, or passkey-authenticated provider.
 Because local objects are immutable content-named files, an application may
 place the store in a separately managed Git repository, but pkcs11rs performs
 no Git operations and defines no synchronization or merge policy.
 
-Future durable previewSign integration must still define configuration, token
-binding, private-data protection, and restoration. Object lifetime, immutable
-replacement, dependency storage, and deletion already use the common provider
-boundary. The current PKCS #11 mapping is documented in
-[Experimental FIDO previewSign boundary](preview-sign.md).
+The current token binding uses the validated physical Yubico serial and remains
+provisional until positive previewSign hardware qualification. Local files are
+not encrypted; access control, backup, synchronization, and private-data
+protection are deployment responsibilities. The provider has no garbage
+collector, so deleting backed objects can leave unreferenced dependency blobs.
+The current PKCS #11 mapping is documented in [Experimental FIDO previewSign
+boundary](preview-sign.md).

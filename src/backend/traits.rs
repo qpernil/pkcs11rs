@@ -73,6 +73,9 @@ pub(crate) trait Slot {
         crate::device::DeviceOperationKind::Ccid
     }
     fn kind(&self) -> SlotKind;
+    fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
+        None
+    }
     fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
         None
     }

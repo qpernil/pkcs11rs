@@ -2919,6 +2919,85 @@ fn pcsc_sessions_on_one_slot_share_a_slot_context() {
     assert_pcsc_slot_context_concurrency(true);
 }
 
+#[test]
+fn corrupt_fido_storage_does_not_suppress_sibling_pcsc_applets() {
+    struct StorageEnvironment {
+        root: std::path::PathBuf,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for StorageEnvironment {
+        fn drop(&mut self) {
+            let _ = crate::api::C_Finalize(std::ptr::null_mut());
+            match self.previous.as_ref() {
+                Some(previous) => std::env::set_var(crate::FIDO2_STORAGE_ENV, previous),
+                None => std::env::remove_var(crate::FIDO2_STORAGE_ENV),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    static NEXT_DIRECTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT_DIRECTORY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "pkcs11rs-pcsc-fido-storage-test-{}-{id}",
+        std::process::id()
+    ));
+    let objects = root
+        .join("fido2-v1")
+        .join("yubico-serial-434f4e43555252454e5430")
+        .join("objects");
+    std::fs::create_dir_all(&objects).unwrap();
+    std::fs::write(
+        objects.join(format!("sha3-256-{}.cbor", "00".repeat(32))),
+        [0xf6],
+    )
+    .unwrap();
+    let environment = StorageEnvironment {
+        previous: std::env::var_os(crate::FIDO2_STORAGE_ENV),
+        root,
+    };
+    std::env::set_var(crate::FIDO2_STORAGE_ENV, &environment.root);
+
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    const FIDO_SLOT_ID: CK_SLOT_ID = 224;
+    const PIV_SLOT_ID: CK_SLOT_ID = 225;
+    let state = std::sync::Arc::new(ConcurrentOperationState::default());
+    let slots = vec![
+        (
+            FIDO_SLOT_ID,
+            Box::new(ConcurrentSlot {
+                state: state.clone(),
+                slot_index: 0,
+                kind: crate::SlotKind::Fido2,
+                device: None,
+            }) as Box<dyn crate::Slot>,
+        ),
+        (
+            PIV_SLOT_ID,
+            Box::new(ConcurrentSlot {
+                state,
+                slot_index: 1,
+                kind: crate::SlotKind::Ccid(crate::CcidApplication::Piv),
+                device: None,
+            }) as Box<dyn crate::Slot>,
+        ),
+    ];
+    {
+        let mut context = crate::lock_context().unwrap();
+        context.as_mut().unwrap().insert_pcsc_slots(slots).unwrap();
+    }
+    let context = crate::lock_context_read().unwrap();
+    let slots = context.as_ref().unwrap().slot_contexts.read().unwrap();
+    assert!(!slots.contains_key(&FIDO_SLOT_ID));
+    assert!(slots.contains_key(&PIV_SLOT_ID));
+}
+
 fn assert_physical_device_gate(
     shared_device: bool,
     second_kind: crate::SlotKind,
