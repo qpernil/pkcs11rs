@@ -1251,11 +1251,31 @@ class Pkcs11AbiTests(unittest.TestCase):
             ABI_TEST_SCP11_SLOT_ID,
         ])
 
+    def test_hardware_discovery_configuration_rejects_nonbinary_values(
+        self,
+    ) -> None:
+        previous = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
+        try:
+            for invalid in ("", "false", "2"):
+                os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = invalid
+                self.assertEqual(
+                    self.lib.C_Initialize(None),
+                    CKR_ARGUMENTS_BAD,
+                    invalid,
+                )
+        finally:
+            if previous is None:
+                os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
+            else:
+                os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous
+
     def test_named_software_slots_are_explicit_independent_session_tokens(
         self,
     ) -> None:
         previous = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        previous_hardware = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
         os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "build signing,key exchange"
+        os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = "0"
         try:
             self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
             count = CK_ULONG()
@@ -1586,6 +1606,10 @@ class Pkcs11AbiTests(unittest.TestCase):
                 os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
             else:
                 os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous
+            if previous_hardware is None:
+                os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
+            else:
+                os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous_hardware
 
     def test_named_software_slot_restores_public_but_not_private_token_state(
         self,

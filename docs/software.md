@@ -13,6 +13,12 @@ bytes. Invalid configuration makes `C_Initialize` return
 `CKR_ARGUMENTS_BAD`. When the variable is absent, the module exposes no
 software slots.
 
+For a software-focused process, set `PKCS11RS_HARDWARE_DISCOVERY=0`. This
+prevents automatic local USB, HID, and PC/SC/CCID discovery without affecting
+the named software slots. Explicit `PKCS11RS_YUBIHSM_URLS` HTTP(S) connectors
+also remain enabled because they are opt-in rather than locally discovered.
+The only accepted hardware-discovery values are `0` and `1`.
+
 Each entry creates a separate slot context with separate object handles and
 sessions. The name is reported as `CK_TOKEN_INFO.label`; the slot description
 is `pkcs11rs software slot: <name>`. The token model is `Software`, the

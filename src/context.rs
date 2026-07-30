@@ -42,6 +42,7 @@ pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUND
 pub(crate) const TOKEN_STORAGE_ENV: &str = "PKCS11RS_TOKEN_STORAGE";
 pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
 pub(crate) const SOFTWARE_SLOTS_ENV: &str = "PKCS11RS_SOFTWARE_SLOTS";
+pub(crate) const HARDWARE_DISCOVERY_ENV: &str = "PKCS11RS_HARDWARE_DISCOVERY";
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
@@ -301,6 +302,25 @@ pub(crate) fn configured_yubihsm_http_tls(
 
 #[cfg(any(not(feature = "abi-tests"), test))]
 pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
+    configured_binary_switch(value)
+}
+
+#[cfg(any(not(feature = "abi-tests"), test))]
+pub(crate) fn configured_local_yubihsm_usb(
+    hardware_discovery: bool,
+    value: Option<std::ffi::OsString>,
+) -> Result<bool, Error> {
+    let yubihsm_usb = configured_yubihsm_usb(value)?;
+    Ok(hardware_discovery && yubihsm_usb)
+}
+
+pub(crate) fn configured_hardware_discovery(
+    value: Option<std::ffi::OsString>,
+) -> Result<bool, Error> {
+    configured_binary_switch(value)
+}
+
+fn configured_binary_switch(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
     match value {
         None => Ok(true),
         Some(value) if value == "0" => Ok(false),
@@ -330,6 +350,7 @@ fn read_nusb_string(device: &nusb::Device, index: Option<std::num::NonZeroU8>) -
 // operations release it before taking an individual SlotContext lock.
 pub(crate) struct ModuleContext {
     pub(crate) debug_level: u8,
+    pub(crate) hardware_discovery: bool,
     pub(crate) yubihsm_usb: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) pcsc: Option<pcsc::Context>,
@@ -619,6 +640,7 @@ impl std::fmt::Debug for ModuleContext {
             .ok()
             .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
         fmt.debug_struct("ModuleContext")
+            .field("hardware_discovery", &self.hardware_discovery)
             .field("yubihsm_usb", &self.yubihsm_usb)
             .field("software_slots", &self.software_slots)
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
@@ -757,6 +779,8 @@ impl ModuleContext {
         ]);
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
+        let hardware_discovery =
+            configured_hardware_discovery(std::env::var_os(HARDWARE_DISCOVERY_ENV))?;
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         let software_slots = configured_software_slots(std::env::var_os(SOFTWARE_SLOTS_ENV))?;
         let token_storage = configured_token_storage(std::env::var_os(TOKEN_STORAGE_ENV))?;
@@ -779,9 +803,13 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_config = None;
         #[cfg(not(feature = "abi-tests"))]
-        let yubihsm_usb = configured_yubihsm_usb(std::env::var_os("PKCS11RS_YUBIHSM_USB"))?;
+        let yubihsm_usb = configured_local_yubihsm_usb(
+            hardware_discovery,
+            std::env::var_os("PKCS11RS_YUBIHSM_USB"),
+        )?;
         let mut context = ModuleContext {
             debug_level,
+            hardware_discovery,
             #[cfg(feature = "abi-tests")]
             yubihsm_usb: false,
             #[cfg(not(feature = "abi-tests"))]
@@ -790,12 +818,16 @@ impl ModuleContext {
             #[cfg(feature = "abi-tests")]
             pcsc: None,
             #[cfg(not(feature = "abi-tests"))]
-            pcsc: match pcsc::Context::establish(pcsc::Scope::System) {
-                Ok(context) => Some(context),
-                Err(e) => {
-                    log!(1, "pcsc::Context::establish: {}", e);
-                    None
+            pcsc: if hardware_discovery {
+                match pcsc::Context::establish(pcsc::Scope::System) {
+                    Ok(context) => Some(context),
+                    Err(e) => {
+                        log!(1, "pcsc::Context::establish: {}", e);
+                        None
+                    }
                 }
+            } else {
+                None
             },
             yubihsm_urls,
             yubihsm_http_tls,
@@ -1751,6 +1783,8 @@ impl ModuleContext {
                 }
             }
         }
+        // Remote connector slots are explicitly configured and remain
+        // independent of automatic local hardware discovery.
         for url in self.yubihsm_urls.clone() {
             let mut connector =
                 match HttpConnector::new_with_tls(url.clone(), &self.yubihsm_http_tls) {
@@ -2023,12 +2057,16 @@ impl ModuleContext {
                 }
             }
         }
-        let hid_descriptors = match enumerate_fido_devices() {
-            Ok(descriptors) => descriptors,
-            Err(error) => {
-                log!(1, "FIDO HID enumeration: {:?}", error);
-                Vec::new()
+        let hid_descriptors = if self.hardware_discovery {
+            match enumerate_fido_devices() {
+                Ok(descriptors) => descriptors,
+                Err(error) => {
+                    log!(1, "FIDO HID enumeration: {:?}", error);
+                    Vec::new()
+                }
             }
+        } else {
+            Vec::new()
         };
         for descriptor in hid_descriptors {
             let io = match descriptor.open() {
@@ -2305,6 +2343,32 @@ mod discovery_tests {
 
     fn key(serial: &str) -> PhysicalDeviceKey {
         PhysicalDeviceKey::YubicoSerial(serial.to_owned())
+    }
+
+    #[test]
+    fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
+        let context = ModuleContext {
+            debug_level: 0,
+            hardware_discovery: false,
+            yubihsm_usb: false,
+            software_slots: Vec::new(),
+            pcsc: None,
+            yubihsm_urls: Vec::new(),
+            yubihsm_http_tls: HttpConnectorTlsConfig::default(),
+            yubihsm_public_discovery_config: None,
+            token_storage: None,
+            fido_storage: None,
+            handles: Arc::new(HandleCounters::new()),
+            pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
+            trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new()),
+            slot_contexts: RwLock::new(SlotContextRegistry::new()),
+        };
+
+        context.init().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        assert!(slots.discovered);
+        assert!(slots.slots.is_empty());
     }
 
     #[test]

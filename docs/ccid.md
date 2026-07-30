@@ -10,6 +10,11 @@ The PC/SC transport automatically probes these CCID applets by default:
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 | FIDO2 | `A0 00 00 06 47 2F 00 01` | `PKCS11RS_FIDO2_AID` |
 
+Set `PKCS11RS_HARDWARE_DISCOVERY=0` to skip PC/SC context creation and all
+CCID reader and applet probes. This global local-discovery switch also skips
+native USB/HID discovery, but does not affect configured software slots or
+opt-in remote YubiHSM HTTP(S) connectors.
+
 Each applet is added as a separate PKCS #11 slot only when its configured AID
 can be selected successfully. Reader and applet discovery is a snapshot taken
 on the first `C_GetSlotList` call after `C_Initialize`; discovering newly added
