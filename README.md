@@ -136,7 +136,8 @@ Building requires a Rust toolchain plus the development files for:
 The exact package names depend on the operating system and package manager.
 Direct YubiHSM USB access uses native OS APIs through the pure-Rust `nusb`
 crate: usbfs on Linux, IOKit on macOS, and WinUSB on Windows. It does not
-require libusb. On Windows, the YubiHSM interface must be bound to WinUSB.
+require libusb. On Windows, the YubiHSM interface must be bound to WinUSB,
+which is its default Windows USB driver binding.
 The `hidapi` Rust dependency compiles its bundled hidraw backend on Linux and
 its bundled IOKit backend on macOS; Windows uses its native Windows HID
 backend. No separately installed `libhidapi` is required.
@@ -508,8 +509,8 @@ are documented in their backend guides.
 Running an ignored hardware test also requires the selected device, its
 platform driver, and access permissions. PC/SC-backed tests require the
 platform smart-card service (`pcscd` on Linux). Direct YubiHSM USB tests on
-Windows require the YubiHSM interface to be bound to WinUSB. These requirements
-do not apply to the default `cargo test` run.
+Windows use the default WinUSB binding for the YubiHSM interface. These
+requirements do not apply to the default `cargo test` run.
 
 The read-only FIDO cross-interface diagnostic deliberately overlaps HID and
 CCID operations on the same serial-numbered YubiKey and reports whether the
