@@ -273,10 +273,9 @@ fn generate_key_pair(
         let private_token =
             optional_bool_template_attribute(private_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
                 .unwrap_or(false);
-        if !private_token
-            && ctx
-                .get_slot(slot_id)?
-                .supports_software_private_operations()
+        if ctx
+            .get_slot(slot_id)?
+            .supports_software_private_operations()
             && matches!(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
@@ -289,6 +288,47 @@ fn generate_key_pair(
                 software_generate_key_pair(mechanism, public_template, private_template)?;
             validate_new_object_access(&public_object, flags, logged_in)?;
             validate_new_object_access(&private_object, flags, logged_in)?;
+            if private_token {
+                let stored_private = ctx
+                    ._get_slot_mut(slot_id)?
+                    .store_software_private_key(slot_id, &private_object)?;
+                let private_unique_id = stored_private.unique_id.clone();
+                if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
+                    let _ = ctx
+                        ._get_slot_mut(slot_id)?
+                        .destroy_software_private_key(&private_unique_id);
+                    return Err(error);
+                }
+                let private =
+                    match ctx
+                        .resolved_objects()?
+                        .into_iter()
+                        .find_map(|(handle, object)| {
+                            (object.unique_id == private_unique_id).then_some(handle)
+                        }) {
+                        Some(handle) => handle,
+                        None => {
+                            let _ = ctx
+                                ._get_slot_mut(slot_id)?
+                                .destroy_software_private_key(&private_unique_id);
+                            let _ = ctx.refresh_slot_token_objects(slot_id);
+                            return Err(CKR_DEVICE_ERROR.into());
+                        }
+                    };
+                let public = match ctx.store_backed_object(session_handle, public_object) {
+                    Ok(public) => public,
+                    Err(error) => {
+                        let _ = ctx
+                            ._get_slot_mut(slot_id)?
+                            .destroy_software_private_key(&private_unique_id);
+                        let _ = ctx.refresh_slot_token_objects(slot_id);
+                        return Err(error);
+                    }
+                };
+                *public_handle = public;
+                *private_handle = private;
+                return Ok(());
+            }
             private_object.set_creator(session_handle, slot_id);
             let private = ctx.insert_object(private_object)?;
             let public = match ctx.store_backed_object(session_handle, public_object) {
@@ -858,7 +898,7 @@ fn software_key_pair_object(
         parsed.apply_attribute(attribute).map_err(Error::from)?;
     }
     let object = parsed.into_object().map_err(Error::from)?;
-    if object.class != class || object.key_type != key_type || private && object.token {
+    if object.class != class || object.key_type != key_type {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     Ok(object)

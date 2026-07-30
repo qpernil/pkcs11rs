@@ -245,6 +245,9 @@ pub(crate) trait Slot {
     fn refresh_token_objects_after_login(&self) -> bool {
         false
     }
+    fn refresh_token_objects_after_logout(&self) -> bool {
+        false
+    }
     fn token_objects(&self, slot_id: CK_SLOT_ID) -> Result<Vec<TokenObject>, Error> {
         let mut objects = self.profile_objects(slot_id);
         objects.extend(self.backend_token_objects(slot_id)?);
@@ -288,6 +291,16 @@ pub(crate) trait Slot {
     }
     fn supports_software_private_operations(&self) -> bool {
         false
+    }
+    fn store_software_private_key(
+        &mut self,
+        _slot_id: CK_SLOT_ID,
+        _object: &TokenObject,
+    ) -> Result<TokenObject, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn destroy_software_private_key(&mut self, _unique_id: &str) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn private_objects_require_login(&self) -> bool {
         true

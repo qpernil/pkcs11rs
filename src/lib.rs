@@ -141,6 +141,8 @@ pub mod error;
 use error::*;
 
 mod secure_channel_crypto;
+mod software_storage;
+pub(crate) use software_storage::SoftwareTokenStore;
 
 mod pinentry;
 

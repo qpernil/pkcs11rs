@@ -476,7 +476,7 @@ fn software_session_ecdh_covers_every_supported_curve() {
 }
 
 #[test]
-fn software_private_keys_remain_session_objects_while_public_keys_may_be_persisted() {
+fn software_private_token_keys_require_the_dedicated_encrypted_store() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -515,7 +515,7 @@ fn software_private_keys_remain_session_objects_while_public_keys_may_be_persist
             &mut public,
             &mut private,
         ),
-        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+        CKR_TOKEN_WRITE_PROTECTED as CK_RV
     );
     assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
     assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
@@ -540,7 +540,7 @@ fn software_private_keys_remain_session_objects_while_public_keys_may_be_persist
             import_template.len() as CK_ULONG,
             &mut imported,
         ),
-        CKR_TEMPLATE_INCONSISTENT as CK_RV
+        CKR_TOKEN_WRITE_PROTECTED as CK_RV
     );
     assert_eq!(imported, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
 

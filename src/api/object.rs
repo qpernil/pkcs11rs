@@ -307,12 +307,36 @@ fn create_object(
             return Ok(());
         }
         if matches!(object.material, KeyMaterial::SoftwarePrivate(_))
-            && (object.token
-                || !ctx
-                    .get_slot(slot_id)?
-                    .supports_software_private_operations())
+            && !ctx
+                .get_slot(slot_id)?
+                .supports_software_private_operations()
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        if object.token && matches!(object.material, KeyMaterial::SoftwarePrivate(_)) {
+            let stored = ctx
+                ._get_slot_mut(slot_id)?
+                .store_software_private_key(slot_id, &object)?;
+            let unique_id = stored.unique_id.clone();
+            if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
+                let _ = ctx
+                    ._get_slot_mut(slot_id)?
+                    .destroy_software_private_key(&unique_id);
+                return Err(error);
+            }
+            let handle = ctx
+                .resolved_objects()?
+                .into_iter()
+                .find_map(|(handle, object)| (object.unique_id == unique_id).then_some(handle));
+            let Some(handle) = handle else {
+                let _ = ctx
+                    ._get_slot_mut(slot_id)?
+                    .destroy_software_private_key(&unique_id);
+                let _ = ctx.refresh_slot_token_objects(slot_id);
+                return Err(CKR_DEVICE_ERROR.into());
+            };
+            *object_handle = handle;
+            return Ok(());
         }
         object.set_creator(session_handle, slot_id);
         let handle = ctx.insert_object(object)?;
@@ -1408,6 +1432,15 @@ fn destroy_object(
             return Ok(());
         }
         if ctx.destroy_backed_object(object, &stored_object)? {
+            return Ok(());
+        }
+        if stored_object.token
+            && matches!(stored_object.material, KeyMaterial::SoftwarePrivate(_))
+            && ctx.get_slot(slot_id)?.kind() == SlotKind::Software
+        {
+            ctx._get_slot_mut(slot_id)?
+                .destroy_software_private_key(&stored_object.unique_id)?;
+            ctx.refresh_slot_token_objects(slot_id)?;
             return Ok(());
         }
         if stored_object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
