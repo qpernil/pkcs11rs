@@ -16,9 +16,11 @@ use pkcs8::{
 };
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::RsaPrivateKey;
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -160,7 +162,7 @@ impl SoftwareTokenStore {
             &header.wrapped_master_key,
         ) {
             Ok(plaintext) => plaintext,
-            Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as u64 => {
+            Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV => {
                 return Err(CKR_PIN_INCORRECT.into())
             }
             Err(error) => return Err(error),
@@ -620,8 +622,20 @@ fn decode_record(
     let plaintext = decrypt(master_key, &nonce, &record_aad(name), ciphertext)
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     let (attributes, material) = decode_stored_private_key_info(plaintext.as_ref())?;
-    if attributes.class != crate::CKO_PRIVATE_KEY as u64
-        || attributes.key_type != material.key_type()
+    let class: crate::CK_OBJECT_CLASS = attributes
+        .class
+        .try_into()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let key_type: crate::CK_KEY_TYPE = attributes
+        .key_type
+        .try_into()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let key_gen_mechanism: Option<crate::CK_MECHANISM_TYPE> = attributes
+        .key_gen_mechanism
+        .map(TryInto::try_into)
+        .transpose()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    if class != crate::CKO_PRIVATE_KEY as crate::CK_OBJECT_CLASS || key_type != material.key_type()
     {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -629,8 +643,8 @@ fn decode_record(
     Ok(TokenObject {
         slot_id: Some(slot_id),
         unique_id: unique_id.to_owned(),
-        class: attributes.class,
-        key_type: attributes.key_type,
+        class,
+        key_type,
         label: attributes.label,
         id: attributes.id,
         token: true,
@@ -645,7 +659,7 @@ fn decode_record(
         always_sensitive: attributes.always_sensitive,
         never_extractable: attributes.never_extractable,
         local: attributes.local,
-        key_gen_mechanism: attributes.key_gen_mechanism,
+        key_gen_mechanism,
         creator_session: None,
         public_key: Some(public_key),
         rp_id: None,
@@ -667,8 +681,8 @@ fn encode_record_envelope(nonce: &[u8; NONCE_LENGTH], ciphertext: &[u8]) -> Resu
 
 fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
     Ok(StoredAttributes {
-        class: object.class,
-        key_type: object.key_type,
+        class: object.class.into(),
+        key_type: object.key_type.into(),
         label: object.label.clone(),
         id: object.id.clone(),
         private: object.private,
@@ -682,7 +696,7 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
         always_sensitive: object.always_sensitive,
         never_extractable: object.never_extractable,
         local: object.local,
-        key_gen_mechanism: object.key_gen_mechanism,
+        key_gen_mechanism: object.key_gen_mechanism.map(Into::into),
     })
 }
 
@@ -1312,7 +1326,7 @@ mod tests {
         drop(key);
         assert!(matches!(
             store.login(b"wrong password"),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as u64
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
         let key = store.login(b"correct horse battery staple").unwrap();
         let (objects, _) = store.load_objects(9, &key).unwrap();
@@ -1330,7 +1344,7 @@ mod tests {
         assert_eq!(rotated.as_ref(), key.as_ref());
         assert!(matches!(
             store.login(b"correct horse battery staple"),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as u64
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
         let rotated = store.login(b"new correct horse battery staple").unwrap();
         assert_eq!(store.load_objects(9, &rotated).unwrap().0.len(), 1);
@@ -1386,7 +1400,7 @@ mod tests {
         let conflicting = info.to_der().unwrap();
         assert!(matches!(
             decode_stored_private_key_info(&conflicting),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as u64
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
     }
 
@@ -1399,14 +1413,14 @@ mod tests {
             SoftwareTokenStore::open(String::from("second"), directory.0.clone()).unwrap();
         assert!(matches!(
             other_name_same_root.login(b"one sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as u64
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
 
         let (_, path) = first.current_header_path().unwrap().unwrap();
         fs::write(path, [0x81, 0x01]).unwrap();
         assert!(matches!(
             first.login(b"one sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as u64
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
     }
 
@@ -1443,7 +1457,7 @@ mod tests {
         fs::write(store.root.join(format!("{TEMPORARY_PREFIX}crash")), [0x81]).unwrap();
         assert!(matches!(
             store.login(b"one shared initialization pin"),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as u64
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
         assert_eq!(
             store
@@ -1462,12 +1476,13 @@ mod tests {
             SoftwareTokenStore::open(String::from("malformed"), directory.0.clone()).unwrap();
         assert!(matches!(
             store.login(b"short"),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_LEN_RANGE as u64
+            Err(Error::Generic(rv)) if rv == CKR_PIN_LEN_RANGE as crate::CK_RV
         ));
         assert!(!store.is_initialized().unwrap());
         assert!(matches!(
             store.change_pin(b"old sufficiently long pin", b"new sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == crate::CKR_USER_PIN_NOT_INITIALIZED as u64
+            Err(Error::Generic(rv))
+                if rv == crate::CKR_USER_PIN_NOT_INITIALIZED as crate::CK_RV
         ));
         assert!(!store.is_initialized().unwrap());
         let key = store.login(b"a sufficiently long pin").unwrap();
@@ -1475,7 +1490,7 @@ mod tests {
         store.records.put(&malformed).unwrap();
         assert!(matches!(
             store.load_objects(1, &key),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as u64
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
 
         let missing_header_directory = TestDirectory::new();
@@ -1487,7 +1502,7 @@ mod tests {
         missing_header.records.put(&malformed).unwrap();
         assert!(matches!(
             missing_header.login(b"a sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as u64
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
         assert!(!missing_header.is_initialized().unwrap());
 
@@ -1500,7 +1515,7 @@ mod tests {
         fs::write(malformed_header.root.join("header-invalid.cbor"), [0x80]).unwrap();
         assert!(matches!(
             malformed_header.login(b"a sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as u64
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
     }
 }
