@@ -4,8 +4,9 @@
 
 `pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
 applications, YubiHSM devices, and explicitly configured in-memory software
-tokens. Hardware private-key operations remain on the device; software
-private keys exist only as session objects in dedicated software slots.
+tokens. Hardware private-key operations remain on the device. Dedicated
+software slots support login-gated session keys and, when local token storage
+is configured, encrypted persistent private-key objects.
 
 The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
@@ -36,7 +37,8 @@ The minimum supported Rust version is 1.85.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 - **Named software slots** created only by explicit configuration, with
-  session-only RSA, EC, Ed25519, and X25519 private keys.
+  login-gated session RSA, EC, Ed25519, and X25519 private keys, plus encrypted
+  persistent private keys when local token storage is configured.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
@@ -174,13 +176,14 @@ must be unique and nonempty, and may contain at most 32 UTF-8 bytes. An empty
 entry, duplicate name, overlong name, or non-UTF-8 value makes `C_Initialize`
 return `CKR_ARGUMENTS_BAD`.
 
-Software slots have no PIN and never advertise `CKF_HW` or `CKF_HW_SLOT`.
-Private keys may be generated or imported only with `CKA_TOKEN=CK_FALSE`; they
-are removed with their creating session. `CKA_TOKEN=CK_TRUE` never falls back
-to session storage. `PKCS11RS_TOKEN_STORAGE` provides a name-scoped store for
-supported non-private token objects, but never persists software private-key
-material. See [Named software slots](docs/software.md) for the exact
-mechanisms, curves, metadata, and object lifecycle.
+Software slots never advertise `CKF_HW` or `CKF_HW_SLOT`. `C_Login(CKU_USER)`
+unlocks private-key operations. Session keys are removed with their creating
+session. With `PKCS11RS_TOKEN_STORAGE` configured, `CKA_TOKEN=CK_TRUE` private
+keys are encrypted below a name-scoped root and survive restart; without that
+configuration the request returns `CKR_TOKEN_WRITE_PROTECTED` and never falls
+back to session storage. This capability is not enabled on any hardware or
+applet slot. See [Named software slots](docs/software.md) for the exact PIN,
+storage, format, mechanism, metadata, and lifecycle semantics.
 
 Add remote YubiHSM Connector instances with a comma-separated URL list:
 
@@ -548,7 +551,8 @@ configured by `PKCS11RS_SOFTWARE_SLOTS`; hardware and applet slots neither
 advertise nor create generic software private keys. Their shared public-key
 implementation remains available for projected and imported public objects.
 A private template with `CKA_TOKEN=CK_TRUE` never falls back to software
-session storage.
+session storage. Encrypted persistent software private keys exist only in an
+explicitly named software slot with `PKCS11RS_TOKEN_STORAGE` configured.
 
 ## Known Limitations
 

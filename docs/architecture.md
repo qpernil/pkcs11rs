@@ -66,11 +66,12 @@ Weierstrass curve supported by the hardware backends (NIST
 P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
 Ed25519, and X25519. `PKCS11RS_SOFTWARE_SLOTS` creates one independent
 `SoftwareSlot` and `SoftwareSession` backend for each configured name. These
-slots have no transport, hardware flags, or login state. A configured generic
-token-storage root is scoped by software-token name and stores only supported
-non-private token objects.
-`CKA_TOKEN=CK_TRUE` is never allowed to fall back to the software
-implementation: a persistent private-key request fails. FIDO2 adds an explicit vendor
+slots have no transport or hardware flags. They use token-wide user login to
+gate private material. A configured generic token-storage root is scoped by
+software-token name and supplies an encrypted, master-key-protected PKCS #8
+store for persistent software private keys in addition to supported
+non-private backed objects. `CKA_TOKEN=CK_TRUE` never falls back to session
+storage, and no hardware or applet slot enables this store. FIDO2 adds an explicit vendor
 GetAssertion mechanism for operational resident credentials; it cannot be
 confused with a bare EC or RSA signing mechanism because its input and
 structured output are separately defined.

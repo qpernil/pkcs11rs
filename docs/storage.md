@@ -52,10 +52,12 @@ Named software slots use the configured token name as their stable storage
 identity. When `PKCS11RS_TOKEN_STORAGE` is set, each name receives a distinct
 `software-name-<hex-encoded-name>` directory below `tokens-v1`. The provider
 stores supported non-private backed token objects such as public projections.
-Software private keys remain session-only even when that provider is present.
-A future persistent private-key design would require its own explicit
-protection and unlock model; the current implementation never writes private
-software material to this generic local provider.
+It also supplies that named token's isolated root to the encrypted
+private-key store. Private keys are stored separately below
+`private-keys-v1`: a login-PIN-wrapped random master key protects attributed
+PKCS #8 records with AES-256-GCM. No hardware or applet slot installs this
+software-private store. See [Named software slots](software.md) for its format,
+PIN, permissions, corruption, durability, and concurrency semantics.
 
 ## Backed-key metadata
 
