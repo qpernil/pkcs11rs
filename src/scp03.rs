@@ -29,6 +29,7 @@ const MAX_EXTENDED_EXPECTED_LENGTH: u32 = 1 << 16;
 #[cfg(test)]
 const MAX_RESPONSE_CHAIN_SEGMENTS: usize =
     MAX_EXTENDED_EXPECTED_LENGTH as usize / MAX_SHORT_EXPECTED_LENGTH as usize;
+#[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
 const MORE_COMMANDS: u8 = 0x80;
 const DERIVATION_CARD_CRYPTOGRAM: u8 = 0x00;
 const DERIVATION_HOST_CRYPTOGRAM: u8 = 0x01;
@@ -798,6 +799,7 @@ impl Scp03Session {
         self.unprotect_response(response)
     }
 
+    #[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
     pub(crate) fn transmit_chained(
         &mut self,
         connector: &dyn Connector,
@@ -844,6 +846,7 @@ impl Scp03Session {
         Err(CKR_DEVICE_ERROR.into())
     }
 
+    #[allow(dead_code)] // Used by the ABI backend and SCP03 test transport.
     pub(crate) fn collect_response_chain(
         connector: &dyn Connector,
         response: ResponseApdu,

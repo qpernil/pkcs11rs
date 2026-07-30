@@ -1032,6 +1032,7 @@ impl BackendSession for PcscAppletSession {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // Constructed by the ABI backend and SCP03 tests.
 pub(crate) struct IssuerSecurityDomainSession {
     pub(crate) slotID: CK_SLOT_ID,
     pub(crate) flags: CK_FLAGS,
@@ -1137,6 +1138,7 @@ impl BackendSession for IssuerSecurityDomainSession {
 }
 
 impl IssuerSecurityDomainSession {
+    #[allow(dead_code)] // Used by the ABI backend and SCP03 tests.
     pub(crate) fn send_apdu(
         &self,
         command: &CommandApdu,
