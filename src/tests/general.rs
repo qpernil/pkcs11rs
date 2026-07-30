@@ -155,7 +155,7 @@ pub fn get_info_reports_cryptoki_3_2() {
 }
 
 #[test]
-pub fn initialize_and_finalize_reject_reserved_args() {
+pub fn initialize_accepts_opaque_reserved_arg_without_dereferencing_it() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     let mut init_args = CK_C_INITIALIZE_ARGS {
@@ -169,11 +169,29 @@ pub fn initialize_and_finalize_reject_reserved_args() {
 
     assert_eq!(
         crate::api::C_Initialize(&mut init_args as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
-        CKR_ARGUMENTS_BAD as CK_RV
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+pub fn finalize_rejects_reserved_arg() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
     );
     assert_eq!(
         crate::api::C_Finalize(1 as CK_VOID_PTR),
         CKR_ARGUMENTS_BAD as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
     );
 }
 
