@@ -1781,7 +1781,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_rejects_software_only_sign_mechanism_for_hardware_key(
+    def test_abi_yubihsm_does_not_advertise_software_only_private_signing(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -1815,7 +1815,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             CKR_OK,
         )
         self.assertEqual(info.flags & CKF_VERIFY, CKF_VERIFY)
-        self.assertEqual(info.flags & CKF_SIGN, CKF_SIGN)
+        self.assertEqual(info.flags & CKF_SIGN, 0)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -2172,7 +2172,7 @@ fn main() {
                 else:
                     os.environ["PKCS11RS_PINENTRY"] = previous
 
-    def test_yubihsm_key_pair_generation_supports_a_session_private_key(self) -> None:
+    def test_yubihsm_key_pair_generation_rejects_a_session_private_key(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
         session = self.open_slot_session(
             ABI_TEST_YUBIHSM_SLOT_ID, CKF_SERIAL_SESSION | CKF_RW_SESSION
@@ -2209,10 +2209,10 @@ fn main() {
                 ctypes.byref(public_key),
                 ctypes.byref(private_key),
             ),
-            CKR_OK,
+            CKR_TEMPLATE_INCONSISTENT,
         )
-        self.assertNotEqual(public_key.value, 0)
-        self.assertNotEqual(private_key.value, 0)
+        self.assertEqual(public_key.value, 0)
+        self.assertEqual(private_key.value, 0)
 
     def test_yubihsm_key_pair_generation_requires_matching_ids(self) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)

@@ -40,16 +40,19 @@ zeroize = "1.9.0"
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "pem", "std"] }
 ecdsa = "0.17.0"
+elliptic-curve = { version = "0.14.1", features = ["ecdh"] }
 ed25519-dalek = "3.0.0"
-p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["ecdsa", "std"] }
+p224 = { version = "=0.14.0-rc.15", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 p256 = { version = "0.14.0", features = ["ecdh", "ecdsa", "pem", "pkcs8"] }
 p384 = { version = "0.14.0", features = ["ecdh", "ecdsa", "pem", "pkcs8"] }
-p521 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
-bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
-bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
-k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"] }
+p521 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
+bp256 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "sha256", "std"] }
+bp384 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic", "ecdsa", "sha384", "std"] }
+k256 = { version = "0.14.0", default-features = false, features = ["ecdh", "ecdsa", "std"] }
 num-bigint-dig = "0.8.6"
 pkcs8 = { version = "0.11.0", features = ["alloc", "pem", "std"] }
+primefield = "0.14.0"
+primeorder = "0.14.0"
 rsa = { version = "0.9.10", features = ["pem", "sha2"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.15.1"

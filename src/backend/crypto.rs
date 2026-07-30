@@ -320,7 +320,7 @@ pub(crate) fn encode_rsa_pss(
     Ok(encoded)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EcCurve {
     P224,
     P256,
@@ -330,6 +330,25 @@ pub(crate) enum EcCurve {
     BrainpoolP256,
     BrainpoolP384,
     BrainpoolP512,
+}
+
+pub(crate) fn ec_curve_parameters(curve: EcCurve) -> &'static [u8] {
+    match curve {
+        EcCurve::P224 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21],
+        EcCurve::P256 => &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],
+        EcCurve::P384 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+        EcCurve::P521 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+        EcCurve::K256 => &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
+        EcCurve::BrainpoolP256 => &[
+            0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07,
+        ],
+        EcCurve::BrainpoolP384 => &[
+            0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0b,
+        ],
+        EcCurve::BrainpoolP512 => &[
+            0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d,
+        ],
+    }
 }
 
 pub(crate) struct EcParameters {
@@ -586,6 +605,8 @@ fn verify_generic_ecdsa(
     digest: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
+    // All values used below are public. The variable-time BigUint arithmetic is
+    // therefore appropriate here, but must not be reused for private-key work.
     let coordinate_length = parameters.coordinate_length;
     let q = EcPointValue {
         x: BigUint::from_bytes_be(&public_key[..coordinate_length]),
@@ -712,23 +733,19 @@ pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(
 }
 
 pub(crate) fn ec_curve_from_parameters(parameters: &[u8]) -> Result<EcCurve, Error> {
-    match parameters {
-        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x21] => Ok(EcCurve::P224),
-        [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07] => Ok(EcCurve::P256),
-        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22] => Ok(EcCurve::P384),
-        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23] => Ok(EcCurve::P521),
-        [0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a] => Ok(EcCurve::K256),
-        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x07] => {
-            Ok(EcCurve::BrainpoolP256)
-        }
-        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0b] => {
-            Ok(EcCurve::BrainpoolP384)
-        }
-        [0x06, 0x09, 0x2b, 0x24, 0x03, 0x03, 0x02, 0x08, 0x01, 0x01, 0x0d] => {
-            Ok(EcCurve::BrainpoolP512)
-        }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-    }
+    [
+        EcCurve::P224,
+        EcCurve::P256,
+        EcCurve::P384,
+        EcCurve::P521,
+        EcCurve::K256,
+        EcCurve::BrainpoolP256,
+        EcCurve::BrainpoolP384,
+        EcCurve::BrainpoolP512,
+    ]
+    .into_iter()
+    .find(|curve| parameters == ec_curve_parameters(*curve))
+    .ok_or(CKR_KEY_TYPE_INCONSISTENT.into())
 }
 
 pub(crate) fn verify_ed25519(

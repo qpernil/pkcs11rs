@@ -283,7 +283,7 @@ pub(crate) trait Slot {
         true
     }
     fn supports_software_private_operations(&self) -> bool {
-        true
+        false
     }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
@@ -294,15 +294,25 @@ pub(crate) trait Slot {
         if self.supports_software_private_operations() {
             software_mechanisms.extend(software_private_mechanisms());
         }
+        let mut combined_software_mechanisms: Vec<MechanismDetails> = Vec::new();
         for software in software_mechanisms {
-            if let Some(existing) = mechanisms
+            if let Some(existing) = combined_software_mechanisms
                 .iter_mut()
                 .find(|mechanism| mechanism.type_ == software.type_)
             {
                 existing.min_key_size = existing.min_key_size.min(software.min_key_size);
                 existing.max_key_size = existing.max_key_size.max(software.max_key_size);
                 existing.flags |= software.flags;
-                existing.flags &= !(CKF_HW as CK_FLAGS);
+            } else {
+                combined_software_mechanisms.push(software);
+            }
+        }
+        for software in combined_software_mechanisms {
+            if let Some(existing) = mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.type_ == software.type_)
+            {
+                existing.flags |= software.flags;
             } else {
                 mechanisms.push(software);
             }

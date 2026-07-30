@@ -202,14 +202,14 @@ fn derive_secret(
 }
 
 #[test]
-fn software_session_key_pairs_cover_rsa_ec_and_ed25519_operations() {
+fn software_session_key_pairs_cover_every_supported_curve() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
 
     let (rsa_public, rsa_private) = generate_software_key_pair(
         TEST_SESSION_HANDLE,
@@ -359,17 +359,43 @@ fn software_session_key_pairs_cover_rsa_ec_and_ed25519_operations() {
     for (algorithm, mut parameters, sign_mechanism) in [
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
-                .unwrap()
-                .to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::P224).to_vec(),
+            CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::P256).to_vec(),
             CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
         ),
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::EccP384)
-                .unwrap()
-                .to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::P384).to_vec(),
             CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::P521).to_vec(),
+            CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::K256).to_vec(),
+            CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP256).to_vec(),
+            CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP384).to_vec(),
+            CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP512).to_vec(),
+            CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
         ),
         (
             CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -387,26 +413,46 @@ fn software_session_key_pairs_cover_rsa_ec_and_ed25519_operations() {
 }
 
 #[test]
-fn software_session_ecdh_covers_nist_curves_and_x25519() {
+fn software_session_ecdh_covers_every_supported_curve() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     for (algorithm, mut parameters) in [
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
-                .unwrap()
-                .to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::P224).to_vec(),
         ),
         (
             CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            crate::piv_ec_parameters(crate::piv::Algorithm::EccP384)
-                .unwrap()
-                .to_vec(),
+            crate::ec_curve_parameters(crate::EcCurve::P256).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::P384).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::P521).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::K256).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP256).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP384).to_vec(),
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ec_curve_parameters(crate::EcCurve::BrainpoolP512).to_vec(),
         ),
         (
             CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -437,7 +483,7 @@ fn software_private_keys_remain_session_objects_while_public_keys_may_be_persist
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
     with_test_slot_context(TEST_SLOT_ID, |context| {
         context
             .set_token_storage_provider(Box::new(crate::storage::MemoryStorageProvider::new()))
@@ -501,6 +547,83 @@ fn software_private_keys_remain_session_objects_while_public_keys_may_be_persist
             crate::KeyMaterial::SoftwarePrivate(_)
         ));
     });
+    finalize_for_test();
+}
+
+#[test]
+fn hardware_slots_do_not_fallback_to_generic_software_private_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut mechanism_count = 0;
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, std::ptr::null_mut(), &mut mechanism_count),
+        CKR_OK as CK_RV
+    );
+    let mut mechanisms = vec![0; mechanism_count as usize];
+    assert_eq!(
+        crate::C_GetMechanismList(TEST_SLOT_ID, mechanisms.as_mut_ptr(), &mut mechanism_count),
+        CKR_OK as CK_RV
+    );
+    assert!(!mechanisms.contains(&(CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)));
+    assert!(!mechanisms.contains(&(CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE)));
+
+    let mut modulus_bits = 1024 as CK_ULONG;
+    let mut public_template = [scalar_attribute(
+        CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+        &mut modulus_bits,
+    )];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            0,
+            &mut public,
+            &mut private,
+        ),
+        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+    );
+    assert_eq!(public, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(private, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+    let mut value = [0u8; 32];
+    value[31] = 1;
+    let mut import_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+    ];
+    let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            import_template.as_mut_ptr(),
+            import_template.len() as CK_ULONG,
+            &mut object,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(object, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
     finalize_for_test();
 }
 

@@ -20,21 +20,22 @@ fn software_sign_mechanism_supported(
                 || piv_is_hashed_rsa_pkcs(mechanism)
                 || piv_is_pss_mechanism(mechanism)
         }
-        SoftwarePrivateKeyMaterial::P256(_) | SoftwarePrivateKeyMaterial::P384(_) => {
-            mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
-        }
         SoftwarePrivateKeyMaterial::Ed25519(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
         SoftwarePrivateKeyMaterial::X25519(_) => false,
+        _ => mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism),
     }
 }
 
 fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, Error> {
     match key {
         SoftwarePrivateKeyMaterial::Rsa(key) => Ok(key.size()),
-        SoftwarePrivateKeyMaterial::P256(_) => Ok(64),
-        SoftwarePrivateKeyMaterial::P384(_) => Ok(96),
         SoftwarePrivateKeyMaterial::Ed25519(_) => Ok(64),
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        _ => Ok(
+            ec_parameters(key.weierstrass_curve().ok_or(CKR_KEY_TYPE_INCONSISTENT)?)?
+                .coordinate_length
+                * 2,
+        ),
     }
 }
 
@@ -44,6 +45,19 @@ fn software_sign(
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    macro_rules! sign_ecdsa {
+        ($key:expr, $curve:ty, $signature:ty) => {{
+            let digest = piv_hash_mechanism(mechanism)
+                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                .transpose()?
+                .unwrap_or_else(|| data.to_vec());
+            let signing_key = ecdsa::SigningKey::<$curve>::from($key.clone());
+            let signature: $signature =
+                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
+                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+            Ok(signature.to_bytes().to_vec())
+        }};
+    }
     match key {
         SoftwarePrivateKeyMaterial::Rsa(key) => {
             let digest = piv_hash_mechanism(mechanism)
@@ -78,27 +92,41 @@ fn software_sign(
                 Err(CKR_MECHANISM_INVALID.into())
             }
         }
+        SoftwarePrivateKeyMaterial::P224(key) => {
+            sign_ecdsa!(key, p224::NistP224, p224::ecdsa::Signature)
+        }
         SoftwarePrivateKeyMaterial::P256(key) => {
-            let digest = piv_hash_mechanism(mechanism)
-                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
-                .transpose()?
-                .unwrap_or_else(|| data.to_vec());
-            let signing_key = p256::ecdsa::SigningKey::from(key.clone());
-            let signature: p256::ecdsa::Signature =
-                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
-                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-            Ok(signature.to_bytes().to_vec())
+            sign_ecdsa!(key, p256::NistP256, p256::ecdsa::Signature)
         }
         SoftwarePrivateKeyMaterial::P384(key) => {
-            let digest = piv_hash_mechanism(mechanism)
-                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
-                .transpose()?
-                .unwrap_or_else(|| data.to_vec());
-            let signing_key = p384::ecdsa::SigningKey::from(key.clone());
-            let signature: p384::ecdsa::Signature =
-                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
-                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-            Ok(signature.to_bytes().to_vec())
+            sign_ecdsa!(key, p384::NistP384, p384::ecdsa::Signature)
+        }
+        SoftwarePrivateKeyMaterial::P521(key) => {
+            sign_ecdsa!(key, p521::NistP521, p521::ecdsa::Signature)
+        }
+        SoftwarePrivateKeyMaterial::K256(key) => {
+            sign_ecdsa!(key, k256::Secp256k1, k256::ecdsa::Signature)
+        }
+        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => {
+            sign_ecdsa!(
+                key,
+                bp256::BrainpoolP256r1,
+                ecdsa::Signature<bp256::BrainpoolP256r1>
+            )
+        }
+        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => {
+            sign_ecdsa!(
+                key,
+                bp384::BrainpoolP384r1,
+                ecdsa::Signature<bp384::BrainpoolP384r1>
+            )
+        }
+        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => {
+            sign_ecdsa!(
+                key,
+                crate::brainpool512::BrainpoolP512r1,
+                crate::brainpool512::Signature
+            )
         }
         SoftwarePrivateKeyMaterial::Ed25519(key) => {
             let signature: ed25519_dalek::Signature = signature::Signer::sign(key, data);

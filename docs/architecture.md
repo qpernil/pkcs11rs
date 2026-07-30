@@ -58,13 +58,18 @@ implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
 Backend mechanism lists describe hardware operations. The default `Slot`
-implementation augments them with the module's software digest, public-key,
-and private session-key mechanisms, whose active state is still stored in the
-calling session. Software RSA, P-256, P-384, Ed25519, and X25519 private
-material is typed explicitly and never enters token storage. FIDO2 adds an
-explicit vendor GetAssertion mechanism for operational resident credentials;
-it cannot be confused with a bare EC or RSA signing mechanism because its
-input and structured output are separately defined.
+implementation augments them with the module's software digest and public-key
+mechanisms, whose active state is still stored in the calling session. Generic
+software private-key support is an explicit slot capability and is disabled for
+all hardware and applet slots. The typed implementation covers RSA, every
+Weierstrass curve supported by the hardware backends (NIST
+P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
+Ed25519, and X25519 for a future opt-in software slot. `CKA_TOKEN=CK_TRUE` is
+never allowed to fall back to that implementation: the selected backend must
+create a genuine token object or fail. FIDO2 adds an explicit vendor
+GetAssertion mechanism for operational resident credentials; it cannot be
+confused with a bare EC or RSA signing mechanism because its input and
+structured output are separately defined.
 
 The `abi-tests` feature uses synthetic slots that identify the real backend
 kind they model. Production dispatch therefore does not contain a generic

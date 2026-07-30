@@ -274,6 +274,9 @@ fn generate_key_pair(
             optional_bool_template_attribute(private_template, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
                 .unwrap_or(false);
         if !private_token
+            && ctx
+                .get_slot(slot_id)?
+                .supports_software_private_operations()
             && matches!(
                 mechanism.mechanism,
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
@@ -898,23 +901,25 @@ fn software_generate_key_pair(
         x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             let parameters =
                 required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
-            if parameters.as_slice()
-                == piv_ec_parameters(piv::Algorithm::EccP256).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-            {
-                (
-                    CKK_EC as CK_KEY_TYPE,
-                    SoftwarePrivateKeyMaterial::P256(p256::SecretKey::generate()),
-                )
-            } else if parameters.as_slice()
-                == piv_ec_parameters(piv::Algorithm::EccP384).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-            {
-                (
-                    CKK_EC as CK_KEY_TYPE,
-                    SoftwarePrivateKeyMaterial::P384(p384::SecretKey::generate()),
-                )
-            } else {
-                return Err(CKR_CURVE_NOT_SUPPORTED.into());
-            }
+            let curve = ec_curve_from_parameters(&parameters)
+                .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
+            let material = match curve {
+                EcCurve::P224 => SoftwarePrivateKeyMaterial::P224(p224::SecretKey::generate()),
+                EcCurve::P256 => SoftwarePrivateKeyMaterial::P256(p256::SecretKey::generate()),
+                EcCurve::P384 => SoftwarePrivateKeyMaterial::P384(p384::SecretKey::generate()),
+                EcCurve::P521 => SoftwarePrivateKeyMaterial::P521(p521::SecretKey::generate()),
+                EcCurve::K256 => SoftwarePrivateKeyMaterial::K256(k256::SecretKey::generate()),
+                EcCurve::BrainpoolP256 => {
+                    SoftwarePrivateKeyMaterial::BrainpoolP256(bp256::r1::SecretKey::generate())
+                }
+                EcCurve::BrainpoolP384 => {
+                    SoftwarePrivateKeyMaterial::BrainpoolP384(bp384::r1::SecretKey::generate())
+                }
+                EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
+                    crate::brainpool512::SecretKey::generate(),
+                ),
+            };
+            (CKK_EC as CK_KEY_TYPE, material)
         }
         x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
             let parameters =
@@ -1285,6 +1290,37 @@ fn project_public_key_object(
     Ok(projected)
 }
 
+fn software_ecdh(key: &SoftwarePrivateKeyMaterial, public_data: &[u8]) -> Result<Vec<u8>, Error> {
+    macro_rules! derive {
+        ($key:expr, $curve:ty) => {{
+            let peer = elliptic_curve::PublicKey::<$curve>::from_sec1_bytes(public_data)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            Ok(
+                elliptic_curve::ecdh::diffie_hellman($key.to_nonzero_scalar(), peer.as_affine())
+                    .raw_secret_bytes()
+                    .to_vec(),
+            )
+        }};
+    }
+    match key {
+        SoftwarePrivateKeyMaterial::P224(key) => derive!(key, p224::NistP224),
+        SoftwarePrivateKeyMaterial::P256(key) => derive!(key, p256::NistP256),
+        SoftwarePrivateKeyMaterial::P384(key) => derive!(key, p384::NistP384),
+        SoftwarePrivateKeyMaterial::P521(key) => derive!(key, p521::NistP521),
+        SoftwarePrivateKeyMaterial::K256(key) => derive!(key, k256::Secp256k1),
+        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => {
+            derive!(key, bp256::BrainpoolP256r1)
+        }
+        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => {
+            derive!(key, bp384::BrainpoolP384r1)
+        }
+        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => {
+            derive!(key, crate::brainpool512::BrainpoolP512r1)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
+}
+
 fn derive_key(
     session_handle: CK_SESSION_HANDLE,
     mechanism: CK_MECHANISM_PTR,
@@ -1504,11 +1540,12 @@ fn derive_key(
             },
         }
         let source = match &object.material {
-            KeyMaterial::SoftwarePrivate(
-                key @ (SoftwarePrivateKeyMaterial::P256(_)
-                | SoftwarePrivateKeyMaterial::P384(_)
-                | SoftwarePrivateKeyMaterial::X25519(_)),
-            ) => DeriveSource::Software(Box::new(key.clone())),
+            KeyMaterial::SoftwarePrivate(key)
+                if key.weierstrass_curve().is_some()
+                    || matches!(key, SoftwarePrivateKeyMaterial::X25519(_)) =>
+            {
+                DeriveSource::Software(Box::new(key.clone()))
+            }
             KeyMaterial::PivPrivate {
                 slot,
                 algorithm,
@@ -1566,10 +1603,13 @@ fn derive_key(
         }
         let (expected_length, expected_public_length, requires_uncompressed) = match &source {
             DeriveSource::Software(key) => match key.as_ref() {
-                SoftwarePrivateKeyMaterial::P256(_) => (32, 65, true),
-                SoftwarePrivateKeyMaterial::P384(_) => (48, 97, true),
                 SoftwarePrivateKeyMaterial::X25519(_) => (32, 32, false),
-                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                key => {
+                    let coordinate_length =
+                        ec_parameters(key.weierstrass_curve().ok_or(CKR_KEY_TYPE_INCONSISTENT)?)?
+                            .coordinate_length;
+                    (coordinate_length, coordinate_length * 2 + 1, true)
+                }
             },
             DeriveSource::Piv { algorithm, .. } => match *algorithm {
                 piv::Algorithm::EccP256 => (32, 65, true),
@@ -1608,20 +1648,6 @@ fn derive_key(
         let derived =
             match source {
                 DeriveSource::Software(key) => match key.as_ref() {
-                    SoftwarePrivateKeyMaterial::P256(key) => {
-                        let peer = p256::PublicKey::from_sec1_bytes(public_data)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                        p256::ecdh::diffie_hellman(key.to_nonzero_scalar(), peer.as_affine())
-                            .raw_secret_bytes()
-                            .to_vec()
-                    }
-                    SoftwarePrivateKeyMaterial::P384(key) => {
-                        let peer = p384::PublicKey::from_sec1_bytes(public_data)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                        p384::ecdh::diffie_hellman(key.to_nonzero_scalar(), peer.as_affine())
-                            .raw_secret_bytes()
-                            .to_vec()
-                    }
                     SoftwarePrivateKeyMaterial::X25519(key) => {
                         let peer: [u8; 32] = public_data
                             .try_into()
@@ -1630,7 +1656,7 @@ fn derive_key(
                             .as_bytes()
                             .to_vec()
                     }
-                    _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+                    key => software_ecdh(key, public_data)?,
                 },
                 DeriveSource::Piv {
                     slot,

@@ -188,6 +188,10 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
 }
 
 pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
+    // C_GetMechanismInfo cannot filter by curve or storage location. These
+    // ranges are therefore the envelope of all supported software session
+    // private keys; CKA_EC_PARAMS or the selected key handle chooses the exact
+    // curve for an operation.
     let mut mechanisms = vec![
         MechanismDetails {
             type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -197,8 +201,8 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         },
         MechanismDetails {
             type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
-            min_key_size: 256,
-            max_key_size: 384,
+            min_key_size: 224,
+            max_key_size: 521,
             flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
         },
         MechanismDetails {
@@ -215,14 +219,14 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         },
         MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 255,
-            max_key_size: 384,
+            min_key_size: 224,
+            max_key_size: 521,
             flags: CKF_DERIVE as CK_FLAGS,
         },
         MechanismDetails {
             type_: CKM_ECDH1_COFACTOR_DERIVE as CK_MECHANISM_TYPE,
-            min_key_size: 256,
-            max_key_size: 384,
+            min_key_size: 224,
+            max_key_size: 521,
             flags: CKF_DERIVE as CK_FLAGS,
         },
         MechanismDetails {
@@ -280,8 +284,8 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
     ] {
         mechanisms.push(MechanismDetails {
             type_: type_ as CK_MECHANISM_TYPE,
-            min_key_size: 256,
-            max_key_size: 384,
+            min_key_size: 224,
+            max_key_size: 521,
             flags: (CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
         });
     }
