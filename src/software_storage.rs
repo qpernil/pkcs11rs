@@ -38,7 +38,7 @@ const HEADER_SCHEMA: &str = "pkcs11rs-software-token-key";
 const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
 const FORMAT_VERSION: u64 = 1;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
-const KDF_ITERATIONS: u32 = 600_000;
+const KDF_ITERATIONS: u32 = 10_000;
 const AEAD_NAME: &str = "aes-256-gcm";
 const SALT_LENGTH: usize = 16;
 const NONCE_LENGTH: usize = 12;
@@ -1425,6 +1425,27 @@ mod tests {
         fs::write(path, [0x81, 0x01]).unwrap();
         assert!(matches!(
             first.login(b"one sufficiently long pin"),
+            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
+        ));
+    }
+
+    #[test]
+    fn headers_require_the_current_kdf_iteration_count() {
+        let mut encoded = Vec::new();
+        Encoder::new(&mut encoded)
+            .array(9)
+            .and_then(|encoder| encoder.str(HEADER_SCHEMA))
+            .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+            .and_then(|encoder| encoder.u64(1))
+            .and_then(|encoder| encoder.str(KDF_NAME))
+            .and_then(|encoder| encoder.u32(600_000))
+            .and_then(|encoder| encoder.bytes(&[1; SALT_LENGTH]))
+            .and_then(|encoder| encoder.str(AEAD_NAME))
+            .and_then(|encoder| encoder.bytes(&[2; NONCE_LENGTH]))
+            .and_then(|encoder| encoder.bytes(&[3; MASTER_KEY_LENGTH + TAG_LENGTH]))
+            .unwrap();
+        assert!(matches!(
+            decode_header(&encoded),
             Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
         ));
     }
