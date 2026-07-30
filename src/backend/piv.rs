@@ -1030,15 +1030,6 @@ impl Slot for PivSlot {
                         | piv::Slot::Retired19
                         | piv::Slot::Retired20
                 );
-            let public_material = match &key.public_key {
-                PivPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
-                PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => {
-                    KeyMaterial::PivPublic {
-                        algorithm: key.algorithm,
-                        public_key: public_key.clone(),
-                    }
-                }
-            };
             let (modulus, public_exponent) = match &key.public_key {
                 PivPublicKey::Rsa(public_key) => {
                     (public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
@@ -1049,6 +1040,16 @@ impl Slot for PivSlot {
                 PivPublicKey::Ec(public_key) | PivPublicKey::Raw(public_key) => public_key.clone(),
                 PivPublicKey::Rsa(_) => Vec::new(),
             };
+            let private_material = KeyMaterial::PivPrivate {
+                slot: key.slot,
+                algorithm: key.algorithm,
+                modulus,
+                public_exponent,
+                public_key,
+                pin_policy: key.pin_policy,
+                touch_policy: key.touch_policy,
+            };
+            let public_material = private_material.projected_public()?;
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("piv-{:02x}-{fingerprint}-public", key.slot as u8),
@@ -1096,15 +1097,7 @@ impl Slot for PivSlot {
                 local,
                 key_gen_mechanism,
                 creator_session: None,
-                material: KeyMaterial::PivPrivate {
-                    slot: key.slot,
-                    algorithm: key.algorithm,
-                    modulus,
-                    public_exponent,
-                    public_key,
-                    pin_policy: key.pin_policy,
-                    touch_policy: key.touch_policy,
-                },
+                material: private_material,
             });
         }
         for certificate in &self.certificates {

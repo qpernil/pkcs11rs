@@ -652,25 +652,16 @@ impl Slot for OpenPgpSlot {
                 .flatten();
             let label = format!("OpenPGP {:?} key", key.key_ref);
             let id = vec![key.key_ref as u8];
-            let public_material = match &key.public_key {
-                OpenPgpPublicKey::Rsa(public_key) => KeyMaterial::RsaPublic(public_key.clone()),
-                OpenPgpPublicKey::Ec { curve, point } => KeyMaterial::OpenPgpPublic {
-                    algorithm: if matches!(key.algorithm, OpenPgpAlgorithm::Ecdh(_)) {
-                        OpenPgpAlgorithm::Ecdh(*curve)
-                    } else {
-                        OpenPgpAlgorithm::Ecdsa(*curve)
-                    },
-                    public_key: point.clone(),
-                },
-                OpenPgpPublicKey::Raw { curve, key } => KeyMaterial::OpenPgpPublic {
-                    algorithm: if *curve == openpgp::Curve::Ed25519 {
-                        OpenPgpAlgorithm::Ed25519
-                    } else {
-                        OpenPgpAlgorithm::Ecdh(*curve)
-                    },
-                    public_key: key.clone(),
-                },
+            let private_material = KeyMaterial::OpenPgpPrivate {
+                key_ref: key.key_ref,
+                algorithm: key.algorithm,
+                modulus,
+                public_exponent,
+                public_key: public_bytes,
+                pin_policy: key.pin_policy,
+                touch_policy: key.touch_policy,
             };
+            let public_material = private_material.projected_public()?;
             objects.push(TokenObject {
                 slot_id: Some(slot_id),
                 unique_id: format!("openpgp-{:02x}-public", key.key_ref as u8),
@@ -716,15 +707,7 @@ impl Slot for OpenPgpSlot {
                 local: key.local,
                 key_gen_mechanism,
                 creator_session: None,
-                material: KeyMaterial::OpenPgpPrivate {
-                    key_ref: key.key_ref,
-                    algorithm: key.algorithm,
-                    modulus,
-                    public_exponent,
-                    public_key: public_bytes,
-                    pin_policy: key.pin_policy,
-                    touch_policy: key.touch_policy,
-                },
+                material: private_material,
             });
         }
         for certificate in &self.certificates {

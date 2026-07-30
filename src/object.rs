@@ -211,6 +211,98 @@ pub(crate) enum KeyMaterial {
     DerivedSecret(Zeroizing<Vec<u8>>),
 }
 
+impl KeyMaterial {
+    pub(crate) fn projected_public(&self) -> Result<Self, Error> {
+        match self {
+            Self::RsaPrivate(private) => Ok(Self::RsaPublic(RsaPublicKey::from(private.as_ref()))),
+            Self::PivPrivate {
+                algorithm,
+                modulus,
+                public_exponent,
+                public_key,
+                ..
+            } => {
+                if !modulus.is_empty() {
+                    Ok(Self::RsaPublic(
+                        RsaPublicKey::new(
+                            BigUint::from_bytes_be(modulus),
+                            BigUint::from_bytes_be(public_exponent),
+                        )
+                        .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                    ))
+                } else {
+                    Ok(Self::PivPublic {
+                        algorithm: *algorithm,
+                        public_key: public_key.clone(),
+                    })
+                }
+            }
+            Self::OpenPgpPrivate {
+                algorithm,
+                modulus,
+                public_exponent,
+                public_key,
+                ..
+            } => {
+                if !modulus.is_empty() {
+                    Ok(Self::RsaPublic(
+                        RsaPublicKey::new(
+                            BigUint::from_bytes_be(modulus),
+                            BigUint::from_bytes_be(public_exponent),
+                        )
+                        .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                    ))
+                } else {
+                    Ok(Self::OpenPgpPublic {
+                        algorithm: *algorithm,
+                        public_key: public_key.clone(),
+                    })
+                }
+            }
+            Self::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if !public_key.is_empty() && is_yubihsm_rsa(*algorithm) => Ok(Self::RsaPublic(
+                RsaPublicKey::new(BigUint::from_bytes_be(public_key), BigUint::from(65537u32))
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+            )),
+            Self::YubiHsm {
+                algorithm,
+                public_key,
+                ..
+            } if !public_key.is_empty()
+                && (is_yubihsm_ec(*algorithm)
+                    || is_yubihsm_x25519(*algorithm)
+                    || *algorithm == YUBIHSM_ALGO_ED25519) =>
+            {
+                Ok(Self::FidoKey {
+                    public_key: FidoPublicKey::Ec {
+                        parameters: yubihsm_ec_parameters(*algorithm)
+                            .ok_or(CKR_KEY_TYPE_INCONSISTENT)?
+                            .to_vec(),
+                        public_key: public_key.clone(),
+                        prefix_uncompressed: is_yubihsm_ec(*algorithm),
+                    },
+                    rp_id: None,
+                })
+            }
+            Self::FidoResidentPrivate {
+                public_key, rp_id, ..
+            } => Ok(Self::FidoKey {
+                public_key: public_key.clone(),
+                rp_id: Some(rp_id.clone()),
+            }),
+            Self::FidoPreviewCredential { public_key, .. }
+            | Self::PreviewSignDerived { public_key, .. } => Ok(Self::FidoKey {
+                public_key: public_key.clone(),
+                rp_id: None,
+            }),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        }
+    }
+}
+
 impl std::fmt::Debug for KeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
