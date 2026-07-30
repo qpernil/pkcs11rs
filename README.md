@@ -3,9 +3,9 @@
 [![CI](https://github.com/qpernil/pkcs11rs/actions/workflows/ci.yml/badge.svg)](https://github.com/qpernil/pkcs11rs/actions/workflows/ci.yml)
 
 `pkcs11rs` is a Rust PKCS #11 provider for YubiKey CCID and FIDO HID
-applications and YubiHSM devices. It exposes hardware-backed keys and
-certificates through the standard Cryptoki API while keeping private key
-operations on the device.
+applications, YubiHSM devices, and explicitly configured in-memory software
+tokens. Hardware private-key operations remain on the device; software
+private keys exist only as session objects in dedicated software slots.
 
 The project currently implements PKCS #11 2.40, 3.0, 3.1, and 3.2 function
 tables. Unsupported entry points are present in the ABI and return the
@@ -35,6 +35,8 @@ The minimum supported Rust version is 1.85.
   extension.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
+- **Named software slots** created only by explicit configuration, with
+  session-only RSA, EC, Ed25519, and X25519 private keys.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
@@ -157,6 +159,28 @@ pkcs11-tool \
 
 No configuration is required for normal discovery. The module probes supported
 YubiHSM USB devices and the default CCID applets available through PC/SC.
+
+Add one or more independent in-memory software tokens with a comma-separated
+list of names:
+
+```sh
+export PKCS11RS_SOFTWARE_SLOTS='build signing,key exchange'
+```
+
+The variable is absent by default, so no software slot is normally exposed.
+Each configured name creates one present slot and is reported in
+`CK_SLOT_INFO.slotDescription` and `CK_TOKEN_INFO.label`. Names are trimmed,
+must be unique and nonempty, and may contain at most 32 UTF-8 bytes. An empty
+entry, duplicate name, overlong name, or non-UTF-8 value makes `C_Initialize`
+return `CKR_ARGUMENTS_BAD`.
+
+Software slots have no PIN and never advertise `CKF_HW` or `CKF_HW_SLOT`.
+Private keys may be generated or imported only with `CKA_TOKEN=CK_FALSE`; they
+are removed with their creating session. `CKA_TOKEN=CK_TRUE` never falls back
+to session storage. `PKCS11RS_TOKEN_STORAGE` provides a name-scoped store for
+supported non-private token objects, but never persists software private-key
+material. See [Named software slots](docs/software.md) for the exact
+mechanisms, curves, metadata, and object lifecycle.
 
 Add remote YubiHSM Connector instances with a comma-separated URL list:
 
@@ -284,7 +308,9 @@ provider. Tokens without a stable identity continue to return
 `CKR_TOKEN_WRITE_PROTECTED` for provider-backed token-object creation.
 Software private keys are always session objects. A private-key request with
 `CKA_TOKEN=CK_TRUE` must be fulfilled by the applet or HSM as a real hardware
-object, otherwise it fails.
+object, otherwise it fails. Named software slots always reject that request;
+the generic storage setting persists only their supported non-private token
+objects.
 
 The files contain unencrypted private previewSign protocol metadata. On Unix,
 new object files use mode `0600`, but the caller remains responsible for
@@ -336,6 +362,7 @@ export PKCS11RS_CCID_SECURE_CHANNEL=scp11c
 
 Detailed configuration:
 
+- [Named software slots](docs/software.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
 - [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)
 - [PIV backend](docs/piv.md)
@@ -516,12 +543,12 @@ integration limits.
 
 The module has typed software private-key implementations for RSA, NIST P-224,
 P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,
-brainpoolP512r1, Ed25519, and X25519. They are reserved for a separately
-configured software slot; hardware and applet slots neither advertise nor
-create generic software private keys. Their shared public-key implementation
-remains available for projected and imported public objects. A private template
-with `CKA_TOKEN=CK_TRUE` is always delegated to the selected backend, which must
-create a genuine token private key or fail.
+brainpoolP512r1, Ed25519, and X25519. They are reserved for named slots
+configured by `PKCS11RS_SOFTWARE_SLOTS`; hardware and applet slots neither
+advertise nor create generic software private keys. Their shared public-key
+implementation remains available for projected and imported public objects.
+A private template with `CKA_TOKEN=CK_TRUE` never falls back to software
+session storage.
 
 ## Known Limitations
 

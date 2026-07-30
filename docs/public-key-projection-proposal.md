@@ -12,7 +12,7 @@ pkcs11rs includes a vendor-defined reference implementation named
 for all supported backends and accepts `CKA_TOKEN=true` when the slot has a
 writable token provider. YubiHSM supplies a native provider that retains the
 public object in pkcs11rs-owned canonical metadata on the device. It supports
-software RSA private keys and PIV, OpenPGP, YubiHSM,
+software RSA and EC private keys in named software slots and PIV, OpenPGP, YubiHSM,
 resident-FIDO, and previewSign private objects when their backend metadata
 contains a validated RSA, EC, or Ed25519 public component. RSA encryption and
 RSA, ECDSA, and EdDSA verification execute in software on the projected
@@ -27,6 +27,11 @@ matching and conflicting intrinsic attributes; non-private bases; unavailable
 token storage; session cleanup; generic token creation, refresh, update, and
 destruction; and YubiHSM token creation, rediscovery, material validation, and
 independent destruction.
+
+Named software slots produce session projections by default. When
+`PKCS11RS_TOKEN_STORAGE` is configured, an explicit `CKA_TOKEN=CK_TRUE`
+projection uses the provider scoped by the configured software-token name.
+This stores only the public object, never its private base.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and
