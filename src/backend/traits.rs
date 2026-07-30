@@ -76,7 +76,14 @@ pub(crate) trait Slot {
     }
     fn kind(&self) -> SlotKind;
     fn physical_device_key(&self) -> Option<crate::device::PhysicalDeviceKey> {
-        None
+        crate::device::DeviceIdentity {
+            manufacturer: self.manufacturer().to_owned(),
+            product: self.product().to_owned(),
+            serial: self.serial().to_owned(),
+            hardware_version: None,
+            firmware_version: None,
+        }
+        .physical_key()
     }
     fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
         None
@@ -209,7 +216,7 @@ pub(crate) trait Slot {
         false
     }
     fn supports_authentication_token_profile(&self) -> bool {
-        self.mechanisms().iter().any(|mechanism| {
+        self.backend_mechanisms().iter().any(|mechanism| {
             mechanism.type_ == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
                 && mechanism.flags & CKF_SIGN as CK_FLAGS != 0
         })
@@ -275,20 +282,29 @@ pub(crate) trait Slot {
     fn supports_software_public_operations(&self) -> bool {
         true
     }
+    fn supports_software_private_operations(&self) -> bool {
+        true
+    }
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
+        let mut software_mechanisms = Vec::new();
         if self.supports_software_public_operations() {
-            for software in software_public_mechanisms() {
-                if let Some(existing) = mechanisms
-                    .iter_mut()
-                    .find(|mechanism| mechanism.type_ == software.type_)
-                {
-                    existing.min_key_size = existing.min_key_size.min(software.min_key_size);
-                    existing.max_key_size = existing.max_key_size.max(software.max_key_size);
-                    existing.flags |= software.flags;
-                } else {
-                    mechanisms.push(software);
-                }
+            software_mechanisms.extend(software_public_mechanisms());
+        }
+        if self.supports_software_private_operations() {
+            software_mechanisms.extend(software_private_mechanisms());
+        }
+        for software in software_mechanisms {
+            if let Some(existing) = mechanisms
+                .iter_mut()
+                .find(|mechanism| mechanism.type_ == software.type_)
+            {
+                existing.min_key_size = existing.min_key_size.min(software.min_key_size);
+                existing.max_key_size = existing.max_key_size.max(software.max_key_size);
+                existing.flags |= software.flags;
+                existing.flags &= !(CKF_HW as CK_FLAGS);
+            } else {
+                mechanisms.push(software);
             }
         }
         for software in SOFTWARE_DIGEST_MECHANISMS {

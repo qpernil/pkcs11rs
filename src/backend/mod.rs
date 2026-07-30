@@ -16,8 +16,9 @@ pub(crate) use crypto::{
     encode_rsa_pss, mgf1, mgf_digest, openpgp_ec_coordinate_length, openpgp_ec_params,
     openpgp_sign_mechanism_supported, openpgp_signature, piv_digest_info, piv_hash_mechanism,
     piv_is_hashed_ecdsa, piv_is_hashed_rsa_pkcs, piv_is_pss_mechanism, pss_hash_mechanism,
-    rsa_pkcs1_encrypt, rsa_pkcs1_recover, rsa_pkcs1_sign, rsa_public_operation,
-    validate_ec_public_point, verify_ecdsa, verify_ed25519, verify_rsa_pss, EcCurve,
+    rsa_pkcs1_encrypt, rsa_pkcs1_recover, rsa_pkcs1_sign, rsa_private_operation,
+    rsa_public_operation, validate_ec_public_point, verify_ecdsa, verify_ed25519, verify_rsa_pss,
+    EcCurve,
 };
 #[cfg(all(test, feature = "mock-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
@@ -49,7 +50,7 @@ pub(crate) use ccid::{
     parse_ccid_application, parse_ccid_application_list, parse_secure_channel, PcscAppletSession,
 };
 #[cfg(test)]
-pub(crate) use crypto::{ec_multiply, rsa_private_operation, EcPointValue};
+pub(crate) use crypto::{ec_multiply, EcPointValue};
 #[cfg(test)]
 pub(crate) use openpgp::{
     openpgp_key_generation_mechanism, openpgp_private_key_template, openpgp_touch_policy,

@@ -766,7 +766,9 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
 
     let private_key = with_test_slot_context(TEST_SLOT_ID, |context| {
         match &context.memory_objects.get(&2).unwrap().material {
-            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(key)) => key.clone(),
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(key)) => {
+                key.clone()
+            }
             _ => panic!("test private key is not RSA"),
         }
     });
@@ -946,7 +948,7 @@ pub fn sign_init_reports_key_and_mechanism_errors() {
     );
 
     let mut unadvertised = CK_MECHANISM {
-        mechanism: CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE,
+        mechanism: CKM_DSA as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
         ulParameterLen: 0,
     };

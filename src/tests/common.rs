@@ -6029,14 +6029,14 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!(eddsa.flags, CKF_VERIFY as CK_FLAGS);
+    assert_eq!(eddsa.flags, (CKF_SIGN | CKF_VERIFY) as CK_FLAGS);
     let rsa_generation = mechanisms
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
         .unwrap();
     assert_eq!(
         (rsa_generation.min_key_size, rsa_generation.max_key_size),
-        (1024, 2048)
+        (1024, 4096)
     );
 }
 
@@ -7647,9 +7647,9 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
             .find(|(_, object)| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
             .unwrap();
         let private = match &object.material {
-            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(private)) => {
-                private.as_ref().clone()
-            }
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(
+                private,
+            )) => private.as_ref().clone(),
             _ => panic!("default private key must be RSA"),
         };
         (*handle, private)

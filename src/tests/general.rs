@@ -806,10 +806,9 @@ fn openpgp_mechanisms_are_unique_and_report_complete_rsa_flags() {
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_RSA_X_509 as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!(raw_rsa.flags & CKF_SIGN as CK_FLAGS, 0);
     assert_eq!(
-        raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS,
-        (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS
+        raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS
     );
     for mechanism_type in [
         CKM_RSA_PKCS_KEY_PAIR_GEN,
@@ -1092,13 +1091,18 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert_eq!(token_info.ulMaxPinLen, 0);
     assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
     let mechanisms = crate::Slot::mechanisms(&slot);
-    assert_eq!(mechanisms.len(), crate::SOFTWARE_DIGEST_MECHANISMS.len());
-    assert!(mechanisms.iter().all(|mechanism| {
-        mechanism.flags == CKF_DIGEST as CK_FLAGS
-            && crate::SOFTWARE_DIGEST_MECHANISMS
-                .iter()
-                .any(|expected| expected.type_ == mechanism.type_)
-    }));
+    for expected in crate::SOFTWARE_DIGEST_MECHANISMS {
+        let mechanism = mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == expected.type_)
+            .unwrap();
+        assert_eq!(mechanism.flags, CKF_DIGEST as CK_FLAGS);
+    }
+    for expected in crate::software_private_mechanisms() {
+        assert!(mechanisms
+            .iter()
+            .any(|mechanism| mechanism.type_ == expected.type_));
+    }
     assert!(crate::Slot::login(&mut slot, &[]).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
     crate::Slot::logout(&mut slot).unwrap();

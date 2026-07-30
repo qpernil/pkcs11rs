@@ -9,6 +9,105 @@ use crate::*;
 
 const AES_CMAC_LENGTH: usize = 16;
 
+fn software_sign_mechanism_supported(
+    key: &SoftwarePrivateKeyMaterial,
+    mechanism: CK_MECHANISM_TYPE,
+) -> bool {
+    match key {
+        SoftwarePrivateKeyMaterial::Rsa(_) => {
+            mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || piv_is_hashed_rsa_pkcs(mechanism)
+                || piv_is_pss_mechanism(mechanism)
+        }
+        SoftwarePrivateKeyMaterial::P256(_) | SoftwarePrivateKeyMaterial::P384(_) => {
+            mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
+        }
+        SoftwarePrivateKeyMaterial::Ed25519(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+        SoftwarePrivateKeyMaterial::X25519(_) => false,
+    }
+}
+
+fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, Error> {
+    match key {
+        SoftwarePrivateKeyMaterial::Rsa(key) => Ok(key.size()),
+        SoftwarePrivateKeyMaterial::P256(_) => Ok(64),
+        SoftwarePrivateKeyMaterial::P384(_) => Ok(96),
+        SoftwarePrivateKeyMaterial::Ed25519(_) => Ok(64),
+        SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
+}
+
+fn software_sign(
+    key: &SoftwarePrivateKeyMaterial,
+    mechanism: CK_MECHANISM_TYPE,
+    pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    match key {
+        SoftwarePrivateKeyMaterial::Rsa(key) => {
+            let digest = piv_hash_mechanism(mechanism)
+                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                .transpose()?;
+            if piv_is_pss_mechanism(mechanism) {
+                let (mgf, salt_length, hash_mechanism) = pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                let digest = digest.as_deref().unwrap_or(data);
+                let encoded = encode_rsa_pss(
+                    digest,
+                    key.size(),
+                    hash_mechanism,
+                    mgf,
+                    salt_length as usize,
+                )?;
+                rsa_private_operation(key, &encoded)
+            } else if piv_is_hashed_rsa_pkcs(mechanism) {
+                let digest = digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                let digest_info =
+                    piv_digest_info(mechanism, digest).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+                rsa_pkcs1_sign(key, &digest_info)
+            } else if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
+                rsa_pkcs1_sign(key, data)
+            } else if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+                if data.len() > key.size() {
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                }
+                let mut encoded = vec![0; key.size() - data.len()];
+                encoded.extend_from_slice(data);
+                rsa_private_operation(key, &encoded)
+            } else {
+                Err(CKR_MECHANISM_INVALID.into())
+            }
+        }
+        SoftwarePrivateKeyMaterial::P256(key) => {
+            let digest = piv_hash_mechanism(mechanism)
+                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                .transpose()?
+                .unwrap_or_else(|| data.to_vec());
+            let signing_key = p256::ecdsa::SigningKey::from(key.clone());
+            let signature: p256::ecdsa::Signature =
+                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
+                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+            Ok(signature.to_bytes().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::P384(key) => {
+            let digest = piv_hash_mechanism(mechanism)
+                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+                .transpose()?
+                .unwrap_or_else(|| data.to_vec());
+            let signing_key = p384::ecdsa::SigningKey::from(key.clone());
+            let signature: p384::ecdsa::Signature =
+                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
+                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
+            Ok(signature.to_bytes().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::Ed25519(key) => {
+            let signature: ed25519_dalek::Signature = signature::Signer::sign(key, data);
+            Ok(signature.to_bytes().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
+}
+
 pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
     match mechanism.mechanism {
         x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE => {
@@ -271,7 +370,7 @@ fn sign_init(
                 && object.key_type != expected_key_type)
             || !matches!(
                 object.material,
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(_))
+                KeyMaterial::SoftwarePrivate(_)
                     | KeyMaterial::PivPrivate { .. }
                     | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
@@ -301,16 +400,28 @@ fn sign_init(
             KeyMaterial::FidoResidentPrivate { .. }
                 if mechanism.mechanism == CKM_PKCS11RS_FIDO_ASSERTION
         );
-        if !matches!(object.material, KeyMaterial::YubiHsm { .. })
+        let software_mechanism_supported = match &object.material {
+            KeyMaterial::SoftwarePrivate(key) => {
+                key.key_type() == expected_key_type
+                    && software_sign_mechanism_supported(key, mechanism.mechanism)
+            }
+            _ => false,
+        };
+        let yubihsm_mechanism_supported = matches!(object.material, KeyMaterial::YubiHsm { .. })
+            && ctx
+                .get_slot(slot_id)?
+                .backend_mechanisms()
+                .iter()
+                .any(|details| {
+                    details.type_ == mechanism.mechanism
+                        && details.flags & CKF_SIGN as CK_FLAGS != 0
+                });
+        if !yubihsm_mechanism_supported
             && !piv_mechanism_supported
             && !openpgp_mechanism_supported
             && !preview_sign_mechanism_supported
             && !fido_assertion_mechanism_supported
-            && !matches!(
-                &object.material,
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(_))
-                    if mechanism.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-            )
+            && !software_mechanism_supported
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
@@ -477,7 +588,7 @@ fn sign(
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let required = match &operation.key {
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) => key.size(),
+            KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
             KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
                 piv::Algorithm::Rsa1024
                 | piv::Algorithm::Rsa2048
@@ -563,8 +674,8 @@ fn sign(
 
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(private_key)) => {
-                    rsa_pkcs1_sign(private_key, data)
+                KeyMaterial::SoftwarePrivate(key) => {
+                    software_sign(key, operation.mechanism, operation.pss, data)
                 }
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..

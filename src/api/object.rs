@@ -111,6 +111,15 @@ fn create_object(
     let templ = from_raw_parts(templ, count as usize)?;
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        let class = template_attribute(templ, CKA_CLASS as CK_ATTRIBUTE_TYPE)
+            .map(read_ulong_template_attribute)
+            .transpose()
+            .map_err(Error::from)?;
+        let token = template_attribute(templ, CKA_TOKEN as CK_ATTRIBUTE_TYPE)
+            .map(read_bool_template_attribute)
+            .transpose()
+            .map_err(Error::from)?
+            .unwrap_or(false);
         if ctx.get_slot(slot_id)?.kind() == SlotKind::Fido2 {
             if let Some(imported) = preview_sign_import_object(templ)? {
                 validate_new_object_access(&imported, flags, logged_in)?;
@@ -118,7 +127,14 @@ fn create_object(
                 return Ok(());
             }
         }
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv) {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::Piv)
+            && token
+            && class.is_some_and(|class| {
+                class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                    || class == CKO_CERTIFICATE as CK_OBJECT_CLASS
+                    || class == CKO_DATA as CK_OBJECT_CLASS
+            })
+        {
             let import = piv_import_parameters(templ)?;
             match import {
                 PivImport::Private {
@@ -227,7 +243,10 @@ fn create_object(
             }
             return Ok(());
         }
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::OpenPgp) {
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::Ccid(CcidApplication::OpenPgp)
+            && token
+            && class == Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+        {
             let import = openpgp_private_import(templ)?;
             validate_new_object_access(&import.object, flags, logged_in)?;
             ctx._get_slot_mut(slot_id)?.openpgp_import_private_key(
@@ -250,7 +269,11 @@ fn create_object(
         }
         let mut object = parse_create_object_template(templ)?;
         validate_new_object_access(&object, flags, logged_in)?;
-        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
+        if crate::backed_object::supports_backed_object(&object) {
+            *object_handle = ctx.store_backed_object(session_handle, object)?;
+            return Ok(());
+        }
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm && object.token {
             let hardware_object = yubihsm_hardware_import_object(&object)?;
             let (command, expected_class) = yubihsm_import_command(&hardware_object)?;
             let response = ctx
@@ -283,12 +306,11 @@ fn create_object(
             *object_handle = handle;
             return Ok(());
         }
-        let handle = if crate::backed_object::supports_backed_object(&object) {
-            ctx.store_backed_object(session_handle, object)?
-        } else {
-            object.set_creator(session_handle, slot_id);
-            ctx.insert_object(object)?
-        };
+        if object.token && matches!(object.material, KeyMaterial::SoftwarePrivate(_)) {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        object.set_creator(session_handle, slot_id);
+        let handle = ctx.insert_object(object)?;
         *object_handle = handle;
         Ok(())
     })
@@ -331,7 +353,8 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&without_touch)?;
-        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) = parsed.material else {
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) = parsed.material
+        else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
         let bits = key.size() * 8;
@@ -340,7 +363,7 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
         }
         (
             OpenPgpAlgorithm::Rsa { bits },
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)),
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)),
         )
     } else {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
@@ -509,7 +532,8 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&filtered)?;
-        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key)) = parsed.material else {
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) = parsed.material
+        else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
         let algorithm = match key.size() {
@@ -927,7 +951,7 @@ fn yubihsm_import_command(
     object: &TokenObject,
 ) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS), Error> {
     match &object.material {
-        KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(key))
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
             if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
         {
             let (algorithm, component_length) = match key.size() {
@@ -1022,6 +1046,8 @@ fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     matches!(
         attribute_type,
         x if x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+            || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
             || x == CKA_MODULUS as CK_ATTRIBUTE_TYPE
             || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
             || x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE
@@ -1131,7 +1157,73 @@ fn build_imported_key_material(
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             key.precompute()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKey::Rsa(Box::new(key)))
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(Box::new(key)))
+        }
+        (class, key_type)
+            if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && matches!(
+                    key_type,
+                    x if x == CKK_EC as CK_KEY_TYPE
+                        || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                        || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+                ) =>
+        {
+            let parameters = components
+                .remove(&(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let value = components
+                .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let material = if key_type == CKK_EC as CK_KEY_TYPE {
+                if parameters.as_slice()
+                    == piv_ec_parameters(piv::Algorithm::EccP256).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                {
+                    let scalar = padded_private_scalar(&value, 32)?;
+                    SoftwarePrivateKeyMaterial::P256(
+                        p256::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    )
+                } else if parameters.as_slice()
+                    == piv_ec_parameters(piv::Algorithm::EccP384).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                {
+                    let scalar = padded_private_scalar(&value, 48)?;
+                    SoftwarePrivateKeyMaterial::P384(
+                        p384::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    )
+                } else {
+                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
+                }
+            } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
+                if parameters.as_slice()
+                    != piv_ec_parameters(piv::Algorithm::Ed25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                {
+                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
+                }
+                if value.len() != 32 {
+                    return Err(CKR_KEY_SIZE_RANGE.into());
+                }
+                let value: [u8; 32] = value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&value))
+            } else {
+                if parameters.as_slice()
+                    != piv_ec_parameters(piv::Algorithm::X25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                {
+                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
+                }
+                if value.len() != 32 {
+                    return Err(CKR_KEY_SIZE_RANGE.into());
+                }
+                let value: [u8; 32] = value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(value))
+            };
+            KeyMaterial::SoftwarePrivate(material)
         }
         _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };
@@ -1140,6 +1232,15 @@ fn build_imported_key_material(
     } else {
         Err(CKR_TEMPLATE_INCONSISTENT.into())
     }
+}
+
+fn padded_private_scalar(value: &[u8], length: usize) -> Result<Zeroizing<Vec<u8>>, Error> {
+    if value.is_empty() || value.len() > length {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    let mut scalar = Zeroizing::new(vec![0; length]);
+    scalar[length - value.len()..].copy_from_slice(value);
+    Ok(scalar)
 }
 
 pub(super) fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Error> {
@@ -1213,6 +1314,10 @@ fn copy_object(
         }
         if rv != CKR_OK as CK_RV {
             return Err(rv.into());
+        }
+        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwarePrivate(_))
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         validate_new_object_access(&copied_object, flags, logged_in)?;
         copied_object.set_creator(session_handle, slot_id);

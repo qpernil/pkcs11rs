@@ -403,9 +403,6 @@ impl Slot for HsmAuthSlot {
         Vec::new()
     }
 
-    fn supports_software_public_operations(&self) -> bool {
-        false
-    }
     fn supports_protected_authentication_path(&self) -> bool {
         true
     }
@@ -779,10 +776,6 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn backend_mechanisms(&self) -> Vec<MechanismDetails> {
         Vec::new()
-    }
-
-    fn supports_software_public_operations(&self) -> bool {
-        false
     }
 }
 

@@ -1422,7 +1422,7 @@ pub fn create_object_requires_and_imports_real_key_material() {
     let imported = crate::parse_create_object_template(&private_template).unwrap();
     assert!(matches!(
         imported.material,
-        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKey::Rsa(_))
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(_))
     ));
     assert_eq!(
         imported.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE),
@@ -1441,13 +1441,13 @@ pub fn create_object_requires_and_imports_real_key_material() {
 
     let extractable_private_template = crate::TokenObjectTemplate {
         class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
+        key_type: Some(CKK_RSA as CK_KEY_TYPE),
         extractable: Some(true),
         ..crate::TokenObjectTemplate::default()
     };
-    assert!(matches!(
-        extractable_private_template.into_object(),
-        Err(rv) if rv == CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
-    ));
+    let extractable = extractable_private_template.into_object().unwrap();
+    assert!(extractable.extractable);
+    assert!(!extractable.never_extractable);
 }
 
 #[test]
@@ -1549,6 +1549,56 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
     }
 
     finalize_for_test();
+}
+
+#[test]
+fn software_ec_private_imports_use_curve_specific_material() {
+    for (key_type, algorithm, value_length) in [
+        (CKK_EC as CK_KEY_TYPE, crate::piv::Algorithm::EccP256, 32),
+        (CKK_EC as CK_KEY_TYPE, crate::piv::Algorithm::EccP384, 48),
+        (
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+            crate::piv::Algorithm::Ed25519,
+            32,
+        ),
+        (
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            crate::piv::Algorithm::X25519,
+            32,
+        ),
+    ] {
+        let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let mut key_type = key_type;
+        let mut parameters = crate::piv_ec_parameters(algorithm).unwrap().to_vec();
+        let mut value = vec![0; value_length];
+        value[value_length - 1] = 1;
+        let template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+            bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+        ];
+        let object = crate::parse_create_object_template(&template).unwrap();
+        assert_eq!(object.key_type, key_type);
+        assert!(!object.token);
+        assert!(matches!(
+            (&object.material, algorithm),
+            (
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::P256(_)),
+                crate::piv::Algorithm::EccP256
+            ) | (
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::P384(_)),
+                crate::piv::Algorithm::EccP384
+            ) | (
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Ed25519(_)),
+                crate::piv::Algorithm::Ed25519
+            ) | (
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::X25519(_)),
+                crate::piv::Algorithm::X25519
+            )
+        ));
+        assert!(object.projected_public_key().is_ok());
+    }
 }
 
 #[test]

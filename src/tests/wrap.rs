@@ -486,13 +486,15 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
         let mut ec_parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
         let mut sign = CK_TRUE as CK_BBOOL;
         let mut extractable = CK_TRUE as CK_BBOOL;
-        let mut ec_public_template = [bytes_attribute(
-            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
-            &mut ec_parameters,
-        )];
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut ec_public_template = [
+            bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut ec_parameters),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        ];
         let mut ec_private_template = [
             scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
             scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
         ];
         let mut ec_generation = CK_MECHANISM {
             mechanism: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -520,11 +522,12 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
         let mut rsa_public_template = [
             scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
             scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
         ];
-        let mut rsa_private_template = [scalar_attribute(
-            CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
-            &mut unwrap,
-        )];
+        let mut rsa_private_template = [
+            scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        ];
         let mut rsa_generation = CK_MECHANISM {
             mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             pParameter: std::ptr::null_mut(),
