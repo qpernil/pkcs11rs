@@ -2294,10 +2294,11 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
     Ok(objects)
 }
 
-// Each SlotContext and every Rc reachable from it is owned by one slot-context
-// mutex. Physical PC/SC state and HSM Auth providers cross slot boundaries only
-// through synchronized Arc handles; the slot-local Rc graph never escapes this
-// guard.
+// SAFETY: Each SlotContext and every Rc reachable from it is owned by one
+// slot-context mutex and accessed only while that mutex is held. The lock
+// helpers require returned values to be Send, preventing ordinary non-Send
+// slot state from escaping their guards. Physical PC/SC state and HSM Auth
+// providers cross slot boundaries only through synchronized Arc handles.
 unsafe impl Send for SlotContext {}
 
 // Presence is the module lifecycle state. Ordinary calls retain a shared guard

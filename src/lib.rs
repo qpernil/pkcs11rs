@@ -777,7 +777,7 @@ fn session_slot_context(
         .ok_or(CKR_SESSION_HANDLE_INVALID.into())
 }
 
-fn with_slot_context<T>(
+fn with_slot_context<T: Send>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -794,7 +794,7 @@ fn with_slot_context<T>(
     f(&child)
 }
 
-fn with_slot_context_mut<T>(
+fn with_slot_context_mut<T: Send>(
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -803,7 +803,7 @@ fn with_slot_context_mut<T>(
     with_slot_context_mut_in_context(ctx, slot_id, f)
 }
 
-fn with_slot_context_mut_in_context<T>(
+fn with_slot_context_mut_in_context<T: Send>(
     ctx: &ModuleContext,
     slot_id: CK_SLOT_ID,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
@@ -819,7 +819,7 @@ fn with_slot_context_mut_in_context<T>(
     f(&mut child)
 }
 
-fn with_session_context<T>(
+fn with_session_context<T: Send>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -836,7 +836,7 @@ fn with_session_context<T>(
     f(&child)
 }
 
-fn with_session_context_mut<T>(
+fn with_session_context_mut<T: Send>(
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
 ) -> Result<T, Error> {
@@ -845,7 +845,7 @@ fn with_session_context_mut<T>(
     with_session_context_mut_in_context(ctx, session_handle, f)
 }
 
-fn with_session_context_mut_in_context<T>(
+fn with_session_context_mut_in_context<T: Send>(
     ctx: &ModuleContext,
     session_handle: CK_SESSION_HANDLE,
     f: impl FnOnce(&mut SlotContext) -> Result<T, Error>,
