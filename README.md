@@ -514,14 +514,14 @@ also removes its pkcs11rs-owned companion metadata. See
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.
 
-Every slot also advertises software session-key support for RSA, P-256, P-384,
-Ed25519, and X25519. `C_GenerateKeyPair` and `C_CreateObject` create typed
-software private objects only when `CKA_TOKEN=CK_FALSE` (the PKCS #11 default).
-They support the applicable signing, RSA decryption, and ECDH mechanisms.
-Their public counterparts use the shared projection implementation and may be
-session objects or persisted token objects. A private template with
-`CKA_TOKEN=CK_TRUE` bypasses software creation: the selected backend must create
-a genuine hardware private key or the call fails.
+The module has typed software private-key implementations for RSA, NIST P-224,
+P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,
+brainpoolP512r1, Ed25519, and X25519. They are reserved for a separately
+configured software slot; hardware and applet slots neither advertise nor
+create generic software private keys. Their shared public-key implementation
+remains available for projected and imported public objects. A private template
+with `CKA_TOKEN=CK_TRUE` is always delegated to the selected backend, which must
+create a genuine token private key or fail.
 
 ## Known Limitations
 

@@ -1553,25 +1553,62 @@ pub fn ec_key_pairs_expose_matching_public_key_info() {
 
 #[test]
 fn software_ec_private_imports_use_curve_specific_material() {
-    for (key_type, algorithm, value_length) in [
-        (CKK_EC as CK_KEY_TYPE, crate::piv::Algorithm::EccP256, 32),
-        (CKK_EC as CK_KEY_TYPE, crate::piv::Algorithm::EccP384, 48),
+    for curve in [
+        crate::EcCurve::P224,
+        crate::EcCurve::P256,
+        crate::EcCurve::P384,
+        crate::EcCurve::P521,
+        crate::EcCurve::K256,
+        crate::EcCurve::BrainpoolP256,
+        crate::EcCurve::BrainpoolP384,
+        crate::EcCurve::BrainpoolP512,
+    ] {
+        let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let mut key_type = CKK_EC as CK_KEY_TYPE;
+        let mut parameters = crate::ec_curve_parameters(curve).to_vec();
+        let value_length = crate::ec_parameters(curve).unwrap().coordinate_length;
+        let mut value = vec![0; value_length];
+        value[value_length - 1] = 1;
+        let template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+            bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+        ];
+        let object = crate::parse_create_object_template(&template).unwrap();
+        assert_eq!(object.key_type, key_type);
+        assert!(!object.token);
+        assert!(matches!(
+            &object.material,
+            crate::KeyMaterial::SoftwarePrivate(material)
+                if material.weierstrass_curve() == Some(curve)
+        ));
+        assert!(object.projected_public_key().is_ok());
+
+        value.fill(0);
+        let malformed = crate::parse_create_object_template(&template);
+        assert!(matches!(
+            malformed,
+            Err(crate::error::Error::Generic(rv))
+                if rv == CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+        ));
+    }
+
+    for (key_type, algorithm) in [
         (
             CKK_EC_EDWARDS as CK_KEY_TYPE,
             crate::piv::Algorithm::Ed25519,
-            32,
         ),
         (
             CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             crate::piv::Algorithm::X25519,
-            32,
         ),
     ] {
         let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
         let mut key_type = key_type;
         let mut parameters = crate::piv_ec_parameters(algorithm).unwrap().to_vec();
-        let mut value = vec![0; value_length];
-        value[value_length - 1] = 1;
+        let mut value = vec![0; 32];
+        value[31] = 1;
         let template = [
             scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
             scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),

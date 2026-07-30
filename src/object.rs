@@ -59,8 +59,14 @@ pub(crate) enum PublicKeyMaterial {
 #[derive(Clone)]
 pub(crate) enum SoftwarePrivateKeyMaterial {
     Rsa(Box<RsaPrivateKey>),
+    P224(p224::SecretKey),
     P256(p256::SecretKey),
     P384(p384::SecretKey),
+    P521(p521::SecretKey),
+    K256(k256::SecretKey),
+    BrainpoolP256(bp256::r1::SecretKey),
+    BrainpoolP384(bp384::r1::SecretKey),
+    BrainpoolP512(crate::brainpool512::SecretKey),
     Ed25519(ed25519_dalek::SigningKey),
     X25519(x25519_dalek::StaticSecret),
 }
@@ -69,8 +75,14 @@ impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rsa(key) => fmt.debug_tuple("Rsa").field(&key.size()).finish(),
+            Self::P224(_) => fmt.write_str("P224([REDACTED])"),
             Self::P256(_) => fmt.write_str("P256([REDACTED])"),
             Self::P384(_) => fmt.write_str("P384([REDACTED])"),
+            Self::P521(_) => fmt.write_str("P521([REDACTED])"),
+            Self::K256(_) => fmt.write_str("K256([REDACTED])"),
+            Self::BrainpoolP256(_) => fmt.write_str("BrainpoolP256([REDACTED])"),
+            Self::BrainpoolP384(_) => fmt.write_str("BrainpoolP384([REDACTED])"),
+            Self::BrainpoolP512(_) => fmt.write_str("BrainpoolP512([REDACTED])"),
             Self::Ed25519(_) => fmt.write_str("Ed25519([REDACTED])"),
             Self::X25519(_) => fmt.write_str("X25519([REDACTED])"),
         }
@@ -78,52 +90,62 @@ impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
 }
 
 impl SoftwarePrivateKeyMaterial {
+    pub(crate) fn weierstrass_curve(&self) -> Option<crate::EcCurve> {
+        match self {
+            Self::P224(_) => Some(crate::EcCurve::P224),
+            Self::P256(_) => Some(crate::EcCurve::P256),
+            Self::P384(_) => Some(crate::EcCurve::P384),
+            Self::P521(_) => Some(crate::EcCurve::P521),
+            Self::K256(_) => Some(crate::EcCurve::K256),
+            Self::BrainpoolP256(_) => Some(crate::EcCurve::BrainpoolP256),
+            Self::BrainpoolP384(_) => Some(crate::EcCurve::BrainpoolP384),
+            Self::BrainpoolP512(_) => Some(crate::EcCurve::BrainpoolP512),
+            Self::Rsa(_) | Self::Ed25519(_) | Self::X25519(_) => None,
+        }
+    }
+
     pub(crate) fn key_type(&self) -> CK_KEY_TYPE {
         match self {
             Self::Rsa(_) => CKK_RSA as CK_KEY_TYPE,
-            Self::P256(_) | Self::P384(_) => CKK_EC as CK_KEY_TYPE,
+            Self::P224(_)
+            | Self::P256(_)
+            | Self::P384(_)
+            | Self::P521(_)
+            | Self::K256(_)
+            | Self::BrainpoolP256(_)
+            | Self::BrainpoolP384(_)
+            | Self::BrainpoolP512(_) => CKK_EC as CK_KEY_TYPE,
             Self::Ed25519(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
             Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
         }
     }
 
     pub(crate) fn public_key(&self) -> Result<PublicKeyMaterial, Error> {
+        macro_rules! weierstrass {
+            ($key:expr, $curve:expr) => {{
+                let encoded =
+                    elliptic_curve::sec1::ToSec1Point::to_sec1_point(&$key.public_key(), false);
+                let public_key = encoded
+                    .as_bytes()
+                    .strip_prefix(&[0x04])
+                    .ok_or(CKR_DATA_INVALID)?
+                    .to_vec();
+                Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::ec_curve_parameters($curve).to_vec(),
+                    public_key,
+                })
+            }};
+        }
         match self {
             Self::Rsa(key) => Ok(PublicKeyMaterial::Rsa(RsaPublicKey::from(key.as_ref()))),
-            Self::P256(key) => {
-                let encoded = p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
-                    &key.public_key(),
-                    false,
-                );
-                let public_key = encoded
-                    .as_bytes()
-                    .strip_prefix(&[0x04])
-                    .ok_or(CKR_DATA_INVALID)?
-                    .to_vec();
-                Ok(PublicKeyMaterial::Ec {
-                    parameters: crate::piv_ec_parameters(piv::Algorithm::EccP256)
-                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                        .to_vec(),
-                    public_key,
-                })
-            }
-            Self::P384(key) => {
-                let encoded = p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(
-                    &key.public_key(),
-                    false,
-                );
-                let public_key = encoded
-                    .as_bytes()
-                    .strip_prefix(&[0x04])
-                    .ok_or(CKR_DATA_INVALID)?
-                    .to_vec();
-                Ok(PublicKeyMaterial::Ec {
-                    parameters: crate::piv_ec_parameters(piv::Algorithm::EccP384)
-                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                        .to_vec(),
-                    public_key,
-                })
-            }
+            Self::P224(key) => weierstrass!(key, crate::EcCurve::P224),
+            Self::P256(key) => weierstrass!(key, crate::EcCurve::P256),
+            Self::P384(key) => weierstrass!(key, crate::EcCurve::P384),
+            Self::P521(key) => weierstrass!(key, crate::EcCurve::P521),
+            Self::K256(key) => weierstrass!(key, crate::EcCurve::K256),
+            Self::BrainpoolP256(key) => weierstrass!(key, crate::EcCurve::BrainpoolP256),
+            Self::BrainpoolP384(key) => weierstrass!(key, crate::EcCurve::BrainpoolP384),
+            Self::BrainpoolP512(key) => weierstrass!(key, crate::EcCurve::BrainpoolP512),
             Self::Ed25519(key) => Ok(PublicKeyMaterial::Ec {
                 parameters: crate::piv_ec_parameters(piv::Algorithm::Ed25519)
                     .ok_or(CKR_CURVE_NOT_SUPPORTED)?
@@ -142,8 +164,14 @@ impl SoftwarePrivateKeyMaterial {
     pub(crate) fn private_value(&self) -> Option<Vec<u8>> {
         match self {
             Self::Rsa(_) => None,
+            Self::P224(key) => Some(key.to_bytes().to_vec()),
             Self::P256(key) => Some(key.to_bytes().to_vec()),
             Self::P384(key) => Some(key.to_bytes().to_vec()),
+            Self::P521(key) => Some(key.to_bytes().to_vec()),
+            Self::K256(key) => Some(key.to_bytes().to_vec()),
+            Self::BrainpoolP256(key) => Some(key.to_bytes().to_vec()),
+            Self::BrainpoolP384(key) => Some(key.to_bytes().to_vec()),
+            Self::BrainpoolP512(key) => Some(key.to_bytes().to_vec()),
             Self::Ed25519(key) => Some(key.to_bytes().to_vec()),
             Self::X25519(key) => Some(key.to_bytes().to_vec()),
         }

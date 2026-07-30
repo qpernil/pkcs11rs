@@ -23,6 +23,10 @@ impl Slot for AbiTestSlot {
         SlotKind::Synthetic
     }
 
+    fn supports_software_private_operations(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> String {
         String::from("PKCS11RS ABI test slot")
     }

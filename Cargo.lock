@@ -77,6 +77,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -89,6 +90,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -884,6 +886,7 @@ dependencies = [
  "des",
  "ecdsa",
  "ed25519-dalek",
+ "elliptic-curve",
  "flate2",
  "getrandom 0.4.3",
  "ghash",
@@ -901,6 +904,8 @@ dependencies = [
  "pbkdf2",
  "pcsc",
  "pkcs8 0.11.0",
+ "primefield",
+ "primeorder",
  "rsa",
  "rustls",
  "rustls-pki-types",

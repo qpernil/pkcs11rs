@@ -306,7 +306,12 @@ fn create_object(
             *object_handle = handle;
             return Ok(());
         }
-        if object.token && matches!(object.material, KeyMaterial::SoftwarePrivate(_)) {
+        if matches!(object.material, KeyMaterial::SoftwarePrivate(_))
+            && (object.token
+                || !ctx
+                    .get_slot(slot_id)?
+                    .supports_software_private_operations())
+        {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         object.set_creator(session_handle, slot_id);
@@ -1175,24 +1180,43 @@ fn build_imported_key_material(
                 .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
                 .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
             let material = if key_type == CKK_EC as CK_KEY_TYPE {
-                if parameters.as_slice()
-                    == piv_ec_parameters(piv::Algorithm::EccP256).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                {
-                    let scalar = padded_private_scalar(&value, 32)?;
-                    SoftwarePrivateKeyMaterial::P256(
+                let curve = ec_curve_from_parameters(&parameters)
+                    .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
+                let scalar =
+                    padded_private_scalar(&value, ec_parameters(curve)?.coordinate_length)?;
+                match curve {
+                    EcCurve::P224 => SoftwarePrivateKeyMaterial::P224(
+                        p224::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
+                    EcCurve::P256 => SoftwarePrivateKeyMaterial::P256(
                         p256::SecretKey::from_slice(&scalar)
                             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    )
-                } else if parameters.as_slice()
-                    == piv_ec_parameters(piv::Algorithm::EccP384).ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                {
-                    let scalar = padded_private_scalar(&value, 48)?;
-                    SoftwarePrivateKeyMaterial::P384(
+                    ),
+                    EcCurve::P384 => SoftwarePrivateKeyMaterial::P384(
                         p384::SecretKey::from_slice(&scalar)
                             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    )
-                } else {
-                    return Err(CKR_CURVE_NOT_SUPPORTED.into());
+                    ),
+                    EcCurve::P521 => SoftwarePrivateKeyMaterial::P521(
+                        p521::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
+                    EcCurve::K256 => SoftwarePrivateKeyMaterial::K256(
+                        k256::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
+                    EcCurve::BrainpoolP256 => SoftwarePrivateKeyMaterial::BrainpoolP256(
+                        bp256::r1::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
+                    EcCurve::BrainpoolP384 => SoftwarePrivateKeyMaterial::BrainpoolP384(
+                        bp384::r1::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
+                    EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
+                        crate::brainpool512::SecretKey::from_slice(&scalar)
+                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                    ),
                 }
             } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
                 if parameters.as_slice()

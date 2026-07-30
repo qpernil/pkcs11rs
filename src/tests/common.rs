@@ -6029,14 +6029,14 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
         .unwrap();
-    assert_eq!(eddsa.flags, (CKF_SIGN | CKF_VERIFY) as CK_FLAGS);
+    assert_eq!(eddsa.flags, CKF_VERIFY as CK_FLAGS);
     let rsa_generation = mechanisms
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
         .unwrap();
     assert_eq!(
         (rsa_generation.min_key_size, rsa_generation.max_key_size),
-        (1024, 4096)
+        (1024, 2048)
     );
 }
 
@@ -6271,6 +6271,7 @@ struct TestSlot {
     present: std::cell::Cell<bool>,
     remove_on_refresh: bool,
     login_active: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    software_private_operations: bool,
     mechanisms: Vec<crate::MechanismDetails>,
     token_objects: Vec<crate::TokenObject>,
     session_objects: Vec<crate::TokenObject>,
@@ -6748,6 +6749,10 @@ impl crate::Slot for TestSlot {
         crate::SlotKind::Synthetic
     }
 
+    fn supports_software_private_operations(&self) -> bool {
+        self.software_private_operations
+    }
+
     fn name(&self) -> String {
         String::from("Test Slot")
     }
@@ -6902,6 +6907,7 @@ fn test_slot(present: bool) -> TestSlot {
         present: std::cell::Cell::new(present),
         remove_on_refresh: false,
         login_active: None,
+        software_private_operations: false,
         mechanisms: crate::MECHANISMS.to_vec(),
         token_objects: Vec::new(),
         session_objects: Vec::new(),
@@ -6924,6 +6930,36 @@ fn test_slot_with_mechanisms(
             }),
     );
     slot
+}
+
+#[test]
+fn software_capabilities_preserve_native_hardware_range_and_flag() {
+    let mut slot = test_slot(true);
+    slot.software_private_operations = true;
+    slot.mechanisms = vec![crate::MechanismDetails {
+        type_: CKM_ECDSA as CK_MECHANISM_TYPE,
+        min_key_size: 256,
+        max_key_size: 384,
+        flags: (CKF_HW | CKF_VERIFY) as CK_FLAGS,
+    }];
+
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    let ecdsa = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_ECDSA as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (256, 384));
+    assert_ne!(ecdsa.flags & CKF_HW as CK_FLAGS, 0);
+    assert_ne!(ecdsa.flags & CKF_SIGN as CK_FLAGS, 0);
+    assert_ne!(ecdsa.flags & CKF_VERIFY as CK_FLAGS, 0);
+
+    let eddsa = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(eddsa.flags & CKF_HW as CK_FLAGS, 0);
+    assert_ne!(eddsa.flags & CKF_SIGN as CK_FLAGS, 0);
+    assert_ne!(eddsa.flags & CKF_VERIFY as CK_FLAGS, 0);
 }
 
 fn install_test_slot(slot_id: CK_SLOT_ID) {
@@ -7039,6 +7075,13 @@ fn install_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) 
         (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
         true,
     );
+}
+
+fn install_software_private_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
+    let mut slot = test_slot(true);
+    slot.software_private_operations = true;
+    install_test_slot_with_backend(slot_id, Box::new(slot));
+    install_test_session(slot_id, session_handle);
 }
 
 fn install_public_test_session(slot_id: CK_SLOT_ID, session_handle: CK_SESSION_HANDLE) {
