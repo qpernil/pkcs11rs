@@ -252,11 +252,8 @@ pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_TOKEN_INF
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_WaitForSlotEvent(
+non_session_unsupported_stub!(C_WaitForSlotEvent(
     _flags: CK_FLAGS,
     _slot: *mut CK_SLOT_ID,
     _pReserved: *mut ::std::os::raw::c_void,
-) -> CK_RV {
-    crate::ffi_boundary(|| CKR_FUNCTION_NOT_SUPPORTED.into())
-}
+));

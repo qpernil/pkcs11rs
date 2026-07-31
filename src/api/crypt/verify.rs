@@ -1,5 +1,4 @@
 use super::sign::{aes_cmac_length, aes_gmac_parameters, yubihsm_aes_cmac, yubihsm_aes_gmac};
-use crate::api::general::session_function_not_supported;
 use crate::backed_object::projected_public_key_material;
 use crate::*;
 
@@ -433,22 +432,14 @@ pub extern "C" fn C_VerifyFinal(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_VerifyRecoverInit(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_VerifyRecoverInit(
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_VerifyRecover(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_VerifyRecover(
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: ::std::os::raw::c_ulong,
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));

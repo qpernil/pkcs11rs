@@ -1,15 +1,11 @@
-use super::general::session_function_not_supported;
 use crate::*;
 
-#[no_mangle]
-pub extern "C" fn C_InitToken(
+non_session_unsupported_stub!(C_InitToken(
     _slotID: CK_SLOT_ID,
     _pin: *mut ::std::os::raw::c_uchar,
     _pin_len: ::std::os::raw::c_ulong,
     _label: *mut ::std::os::raw::c_uchar,
-) -> CK_RV {
-    crate::ffi_boundary(|| CKR_FUNCTION_NOT_SUPPORTED.into())
-}
+));
 
 #[no_mangle]
 pub extern "C" fn C_InitPIN(
@@ -336,25 +332,17 @@ fn get_session_info(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetOperationState(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_GetOperationState(
     _operation_state: *mut ::std::os::raw::c_uchar,
     _operation_state_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_SetOperationState(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_SetOperationState(
     _operation_state: *mut ::std::os::raw::c_uchar,
     _operation_state_len: ::std::os::raw::c_ulong,
     _encryption_key: CK_OBJECT_HANDLE,
     _authentiation_key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
 fn login_role(
     ctx: &mut SlotContext,

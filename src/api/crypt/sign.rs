@@ -4,7 +4,6 @@ use super::{
         encode_pkcs1_v1_5_signature_input, yubihsm_ec_coordinate_length, yubihsm_ecdsa_signature,
     },
 };
-use crate::api::general::session_function_not_supported;
 use crate::*;
 
 const AES_CMAC_LENGTH: usize = 16;
@@ -927,22 +926,14 @@ pub extern "C" fn C_SignFinal(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_SignRecoverInit(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_SignRecoverInit(
     _mechanism: *mut CK_MECHANISM,
     _key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_SignRecover(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_SignRecover(
     _data: *mut ::std::os::raw::c_uchar,
     _data_len: ::std::os::raw::c_ulong,
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
