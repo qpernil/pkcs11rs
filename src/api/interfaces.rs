@@ -1,4 +1,3 @@
-use super::general::session_function_not_supported;
 use crate::*;
 
 #[repr(transparent)]
@@ -10,15 +9,8 @@ struct StaticInterface(CK_INTERFACE);
 // promising that every caller-created CK_INTERFACE is safe to share.
 unsafe impl Sync for StaticInterface {}
 
-#[no_mangle]
-pub extern "C" fn C_GetFunctionStatus(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
-
-#[no_mangle]
-pub extern "C" fn C_CancelFunction(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+session_unsupported_stub!(C_GetFunctionStatus());
+session_unsupported_stub!(C_CancelFunction());
 
 #[no_mangle]
 pub extern "C" fn C_GetInterfaceList(
@@ -99,28 +91,13 @@ pub extern "C" fn C_GetInterface(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_SessionCancel(session_handle: CK_SESSION_HANDLE, _flags: CK_FLAGS) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+session_unsupported_stub!(C_SessionCancel(_flags: CK_FLAGS));
 
-macro_rules! message_stub {
-    ($name:ident ( $($arg:ident : $typ:ty),* $(,)? )) => {
-        #[no_mangle]
-        pub extern "C" fn $name(session_handle: CK_SESSION_HANDLE, $($arg: $typ),*) -> CK_RV {
-            crate::ffi_boundary(|| {
-                $(let _ = $arg;)*
-                session_function_not_supported(session_handle)
-            })
-        }
-    };
-}
-
-message_stub!(C_MessageEncryptInit(
+session_unsupported_stub!(C_MessageEncryptInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ));
-message_stub!(C_EncryptMessage(
+session_unsupported_stub!(C_EncryptMessage(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     associated_data: *mut ::std::os::raw::c_uchar,
@@ -130,13 +107,13 @@ message_stub!(C_EncryptMessage(
     ciphertext: *mut ::std::os::raw::c_uchar,
     ciphertext_len: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_EncryptMessageBegin(
+session_unsupported_stub!(C_EncryptMessageBegin(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     associated_data: *mut ::std::os::raw::c_uchar,
     associated_data_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_EncryptMessageNext(
+session_unsupported_stub!(C_EncryptMessageNext(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     plaintext_part: *mut ::std::os::raw::c_uchar,
@@ -145,13 +122,13 @@ message_stub!(C_EncryptMessageNext(
     ciphertext_part_len: *mut ::std::os::raw::c_ulong,
     flags: CK_FLAGS,
 ));
-message_stub!(C_MessageEncryptFinal());
+session_unsupported_stub!(C_MessageEncryptFinal());
 
-message_stub!(C_MessageDecryptInit(
+session_unsupported_stub!(C_MessageDecryptInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ));
-message_stub!(C_DecryptMessage(
+session_unsupported_stub!(C_DecryptMessage(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     associated_data: *mut ::std::os::raw::c_uchar,
@@ -161,13 +138,13 @@ message_stub!(C_DecryptMessage(
     plaintext: *mut ::std::os::raw::c_uchar,
     plaintext_len: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_DecryptMessageBegin(
+session_unsupported_stub!(C_DecryptMessageBegin(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     associated_data: *mut ::std::os::raw::c_uchar,
     associated_data_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_DecryptMessageNext(
+session_unsupported_stub!(C_DecryptMessageNext(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     ciphertext_part: *mut ::std::os::raw::c_uchar,
@@ -176,13 +153,13 @@ message_stub!(C_DecryptMessageNext(
     plaintext_part_len: *mut ::std::os::raw::c_ulong,
     flags: CK_FLAGS,
 ));
-message_stub!(C_MessageDecryptFinal());
+session_unsupported_stub!(C_MessageDecryptFinal());
 
-message_stub!(C_MessageSignInit(
+session_unsupported_stub!(C_MessageSignInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ));
-message_stub!(C_SignMessage(
+session_unsupported_stub!(C_SignMessage(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     data: *mut ::std::os::raw::c_uchar,
@@ -190,11 +167,11 @@ message_stub!(C_SignMessage(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_SignMessageBegin(
+session_unsupported_stub!(C_SignMessageBegin(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_SignMessageNext(
+session_unsupported_stub!(C_SignMessageNext(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     data: *mut ::std::os::raw::c_uchar,
@@ -202,13 +179,13 @@ message_stub!(C_SignMessageNext(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_MessageSignFinal());
+session_unsupported_stub!(C_MessageSignFinal());
 
-message_stub!(C_MessageVerifyInit(
+session_unsupported_stub!(C_MessageVerifyInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
 ));
-message_stub!(C_VerifyMessage(
+session_unsupported_stub!(C_VerifyMessage(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     data: *mut ::std::os::raw::c_uchar,
@@ -216,11 +193,11 @@ message_stub!(C_VerifyMessage(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_VerifyMessageBegin(
+session_unsupported_stub!(C_VerifyMessageBegin(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_VerifyMessageNext(
+session_unsupported_stub!(C_VerifyMessageNext(
     parameter: *mut ::std::os::raw::c_void,
     parameter_len: ::std::os::raw::c_ulong,
     data: *mut ::std::os::raw::c_uchar,
@@ -228,9 +205,9 @@ message_stub!(C_VerifyMessageNext(
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_MessageVerifyFinal());
+session_unsupported_stub!(C_MessageVerifyFinal());
 
-message_stub!(C_EncapsulateKey(
+session_unsupported_stub!(C_EncapsulateKey(
     mechanism: *mut CK_MECHANISM,
     public_key: CK_OBJECT_HANDLE,
     templ: *mut CK_ATTRIBUTE,
@@ -239,7 +216,7 @@ message_stub!(C_EncapsulateKey(
     ciphertext_len: *mut ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ));
-message_stub!(C_DecapsulateKey(
+session_unsupported_stub!(C_DecapsulateKey(
     mechanism: *mut CK_MECHANISM,
     private_key: CK_OBJECT_HANDLE,
     templ: *mut CK_ATTRIBUTE,
@@ -248,40 +225,40 @@ message_stub!(C_DecapsulateKey(
     ciphertext_len: ::std::os::raw::c_ulong,
     key: *mut CK_OBJECT_HANDLE,
 ));
-message_stub!(C_VerifySignatureInit(
+session_unsupported_stub!(C_VerifySignatureInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,
     signature: *mut ::std::os::raw::c_uchar,
     signature_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_VerifySignature(
+session_unsupported_stub!(C_VerifySignature(
     data: *mut ::std::os::raw::c_uchar,
     data_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_VerifySignatureUpdate(
+session_unsupported_stub!(C_VerifySignatureUpdate(
     part: *mut ::std::os::raw::c_uchar,
     part_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_VerifySignatureFinal());
-message_stub!(C_GetSessionValidationFlags(
+session_unsupported_stub!(C_VerifySignatureFinal());
+session_unsupported_stub!(C_GetSessionValidationFlags(
     type_: CK_SESSION_VALIDATION_FLAGS_TYPE,
     flags: *mut CK_FLAGS,
 ));
-message_stub!(C_AsyncComplete(
+session_unsupported_stub!(C_AsyncComplete(
     function_name: *mut ::std::os::raw::c_uchar,
     result: *mut CK_ASYNC_DATA,
 ));
-message_stub!(C_AsyncGetID(
+session_unsupported_stub!(C_AsyncGetID(
     function_name: *mut ::std::os::raw::c_uchar,
     id: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_AsyncJoin(
+session_unsupported_stub!(C_AsyncJoin(
     function_name: *mut ::std::os::raw::c_uchar,
     id: ::std::os::raw::c_ulong,
     data: *mut ::std::os::raw::c_uchar,
     data_len: ::std::os::raw::c_ulong,
 ));
-message_stub!(C_WrapKeyAuthenticated(
+session_unsupported_stub!(C_WrapKeyAuthenticated(
     mechanism: *mut CK_MECHANISM,
     wrapping_key: CK_OBJECT_HANDLE,
     key: CK_OBJECT_HANDLE,
@@ -290,7 +267,7 @@ message_stub!(C_WrapKeyAuthenticated(
     wrapped_key: *mut ::std::os::raw::c_uchar,
     wrapped_key_len: *mut ::std::os::raw::c_ulong,
 ));
-message_stub!(C_UnwrapKeyAuthenticated(
+session_unsupported_stub!(C_UnwrapKeyAuthenticated(
     mechanism: *mut CK_MECHANISM,
     unwrapping_key: CK_OBJECT_HANDLE,
     wrapped_key: *mut ::std::os::raw::c_uchar,

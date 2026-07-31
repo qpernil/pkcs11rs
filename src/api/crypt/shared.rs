@@ -1,4 +1,3 @@
-use crate::api::general::session_function_not_supported;
 use crate::*;
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
@@ -137,46 +136,30 @@ pub(crate) fn rsa_oaep_pad(
     Ok(encoded)
 }
 
-#[no_mangle]
-pub extern "C" fn C_DigestEncryptUpdate(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_DigestEncryptUpdate(
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_DecryptDigestUpdate(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_DecryptDigestUpdate(
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: ::std::os::raw::c_ulong,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_SignEncryptUpdate(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_SignEncryptUpdate(
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: ::std::os::raw::c_ulong,
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
 
-#[no_mangle]
-pub extern "C" fn C_DecryptVerifyUpdate(
-    session_handle: CK_SESSION_HANDLE,
+session_unsupported_stub!(C_DecryptVerifyUpdate(
     _encrypted_part: *mut ::std::os::raw::c_uchar,
     _encrypted_part_len: ::std::os::raw::c_ulong,
     _part: *mut ::std::os::raw::c_uchar,
     _part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| session_function_not_supported(session_handle))
-}
+));
