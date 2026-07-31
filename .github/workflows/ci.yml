@@ -197,6 +197,11 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      - name: Build and load PKCS #11 DLL
+        run: |
+          cargo build --locked
+          cargo test --locked --test shared_library -- --ignored
+
       - name: Run mock YubiKey PKCS #11 tests
         run: cargo test --locked --features mock-yubikey preview_sign_mock
 

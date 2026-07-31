@@ -456,12 +456,6 @@ Neither normal nor all-features Rust test runs require:
 - physical hardware
 - a running `pcscd`
 
-The shared-library integration test uses the operating system's native dynamic
-loader through the Rust `libloading` crate; it does not require a separate
-loader executable or system library package. It disables automatic hardware
-discovery before initializing the module, so it does not contact USB, HID, or
-PC/SC devices.
-
 The Linux CI image additionally installs Clang, libclang, and OpenSC because
 the complete validation job also checks regenerated PKCS #11 bindings and runs
 the Python ABI, OpenSSL, and OpenSC tests. Those packages are not prerequisites
@@ -475,16 +469,29 @@ cargo test --locked
 cargo test --locked --all-features
 ```
 
-The Rust suite includes a shared-library integration test. It dynamically
-loads the Cargo-built `.so`, `.dylib`, or `.dll`, resolves the exported PKCS
-#11 entry points, initializes the module with local hardware discovery
-disabled, queries its slots, finalizes it, and unloads it.
+To test the production shared library with the operating system's native
+dynamic loader, without Python, build it and run the explicit loader smoke
+test:
+
+```sh
+cargo build --locked
+cargo test --locked --test shared_library -- --ignored
+```
+
+The smoke test resolves the exported PKCS #11 entry points, initializes the
+module with local hardware discovery disabled, queries its slots, finalizes
+it, and unloads it. It is ignored by the ordinary Rust suite so that
+`cargo test` does not also build the production shared library.
 
 Run the hardware-independent Python ABI tests:
 
 ```sh
 python3 test_pkcs11.py
 ```
+
+The Python ABI suite builds the shared library with its deterministic test
+backend, loads the resulting `.so`, `.dylib`, or `.dll`, and exercises its
+exported PKCS #11 entry points.
 
 The four final OASIS PKCS #11 3.2 mandatory provider profile artifacts are
 also executable as four separate tests against either the deterministic ABI
