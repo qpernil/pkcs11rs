@@ -1,5 +1,4 @@
 use libloading::{Library, Symbol};
-use pkcs11rs as _;
 use std::{
     ffi::{c_ulong, c_void, OsString},
     path::PathBuf,
@@ -63,25 +62,19 @@ fn built_library_path() -> PathBuf {
     let profile = deps
         .parent()
         .expect("integration-test dependency directory has a parent");
-    let candidates = [
-        profile.join(library_filename()),
-        deps.join(library_filename()),
-    ];
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .unwrap_or_else(|| {
-            panic!(
-                "Cargo did not build {} beside the integration test",
-                library_filename()
-            )
-        })
+    profile.join(library_filename())
 }
 
 #[test]
+#[ignore = "run after `cargo build --locked` to test the production shared library"]
 fn loads_initializes_queries_and_finalizes_the_shared_library() {
     let _environment = EnvironmentGuard::isolated_pkcs11rs_configuration();
     let path = built_library_path();
+    assert!(
+        path.is_file(),
+        "{} is missing; run `cargo build --locked` first",
+        path.display()
+    );
     let library = unsafe { Library::new(&path) }
         .unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
 

@@ -11,7 +11,7 @@ keywords = ["pkcs11", "cryptoki", "yubikey", "yubihsm", "hsm"]
 categories = ["api-bindings", "cryptography", "hardware-support"]
 
 [lib]
-crate-type = ["cdylib", "rlib"] # PKCS #11 library plus Rust integration-test linkage
+crate-type = ["cdylib"]
 
 [features]
 abi-tests = []
