@@ -2,20 +2,19 @@ use super::sign::{aes_cmac_length, aes_gmac_parameters, yubihsm_aes_cmac, yubihs
 use crate::backed_object::projected_public_key_material;
 use crate::*;
 
-#[no_mangle]
-pub extern "C" fn C_VerifyInit(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_VerifyInit(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        key: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_VerifyInit called with {:?}",
             (session_handle, mechanism, key)
         );
         map(verify_init(session_handle, mechanism, key))
-    })
+    }
 }
 
 fn verify_init(
@@ -183,15 +182,14 @@ fn verify_init(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_Verify(
-    session_handle: CK_SESSION_HANDLE,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Verify(
+        session_handle: CK_SESSION_HANDLE,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_Verify called with {:?}",
@@ -204,7 +202,7 @@ pub extern "C" fn C_Verify(
             signature,
             signature_len,
         ))
-    })
+    }
 }
 
 fn verify(
@@ -395,13 +393,12 @@ fn verify_rsa_signature(
     Ok(())
 }
 
-#[no_mangle]
-pub extern "C" fn C_VerifyUpdate(
-    session_handle: CK_SESSION_HANDLE,
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_VerifyUpdate(
+        session_handle: CK_SESSION_HANDLE,
+        part: *mut ::std::os::raw::c_uchar,
+        part_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(with_session_context_mut(session_handle, |ctx| {
             let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
             let operation = ctx
@@ -412,16 +409,15 @@ pub extern "C" fn C_VerifyUpdate(
             operation.buffer.extend_from_slice(&part);
             Ok(())
         }))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_VerifyFinal(
-    session_handle: CK_SESSION_HANDLE,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_VerifyFinal(
+        session_handle: CK_SESSION_HANDLE,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(verify(
             session_handle,
             ptr::null(),
@@ -429,7 +425,7 @@ pub extern "C" fn C_VerifyFinal(
             signature,
             signature_len,
         ))
-    })
+    }
 }
 
 session_unsupported_stub!(C_VerifyRecoverInit(

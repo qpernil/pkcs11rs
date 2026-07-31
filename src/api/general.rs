@@ -8,9 +8,10 @@ pub(super) fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) 
     map(result)
 }
 
-#[no_mangle]
-pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Initialize(
+        init_args: CK_VOID_PTR,
+    ) -> CK_RV {
         log!(2, "C_Initialize called with {:?}", init_args);
         if let Err(rv) = validate_initialize_args(init_args) {
             return rv;
@@ -28,7 +29,7 @@ pub extern "C" fn C_Initialize(init_args: CK_VOID_PTR) -> CK_RV {
             },
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
@@ -69,9 +70,10 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
     Ok(())
 }
 
-#[no_mangle]
-pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Finalize(
+        pReserved: *mut ::std::os::raw::c_void,
+    ) -> CK_RV {
         log!(2, "C_Finalize called with {:?}", pReserved);
         if !pReserved.is_null() {
             return CKR_ARGUMENTS_BAD.into();
@@ -111,97 +113,102 @@ pub extern "C" fn C_Finalize(pReserved: *mut ::std::os::raw::c_void) -> CK_RV {
             },
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 // The public generated declarations and function-list entries are unsafe. The
 // handwritten implementations stay in this private module and validate each
 // caller-owned pointer before dereferencing it.
-#[no_mangle]
-pub extern "C" fn C_GetFunctionList(function_list: *mut *mut CK_FUNCTION_LIST) -> CK_RV {
-    crate::ffi_boundary(|| unsafe {
-        log!(2, "C_GetFunctionList called with {:?}", function_list);
-        match as_mut(function_list) {
-            Ok(function_list) => {
-                *function_list = &super::interfaces::G_FUNCTION_LIST as *const CK_FUNCTION_LIST
-                    as CK_FUNCTION_LIST_PTR;
-                log!(2, "C_GetFunctionList returning {:?}", *function_list);
-                CKR_OK as CK_RV
+ffi_entry_point! {
+    pub fn C_GetFunctionList(
+        function_list: *mut *mut CK_FUNCTION_LIST,
+    ) -> CK_RV {
+        unsafe {
+            log!(2, "C_GetFunctionList called with {:?}", function_list);
+            match as_mut(function_list) {
+                Ok(function_list) => {
+                    *function_list = &super::interfaces::G_FUNCTION_LIST as *const CK_FUNCTION_LIST
+                        as CK_FUNCTION_LIST_PTR;
+                    log!(2, "C_GetFunctionList returning {:?}", *function_list);
+                    CKR_OK as CK_RV
+                }
+                Err(error) => error.into(),
             }
-            Err(error) => error.into(),
         }
-    })
+    }
 }
 
 fn get_info(info_ptr: CK_INFO_PTR) -> Result<(), Error> {
     with_context(|ctx| ctx.get_info(unsafe { as_mut(info_ptr) }?))
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetInfo(info_ptr: *mut CK_INFO) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetInfo(
+        info_ptr: *mut CK_INFO,
+    ) -> CK_RV {
         log!(2, "C_GetInfo called with {:?}", info_ptr);
         map(get_info(info_ptr))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetSlotList(
-    token_present: ::std::os::raw::c_uchar,
-    slot_list: *mut CK_SLOT_ID,
-    count: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| unsafe {
-        log!(
-            2,
-            "C_GetSlotList called with {:?}",
-            (token_present, slot_list, count)
-        );
-        let count = match as_mut(count) {
-            Ok(count) => count,
-            Err(error) => return error.into(),
-        };
-        match with_context(|ctx| {
-            ctx.init()?;
-            let slot_contexts = ctx
-                .slot_contexts
-                .read()
-                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-            let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
-                slot_contexts.keys().copied().collect()
-            } else {
-                let mut keys = Vec::new();
-                for (slot_id, child) in slot_contexts.iter() {
-                    let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
-                    if child.slot.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0 {
-                        keys.push(*slot_id);
-                    }
-                }
-                keys
+ffi_entry_point! {
+    pub fn C_GetSlotList(
+        token_present: ::std::os::raw::c_uchar,
+        slot_list: *mut CK_SLOT_ID,
+        count: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
+        unsafe {
+            log!(
+                2,
+                "C_GetSlotList called with {:?}",
+                (token_present, slot_list, count)
+            );
+            let count = match as_mut(count) {
+                Ok(count) => count,
+                Err(error) => return error.into(),
             };
-            if slot_list.is_null() {
-                *count = keys.len() as CK_ULONG;
-                log!(2, "C_GetSlotList returning {:?}", *count);
-                return Ok(CKR_OK as CK_RV);
-            }
+            match with_context(|ctx| {
+                ctx.init()?;
+                let slot_contexts = ctx
+                    .slot_contexts
+                    .read()
+                    .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+                let mut keys: Vec<CK_SLOT_ID> = if token_present == 0 {
+                    slot_contexts.keys().copied().collect()
+                } else {
+                    let mut keys = Vec::new();
+                    for (slot_id, child) in slot_contexts.iter() {
+                        let child = child.lock().map_err(|_| CKR_MUTEX_BAD)?;
+                        if child.slot.flags() & (CKF_TOKEN_PRESENT as CK_FLAGS) != 0 {
+                            keys.push(*slot_id);
+                        }
+                    }
+                    keys
+                };
+                if slot_list.is_null() {
+                    *count = keys.len() as CK_ULONG;
+                    log!(2, "C_GetSlotList returning {:?}", *count);
+                    return Ok(CKR_OK as CK_RV);
+                }
 
-            if *count < keys.len() as CK_ULONG {
-                *count = keys.len() as CK_ULONG;
-                log!(2, "C_GetSlotList returning {:?}", *count);
-                return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
-            }
+                if *count < keys.len() as CK_ULONG {
+                    *count = keys.len() as CK_ULONG;
+                    log!(2, "C_GetSlotList returning {:?}", *count);
+                    return Ok(CKR_BUFFER_TOO_SMALL as CK_RV);
+                }
 
-            keys.sort();
-            let output = _from_raw_parts_mut(slot_list, keys.len())?;
-            output.copy_from_slice(&keys);
-            *count = keys.len() as CK_ULONG;
-            log!(2, "C_GetSlotList returning {:?}", (keys, *count));
-            Ok(CKR_OK as CK_RV)
-        }) {
-            Ok(rv) => rv,
-            Err(e) => e.into(),
+                keys.sort();
+                let output = _from_raw_parts_mut(slot_list, keys.len())?;
+                output.copy_from_slice(&keys);
+                *count = keys.len() as CK_ULONG;
+                log!(2, "C_GetSlotList returning {:?}", (keys, *count));
+                Ok(CKR_OK as CK_RV)
+            }) {
+                Ok(rv) => rv,
+                Err(e) => e.into(),
+            }
         }
-    })
+    }
 }
 
 fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), Error> {
@@ -209,12 +216,14 @@ fn get_slot_info(slotID: CK_SLOT_ID, info_ptr: CK_SLOT_INFO_PTR) -> Result<(), E
     with_slot_context(slotID, |ctx| ctx.get_slot(slotID)?.get_slot_info(info))
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_SLOT_INFO) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetSlotInfo(
+        slotID: CK_SLOT_ID,
+        info_ptr: *mut CK_SLOT_INFO,
+    ) -> CK_RV {
         log!(2, "C_GetSlotInfo called with {:?}", (slotID, info_ptr));
         map(get_slot_info(slotID, info_ptr))
-    })
+    }
 }
 
 fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(), Error> {
@@ -244,12 +253,14 @@ fn get_token_info(slotID: CK_SLOT_ID, info_ptr: CK_TOKEN_INFO_PTR) -> Result<(),
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, info_ptr: *mut CK_TOKEN_INFO) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetTokenInfo(
+        slotID: CK_SLOT_ID,
+        info_ptr: *mut CK_TOKEN_INFO,
+    ) -> CK_RV {
         log!(2, "C_GetTokenInfo called with {:?}", (slotID, info_ptr));
         map(get_token_info(slotID, info_ptr))
-    })
+    }
 }
 
 non_session_unsupported_stub!(C_WaitForSlotEvent(

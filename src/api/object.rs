@@ -83,14 +83,13 @@ fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObje
     Ok(Some(imported))
 }
 
-#[no_mangle]
-pub extern "C" fn C_CreateObject(
-    session_handle: CK_SESSION_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-    object: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_CreateObject(
+        session_handle: CK_SESSION_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+        object: *mut CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_CreateObject called with {:?}",
@@ -100,7 +99,7 @@ pub extern "C" fn C_CreateObject(
             Ok(()) => CKR_OK as CK_RV,
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn create_object(
@@ -1302,15 +1301,14 @@ pub(super) fn validate_unique_template(templ: &[CK_ATTRIBUTE]) -> Result<(), Err
     }
 }
 
-#[no_mangle]
-pub extern "C" fn C_CopyObject(
-    session_handle: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-    new_object: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_CopyObject(
+        session_handle: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+        new_object: *mut CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_CopyObject called with {:?}",
@@ -1320,7 +1318,7 @@ pub extern "C" fn C_CopyObject(
             Ok(()) => CKR_OK as CK_RV,
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn copy_object(
@@ -1385,19 +1383,18 @@ fn copy_object(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_DestroyObject(
-    session_handle: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DestroyObject(
+        session_handle: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_DestroyObject called with {:?}",
             (session_handle, object)
         );
         map(destroy_object(session_handle, object))
-    })
+    }
 }
 
 fn destroy_object(
@@ -1550,20 +1547,19 @@ fn destroy_object(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetObjectSize(
-    session_handle: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-    size: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetObjectSize(
+        session_handle: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        size: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_GetObjectSize called with {:?}",
             (session_handle, object, size)
         );
         map(get_object_size(session_handle, object, size))
-    })
+    }
 }
 
 fn get_object_size(
@@ -1583,14 +1579,13 @@ fn get_object_size(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetAttributeValue(
-    session_handle: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetAttributeValue(
+        session_handle: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_GetAttributeValue called with {:?}",
@@ -1600,7 +1595,7 @@ pub extern "C" fn C_GetAttributeValue(
             Ok(()) => CKR_OK as CK_RV,
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn get_attribute_value(
@@ -1776,14 +1771,13 @@ fn combine_attribute_rv(current: CK_RV, next: CK_RV) -> CK_RV {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn C_SetAttributeValue(
-    session_handle: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SetAttributeValue(
+        session_handle: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_SetAttributeValue called with {:?}",
@@ -1793,7 +1787,7 @@ pub extern "C" fn C_SetAttributeValue(
             Ok(()) => CKR_OK as CK_RV,
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn set_attribute_value(
@@ -1940,13 +1934,12 @@ fn set_attribute_value(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_FindObjectsInit(
-    session_handle: CK_SESSION_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_FindObjectsInit(
+        session_handle: CK_SESSION_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_FindObjectsInit called with {:?}",
@@ -1956,7 +1949,7 @@ pub extern "C" fn C_FindObjectsInit(
             return CKR_ARGUMENTS_BAD.into();
         }
         map(find_objects_init(session_handle, templ, count))
-    })
+    }
 }
 
 fn find_objects_init(
@@ -2011,14 +2004,13 @@ fn find_objects_init(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_FindObjects(
-    session_handle: CK_SESSION_HANDLE,
-    object: *mut CK_OBJECT_HANDLE,
-    max_object_count: ::std::os::raw::c_ulong,
-    object_count: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_FindObjects(
+        session_handle: CK_SESSION_HANDLE,
+        object: *mut CK_OBJECT_HANDLE,
+        max_object_count: ::std::os::raw::c_ulong,
+        object_count: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_FindObjects called with {:?}",
@@ -2030,7 +2022,7 @@ pub extern "C" fn C_FindObjects(
             max_object_count,
             object_count,
         ))
-    })
+    }
 }
 
 fn find_objects(
@@ -2058,12 +2050,13 @@ fn find_objects(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_FindObjectsFinal(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_FindObjectsFinal(
+        session_handle: CK_SESSION_HANDLE,
+    ) -> CK_RV {
         log!(2, "C_FindObjectsFinal called with {:?}", session_handle);
         map(find_objects_final(session_handle))
-    })
+    }
 }
 
 fn find_objects_final(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {

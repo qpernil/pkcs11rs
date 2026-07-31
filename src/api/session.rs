@@ -7,20 +7,19 @@ non_session_unsupported_stub!(C_InitToken(
     _label: *mut ::std::os::raw::c_uchar,
 ));
 
-#[no_mangle]
-pub extern "C" fn C_InitPIN(
-    session_handle: CK_SESSION_HANDLE,
-    pin: *mut ::std::os::raw::c_uchar,
-    pin_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_InitPIN(
+        session_handle: CK_SESSION_HANDLE,
+        pin: *mut ::std::os::raw::c_uchar,
+        pin_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_InitPIN called with {:?}",
             (session_handle, pin, pin_len)
         );
         map(init_pin(session_handle, pin, pin_len))
-    })
+    }
 }
 
 fn init_pin(
@@ -43,22 +42,21 @@ fn init_pin(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_SetPIN(
-    session_handle: CK_SESSION_HANDLE,
-    old_pin: *mut ::std::os::raw::c_uchar,
-    old_len: ::std::os::raw::c_ulong,
-    new_pin: *mut ::std::os::raw::c_uchar,
-    new_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SetPIN(
+        session_handle: CK_SESSION_HANDLE,
+        old_pin: *mut ::std::os::raw::c_uchar,
+        old_len: ::std::os::raw::c_ulong,
+        new_pin: *mut ::std::os::raw::c_uchar,
+        new_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_SetPIN called with {:?}",
             (session_handle, old_pin, old_len, new_pin, new_len)
         );
         map(set_pin(session_handle, old_pin, old_len, new_pin, new_len))
-    })
+    }
 }
 
 fn set_pin(
@@ -91,15 +89,14 @@ fn set_pin(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_OpenSession(
-    slotID: CK_SLOT_ID,
-    flags: CK_FLAGS,
-    _application: *mut ::std::os::raw::c_void,
-    _notify: CK_NOTIFY,
-    session: *mut CK_SESSION_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_OpenSession(
+        slotID: CK_SLOT_ID,
+        flags: CK_FLAGS,
+        _application: *mut ::std::os::raw::c_void,
+        _notify: CK_NOTIFY,
+        session: *mut CK_SESSION_HANDLE,
+    ) -> CK_RV {
         log!(2, "C_OpenSession called with {:?}", (slotID, flags));
         unsafe {
             let session = match as_mut(session) {
@@ -164,12 +161,13 @@ pub extern "C" fn C_OpenSession(
                 (Err(error), _) => error.into(),
             }
         }
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_CloseSession(
+        session_handle: CK_SESSION_HANDLE,
+    ) -> CK_RV {
         log!(2, "C_CloseSession called with {:?}", session_handle);
         let module = match lock_context_read() {
             Ok(guard) => guard,
@@ -233,12 +231,13 @@ pub extern "C" fn C_CloseSession(session_handle: CK_SESSION_HANDLE) -> CK_RV {
             Ok(rv) => rv,
             Err(error) => error.into(),
         }
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_CloseAllSessions(
+        slotID: CK_SLOT_ID,
+    ) -> CK_RV {
         log!(2, "C_CloseAllSessions called with {:?}", slotID);
         let module = match lock_context_read() {
             Ok(guard) => guard,
@@ -290,19 +289,18 @@ pub extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
             Ok(rv) => rv,
             Err(error) => error.into(),
         }
-    })
+    }
 }
 
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[no_mangle]
-pub extern "C" fn C_GetSessionInfo(
-    session_handle: CK_SESSION_HANDLE,
-    info_ptr: *mut CK_SESSION_INFO,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn C_GetSessionInfo(
+        session_handle: CK_SESSION_HANDLE,
+        info_ptr: *mut CK_SESSION_INFO,
+    ) -> CK_RV {
         log!(2, "C_GetSessionInfo called with {:?}", session_handle);
         map(get_session_info(session_handle, info_ptr))
-    })
+    }
 }
 
 fn get_session_info(
@@ -486,21 +484,20 @@ fn with_pin<R>(
     use_pin(pin)
 }
 
-#[no_mangle]
-pub extern "C" fn C_Login(
-    session_handle: CK_SESSION_HANDLE,
-    user_type: CK_USER_TYPE,
-    pin: *mut ::std::os::raw::c_uchar,
-    pin_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Login(
+        session_handle: CK_SESSION_HANDLE,
+        user_type: CK_USER_TYPE,
+        pin: *mut ::std::os::raw::c_uchar,
+        pin_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_Login called with {:?}",
             (session_handle, user_type, pin, pin_len)
         );
         map(login(session_handle, user_type, pin, pin_len))
-    })
+    }
 }
 
 fn login_user(
@@ -533,16 +530,15 @@ fn login_user(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_LoginUser(
-    session_handle: CK_SESSION_HANDLE,
-    user_type: CK_USER_TYPE,
-    pin: *mut CK_UTF8CHAR,
-    pin_len: CK_ULONG,
-    username: *mut CK_UTF8CHAR,
-    username_len: CK_ULONG,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_LoginUser(
+        session_handle: CK_SESSION_HANDLE,
+        user_type: CK_USER_TYPE,
+        pin: *mut CK_UTF8CHAR,
+        pin_len: CK_ULONG,
+        username: *mut CK_UTF8CHAR,
+        username_len: CK_ULONG,
+    ) -> CK_RV {
         log!(
             2,
             "C_LoginUser called with {:?}",
@@ -563,7 +559,7 @@ pub extern "C" fn C_LoginUser(
             username,
             username_len,
         ))
-    })
+    }
 }
 
 fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
@@ -577,12 +573,13 @@ fn logout(session_handle: CK_SESSION_HANDLE) -> Result<(), Error> {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_Logout(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Logout(
+        session_handle: CK_SESSION_HANDLE,
+    ) -> CK_RV {
         log!(2, "C_Logout called with {:?}", session_handle);
         map(logout(session_handle))
-    })
+    }
 }
 
 #[cfg(test)]

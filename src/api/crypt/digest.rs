@@ -71,30 +71,28 @@ fn copy_digest(
     Ok(())
 }
 
-#[no_mangle]
-pub extern "C" fn C_DigestInit(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DigestInit(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+    ) -> CK_RV {
         log!(
             2,
             "C_DigestInit called with {:?}",
             (session_handle, mechanism)
         );
         map(digest_init(session_handle, mechanism))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_Digest(
-    session_handle: CK_SESSION_HANDLE,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    digest: *mut ::std::os::raw::c_uchar,
-    digest_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Digest(
+        session_handle: CK_SESSION_HANDLE,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        digest: *mut ::std::os::raw::c_uchar,
+        digest_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_Digest called with {:?}",
@@ -134,16 +132,15 @@ pub extern "C" fn C_Digest(
                 )
             })
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DigestUpdate(
-    session_handle: CK_SESSION_HANDLE,
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DigestUpdate(
+        session_handle: CK_SESSION_HANDLE,
+        part: *mut ::std::os::raw::c_uchar,
+        part_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_DigestUpdate called with {:?}",
@@ -166,12 +163,14 @@ pub extern "C" fn C_DigestUpdate(
                 .extend_from_slice(part);
             Ok(())
         }))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DigestKey(
+        session_handle: CK_SESSION_HANDLE,
+        key: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(2, "C_DigestKey called with {:?}", (session_handle, key));
         map(with_session_context_mut(session_handle, |ctx| {
             let (_slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
@@ -203,16 +202,15 @@ pub extern "C" fn C_DigestKey(session_handle: CK_SESSION_HANDLE, key: CK_OBJECT_
                 .extend_from_slice(&value);
             Ok(())
         }))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DigestFinal(
-    session_handle: CK_SESSION_HANDLE,
-    digest: *mut ::std::os::raw::c_uchar,
-    digest_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DigestFinal(
+        session_handle: CK_SESSION_HANDLE,
+        digest: *mut ::std::os::raw::c_uchar,
+        digest_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_DigestFinal called with {:?}",
@@ -244,5 +242,5 @@ pub extern "C" fn C_DigestFinal(
                 )
             })
         })())
-    })
+    }
 }

@@ -12,83 +12,85 @@ unsafe impl Sync for StaticInterface {}
 session_unsupported_stub!(C_GetFunctionStatus());
 session_unsupported_stub!(C_CancelFunction());
 
-#[no_mangle]
-pub extern "C" fn C_GetInterfaceList(
-    interfaces_list: *mut CK_INTERFACE,
-    count: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| unsafe {
-        let count = match as_mut(count) {
-            Ok(count) => count,
-            Err(error) => return error.into(),
-        };
+ffi_entry_point! {
+    pub fn C_GetInterfaceList(
+        interfaces_list: *mut CK_INTERFACE,
+        count: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
+        unsafe {
+            let count = match as_mut(count) {
+                Ok(count) => count,
+                Err(error) => return error.into(),
+            };
 
-        const INTERFACE_COUNT: CK_ULONG = 4;
+            const INTERFACE_COUNT: CK_ULONG = 4;
 
-        if interfaces_list.is_null() {
+            if interfaces_list.is_null() {
+                *count = INTERFACE_COUNT;
+                return CKR_OK.into();
+            }
+
+            if *count < INTERFACE_COUNT {
+                *count = INTERFACE_COUNT;
+                return CKR_BUFFER_TOO_SMALL.into();
+            }
+
+            let interfaces = [
+                G_INTERFACE_2_40.0,
+                G_INTERFACE_3_0.0,
+                G_INTERFACE_3_1.0,
+                G_INTERFACE_3_2.0,
+            ];
+            let output = match _from_raw_parts_mut(interfaces_list, interfaces.len()) {
+                Ok(output) => output,
+                Err(error) => return error.into(),
+            };
+            output.copy_from_slice(&interfaces);
             *count = INTERFACE_COUNT;
-            return CKR_OK.into();
+            CKR_OK.into()
         }
-
-        if *count < INTERFACE_COUNT {
-            *count = INTERFACE_COUNT;
-            return CKR_BUFFER_TOO_SMALL.into();
-        }
-
-        let interfaces = [
-            G_INTERFACE_2_40.0,
-            G_INTERFACE_3_0.0,
-            G_INTERFACE_3_1.0,
-            G_INTERFACE_3_2.0,
-        ];
-        let output = match _from_raw_parts_mut(interfaces_list, interfaces.len()) {
-            Ok(output) => output,
-            Err(error) => return error.into(),
-        };
-        output.copy_from_slice(&interfaces);
-        *count = INTERFACE_COUNT;
-        CKR_OK.into()
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetInterface(
-    interface_name: *mut ::std::os::raw::c_uchar,
-    version: *mut CK_VERSION,
-    interface_: *mut *mut CK_INTERFACE,
-    flags: CK_FLAGS,
-) -> CK_RV {
-    crate::ffi_boundary(|| unsafe {
-        let interface_ = match as_mut(interface_) {
-            Ok(interface_) => interface_,
-            Err(error) => return error.into(),
-        };
+ffi_entry_point! {
+    pub fn C_GetInterface(
+        interface_name: *mut ::std::os::raw::c_uchar,
+        version: *mut CK_VERSION,
+        interface_: *mut *mut CK_INTERFACE,
+        flags: CK_FLAGS,
+    ) -> CK_RV {
+        unsafe {
+            let interface_ = match as_mut(interface_) {
+                Ok(interface_) => interface_,
+                Err(error) => return error.into(),
+            };
 
-        let selected_interface = match version
-            .as_ref()
-            .map(|version| (version.major, version.minor))
-        {
-            Some((2, 40)) => &G_INTERFACE_2_40.0,
-            Some((3, 0)) => &G_INTERFACE_3_0.0,
-            Some((3, 1)) => &G_INTERFACE_3_1.0,
-            Some((3, 2)) | None => &G_INTERFACE_3_2.0,
-            Some(_) => return CKR_ARGUMENTS_BAD.into(),
-        };
+            let selected_interface = match version
+                .as_ref()
+                .map(|version| (version.major, version.minor))
+            {
+                Some((2, 40)) => &G_INTERFACE_2_40.0,
+                Some((3, 0)) => &G_INTERFACE_3_0.0,
+                Some((3, 1)) => &G_INTERFACE_3_1.0,
+                Some((3, 2)) | None => &G_INTERFACE_3_2.0,
+                Some(_) => return CKR_ARGUMENTS_BAD.into(),
+            };
 
-        if flags & !selected_interface.flags != 0 {
-            return CKR_ARGUMENTS_BAD.into();
-        }
-
-        if !interface_name.is_null() {
-            let name = CStr::from_ptr(interface_name.cast());
-            if name.to_bytes() != b"PKCS 11" {
+            if flags & !selected_interface.flags != 0 {
                 return CKR_ARGUMENTS_BAD.into();
             }
-        }
 
-        *interface_ = selected_interface as *const CK_INTERFACE as CK_INTERFACE_PTR;
-        CKR_OK.into()
-    })
+            if !interface_name.is_null() {
+                let name = CStr::from_ptr(interface_name.cast());
+                if name.to_bytes() != b"PKCS 11" {
+                    return CKR_ARGUMENTS_BAD.into();
+                }
+            }
+
+            *interface_ = selected_interface as *const CK_INTERFACE as CK_INTERFACE_PTR;
+            CKR_OK.into()
+        }
+    }
 }
 
 session_unsupported_stub!(C_SessionCancel(_flags: CK_FLAGS));

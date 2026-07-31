@@ -1,26 +1,21 @@
 macro_rules! session_unsupported_stub {
     ($name:ident ( $($arg:ident : $typ:ty),* $(,)? )) => {
-        #[no_mangle]
-        pub extern "C" fn $name(
-            session_handle: CK_SESSION_HANDLE,
-            $($arg: $typ),*
-        ) -> CK_RV {
-            crate::ffi_boundary(|| {
+        ffi_entry_point! {
+            pub fn $name(session_handle: CK_SESSION_HANDLE, $($arg: $typ),*) -> CK_RV {
                 $(let _ = $arg;)*
                 crate::api::general::session_function_not_supported(session_handle)
-            })
+            }
         }
     };
 }
 
 macro_rules! non_session_unsupported_stub {
     ($name:ident ( $($arg:ident : $typ:ty),* $(,)? )) => {
-        #[no_mangle]
-        pub extern "C" fn $name($($arg: $typ),*) -> CK_RV {
-            crate::ffi_boundary(|| {
+        ffi_entry_point! {
+            pub fn $name($($arg: $typ),*) -> CK_RV {
                 $(let _ = $arg;)*
                 CKR_FUNCTION_NOT_SUPPORTED.into()
-            })
+            }
         }
     };
 }

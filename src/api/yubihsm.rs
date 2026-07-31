@@ -11,18 +11,17 @@ pub(crate) enum YubiHsmEnrollment {
     PublicKey,
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceAttestation(
-    session_handle: CK_SESSION_HANDLE,
-    attestation_key_id: CK_ULONG,
-    fingerprint: CK_BYTE_PTR,
-    fingerprint_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_YubiHsmEnrollDeviceAttestation(
+        session_handle: CK_SESSION_HANDLE,
+        attestation_key_id: CK_ULONG,
+        fingerprint: CK_BYTE_PTR,
+        fingerprint_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         log!(
-            2,
-            "PKCS11RS_YubiHsmEnrollDeviceAttestation called for session {session_handle}, attestation key {attestation_key_id}"
-        );
+                2,
+                "PKCS11RS_YubiHsmEnrollDeviceAttestation called for session {session_handle}, attestation key {attestation_key_id}"
+            );
         let key_id = match u16::try_from(attestation_key_id) {
             Ok(key_id) => key_id,
             Err(_) => return CKR_ARGUMENTS_BAD as CK_RV,
@@ -37,16 +36,15 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceAttestation(
             },
             None,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation(
-    session_handle: CK_SESSION_HANDLE,
-    fingerprint: CK_BYTE_PTR,
-    fingerprint_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation(
+        session_handle: CK_SESSION_HANDLE,
+        fingerprint: CK_BYTE_PTR,
+        fingerprint_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         log!(
             2,
             "PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation called for session {session_handle}"
@@ -61,16 +59,15 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDeviceYubicoAttestation(
             },
             None,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_YubiHsmEnrollDevicePublicKey(
-    session_handle: CK_SESSION_HANDLE,
-    fingerprint: CK_BYTE_PTR,
-    fingerprint_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_YubiHsmEnrollDevicePublicKey(
+        session_handle: CK_SESSION_HANDLE,
+        fingerprint: CK_BYTE_PTR,
+        fingerprint_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         log!(
             2,
             "PKCS11RS_YubiHsmEnrollDevicePublicKey called for session {session_handle}"
@@ -82,7 +79,7 @@ pub extern "C" fn PKCS11RS_YubiHsmEnrollDevicePublicKey(
             YubiHsmEnrollment::PublicKey,
             None,
         ))
-    })
+    }
 }
 
 pub(crate) fn yubihsm_enroll_device(

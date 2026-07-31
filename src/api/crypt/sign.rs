@@ -249,20 +249,19 @@ pub(crate) fn yubihsm_aes_gmac(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_SignInit(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SignInit(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        key: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_SignInit called with {:?}",
             (session_handle, mechanism, key)
         );
         map(sign_init(session_handle, mechanism, key))
-    })
+    }
 }
 
 fn sign_init(
@@ -496,15 +495,14 @@ fn sign_init(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_Sign(
-    session_handle: CK_SESSION_HANDLE,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Sign(
+        session_handle: CK_SESSION_HANDLE,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_Sign called with {:?}",
@@ -517,7 +515,7 @@ pub extern "C" fn C_Sign(
             signature,
             signature_len,
         ))
-    })
+    }
 }
 
 fn sign(
@@ -885,13 +883,12 @@ fn sign(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_SignUpdate(
-    session_handle: CK_SESSION_HANDLE,
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SignUpdate(
+        session_handle: CK_SESSION_HANDLE,
+        part: *mut ::std::os::raw::c_uchar,
+        part_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(with_session_context_mut(session_handle, |ctx| {
             let part = unsafe { from_raw_parts(part, part_len as usize) }?.to_vec();
             let session = ctx.get_session_context_mut(session_handle)?;
@@ -906,16 +903,15 @@ pub extern "C" fn C_SignUpdate(
             operation.buffer.extend_from_slice(&part);
             Ok(())
         }))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_SignFinal(
-    session_handle: CK_SESSION_HANDLE,
-    signature: *mut ::std::os::raw::c_uchar,
-    signature_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SignFinal(
+        session_handle: CK_SESSION_HANDLE,
+        signature: *mut ::std::os::raw::c_uchar,
+        signature_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(sign(
             session_handle,
             ptr::null(),
@@ -923,7 +919,7 @@ pub extern "C" fn C_SignFinal(
             signature,
             signature_len,
         ))
-    })
+    }
 }
 
 session_unsupported_stub!(C_SignRecoverInit(

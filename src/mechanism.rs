@@ -752,20 +752,19 @@ pub(crate) fn require_slot_mechanism(
     Ok(details)
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetMechanismList(
-    slotID: CK_SLOT_ID,
-    mechanism_list: *mut CK_MECHANISM_TYPE,
-    count: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetMechanismList(
+        slotID: CK_SLOT_ID,
+        mechanism_list: *mut CK_MECHANISM_TYPE,
+        count: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(
             2,
             "C_GetMechanismList called with {:?}",
             (slotID, mechanism_list, count)
         );
         map(get_mechanism_list(slotID, mechanism_list, count))
-    })
+    }
 }
 
 pub(crate) fn get_mechanism_list(
@@ -798,20 +797,19 @@ pub(crate) fn get_mechanism_list(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_GetMechanismInfo(
-    slotID: CK_SLOT_ID,
-    type_: CK_MECHANISM_TYPE,
-    info_ptr: *mut CK_MECHANISM_INFO,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GetMechanismInfo(
+        slotID: CK_SLOT_ID,
+        type_: CK_MECHANISM_TYPE,
+        info_ptr: *mut CK_MECHANISM_INFO,
+    ) -> CK_RV {
         log!(
             2,
             "C_GetMechanismInfo called with {:?}",
             (slotID, type_, info_ptr)
         );
         map(get_mechanism_info(slotID, type_, info_ptr))
-    })
+    }
 }
 
 pub(crate) fn get_mechanism_info(
