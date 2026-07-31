@@ -3,22 +3,21 @@ use crate::*;
 const MIN_EXPORT_PASSWORD_LENGTH: usize = 8;
 const MAX_EXPORT_PASSWORD_LENGTH: usize = 1024;
 
-/// Export an extractable private key from a named software slot as a DER
-/// PKCS #8 `EncryptedPrivateKeyInfo`.
-///
-/// The PKCS #11 user login authorizes access to the private key. `password`
-/// independently protects the exported document so it can be opened by
-/// interoperable tools such as OpenSSL.
-#[no_mangle]
-pub extern "C" fn PKCS11RS_SoftwareExportPrivateKey(
-    session_handle: CK_SESSION_HANDLE,
-    key: CK_OBJECT_HANDLE,
-    password: *const CK_UTF8CHAR,
-    password_len: CK_ULONG,
-    encrypted_key: CK_BYTE_PTR,
-    encrypted_key_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    /// Export an extractable private key from a named software slot as a DER
+    /// PKCS #8 `EncryptedPrivateKeyInfo`.
+    ///
+    /// The PKCS #11 user login authorizes access to the private key. `password`
+    /// independently protects the exported document so it can be opened by
+    /// interoperable tools such as OpenSSL.
+    pub fn PKCS11RS_SoftwareExportPrivateKey(
+        session_handle: CK_SESSION_HANDLE,
+        key: CK_OBJECT_HANDLE,
+        password: *const CK_UTF8CHAR,
+        password_len: CK_ULONG,
+        encrypted_key: CK_BYTE_PTR,
+        encrypted_key_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         map(software_export_private_key(
             session_handle,
             key,
@@ -27,7 +26,7 @@ pub extern "C" fn PKCS11RS_SoftwareExportPrivateKey(
             encrypted_key,
             encrypted_key_len,
         ))
-    })
+    }
 }
 
 fn software_export_private_key(

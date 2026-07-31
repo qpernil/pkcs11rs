@@ -6,15 +6,14 @@ use super::object::{
 use crate::*;
 use p256::elliptic_curve::Generate;
 
-#[no_mangle]
-pub extern "C" fn C_GenerateKey(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    templ: *mut CK_ATTRIBUTE,
-    count: ::std::os::raw::c_ulong,
-    key: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GenerateKey(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        templ: *mut CK_ATTRIBUTE,
+        count: ::std::os::raw::c_ulong,
+        key: *mut CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         log!(
             2,
             "C_GenerateKey called with {:?}",
@@ -24,7 +23,7 @@ pub extern "C" fn C_GenerateKey(
             Ok(()) => CKR_OK as CK_RV,
             Err(e) => e.into(),
         }
-    })
+    }
 }
 
 fn generate_key(
@@ -222,18 +221,17 @@ fn generate_key_object(
     Ok(key)
 }
 
-#[no_mangle]
-pub extern "C" fn C_GenerateKeyPair(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    public_key_template: *mut CK_ATTRIBUTE,
-    public_key_attribute_count: ::std::os::raw::c_ulong,
-    private_key_template: *mut CK_ATTRIBUTE,
-    private_key_attribute_count: ::std::os::raw::c_ulong,
-    public_key: *mut CK_OBJECT_HANDLE,
-    private_key: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GenerateKeyPair(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        public_key_template: *mut CK_ATTRIBUTE,
+        public_key_attribute_count: ::std::os::raw::c_ulong,
+        private_key_template: *mut CK_ATTRIBUTE,
+        private_key_attribute_count: ::std::os::raw::c_ulong,
+        public_key: *mut CK_OBJECT_HANDLE,
+        private_key: *mut CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         map(generate_key_pair(
             session_handle,
             mechanism,
@@ -244,7 +242,7 @@ pub extern "C" fn C_GenerateKeyPair(
             public_key,
             private_key,
         ))
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1244,16 +1242,15 @@ pub(crate) fn yubihsm_generate_key_pair_command(
     Ok((private_object, public_object, command))
 }
 
-#[no_mangle]
-pub extern "C" fn C_DeriveKey(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    base_key: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    attribute_count: ::std::os::raw::c_ulong,
-    key: *mut CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DeriveKey(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        base_key: CK_OBJECT_HANDLE,
+        templ: *mut CK_ATTRIBUTE,
+        attribute_count: ::std::os::raw::c_ulong,
+        key: *mut CK_OBJECT_HANDLE,
+    ) -> CK_RV {
         map(derive_key(
             session_handle,
             mechanism,
@@ -1262,7 +1259,7 @@ pub extern "C" fn C_DeriveKey(
             attribute_count,
             key,
         ))
-    })
+    }
 }
 
 fn project_public_key_object(
@@ -1795,29 +1792,27 @@ fn derived_secret_object(
     Ok((object, requested_length))
 }
 
-#[no_mangle]
-pub extern "C" fn C_SeedRandom(
-    session: CK_SESSION_HANDLE,
-    _seed: *mut ::std::os::raw::c_uchar,
-    _seed_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_SeedRandom(
+        session: CK_SESSION_HANDLE,
+        _seed: *mut ::std::os::raw::c_uchar,
+        _seed_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(2, "C_SeedRandom called");
         let result: Result<(), Error> = with_session_context(session, |ctx| {
             ctx._get_session(session)?;
             Err(CKR_RANDOM_SEED_NOT_SUPPORTED.into())
         });
         map(result)
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_GenerateRandom(
-    session: CK_SESSION_HANDLE,
-    random_data: *mut ::std::os::raw::c_uchar,
-    random_len: ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_GenerateRandom(
+        session: CK_SESSION_HANDLE,
+        random_data: *mut ::std::os::raw::c_uchar,
+        random_len: ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         log!(2, "C_GenerateRandom called");
         let result: Result<(), Error> = with_session_context_mut(session, |ctx| {
             let random_data = unsafe { _from_raw_parts_mut(random_data, random_len as usize) }?;
@@ -1827,5 +1822,5 @@ pub extern "C" fn C_GenerateRandom(
             ctx._get_session(session)?.1.generate_random(random_data)
         });
         map(result)
-    })
+    }
 }

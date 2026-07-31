@@ -2,20 +2,19 @@ use crate::*;
 
 const HSMAUTH_P256_PUBLIC_KEY_LENGTH: usize = 65;
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthPutSymmetricCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    enc_key: *const CK_BYTE,
-    enc_key_len: CK_ULONG,
-    mac_key: *const CK_BYTE,
-    mac_key_len: CK_ULONG,
-    credential_password: *const CK_UTF8CHAR,
-    credential_password_len: CK_ULONG,
-    touch_required: CK_BBOOL,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthPutSymmetricCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        enc_key: *const CK_BYTE,
+        enc_key_len: CK_ULONG,
+        mac_key: *const CK_BYTE,
+        mac_key_len: CK_ULONG,
+        credential_password: *const CK_UTF8CHAR,
+        credential_password_len: CK_ULONG,
+        touch_required: CK_BBOOL,
+    ) -> CK_RV {
         map(hsmauth_put_symmetric(
             session_handle,
             label,
@@ -26,21 +25,20 @@ pub extern "C" fn PKCS11RS_HsmAuthPutSymmetricCredential(
             credential_password_len,
             touch_required,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    derivation_password: *const CK_UTF8CHAR,
-    derivation_password_len: CK_ULONG,
-    credential_password: *const CK_UTF8CHAR,
-    credential_password_len: CK_ULONG,
-    touch_required: CK_BBOOL,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        derivation_password: *const CK_UTF8CHAR,
+        derivation_password_len: CK_ULONG,
+        credential_password: *const CK_UTF8CHAR,
+        credential_password_len: CK_ULONG,
+        touch_required: CK_BBOOL,
+    ) -> CK_RV {
         map((|| {
             let derivation_password = hsmauth_utf8(derivation_password, derivation_password_len)?;
             let keys = crate::yubico_password_kdf(derivation_password.as_bytes())?;
@@ -55,7 +53,7 @@ pub extern "C" fn PKCS11RS_HsmAuthPutDerivedSymmetricCredential(
                 touch_required,
             )
         })())
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,20 +90,19 @@ fn hsmauth_put_symmetric(
     .map(|_| ())
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthPutAsymmetricCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    private_key: *const CK_BYTE,
-    private_key_len: CK_ULONG,
-    credential_password: *const CK_UTF8CHAR,
-    credential_password_len: CK_ULONG,
-    touch_required: CK_BBOOL,
-    public_key: CK_BYTE_PTR,
-    public_key_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthPutAsymmetricCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        private_key: *const CK_BYTE,
+        private_key_len: CK_ULONG,
+        credential_password: *const CK_UTF8CHAR,
+        credential_password_len: CK_ULONG,
+        touch_required: CK_BBOOL,
+        public_key: CK_BYTE_PTR,
+        public_key_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         map((|| {
             let private_key = unsafe { from_raw_parts(private_key, private_key_len as usize) }?;
             if private_key.len() != 32 {
@@ -123,23 +120,22 @@ pub extern "C" fn PKCS11RS_HsmAuthPutAsymmetricCredential(
                 public_key_len,
             )
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    derivation_password: *const CK_UTF8CHAR,
-    derivation_password_len: CK_ULONG,
-    credential_password: *const CK_UTF8CHAR,
-    credential_password_len: CK_ULONG,
-    touch_required: CK_BBOOL,
-    public_key: CK_BYTE_PTR,
-    public_key_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        derivation_password: *const CK_UTF8CHAR,
+        derivation_password_len: CK_ULONG,
+        credential_password: *const CK_UTF8CHAR,
+        credential_password_len: CK_ULONG,
+        touch_required: CK_BBOOL,
+        public_key: CK_BYTE_PTR,
+        public_key_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         map((|| {
             let derivation_password = hsmauth_utf8(derivation_password, derivation_password_len)?;
             let key = crate::yubico_kdf::yubico_password_p256_key(derivation_password.as_bytes())?;
@@ -156,21 +152,20 @@ pub extern "C" fn PKCS11RS_HsmAuthPutDerivedAsymmetricCredential(
                 public_key_len,
             )
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthGenerateAsymmetricCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    credential_password: *const CK_UTF8CHAR,
-    credential_password_len: CK_ULONG,
-    touch_required: CK_BBOOL,
-    public_key: CK_BYTE_PTR,
-    public_key_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthGenerateAsymmetricCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        credential_password: *const CK_UTF8CHAR,
+        credential_password_len: CK_ULONG,
+        touch_required: CK_BBOOL,
+        public_key: CK_BYTE_PTR,
+        public_key_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         map(hsmauth_put_asymmetric(
             session_handle,
             label,
@@ -182,7 +177,7 @@ pub extern "C" fn PKCS11RS_HsmAuthGenerateAsymmetricCredential(
             public_key,
             public_key_len,
         ))
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,29 +225,27 @@ fn hsmauth_put_asymmetric(
     Ok(())
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthDeleteCredential(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthDeleteCredential(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+    ) -> CK_RV {
         map((|| {
             let label = hsmauth_utf8(label, label_len)?;
             hsmauth_mutation(session_handle, HsmAuthAdministration::Delete { label }).map(|_| ())
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthChangeCredentialPassword(
-    session_handle: CK_SESSION_HANDLE,
-    label: *const CK_UTF8CHAR,
-    label_len: CK_ULONG,
-    new_credential_password: *const CK_UTF8CHAR,
-    new_credential_password_len: CK_ULONG,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthChangeCredentialPassword(
+        session_handle: CK_SESSION_HANDLE,
+        label: *const CK_UTF8CHAR,
+        label_len: CK_ULONG,
+        new_credential_password: *const CK_UTF8CHAR,
+        new_credential_password_len: CK_ULONG,
+    ) -> CK_RV {
         map((|| {
             let label = hsmauth_utf8(label, label_len)?;
             let password = hsmauth_password(new_credential_password, new_credential_password_len)?;
@@ -265,16 +258,15 @@ pub extern "C" fn PKCS11RS_HsmAuthChangeCredentialPassword(
             )
             .map(|_| ())
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthChangeManagementPassword(
-    session_handle: CK_SESSION_HANDLE,
-    new_management_password: *const CK_UTF8CHAR,
-    new_management_password_len: CK_ULONG,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthChangeManagementPassword(
+        session_handle: CK_SESSION_HANDLE,
+        new_management_password: *const CK_UTF8CHAR,
+        new_management_password_len: CK_ULONG,
+    ) -> CK_RV {
         map((|| {
             let password = hsmauth_password(new_management_password, new_management_password_len)?;
             hsmauth_mutation(
@@ -285,14 +277,15 @@ pub extern "C" fn PKCS11RS_HsmAuthChangeManagementPassword(
             )
             .map(|_| ())
         })())
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn PKCS11RS_HsmAuthReset(session_handle: CK_SESSION_HANDLE) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn PKCS11RS_HsmAuthReset(
+        session_handle: CK_SESSION_HANDLE,
+    ) -> CK_RV {
         map(hsmauth_mutation(session_handle, HsmAuthAdministration::Reset).map(|_| ()))
-    })
+    }
 }
 
 fn hsmauth_mutation(

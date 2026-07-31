@@ -193,16 +193,15 @@ fn parse_yubihsm_import_response(response: &[u8]) -> Result<(u8, u16), Error> {
     Ok((*object_type, u16::from_be_bytes([*high, *low])))
 }
 
-#[no_mangle]
-pub extern "C" fn C_WrapKey(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: CK_MECHANISM_PTR,
-    wrapping_key: CK_OBJECT_HANDLE,
-    key: CK_OBJECT_HANDLE,
-    wrapped_key: CK_BYTE_PTR,
-    wrapped_key_len: CK_ULONG_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_WrapKey(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: CK_MECHANISM_PTR,
+        wrapping_key: CK_OBJECT_HANDLE,
+        key: CK_OBJECT_HANDLE,
+        wrapped_key: CK_BYTE_PTR,
+        wrapped_key_len: CK_ULONG_PTR,
+    ) -> CK_RV {
         map(wrap_key(
             session_handle,
             mechanism,
@@ -211,7 +210,7 @@ pub extern "C" fn C_WrapKey(
             wrapped_key,
             wrapped_key_len,
         ))
-    })
+    }
 }
 
 fn wrap_key(
@@ -297,18 +296,17 @@ fn wrap_key(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn C_UnwrapKey(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: CK_MECHANISM_PTR,
-    unwrapping_key: CK_OBJECT_HANDLE,
-    wrapped_key: CK_BYTE_PTR,
-    wrapped_key_len: CK_ULONG,
-    templ: CK_ATTRIBUTE_PTR,
-    attribute_count: CK_ULONG,
-    key: CK_OBJECT_HANDLE_PTR,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_UnwrapKey(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: CK_MECHANISM_PTR,
+        unwrapping_key: CK_OBJECT_HANDLE,
+        wrapped_key: CK_BYTE_PTR,
+        wrapped_key_len: CK_ULONG,
+        templ: CK_ATTRIBUTE_PTR,
+        attribute_count: CK_ULONG,
+        key: CK_OBJECT_HANDLE_PTR,
+    ) -> CK_RV {
         map(unwrap_key(
             session_handle,
             mechanism,
@@ -319,7 +317,7 @@ pub extern "C" fn C_UnwrapKey(
             attribute_count,
             key,
         ))
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

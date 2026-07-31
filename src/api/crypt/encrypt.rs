@@ -4,24 +4,24 @@ use crate::*;
 use ghash::{universal_hash::UniversalHash, GHash};
 use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
 
-#[no_mangle]
-pub extern "C" fn C_EncryptInit(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| map(crypt_init(session_handle, mechanism, key, true)))
+ffi_entry_point! {
+    pub fn C_EncryptInit(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        key: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
+        map(crypt_init(session_handle, mechanism, key, true))
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_Encrypt(
-    session_handle: CK_SESSION_HANDLE,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: ::std::os::raw::c_ulong,
-    encrypted_data: *mut ::std::os::raw::c_uchar,
-    encrypted_data_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Encrypt(
+        session_handle: CK_SESSION_HANDLE,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: ::std::os::raw::c_ulong,
+        encrypted_data: *mut ::std::os::raw::c_uchar,
+        encrypted_data_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt(
             session_handle,
             data,
@@ -31,18 +31,17 @@ pub extern "C" fn C_Encrypt(
             true,
             false,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_EncryptUpdate(
-    session_handle: CK_SESSION_HANDLE,
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: ::std::os::raw::c_ulong,
-    encrypted_part: *mut ::std::os::raw::c_uchar,
-    encrypted_part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_EncryptUpdate(
+        session_handle: CK_SESSION_HANDLE,
+        part: *mut ::std::os::raw::c_uchar,
+        part_len: ::std::os::raw::c_ulong,
+        encrypted_part: *mut ::std::os::raw::c_uchar,
+        encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt_update(
             session_handle,
             part,
@@ -51,16 +50,15 @@ pub extern "C" fn C_EncryptUpdate(
             encrypted_part_len,
             true,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_EncryptFinal(
-    session_handle: CK_SESSION_HANDLE,
-    last_encrypted_part: *mut ::std::os::raw::c_uchar,
-    last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_EncryptFinal(
+        session_handle: CK_SESSION_HANDLE,
+        last_encrypted_part: *mut ::std::os::raw::c_uchar,
+        last_encrypted_part_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt(
             session_handle,
             ptr::null(),
@@ -70,27 +68,27 @@ pub extern "C" fn C_EncryptFinal(
             true,
             true,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DecryptInit(
-    session_handle: CK_SESSION_HANDLE,
-    mechanism: *mut CK_MECHANISM,
-    key: CK_OBJECT_HANDLE,
-) -> CK_RV {
-    crate::ffi_boundary(|| map(crypt_init(session_handle, mechanism, key, false)))
+ffi_entry_point! {
+    pub fn C_DecryptInit(
+        session_handle: CK_SESSION_HANDLE,
+        mechanism: *mut CK_MECHANISM,
+        key: CK_OBJECT_HANDLE,
+    ) -> CK_RV {
+        map(crypt_init(session_handle, mechanism, key, false))
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_Decrypt(
-    session_handle: CK_SESSION_HANDLE,
-    encrypted_data: *mut ::std::os::raw::c_uchar,
-    encrypted_data_len: ::std::os::raw::c_ulong,
-    data: *mut ::std::os::raw::c_uchar,
-    data_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_Decrypt(
+        session_handle: CK_SESSION_HANDLE,
+        encrypted_data: *mut ::std::os::raw::c_uchar,
+        encrypted_data_len: ::std::os::raw::c_ulong,
+        data: *mut ::std::os::raw::c_uchar,
+        data_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt(
             session_handle,
             encrypted_data,
@@ -100,7 +98,7 @@ pub extern "C" fn C_Decrypt(
             false,
             false,
         ))
-    })
+    }
 }
 
 #[cfg_attr(test, allow(private_interfaces))]
@@ -1489,15 +1487,14 @@ fn rsa_public_encrypt(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DecryptUpdate(
-    session_handle: CK_SESSION_HANDLE,
-    encrypted_part: *mut ::std::os::raw::c_uchar,
-    encrypted_part_len: ::std::os::raw::c_ulong,
-    part: *mut ::std::os::raw::c_uchar,
-    part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DecryptUpdate(
+        session_handle: CK_SESSION_HANDLE,
+        encrypted_part: *mut ::std::os::raw::c_uchar,
+        encrypted_part_len: ::std::os::raw::c_ulong,
+        part: *mut ::std::os::raw::c_uchar,
+        part_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt_update(
             session_handle,
             encrypted_part,
@@ -1506,16 +1503,15 @@ pub extern "C" fn C_DecryptUpdate(
             part_len,
             false,
         ))
-    })
+    }
 }
 
-#[no_mangle]
-pub extern "C" fn C_DecryptFinal(
-    session_handle: CK_SESSION_HANDLE,
-    last_part: *mut ::std::os::raw::c_uchar,
-    last_part_len: *mut ::std::os::raw::c_ulong,
-) -> CK_RV {
-    crate::ffi_boundary(|| {
+ffi_entry_point! {
+    pub fn C_DecryptFinal(
+        session_handle: CK_SESSION_HANDLE,
+        last_part: *mut ::std::os::raw::c_uchar,
+        last_part_len: *mut ::std::os::raw::c_ulong,
+    ) -> CK_RV {
         map(crypt(
             session_handle,
             ptr::null(),
@@ -1525,7 +1521,7 @@ pub extern "C" fn C_DecryptFinal(
             false,
             true,
         ))
-    })
+    }
 }
 
 fn crypt_update(
