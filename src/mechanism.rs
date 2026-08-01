@@ -305,6 +305,12 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             max_key_size: 32,
             flags: CKF_GENERATE as CK_FLAGS,
         },
+        MechanismDetails {
+            type_: CKM_HKDF_DERIVE as CK_MECHANISM_TYPE,
+            min_key_size: 20,
+            max_key_size: 64,
+            flags: CKF_DERIVE as CK_FLAGS,
+        },
     ];
     for type_ in [
         CKM_AES_ECB,

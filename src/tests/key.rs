@@ -483,6 +483,266 @@ fn x963_kdf_matches_nist_ans_x963_2001_vector() {
 }
 
 #[test]
+fn hkdf_matches_rfc5869_sha256_test_case_one_in_all_modes() {
+    let input_key = [0x0b; 22];
+    let salt = crate::parse_hex("000102030405060708090a0b0c").unwrap();
+    let info = crate::parse_hex("f0f1f2f3f4f5f6f7f8f9").unwrap();
+    let prk = crate::parse_hex(
+        "077709362c2e32df0ddc3f0dc47bba63\
+         90b6c73bb50f9c3122ec844ad7c2b3e5",
+    )
+    .unwrap();
+    let output = crate::parse_hex(
+        "3cb25f25faacd57a90434f64d0362f2a\
+         2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+         34007208d5b887185865",
+    )
+    .unwrap();
+    assert_eq!(
+        crate::api::hkdf_key_material(
+            crate::MessageDigest::Sha256,
+            true,
+            false,
+            &input_key,
+            Some(&salt),
+            &[],
+            32,
+        )
+        .unwrap()
+        .as_slice(),
+        prk
+    );
+    assert_eq!(
+        crate::api::hkdf_key_material(
+            crate::MessageDigest::Sha256,
+            false,
+            true,
+            &prk,
+            None,
+            &info,
+            42,
+        )
+        .unwrap()
+        .as_slice(),
+        output
+    );
+    assert_eq!(
+        crate::api::hkdf_key_material(
+            crate::MessageDigest::Sha256,
+            true,
+            true,
+            &input_key,
+            Some(&salt),
+            &info,
+            42,
+        )
+        .unwrap()
+        .as_slice(),
+        output
+    );
+}
+
+fn create_hkdf_test_key(
+    session: CK_SESSION_HANDLE,
+    value: &mut [u8],
+    derive: bool,
+    sensitive: bool,
+    extractable: bool,
+) -> CK_OBJECT_HANDLE {
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut derive = CK_BBOOL::from(derive);
+    let mut sensitive = CK_BBOOL::from(sensitive);
+    let mut extractable = CK_BBOOL::from(extractable);
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, value),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut derive),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+    ];
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_OK as CK_RV
+    );
+    key
+}
+
+#[test]
+fn software_hkdf_derives_typed_keys_with_data_null_and_key_salts() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut base_value = [0x0b; 32];
+    let base = create_hkdf_test_key(TEST_SESSION_HANDLE, &mut base_value, true, true, false);
+    let mut salt_value = *b"software HKDF salt key";
+    let salt = create_hkdf_test_key(TEST_SESSION_HANDLE, &mut salt_value, false, false, true);
+    let mut info = b"software HKDF output context".to_vec();
+    let mut parameters = CK_HKDF_PARAMS {
+        bExtract: CK_TRUE as CK_BBOOL,
+        bExpand: CK_TRUE as CK_BBOOL,
+        prfHashMechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        ulSaltType: CKF_HKDF_SALT_KEY as CK_ULONG,
+        pSalt: std::ptr::null_mut(),
+        ulSaltLen: 0,
+        hSaltKey: salt,
+        pInfo: info.as_mut_ptr(),
+        ulInfoLen: info.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_HKDF_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_HKDF_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_HKDF_PARAMS>() as CK_ULONG,
+    };
+    let mut key_type = CKK_AES as CK_KEY_TYPE;
+    let mut value_length = 32 as CK_ULONG;
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut value_length),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+    ];
+    let mut derived = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut derived,
+        ),
+        CKR_OK as CK_RV
+    );
+    let expected = crate::api::hkdf_key_material(
+        crate::MessageDigest::Sha256,
+        true,
+        true,
+        &base_value,
+        Some(&salt_value),
+        &info,
+        32,
+    )
+    .unwrap();
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(derived).unwrap().unwrap();
+        assert_eq!(object.key_type, CKK_AES as CK_KEY_TYPE);
+        assert!(object.encrypt && object.decrypt);
+        assert!(object.always_sensitive && object.never_extractable);
+        assert!(!object.local);
+        assert_eq!(
+            object.key_gen_mechanism,
+            Some(CKM_HKDF_DERIVE as CK_MECHANISM_TYPE)
+        );
+        assert!(
+            matches!(object.material, crate::KeyMaterial::SoftwareSecret(ref value) if value.as_slice() == expected.as_slice())
+        );
+    });
+
+    parameters.bExtract = CK_FALSE as CK_BBOOL;
+    parameters.ulSaltType = CK_ULONG::MAX;
+    parameters.ulSaltLen = CK_ULONG::MAX;
+    let mut hmac_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut hmac_length = 48 as CK_ULONG;
+    let mut hmac_template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut hmac_length),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut enabled),
+    ];
+    mechanism.pParameter = (&mut parameters as *mut CK_HKDF_PARAMS).cast();
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base,
+            hmac_template.as_mut_ptr(),
+            hmac_template.len() as CK_ULONG,
+            &mut derived,
+        ),
+        CKR_OK as CK_RV
+    );
+    sign_and_verify(
+        TEST_SESSION_HANDLE,
+        derived,
+        derived,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+    );
+
+    parameters.bExtract = CK_TRUE as CK_BBOOL;
+    parameters.bExpand = CK_FALSE as CK_BBOOL;
+    parameters.ulSaltType = CKF_HKDF_SALT_NULL as CK_ULONG;
+    parameters.ulSaltLen = 0;
+    parameters.pInfo = std::ptr::null_mut();
+    parameters.ulInfoLen = CK_ULONG::MAX;
+    mechanism.pParameter = (&mut parameters as *mut CK_HKDF_PARAMS).cast();
+    let mut generic_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut extract_template = [scalar_attribute(
+        CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+        &mut generic_type,
+    )];
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base,
+            extract_template.as_mut_ptr(),
+            extract_template.len() as CK_ULONG,
+            &mut derived,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(object_value(TEST_SESSION_HANDLE, derived).len(), 32);
+
+    for (hash_mechanism, digest, length) in [
+        (CKM_SHA_1, crate::MessageDigest::Sha1, 20),
+        (CKM_SHA256, crate::MessageDigest::Sha256, 32),
+        (CKM_SHA384, crate::MessageDigest::Sha384, 48),
+        (CKM_SHA512, crate::MessageDigest::Sha512, 64),
+    ] {
+        let mut input = vec![length as u8; length];
+        let input_key = create_hkdf_test_key(TEST_SESSION_HANDLE, &mut input, true, false, true);
+        parameters.prfHashMechanism = hash_mechanism as CK_MECHANISM_TYPE;
+        mechanism.pParameter = (&mut parameters as *mut CK_HKDF_PARAMS).cast();
+        assert_eq!(
+            crate::api::C_DeriveKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                input_key,
+                extract_template.as_mut_ptr(),
+                extract_template.len() as CK_ULONG,
+                &mut derived,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            object_value(TEST_SESSION_HANDLE, derived),
+            crate::api::hkdf_key_material(digest, true, false, &input, None, &[], length)
+                .unwrap()
+                .as_slice()
+        );
+    }
+    finalize_for_test();
+}
+
+#[test]
 fn software_ecdh_supports_every_x963_kdf_and_right_truncates_raw_secrets() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

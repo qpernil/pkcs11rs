@@ -454,7 +454,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.supports_software_secret_operations());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 66);
+        assert_eq!(mechanisms.len(), 67);
         assert_eq!(
             mechanisms
                 .iter()
@@ -562,6 +562,7 @@ mod tests {
                     (1, 1024, CKF_GENERATE)
                 }
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => (16, 32, CKF_GENERATE),
+                x if x == CKM_HKDF_DERIVE as CK_MECHANISM_TYPE => (20, 64, CKF_DERIVE),
                 x if [
                     CKM_AES_ECB,
                     CKM_AES_CBC,

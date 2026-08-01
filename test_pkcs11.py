@@ -79,6 +79,7 @@ CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_SIGN = 0x00000800
 CKF_VERIFY = 0x00002000
 CKF_GENERATE = 0x00008000
+CKF_DERIVE = 0x00080000
 CKF_ENCRYPT = 0x00000100
 CKF_DECRYPT = 0x00000200
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
@@ -96,6 +97,7 @@ CKM_SHA3_224 = 0x000002B5
 CKM_SHA3_384 = 0x000002C0
 CKM_SHA3_512 = 0x000002D0
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
+CKM_HKDF_DERIVE = 0x0000402A
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
 CKM_ECDH1_DERIVE = 0x00001050
@@ -116,6 +118,7 @@ CKM_YUBICO_RSA_WRAP = 0xD9554209
 CKG_MGF1_SHA256 = 2
 CKD_NULL = 1
 CKD_SHA256_KDF = 6
+CKF_HKDF_SALT_DATA = 2
 CKZ_DATA_SPECIFIED = 1
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
@@ -424,6 +427,20 @@ class CK_ECDH1_DERIVE_PARAMS(ctypes.Structure):
         ("pSharedData", ctypes.POINTER(CK_BYTE)),
         ("ulPublicDataLen", CK_ULONG),
         ("pPublicData", ctypes.POINTER(CK_BYTE)),
+    ]
+
+
+class CK_HKDF_PARAMS(ctypes.Structure):
+    _fields_ = [
+        ("bExtract", CK_BYTE),
+        ("bExpand", CK_BYTE),
+        ("prfHashMechanism", CK_ULONG),
+        ("ulSaltType", CK_ULONG),
+        ("pSalt", ctypes.POINTER(CK_BYTE)),
+        ("ulSaltLen", CK_ULONG),
+        ("hSaltKey", CK_ULONG),
+        ("pInfo", ctypes.POINTER(CK_BYTE)),
+        ("ulInfoLen", CK_ULONG),
     ]
 
 
@@ -1772,6 +1789,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 (CKM_AES_ECB, CKF_ENCRYPT | CKF_DECRYPT),
                 (CKM_AES_GCM, CKF_ENCRYPT | CKF_DECRYPT),
                 (CKM_AES_CMAC, CKF_SIGN | CKF_VERIFY),
+                (CKM_HKDF_DERIVE, CKF_DERIVE),
             ):
                 self.assertEqual(
                     self.lib.C_GetMechanismInfo(
@@ -2788,6 +2806,145 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
+
+                generic_key_type = CK_ULONG(CKK_GENERIC_SECRET)
+                hkdf_base_length = CK_ULONG(32)
+                hkdf_base_label_bytes = b"persistent HKDF base"
+                hkdf_base_label = (CK_BYTE * len(hkdf_base_label_bytes))(
+                    *hkdf_base_label_bytes
+                )
+                hkdf_base_template = (CK_ATTRIBUTE * 6)(
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(generic_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(generic_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VALUE_LEN,
+                        ctypes.cast(ctypes.byref(hkdf_base_length), CK_VOID_PTR),
+                        ctypes.sizeof(hkdf_base_length),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_DERIVE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(hkdf_base_label, CK_VOID_PTR),
+                        len(hkdf_base_label),
+                    ),
+                )
+                hkdf_base_generate = CK_MECHANISM(
+                    CKM_GENERIC_SECRET_KEY_GEN, None, 0
+                )
+                hkdf_base = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKey(
+                        session,
+                        ctypes.byref(hkdf_base_generate),
+                        hkdf_base_template,
+                        len(hkdf_base_template),
+                        ctypes.byref(hkdf_base),
+                    ),
+                    CKR_OK,
+                )
+
+                hkdf_salt_bytes = b"persistent HKDF salt"
+                hkdf_salt = (CK_BYTE * len(hkdf_salt_bytes))(*hkdf_salt_bytes)
+                hkdf_info_bytes = b"persistent AES context"
+                hkdf_info = (CK_BYTE * len(hkdf_info_bytes))(*hkdf_info_bytes)
+                hkdf_parameters = CK_HKDF_PARAMS(
+                    1,
+                    1,
+                    CKM_SHA256,
+                    CKF_HKDF_SALT_DATA,
+                    hkdf_salt,
+                    len(hkdf_salt),
+                    0,
+                    hkdf_info,
+                    len(hkdf_info),
+                )
+                hkdf_mechanism = CK_MECHANISM(
+                    CKM_HKDF_DERIVE,
+                    ctypes.cast(ctypes.pointer(hkdf_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(hkdf_parameters),
+                )
+                aes_key_type = CK_ULONG(CKK_AES)
+                hkdf_aes_length = CK_ULONG(16)
+                hkdf_aes_label_bytes = b"HKDF persistent AES"
+                hkdf_aes_label = (CK_BYTE * len(hkdf_aes_label_bytes))(
+                    *hkdf_aes_label_bytes
+                )
+                hkdf_aes_template = (CK_ATTRIBUTE * 9)(
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(aes_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(aes_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VALUE_LEN,
+                        ctypes.cast(ctypes.byref(hkdf_aes_length), CK_VOID_PTR),
+                        ctypes.sizeof(hkdf_aes_length),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ENCRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_DECRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SENSITIVE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_EXTRACTABLE,
+                        ctypes.cast(ctypes.byref(disabled), CK_VOID_PTR),
+                        ctypes.sizeof(disabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(hkdf_aes_label, CK_VOID_PTR),
+                        len(hkdf_aes_label),
+                    ),
+                )
+                hkdf_aes = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_DeriveKey(
+                        session,
+                        ctypes.byref(hkdf_mechanism),
+                        hkdf_base.value,
+                        hkdf_aes_template,
+                        len(hkdf_aes_template),
+                        ctypes.byref(hkdf_aes),
+                    ),
+                    CKR_OK,
+                )
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
                 self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
 
@@ -2801,6 +2958,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                     copied_label_bytes,
                     unwrapped_label_bytes,
                     derived_label_bytes,
+                    hkdf_base_label_bytes,
+                    hkdf_aes_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
                 self.login_with_pin(restored, b"secret vault user password")
@@ -2809,11 +2968,15 @@ class Pkcs11AbiTests(unittest.TestCase):
                 restored_copy = find_label(restored, copied_label_bytes)
                 restored_unwrapped = find_label(restored, unwrapped_label_bytes)
                 restored_derived = find_label(restored, derived_label_bytes)
+                restored_hkdf_base = find_label(restored, hkdf_base_label_bytes)
+                restored_hkdf_aes = find_label(restored, hkdf_aes_label_bytes)
                 self.assertEqual(len(restored_aes), 1)
                 self.assertEqual(len(restored_hmac), 1)
                 self.assertEqual(len(restored_copy), 1)
                 self.assertEqual(len(restored_unwrapped), 1)
                 self.assertEqual(len(restored_derived), 1)
+                self.assertEqual(len(restored_hkdf_base), 1)
+                self.assertEqual(len(restored_hkdf_aes), 1)
 
                 iv = (CK_BYTE * 16)(*range(16))
                 cbc_pad = CK_MECHANISM(
@@ -2859,6 +3022,44 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKR_OK,
                 )
                 self.assertEqual(bytes(aes_recovered), bytes(aes_plaintext))
+
+                hkdf_ciphertext = (CK_BYTE * 32)()
+                hkdf_ciphertext_len = CK_ULONG(len(hkdf_ciphertext))
+                self.assertEqual(
+                    self.lib.C_EncryptInit(
+                        restored, ctypes.byref(cbc_pad), restored_hkdf_aes[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Encrypt(
+                        restored,
+                        aes_plaintext,
+                        len(aes_plaintext),
+                        hkdf_ciphertext,
+                        ctypes.byref(hkdf_ciphertext_len),
+                    ),
+                    CKR_OK,
+                )
+                hkdf_recovered = (CK_BYTE * len(aes_plaintext))()
+                hkdf_recovered_len = CK_ULONG(len(hkdf_recovered))
+                self.assertEqual(
+                    self.lib.C_DecryptInit(
+                        restored, ctypes.byref(cbc_pad), restored_hkdf_aes[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Decrypt(
+                        restored,
+                        hkdf_ciphertext,
+                        hkdf_ciphertext_len.value,
+                        hkdf_recovered,
+                        ctypes.byref(hkdf_recovered_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(bytes(hkdf_recovered), bytes(aes_plaintext))
 
                 message_bytes = b"persistent secret operation"
                 message = (CK_BYTE * len(message_bytes))(*message_bytes)
@@ -2963,6 +3164,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                     copied_label_bytes,
                     unwrapped_label_bytes,
                     derived_label_bytes,
+                    hkdf_base_label_bytes,
+                    hkdf_aes_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
                 self.login_with_pin(restored, b"secret vault user password")
@@ -2986,6 +3189,10 @@ class Pkcs11AbiTests(unittest.TestCase):
                     len(find_label(final_session, unwrapped_label_bytes)), 1
                 )
                 self.assertEqual(len(find_label(final_session, derived_label_bytes)), 1)
+                self.assertEqual(
+                    len(find_label(final_session, hkdf_base_label_bytes)), 1
+                )
+                self.assertEqual(len(find_label(final_session, hkdf_aes_label_bytes)), 1)
                 self.assertEqual(self.lib.C_CloseSession(final_session), CKR_OK)
             finally:
                 self.lib.C_Finalize(None)
@@ -7435,6 +7642,39 @@ fn main() {
                     "pSharedData": 8,
                     "ulPublicDataLen": 16,
                     "pPublicData": 24,
+                },
+            ),
+        )
+
+    def test_layout_ck_hkdf_params(self) -> None:
+        self.assert_layout(
+            CK_HKDF_PARAMS,
+            64,
+            8,
+            {
+                "bExtract": 0,
+                "bExpand": 1,
+                "prfHashMechanism": 8,
+                "ulSaltType": 16,
+                "pSalt": 24,
+                "ulSaltLen": 32,
+                "hSaltKey": 40,
+                "pInfo": 48,
+                "ulInfoLen": 56,
+            },
+            llp64=(
+                48,
+                8,
+                {
+                    "bExtract": 0,
+                    "bExpand": 1,
+                    "prfHashMechanism": 4,
+                    "ulSaltType": 8,
+                    "pSalt": 16,
+                    "ulSaltLen": 24,
+                    "hSaltKey": 28,
+                    "pInfo": 32,
+                    "ulInfoLen": 40,
                 },
             ),
         )
