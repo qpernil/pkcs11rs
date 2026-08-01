@@ -1,6 +1,45 @@
 use crate::*;
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
+pub(crate) type RsaOaepParameters = (u8, CK_MECHANISM_TYPE, Vec<u8>);
+
+pub(crate) fn parse_rsa_oaep_parameters(
+    mechanism: &CK_MECHANISM,
+) -> Result<RsaOaepParameters, Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_OAEP_PARAMS_PTR) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if parameters.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let digest = digest_for_hash_mechanism(parameters.hashAlg)
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let mgf = match parameters.mgf {
+        x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
+        x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
+        x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
+        x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
+        x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
+        x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
+        x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
+        x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
+        x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    let label = unsafe {
+        from_raw_parts(
+            parameters.pSourceData as *const u8,
+            parameters.ulSourceDataLen as usize,
+        )
+    }
+    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    Ok((mgf, parameters.hashAlg, hash(digest, label)?.to_vec()))
+}
+
 pub(crate) fn yubihsm_ec_coordinate_length(algorithm: u8) -> Result<usize, Error> {
     match algorithm {
         YUBIHSM_ALGO_EC_P224 => Ok(28),

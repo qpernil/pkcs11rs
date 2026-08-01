@@ -308,6 +308,213 @@ fn software_aes_wrap_and_unwrap_secret_keys() {
     finalize_for_test();
 }
 
+fn generate_software_rsa_wrap_key_pair(
+    session: CK_SESSION_HANDLE,
+) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
+    let mut modulus_bits = 1024 as CK_ULONG;
+    let mut public_wrap = CK_TRUE as CK_BBOOL;
+    let mut private_unwrap = CK_TRUE as CK_BBOOL;
+    let mut public_template = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut public_wrap),
+    ];
+    let mut private_template = [scalar_attribute(
+        CKA_UNWRAP as CK_ATTRIBUTE_TYPE,
+        &mut private_unwrap,
+    )];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV
+    );
+    (public, private)
+}
+
+fn software_rsa_wrap_round_trip(
+    session: CK_SESSION_HANDLE,
+    mechanism: &mut CK_MECHANISM,
+    public: CK_OBJECT_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    target: CK_OBJECT_HANDLE,
+    target_value: &[u8],
+) {
+    let mut wrapped_length = 0;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            session,
+            mechanism,
+            public,
+            target,
+            std::ptr::null_mut(),
+            &mut wrapped_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(wrapped_length, 128);
+    let mut short = vec![0; wrapped_length as usize - 1];
+    let mut short_length = short.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            session,
+            mechanism,
+            public,
+            target,
+            short.as_mut_ptr(),
+            &mut short_length,
+        ),
+        CKR_BUFFER_TOO_SMALL as CK_RV
+    );
+    assert_eq!(short_length, wrapped_length);
+
+    let mut wrapped = vec![0; wrapped_length as usize];
+    assert_eq!(
+        crate::api::C_WrapKey(
+            session,
+            mechanism,
+            public,
+            target,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut key_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut template = software_unwrap_test_template(&mut key_type, &mut sign, &mut verify);
+    let mut unwrapped = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_UnwrapKey(
+            session,
+            mechanism,
+            private,
+            wrapped.as_mut_ptr(),
+            wrapped.len() as CK_ULONG,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut unwrapped,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(unwrapped).unwrap().unwrap();
+        assert!(object.sign && object.verify);
+        assert!(
+            matches!(object.material, KeyMaterial::SoftwareSecret(ref value) if value.as_slice() == target_value)
+        );
+    });
+
+    wrapped[0] ^= 1;
+    assert_eq!(
+        crate::api::C_UnwrapKey(
+            session,
+            mechanism,
+            private,
+            wrapped.as_mut_ptr(),
+            wrapped.len() as CK_ULONG,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut unwrapped,
+        ),
+        CKR_WRAPPED_KEY_INVALID as CK_RV
+    );
+}
+
+#[test]
+fn software_rsa_pkcs_and_oaep_wrap_and_unwrap_secret_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let (public, private) = generate_software_rsa_wrap_key_pair(TEST_SESSION_HANDLE);
+    let mut target_value = [0x5a; 32];
+    let target = create_software_wrap_test_key(
+        TEST_SESSION_HANDLE,
+        CKK_SHA256_HMAC as CK_KEY_TYPE,
+        &mut target_value,
+        false,
+        false,
+        true,
+    );
+
+    let mut pkcs = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    software_rsa_wrap_round_trip(
+        TEST_SESSION_HANDLE,
+        &mut pkcs,
+        public,
+        private,
+        target,
+        &target_value,
+    );
+
+    let mut oversized_value = [0x33; 118];
+    let oversized = create_software_wrap_test_key(
+        TEST_SESSION_HANDLE,
+        CKK_GENERIC_SECRET as CK_KEY_TYPE,
+        &mut oversized_value,
+        false,
+        false,
+        true,
+    );
+    let mut oversized_length = 0;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut pkcs,
+            public,
+            oversized,
+            std::ptr::null_mut(),
+            &mut oversized_length,
+        ),
+        CKR_KEY_SIZE_RANGE as CK_RV
+    );
+
+    let mut label = b"software RSA OAEP wrap".to_vec();
+    let mut oaep_parameters = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+        source: CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+        pSourceData: label.as_mut_ptr().cast(),
+        ulSourceDataLen: label.len() as CK_ULONG,
+    };
+    let mut oaep = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE,
+        pParameter: (&mut oaep_parameters as *mut CK_RSA_PKCS_OAEP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+    };
+    software_rsa_wrap_round_trip(
+        TEST_SESSION_HANDLE,
+        &mut oaep,
+        public,
+        private,
+        target,
+        &target_value,
+    );
+    finalize_for_test();
+}
+
 struct YubiHsmWrapTestObject<'a> {
     id: u16,
     object_type: u8,

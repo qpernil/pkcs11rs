@@ -475,19 +475,21 @@ mod tests {
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
                     (1024, 4096, CKF_GENERATE_KEY_PAIR)
                 }
-                x if [CKM_RSA_X_509, CKM_RSA_PKCS]
-                    .map(|type_| type_ as CK_MECHANISM_TYPE)
-                    .contains(&x) =>
-                {
-                    (
-                        1024,
-                        4096,
-                        CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY,
-                    )
-                }
-                x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
-                    (1024, 4096, CKF_ENCRYPT | CKF_DECRYPT)
-                }
+                x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE => (
+                    1024,
+                    4096,
+                    CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY,
+                ),
+                x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => (
+                    1024,
+                    4096,
+                    CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY | CKF_WRAP | CKF_UNWRAP,
+                ),
+                x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => (
+                    1024,
+                    4096,
+                    CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP,
+                ),
                 x if x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
                     || [
                         CKM_SHA1_RSA_PKCS,

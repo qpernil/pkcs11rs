@@ -66,6 +66,12 @@ publication boundary. Unwrapped keys are non-local and begin with
 `CKA_ALWAYS_SENSITIVE=CK_FALSE` and `CKA_NEVER_EXTRACTABLE=CK_FALSE`, reflecting
 that their material entered the module in wrapped form.
 
+The direct-RSA portion of Phase 8 is implemented. Software RSA public keys can
+wrap extractable software secret keys with PKCS #1 v1.5 or OAEP, and matching
+software RSA private keys can unwrap them into session or private persistent
+objects. OAEP parameter parsing is shared with RSA encryption and the YubiHSM
+RSA-AES path so hash, MGF, source, and label validation stay identical.
+
 ## Future master-key cycling
 
 Add a non-PKCS #11 maintenance operation for explicit key rotation. Public
@@ -487,7 +493,7 @@ must leave no object, handle, or plaintext behind.
 
 ### Direct RSA wrapping
 
-Support software RSA keys with:
+Implemented for software RSA keys with:
 
 - `CKM_RSA_PKCS`; and
 - `CKM_RSA_PKCS_OAEP`.
