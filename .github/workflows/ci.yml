@@ -200,7 +200,7 @@ jobs:
       - name: Build and load PKCS #11 DLL
         run: |
           cargo build --locked
-          cargo test --locked --test shared_library -- --ignored
+          cargo xtask load-shared-library
 
       - name: Run mock YubiKey PKCS #11 tests
         run: cargo test --locked --features mock-yubikey preview_sign_mock
