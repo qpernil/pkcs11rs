@@ -117,6 +117,19 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
             KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(mechanism)),
         )?;
     }
+    if let Some(mechanisms) = &object.allowed_mechanisms {
+        insert(
+            &mut attributes,
+            CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+            KeyAttributeValue::Mechanisms(
+                mechanisms
+                    .iter()
+                    .copied()
+                    .map(cryptoki_ulong_to_u64)
+                    .collect(),
+            ),
+        )?;
+    }
     if let Some(public_key_info) = object.public_key_info() {
         insert(
             &mut attributes,
@@ -320,6 +333,28 @@ fn optional_unsigned(
     }
 }
 
+fn optional_mechanisms(
+    attributes: &KeyAttributes,
+    attribute: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<Vec<CK_MECHANISM_TYPE>>, Error> {
+    match attributes.get(cryptoki_ulong_to_u64(attribute)) {
+        Some(KeyAttributeValue::Mechanisms(values)) => {
+            let mechanisms = values
+                .iter()
+                .copied()
+                .map(CK_MECHANISM_TYPE::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+            if mechanisms.len() > 256 || mechanisms.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            Ok(Some(mechanisms))
+        }
+        None => Ok(None),
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
+}
+
 fn decode_public_key_material(
     encoded: &[u8],
 ) -> Result<(CK_KEY_TYPE, KeyMaterial, Option<String>), Error> {
@@ -459,6 +494,8 @@ fn materialize_object(
             .map(CK_MECHANISM_TYPE::try_from)
             .transpose()
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let allowed_mechanisms =
+        optional_mechanisms(attributes, CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE)?;
     let object = TokenObject {
         slot_id: token.then_some(slot_id),
         unique_id: backed_object_unique_id(reference),
@@ -481,6 +518,7 @@ fn materialize_object(
         never_extractable: required_bool(attributes, CKA_NEVER_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
         local: required_bool(attributes, CKA_LOCAL as CK_ATTRIBUTE_TYPE)?,
         key_gen_mechanism,
+        allowed_mechanisms,
         creator_session: None,
         public_key: None,
         rp_id,
@@ -710,5 +748,55 @@ mod tests {
             object,
         };
         assert!(stored_objects(&provider, 7, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backed_public_key_preserves_allowed_mechanisms() {
+        let object = TokenObject {
+            slot_id: Some(7),
+            unique_id: "public-key".to_owned(),
+            class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            key_type: CKK_RSA as CK_KEY_TYPE,
+            label: "restricted RSA key".to_owned(),
+            id: vec![1],
+            token: true,
+            private: false,
+            encrypt: true,
+            decrypt: false,
+            sign: false,
+            verify: true,
+            derive: false,
+            wrap: false,
+            unwrap: false,
+            sensitive: false,
+            extractable: true,
+            always_sensitive: false,
+            never_extractable: false,
+            local: true,
+            key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
+            allowed_mechanisms: Some(vec![
+                CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+                CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+            ]),
+            creator_session: None,
+            public_key: None,
+            rp_id: None,
+            material: KeyMaterial::Public(PublicKeyMaterial::Rsa(
+                RsaPublicKey::new(
+                    BigUint::from_bytes_be(&vec![0x11; 256]),
+                    BigUint::from(65537u32),
+                )
+                .unwrap(),
+            )),
+        };
+        let encoded = encode_backed_object(&object).unwrap().object;
+        let provider = FixedProvider {
+            reference: ContentReference::for_object(&encoded),
+            object: encoded,
+        };
+
+        let restored = stored_objects(&provider, 7, true).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);
     }
 }

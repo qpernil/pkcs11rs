@@ -95,6 +95,7 @@ CKM_SHA256_HMAC = 0x00000251
 CKM_SHA224 = 0x00000255
 CKM_SHA384 = 0x00000260
 CKM_SHA512 = 0x00000270
+CKM_SHA512_HMAC = 0x00000271
 CKM_SHA3_256 = 0x000002B0
 CKM_SHA3_224 = 0x000002B5
 CKM_SHA3_384 = 0x000002C0
@@ -181,6 +182,7 @@ CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
 CKA_EC_PARAMS = 0x00000180
 CKA_EC_POINT = 0x00000181
+CKA_ALLOWED_MECHANISMS = 0x40000600
 CKA_PROFILE_ID = 0x00000601
 CKA_PKCS11RS_PIV_OBJECT_TAG = 0x80005056
 CKU_SO = 0
@@ -2558,7 +2560,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 hmac_value = (CK_BYTE * 20)(*[0x0B] * 20)
                 hmac_label_bytes = b"persistent HMAC"
                 hmac_label = (CK_BYTE * len(hmac_label_bytes))(*hmac_label_bytes)
-                hmac_template = (CK_ATTRIBUTE * 8)(
+                allowed_hmac_mechanisms = (CK_ULONG * 1)(CKM_SHA256_HMAC)
+                hmac_template = (CK_ATTRIBUTE * 9)(
                     CK_ATTRIBUTE(
                         CKA_CLASS,
                         ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
@@ -2598,6 +2601,11 @@ class Pkcs11AbiTests(unittest.TestCase):
                         CKA_LABEL,
                         ctypes.cast(hmac_label, CK_VOID_PTR),
                         len(hmac_label),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ALLOWED_MECHANISMS,
+                        ctypes.cast(allowed_hmac_mechanisms, CK_VOID_PTR),
+                        ctypes.sizeof(allowed_hmac_mechanisms),
                     ),
                 )
                 hmac_key = CK_ULONG()
@@ -3363,6 +3371,23 @@ class Pkcs11AbiTests(unittest.TestCase):
                 message_bytes = b"persistent secret operation"
                 message = (CK_BYTE * len(message_bytes))(*message_bytes)
                 hmac = CK_MECHANISM(CKM_SHA256_HMAC, None, 0)
+                self.assertEqual(
+                    read_attribute(
+                        restored,
+                        restored_hmac[0],
+                        CKA_ALLOWED_MECHANISMS,
+                    ),
+                    bytes(allowed_hmac_mechanisms),
+                )
+                disallowed_hmac = CK_MECHANISM(CKM_SHA512_HMAC, None, 0)
+                self.assertEqual(
+                    self.lib.C_SignInit(
+                        restored,
+                        ctypes.byref(disallowed_hmac),
+                        restored_hmac[0],
+                    ),
+                    CKR_MECHANISM_INVALID,
+                )
                 self.assertEqual(
                     self.lib.C_SignInit(
                         restored, ctypes.byref(hmac), restored_hmac[0]

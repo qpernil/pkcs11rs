@@ -315,6 +315,7 @@ fn crypt_init(
             .resolve_object(key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        require_key_mechanism(&object, mechanism.mechanism)?;
         if object.private && !logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }

@@ -2,6 +2,7 @@ use crate::*;
 
 #[derive(Clone, Debug)]
 pub(crate) struct DigestOperation {
+    mechanism: CK_MECHANISM_TYPE,
     algorithm: MessageDigest,
     buffer: Vec<u8>,
 }
@@ -36,6 +37,7 @@ fn digest_init(
         }
         ctx.get_session_context_mut(session_handle)?
             .digest_operation = Some(DigestOperation {
+            mechanism: mechanism.mechanism,
             algorithm: software_digest(mechanism.mechanism)?,
             buffer: Vec::new(),
         });
@@ -181,12 +183,19 @@ ffi_entry_point! {
             {
                 return Err(Error::from(CKR_OPERATION_NOT_INITIALIZED as CK_RV));
             }
+            let mechanism = ctx
+                .get_session_context(session_handle)?
+                .digest_operation
+                .as_ref()
+                .ok_or(CKR_OPERATION_NOT_INITIALIZED)?
+                .mechanism;
             let object = ctx
                 .resolve_object(key)?
                 .ok_or_else(|| Error::from(CKR_KEY_HANDLE_INVALID as CK_RV))?;
             if !object.is_visible_to(logged_in) {
                 return Err(Error::from(CKR_KEY_HANDLE_INVALID as CK_RV));
             }
+            require_key_mechanism(&object, mechanism)?;
             if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
                 return Err(Error::from(CKR_KEY_INDIGESTIBLE as CK_RV));
             }

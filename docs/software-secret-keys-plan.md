@@ -561,6 +561,13 @@ Persist and enforce:
 Template-valued attributes require canonical encoding, strict merge rules, and
 duplicate/conflict rejection.
 
+`CKA_ALLOWED_MECHANISMS` is implemented for software keys. An absent attribute
+leaves the key unrestricted, while a present empty list permits no mechanisms.
+Lists are stored in sorted canonical form, duplicates are rejected, and every
+operation that consumes a key checks its active mechanism before using the key.
+The remaining template-valued and trusted-wrapping attributes are still future
+work.
+
 Named software slots have separate Security Officer and user PIN wrappers, but
 do not yet implement trusted-object administration. Therefore:
 

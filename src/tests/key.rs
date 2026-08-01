@@ -361,6 +361,135 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
     );
 }
 
+#[test]
+fn software_keys_enforce_allowed_mechanisms() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut length = 32 as CK_ULONG;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut allowed = [
+        CKM_SHA512_HMAC as CK_MECHANISM_TYPE,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+    ];
+    let mut template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        CK_ATTRIBUTE {
+            type_: CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+            pValue: allowed.as_mut_ptr().cast(),
+            ulValueLen: std::mem::size_of_val(&allowed) as CK_ULONG,
+        },
+    ];
+    let mut generate = CK_MECHANISM {
+        mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut generate,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut returned = [0 as CK_MECHANISM_TYPE; 2];
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE,
+        pValue: returned.as_mut_ptr().cast(),
+        ulValueLen: std::mem::size_of_val(&returned) as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, key, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut expected = allowed;
+    expected.sort_unstable();
+    assert_eq!(returned, expected);
+    sign_and_verify(
+        TEST_SESSION_HANDLE,
+        key,
+        key,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+    );
+
+    let mut disallowed = CK_MECHANISM {
+        mechanism: CKM_SHA384_HMAC as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut disallowed, key),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut disallowed, key),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
+    template[4].pValue = std::ptr::null_mut();
+    template[4].ulValueLen = 0;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut generate,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut disallowed, key),
+        CKR_MECHANISM_INVALID as CK_RV
+    );
+
+    allowed = [
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+    ];
+    template[4].pValue = allowed.as_mut_ptr().cast();
+    template[4].ulValueLen = std::mem::size_of_val(&allowed) as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut generate,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    let mut invalid = [0u8; 1];
+    template[4].pValue = invalid.as_mut_ptr().cast();
+    template[4].ulValueLen = invalid.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut generate,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
+    );
+    finalize_for_test();
+}
+
 fn object_ec_point(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> Vec<u8> {
     let mut attribute = CK_ATTRIBUTE {
         type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,

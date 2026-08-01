@@ -43,6 +43,7 @@ pub(crate) struct TokenObject {
     pub(crate) never_extractable: bool,
     pub(crate) local: bool,
     pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
+    pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
     pub(crate) creator_session: Option<CK_SESSION_HANDLE>,
     pub(crate) public_key: Option<PublicKeyMaterial>,
     pub(crate) rp_id: Option<String>,
@@ -465,6 +466,7 @@ pub(crate) struct TokenObjectTemplate {
     pub(crate) unwrap: bool,
     pub(crate) sensitive: Option<bool>,
     pub(crate) extractable: Option<bool>,
+    pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
 }
 
 #[derive(Debug)]
@@ -984,6 +986,12 @@ pub(crate) fn lazy_yubihsm_attestation_certificate(
 }
 
 impl TokenObject {
+    pub(crate) fn allows_mechanism(&self, mechanism: CK_MECHANISM_TYPE) -> bool {
+        self.allowed_mechanisms
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&mechanism))
+    }
+
     pub(crate) fn supports_public_projection(&self) -> bool {
         self.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS && self.public_key_info().is_some()
     }
@@ -995,6 +1003,12 @@ impl TokenObject {
     pub(crate) fn supports_attribute(&self, attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
         if is_common_storage_attribute(attribute_type) {
             return true;
+        }
+        if attribute_type == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
+            && self.is_key_object()
+            && self.allowed_mechanisms.is_none()
+        {
+            return false;
         }
 
         let standard = match self.class {
@@ -1418,9 +1432,16 @@ impl TokenObject {
                         .unwrap_or(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 ))
             }
+            x if x == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                self.allowed_mechanisms.as_ref().map(|mechanisms| {
+                    mechanisms
+                        .iter()
+                        .flat_map(|mechanism| mechanism.to_ne_bytes())
+                        .collect()
+                })
+            }
             x if x == CKA_START_DATE as CK_ATTRIBUTE_TYPE
                 || x == CKA_END_DATE as CK_ATTRIBUTE_TYPE
-                || x == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE
                 || x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
                 || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
                 || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
@@ -1942,6 +1963,27 @@ impl TokenObjectTemplate {
                 self.extractable = Some(read_bool_template_attribute(attribute)?);
                 Ok(())
             }
+            x if x == CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE => {
+                let value = read_attribute_value(attribute)?;
+                let width = std::mem::size_of::<CK_MECHANISM_TYPE>();
+                if !crate::is_multiple_of(value.len(), width) {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+                }
+                let mut mechanisms = value
+                    .chunks_exact(width)
+                    .map(|bytes| {
+                        let mut encoded = [0; std::mem::size_of::<CK_MECHANISM_TYPE>()];
+                        encoded.copy_from_slice(bytes);
+                        CK_MECHANISM_TYPE::from_ne_bytes(encoded)
+                    })
+                    .collect::<Vec<_>>();
+                mechanisms.sort_unstable();
+                if mechanisms.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
+                }
+                self.allowed_mechanisms = Some(mechanisms);
+                Ok(())
+            }
             _ => Err(CKR_ATTRIBUTE_TYPE_INVALID as CK_RV),
         }
     }
@@ -1990,6 +2032,7 @@ impl TokenObjectTemplate {
             never_extractable: !extractable || (nonextractable_key && !software_secret),
             local: false,
             key_gen_mechanism: None,
+            allowed_mechanisms: self.allowed_mechanisms,
             creator_session: None,
             public_key: None,
             rp_id: None,
