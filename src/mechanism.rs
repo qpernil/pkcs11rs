@@ -292,10 +292,26 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
 }
 
 pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
-    // The capability boundary exists before the implementation is advertised.
-    // Add AES, HMAC, generation, wrapping, and derivation mechanisms here as
-    // those operation paths become complete.
-    Vec::new()
+    let mut mechanisms = vec![MechanismDetails {
+        type_: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        min_key_size: 1,
+        max_key_size: 1024,
+        flags: CKF_GENERATE as CK_FLAGS,
+    }];
+    for type_ in [
+        CKM_SHA_1_HMAC,
+        CKM_SHA256_HMAC,
+        CKM_SHA384_HMAC,
+        CKM_SHA512_HMAC,
+    ] {
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        });
+    }
+    mechanisms
 }
 
 pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [

@@ -268,8 +268,17 @@ fn create_object(
             )?;
             return Ok(());
         }
-        let mut object = parse_create_object_template(templ)?;
+        let software_secret = class == Some(CKO_SECRET_KEY as CK_OBJECT_CLASS)
+            && ctx.get_slot(slot_id)?.supports_software_secret_operations();
+        let mut object = if software_secret {
+            parse_software_secret_create_object_template(templ)?
+        } else {
+            parse_create_object_template(templ)?
+        };
         validate_new_object_access(&object, flags, logged_in)?;
+        if software_secret && object.token {
+            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
+        }
         if crate::backed_object::supports_backed_object(&object) {
             *object_handle = ctx.store_backed_object(session_handle, object)?;
             return Ok(());
@@ -1056,6 +1065,19 @@ fn yubihsm_import_command(
 }
 
 pub(crate) fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    parse_create_object_template_with_policy(templ, false)
+}
+
+fn parse_software_secret_create_object_template(
+    templ: &[CK_ATTRIBUTE],
+) -> Result<TokenObject, Error> {
+    parse_create_object_template_with_policy(templ, true)
+}
+
+fn parse_create_object_template_with_policy(
+    templ: &[CK_ATTRIBUTE],
+    software_secret: bool,
+) -> Result<TokenObject, Error> {
     validate_unique_template(templ)?;
     let mut object_template = TokenObjectTemplate::default();
     let mut key_components = HashMap::new();
@@ -1071,9 +1093,38 @@ pub(crate) fn parse_create_object_template(templ: &[CK_ATTRIBUTE]) -> Result<Tok
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    let mut object = object_template.into_object().map_err(Error::from)?;
+    let mut object = if software_secret {
+        object_template.into_software_secret_object()
+    } else {
+        object_template.into_object()
+    }
+    .map_err(Error::from)?;
     object.material = build_imported_key_material(&object, key_components)?;
+    if software_secret {
+        let KeyMaterial::Secret(value) = object.material else {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        };
+        validate_software_secret_length(object.key_type, value.len())?;
+        object.material = KeyMaterial::SoftwareSecret(value);
+    }
     Ok(object)
+}
+
+pub(crate) fn validate_software_secret_length(
+    key_type: CK_KEY_TYPE,
+    length: usize,
+) -> Result<(), Error> {
+    let valid = if key_type == CKK_AES as CK_KEY_TYPE {
+        matches!(length, 16 | 24 | 32)
+    } else if key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE || is_hmac_key_type(key_type) {
+        (1..=1024).contains(&length)
+    } else {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    };
+    if !valid {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    Ok(())
 }
 
 fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -1372,6 +1423,9 @@ fn copy_object(
         if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwarePrivate(_))
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
+            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
         }
         validate_new_object_access(&copied_object, flags, logged_in)?;
         copied_object.set_creator(session_handle, slot_id);

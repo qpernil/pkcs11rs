@@ -135,6 +135,230 @@ fn sign_and_verify(
     );
 }
 
+#[test]
+fn software_hmac_session_keys_generate_import_sign_and_verify() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    for (key_type, mechanism_type, length) in [
+        (CKK_GENERIC_SECRET, CKM_SHA256_HMAC, 32),
+        (CKK_SHA_1_HMAC, CKM_SHA_1_HMAC, 20),
+        (CKK_SHA256_HMAC, CKM_SHA256_HMAC, 32),
+        (CKK_SHA384_HMAC, CKM_SHA384_HMAC, 48),
+        (CKK_SHA512_HMAC, CKM_SHA512_HMAC, 64),
+    ] {
+        let mut key_type = key_type as CK_KEY_TYPE;
+        let mut length = length as CK_ULONG;
+        let mut sign = CK_TRUE as CK_BBOOL;
+        let mut verify = CK_TRUE as CK_BBOOL;
+        let mut template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+            scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+            scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        ];
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut key,
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            assert!(matches!(
+                context.resolve_object(key).unwrap().unwrap().material,
+                crate::KeyMaterial::SoftwareSecret(_)
+            ));
+        });
+        sign_and_verify(
+            TEST_SESSION_HANDLE,
+            key,
+            key,
+            mechanism_type as CK_MECHANISM_TYPE,
+        );
+    }
+
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut verify = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_FALSE as CK_BBOOL;
+    let mut extractable = CK_TRUE as CK_BBOOL;
+    let mut value = [0x0bu8; 20];
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+    ];
+    let mut imported = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut imported,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut value_attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(TEST_SESSION_HANDLE, imported, &mut value_attribute, 1,),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(value_attribute.ulValueLen, value.len() as CK_ULONG);
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+        CKR_OK as CK_RV
+    );
+    let first = b"Hi ";
+    let second = b"There";
+    assert_eq!(
+        crate::api::C_SignUpdate(
+            TEST_SESSION_HANDLE,
+            first.as_ptr().cast_mut(),
+            first.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignUpdate(
+            TEST_SESSION_HANDLE,
+            second.as_ptr().cast_mut(),
+            second.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = [0u8; 32];
+    let mut signature_length = signature.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_SignFinal(
+            TEST_SESSION_HANDLE,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        signature,
+        [
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+            0x2e, 0x32, 0xcf, 0xf7,
+        ]
+    );
+
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyUpdate(
+            TEST_SESSION_HANDLE,
+            first.as_ptr().cast_mut(),
+            first.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyUpdate(
+            TEST_SESSION_HANDLE,
+            second.as_ptr().cast_mut(),
+            second.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyFinal(
+            TEST_SESSION_HANDLE,
+            signature.as_mut_ptr(),
+            signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            TEST_SESSION_HANDLE,
+            b"Hi There".as_ptr().cast_mut(),
+            8,
+            signature.as_mut_ptr(),
+            signature_length - 1,
+        ),
+        CKR_SIGNATURE_LEN_RANGE as CK_RV
+    );
+    signature[0] ^= 1;
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            TEST_SESSION_HANDLE,
+            b"Hi There".as_ptr().cast_mut(),
+            8,
+            signature.as_mut_ptr(),
+            signature_length,
+        ),
+        CKR_SIGNATURE_INVALID as CK_RV
+    );
+
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut token_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+    ];
+    let mut rejected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            token_template.as_mut_ptr(),
+            token_template.len() as CK_ULONG,
+            &mut rejected,
+        ),
+        CKR_TOKEN_WRITE_PROTECTED as CK_RV
+    );
+    assert_eq!(rejected, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
 fn object_ec_point(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> Vec<u8> {
     let mut attribute = CK_ATTRIBUTE {
         type_: CKA_EC_POINT as CK_ATTRIBUTE_TYPE,

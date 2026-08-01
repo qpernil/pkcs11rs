@@ -1,4 +1,7 @@
-use super::sign::{aes_cmac_length, aes_gmac_parameters, yubihsm_aes_cmac, yubihsm_aes_gmac};
+use super::sign::{
+    aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, software_hmac,
+    yubihsm_aes_cmac, yubihsm_aes_gmac,
+};
 use crate::backed_object::projected_public_key_material;
 use crate::*;
 
@@ -88,7 +91,7 @@ fn verify_init(
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
         let cmac_mechanism = mac_length.is_some();
-        let hmac_mechanism = yubihsm_hmac_mechanism(mechanism.mechanism);
+        let hmac_mechanism = hmac_key_type_and_length(mechanism.mechanism);
         if !rsa_mechanism
             && !ecdsa_mechanism
             && !eddsa_mechanism
@@ -113,16 +116,19 @@ fn verify_init(
         } else {
             None
         };
-        let hmac_key_is_invalid = hmac_mechanism.is_some_and(|(key_type, algorithm, _)| {
-            object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-                || object.key_type != key_type
-                || !matches!(
-                    object.material,
-                    KeyMaterial::YubiHsm {
-                        algorithm: object_algorithm,
-                        ..
-                    } if object_algorithm == algorithm
-                )
+        let hmac_key_is_invalid = hmac_mechanism.is_some_and(|(key_type, _)| {
+            let material_is_valid = match &object.material {
+                KeyMaterial::SoftwareSecret(_) => {
+                    object.key_type == key_type
+                        || object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
+                }
+                KeyMaterial::YubiHsm { algorithm, .. } => {
+                    yubihsm_hmac_mechanism(mechanism.mechanism)
+                        .is_some_and(|(_, expected_algorithm, _)| *algorithm == expected_algorithm)
+                }
+                _ => false,
+            };
+            object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS || !material_is_valid
         });
         if (cmac_mechanism
             && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
@@ -247,15 +253,25 @@ fn verify(
             }
             return Ok(());
         }
-        if let Some((_, expected_algorithm, expected_length)) =
-            yubihsm_hmac_mechanism(operation.mechanism)
-        {
+        if let Some((_, expected_length)) = hmac_key_type_and_length(operation.mechanism) {
             if signature.len() != expected_length {
                 return Err(CKR_SIGNATURE_LEN_RANGE.into());
+            }
+            if let KeyMaterial::SoftwareSecret(key) = &operation.key {
+                let expected = software_hmac(key, operation.mechanism, data)?;
+                if bool::from(subtle::ConstantTimeEq::ct_eq(
+                    expected.as_slice(),
+                    signature,
+                )) {
+                    return Ok(());
+                }
+                return Err(CKR_SIGNATURE_INVALID.into());
             }
             let KeyMaterial::YubiHsm { id, algorithm, .. } = &operation.key else {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             };
+            let (_, expected_algorithm, _) =
+                yubihsm_hmac_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?;
             if *algorithm != expected_algorithm {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             }

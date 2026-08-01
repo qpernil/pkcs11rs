@@ -1,7 +1,8 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    piv_key_object_handles, required_template_value, validate_unique_template,
-    yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
+    piv_key_object_handles, required_template_value, validate_software_secret_length,
+    validate_unique_template, yubihsm_hardware_import_object, yubihsm_id,
+    yubihsm_object_parameters,
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
@@ -73,8 +74,12 @@ fn generate_key(
             *key_handle = handle;
             return Ok(());
         }
-        let mut key = generate_key_object(mechanism, templ)?;
+        let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
+        let mut key = generate_key_object(mechanism, templ, software_secret)?;
         validate_new_object_access(&key, flags, logged_in)?;
+        if software_secret && key.token {
+            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
+        }
         key.set_creator(session_handle, slot_id);
         let handle = ctx.insert_object(key)?;
         *key_handle = handle;
@@ -170,6 +175,7 @@ fn yubihsm_generate_key_command(
 fn generate_key_object(
     mechanism: &CK_MECHANISM,
     templ: &[CK_ATTRIBUTE],
+    software_secret: bool,
 ) -> Result<TokenObject, Error> {
     if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE {
         return Err(CKR_MECHANISM_INVALID.into());
@@ -199,23 +205,39 @@ fn generate_key_object(
             .apply_attribute(attribute)
             .map_err(Error::from)?;
     }
-    let mut key = key_template.into_object().map_err(Error::from)?;
+    let mut key = if software_secret {
+        key_template.into_software_secret_object()
+    } else {
+        key_template.into_object()
+    }
+    .map_err(Error::from)?;
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-        || key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+        || (!software_secret && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE)
+        || (software_secret
+            && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+            && !is_hmac_key_type(key.key_type))
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     let value_len = value_len.ok_or(CKR_TEMPLATE_INCOMPLETE)?;
-    let key_size_bits = value_len
-        .checked_mul(8)
-        .ok_or(CKR_KEY_SIZE_RANGE as CK_RV)?;
-    let details = mechanism_details(&MECHANISMS, mechanism.mechanism)?;
-    if key_size_bits < details.min_key_size || key_size_bits > details.max_key_size {
-        return Err(CKR_KEY_SIZE_RANGE.into());
+    if software_secret {
+        validate_software_secret_length(key.key_type, value_len as usize)?;
+    } else {
+        let key_size_bits = value_len
+            .checked_mul(8)
+            .ok_or(CKR_KEY_SIZE_RANGE as CK_RV)?;
+        let details = mechanism_details(&MECHANISMS, mechanism.mechanism)?;
+        if key_size_bits < details.min_key_size || key_size_bits > details.max_key_size {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
     }
     let mut value = vec![0; value_len as usize];
     getrandom::fill(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-    key.material = KeyMaterial::Secret(Zeroizing::new(value));
+    key.material = if software_secret {
+        KeyMaterial::SoftwareSecret(Zeroizing::new(value))
+    } else {
+        KeyMaterial::Secret(Zeroizing::new(value))
+    };
     key.local = true;
     key.key_gen_mechanism = Some(mechanism.mechanism);
     Ok(key)
