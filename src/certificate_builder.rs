@@ -1,8 +1,6 @@
 #[cfg(feature = "abi-tests")]
 use der::Decode;
 use der::Encode;
-#[cfg(test)]
-use der::{pem::LineEnding, EncodePem};
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::Generate;
 #[cfg(any(test, feature = "abi-tests"))]
@@ -42,15 +40,6 @@ pub(crate) fn rsa_key() -> RsaPrivateKey {
 
 pub(crate) fn p256_public_point(key: &VerifyingKey) -> Vec<u8> {
     key.to_sec1_point(false).as_bytes().to_vec()
-}
-
-#[cfg(test)]
-pub(crate) fn p256_public_key_pem(key: &VerifyingKey) -> Vec<u8> {
-    SubjectPublicKeyInfoOwned::from_key(key)
-        .unwrap()
-        .to_pem(LineEnding::LF)
-        .unwrap()
-        .into_bytes()
 }
 
 struct TestProfile {

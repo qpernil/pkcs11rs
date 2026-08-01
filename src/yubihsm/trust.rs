@@ -1,6 +1,7 @@
 use crate::{Error, CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT};
+use minicbor::{Decoder, Encoder};
 use p256::{
-    pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
+    pkcs8::{DecodePublicKey, EncodePublicKey},
     PublicKey,
 };
 use sha2::{Digest, Sha256};
@@ -15,6 +16,10 @@ use std::{
 use subtle::ConstantTimeEq;
 
 pub(crate) const TRUST_PREFIX_ENV: &str = "PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX";
+const TRUST_RECORD_SCHEMA: &str = "pkcs11rs.yubihsm-device-trust";
+const TRUST_RECORD_VERSION: u64 = 1;
+const TRUST_RECORD_PUBLIC_KEY: u8 = 1;
+const TRUST_RECORD_ATTESTATION_CERTIFICATE: u8 = 2;
 const YUBICO_ROOT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/certificates/yubihsm/yubihsm2-attestation-root.pem"
@@ -39,12 +44,14 @@ impl TrustStore {
         encoded_public_point: &[u8],
         prefix: Option<&OsStr>,
     ) -> Result<[u8; 32], Error> {
-        let key = PublicKey::from_sec1_bytes(encoded_public_point)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let pem = key
-            .to_public_key_pem(LineEnding::LF)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        self.install_pem(encoded_public_point, pem.as_bytes(), prefix, false)
+        let spki = device_spki(encoded_public_point)?;
+        self.install_record(
+            encoded_public_point,
+            TRUST_RECORD_PUBLIC_KEY,
+            &spki,
+            prefix,
+            false,
+        )
     }
 
     pub(crate) fn install_attestation(
@@ -77,25 +84,37 @@ impl TrustStore {
         ) {
             return Err(CKR_PIN_INCORRECT.into());
         }
-        let pem = crate::certificate_chain::encode_pem(&attestation)?;
-        self.install_pem(encoded_public_point, pem.as_bytes(), prefix, true)
+        self.install_record(
+            encoded_public_point,
+            TRUST_RECORD_ATTESTATION_CERTIFICATE,
+            &attestation,
+            prefix,
+            true,
+        )
     }
 
-    fn install_pem(
+    fn install_record(
         &self,
         encoded_public_point: &[u8],
-        pem: &[u8],
+        kind: u8,
+        payload: &[u8],
         prefix: Option<&OsStr>,
         replace_matching_entry: bool,
     ) -> Result<[u8; 32], Error> {
+        let fingerprint = fingerprint_bytes(encoded_public_point)?;
+        let encoded = encode_trust_record(kind, &fingerprint, payload)?;
         let path = entry_path(encoded_public_point, prefix)?;
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
+        let current_metadata = fs::symlink_metadata(&path).ok();
+        if current_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        if current_metadata.is_some() {
             validate_device_public_key(encoded_public_point, prefix)?;
             if !replace_matching_entry {
-                return fingerprint_bytes(encoded_public_point);
+                return Ok(fingerprint);
             }
         }
 
@@ -109,11 +128,11 @@ impl TrustStore {
                 .create_new(true)
                 .open(&temporary)
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-            file.write_all(pem)
+            file.write_all(&encoded)
                 .and_then(|_| file.sync_all())
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
             fs::rename(&temporary, &path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-            fingerprint_bytes(encoded_public_point)
+            Ok(fingerprint)
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
@@ -154,8 +173,72 @@ pub(crate) fn entry_path(
         return Err(CKR_ARGUMENTS_BAD.into());
     }
     name.push(fingerprint(encoded_public_point)?);
-    name.push(".pem");
+    name.push(".cbor");
     Ok(PathBuf::from(name))
+}
+
+fn encode_trust_record(kind: u8, fingerprint: &[u8; 32], payload: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut encoded = Vec::new();
+    Encoder::new(&mut encoded)
+        .array(5)
+        .and_then(|encoder| encoder.str(TRUST_RECORD_SCHEMA))
+        .and_then(|encoder| encoder.u64(TRUST_RECORD_VERSION))
+        .and_then(|encoder| encoder.u8(kind))
+        .and_then(|encoder| encoder.bytes(fingerprint))
+        .and_then(|encoder| encoder.bytes(payload))
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    Ok(encoded)
+}
+
+pub(crate) fn decode_trust_record(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut decoder = Decoder::new(encoded);
+    if decoder.array().map_err(|_| CKR_ARGUMENTS_BAD)? != Some(5)
+        || decoder.str().map_err(|_| CKR_ARGUMENTS_BAD)? != TRUST_RECORD_SCHEMA
+        || decoder.u64().map_err(|_| CKR_ARGUMENTS_BAD)? != TRUST_RECORD_VERSION
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let kind = decoder.u8().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let fingerprint: [u8; 32] = decoder
+        .bytes()
+        .map_err(|_| CKR_ARGUMENTS_BAD)?
+        .try_into()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let payload = decoder.bytes().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    if decoder.position() != encoded.len()
+        || encode_trust_record(kind, &fingerprint, payload)? != encoded
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+
+    let pinned = match kind {
+        TRUST_RECORD_PUBLIC_KEY => {
+            let key = PublicKey::from_public_key_der(payload)
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            let canonical = key
+                .to_public_key_der()
+                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            if canonical.as_bytes() != payload {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            canonical.as_bytes().to_vec()
+        }
+        TRUST_RECORD_ATTESTATION_CERTIFICATE => {
+            let certificate = crate::certificate_chain::decode(payload)?;
+            if certificate != payload {
+                return Err(CKR_ARGUMENTS_BAD.into());
+            }
+            let pinned = crate::certificate_chain::public_key_info(&certificate)?;
+            PublicKey::from_public_key_der(&pinned).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            pinned
+        }
+        _ => return Err(CKR_ARGUMENTS_BAD.into()),
+    };
+    let actual: [u8; 32] = Sha256::digest(&pinned).into();
+    if !bool::from(actual.ct_eq(&fingerprint)) {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(pinned)
 }
 
 pub(crate) fn validate_device_public_key(
@@ -174,26 +257,13 @@ pub(crate) fn validate_device_public_key(
     }
     let expected = device_spki(encoded_public_point)?;
     let path = entry_path(encoded_public_point, Some(prefix.as_os_str()))?;
-    let pem = fs::read(path).map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
-    let pinned = public_key_from_pem(&pem)?;
+    let encoded = fs::read(&path).map_err(|_| Error::from(CKR_PIN_INCORRECT))?;
+    let pinned = decode_trust_record(&encoded)?;
     if bool::from(expected.ct_eq(&pinned)) {
         Ok(())
     } else {
         Err(CKR_PIN_INCORRECT.into())
     }
-}
-
-pub(crate) fn public_key_from_pem(pem: &[u8]) -> Result<Vec<u8>, Error> {
-    if let Ok(public_key_info) = crate::certificate_chain::public_key_info(pem) {
-        PublicKey::from_public_key_der(&public_key_info)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        return Ok(public_key_info);
-    }
-    let pem = std::str::from_utf8(pem).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    PublicKey::from_public_key_pem(pem)
-        .and_then(|key| key.to_public_key_der())
-        .map(|document| document.as_bytes().to_vec())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 #[cfg(test)]
@@ -246,21 +316,6 @@ mod tests {
         (public, point)
     }
 
-    fn certificate_pem(key: &VerifyingKey) -> Vec<u8> {
-        let signing = crate::certificate_builder::p256_key();
-        let certificate = crate::certificate_builder::p256_certificate(
-            key,
-            &signing,
-            "CN=pkcs11rs YubiHSM pin",
-            "CN=pkcs11rs YubiHSM pin",
-            1,
-            false,
-        );
-        crate::certificate_chain::encode_pem(&certificate)
-            .unwrap()
-            .into_bytes()
-    }
-
     fn signed_certificate(key: &VerifyingKey, signer: &SigningKey, serial: u32) -> Vec<u8> {
         crate::certificate_builder::p256_certificate(
             key,
@@ -289,28 +344,66 @@ mod tests {
         std::env::temp_dir().join(format!("pkcs11rs-enroll-{id}-"))
     }
 
-    fn with_entry(pem: &[u8], point: &[u8], test: impl FnOnce(&OsStr)) {
-        let id = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
-        let prefix = std::env::temp_dir().join(format!("pkcs11rs-trust-{id}-"));
-        let path = entry_path(point, Some(prefix.as_os_str())).unwrap();
-        fs::write(&path, pem).unwrap();
-        test(prefix.as_os_str());
+    #[test]
+    fn installed_public_key_is_a_canonical_cbor_record() {
+        let (_, point) = test_key();
+        let prefix = unused_prefix();
+        let path = entry_path(&point, Some(prefix.as_os_str())).unwrap();
+
+        install_public_key(&point, Some(prefix.as_os_str())).unwrap();
+        let encoded = fs::read(&path).unwrap();
+
+        assert_eq!(path.extension(), Some(OsStr::new("cbor")));
+        assert_eq!(
+            decode_trust_record(&encoded).unwrap(),
+            device_spki(&point).unwrap()
+        );
+        assert_eq!(
+            encode_trust_record(
+                TRUST_RECORD_PUBLIC_KEY,
+                &fingerprint_bytes(&point).unwrap(),
+                &device_spki(&point).unwrap(),
+            )
+            .unwrap(),
+            encoded
+        );
         fs::remove_file(path).unwrap();
     }
 
     #[test]
-    fn accepts_public_key_and_certificate_pem_entries() {
-        let (key, point) = test_key();
-        with_entry(
-            &crate::certificate_builder::p256_public_key_pem(&key),
-            &point,
-            |prefix| {
-                validate_device_public_key(&point, Some(prefix)).unwrap();
-            },
-        );
-        with_entry(&certificate_pem(&key), &point, |prefix| {
-            validate_device_public_key(&point, Some(prefix)).unwrap();
-        });
+    fn malformed_cbor_fails_closed() {
+        let (_, point) = test_key();
+        let prefix = unused_prefix();
+        let path = entry_path(&point, Some(prefix.as_os_str())).unwrap();
+        fs::write(&path, [0x81, 0x01]).unwrap();
+
+        assert!(matches!(
+            validate_device_public_key(&point, Some(prefix.as_os_str())),
+            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as _
+        ));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn trust_record_rejects_unknown_kinds_tampering_and_trailing_data() {
+        let (_, point) = test_key();
+        let spki = device_spki(&point).unwrap();
+        let fingerprint = fingerprint_bytes(&point).unwrap();
+
+        let unknown = encode_trust_record(0xff, &fingerprint, &spki).unwrap();
+        assert!(decode_trust_record(&unknown).is_err());
+
+        let mut wrong_fingerprint = fingerprint;
+        wrong_fingerprint[0] ^= 1;
+        let tampered =
+            encode_trust_record(TRUST_RECORD_PUBLIC_KEY, &wrong_fingerprint, &spki).unwrap();
+        assert!(decode_trust_record(&tampered).is_err());
+
+        let mut trailing =
+            encode_trust_record(TRUST_RECORD_PUBLIC_KEY, &fingerprint, &spki).unwrap();
+        trailing.push(0);
+        assert!(decode_trust_record(&trailing).is_err());
     }
 
     #[test]
@@ -387,7 +480,7 @@ mod tests {
         let path = entry_path(&device_point, Some(prefix.as_os_str())).unwrap();
 
         install_public_key(&device_point, Some(prefix.as_os_str())).unwrap();
-        let public_key_pem = fs::read(&path).unwrap();
+        let public_key_record = fs::read(&path).unwrap();
         install_attestation(
             &device_point,
             &attestation,
@@ -397,8 +490,12 @@ mod tests {
         )
         .unwrap();
 
-        let attestation_pem = fs::read(&path).unwrap();
-        assert_ne!(attestation_pem, public_key_pem);
+        let attestation_record = fs::read(&path).unwrap();
+        assert_ne!(attestation_record, public_key_record);
+        assert_eq!(
+            decode_trust_record(&attestation_record).unwrap(),
+            device_spki(&device_point).unwrap()
+        );
         validate_device_public_key(&device_point, Some(prefix.as_os_str())).unwrap();
         fs::remove_file(path).unwrap();
     }

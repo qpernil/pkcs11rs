@@ -1086,7 +1086,7 @@ fn hsmauth_asymmetric_administration_uses_the_yubihsm_p256_derivation() {
 }
 
 #[test]
-fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
+fn yubihsm_device_public_key_enrollment_uses_fingerprinted_cbor_entry() {
     use std::sync::atomic::Ordering;
 
     let _guard = TEST_LOCK.lock().unwrap();
@@ -1156,10 +1156,10 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_pem_entry() {
         .collect();
     let mut path = prefix.as_os_str().to_os_string();
     path.push(fingerprint_hex);
-    path.push(".pem");
+    path.push(".cbor");
     let path = std::path::PathBuf::from(path);
-    let pem = std::fs::read(&path).unwrap();
-    let key = crate::yubihsm::trust::public_key_from_pem(&pem).unwrap();
+    let record = std::fs::read(&path).unwrap();
+    let key = crate::yubihsm::trust::decode_trust_record(&record).unwrap();
     assert_eq!(
         <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&key)),
         fingerprint
@@ -1231,10 +1231,14 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
         .collect();
     let mut path = prefix.as_os_str().to_os_string();
     path.push(fingerprint_hex);
-    path.push(".pem");
+    path.push(".cbor");
     let path = std::path::PathBuf::from(path);
-    let pem = std::fs::read(&path).unwrap();
-    assert!(pem.starts_with(b"-----BEGIN CERTIFICATE-----"));
+    let record = std::fs::read(&path).unwrap();
+    let key = crate::yubihsm::trust::decode_trust_record(&record).unwrap();
+    assert_eq!(
+        <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&key)),
+        fingerprint
+    );
     std::fs::remove_file(path).unwrap();
 
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);

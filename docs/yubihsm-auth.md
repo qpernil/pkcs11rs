@@ -370,12 +370,31 @@ directory while still enabling validation.
 
 The module hashes the canonical DER SubjectPublicKeyInfo returned by the bare
 `GET DEVICE PUBLIC KEY` command and loads
-`<prefix><lowercase SHA-256>.pem`. The PEM file may contain either one P-256
-`PUBLIC KEY` or one X.509 `CERTIFICATE` whose P-256 public key represents the
-trusted device. The stored key must exactly match the device response before
-the secure-session receipt is accepted. A missing, malformed, or mismatched
-entry rejects authentication. Configure a nonempty prefix before calling a
-device-enrollment function.
+`<prefix><lowercase SHA-256>.cbor`. Enrollment writes one strict canonical CBOR
+array containing the schema `pkcs11rs.yubihsm-device-trust`, format version,
+entry kind, 32-byte SubjectPublicKeyInfo fingerprint, and canonical DER
+payload. The payload is either one P-256 SubjectPublicKeyInfo or one X.509
+attestation certificate whose P-256 public key represents the trusted device.
+The decoder rejects unknown kinds, noncanonical records, trailing data,
+fingerprint mismatches, and noncanonical DER before comparing the stored key
+with the device response. A missing, malformed, or mismatched entry rejects
+authentication. Configure a nonempty prefix before calling a device-enrollment
+function.
+
+The canonical record is:
+
+```cbor-diag
+[
+  "pkcs11rs.yubihsm-device-trust",
+  1,
+  1 / 2,
+  h'<32-byte SubjectPublicKeyInfo SHA-256>',
+  h'<canonical DER SubjectPublicKeyInfo or certificate>'
+]
+```
+
+Entry kind `1` carries a SubjectPublicKeyInfo and kind `2` carries an
+attestation certificate.
 
 Certificate chains are not processed during login. Instead, `pkcs11rs.h`
 declares three explicit enrollment functions. They require a read/write session
