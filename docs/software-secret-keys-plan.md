@@ -3,6 +3,26 @@
 Status: design roadmap. This document describes planned work, not current
 software-slot behavior.
 
+## Implemented foundation
+
+Persistent software tokens now start with `C_InitToken` and use independent
+public and private master keys. Discovery and SO credentials unwrap only the
+public key; the USER credential unwraps both. Initial `C_InitPIN` creates the
+private realm and cannot later be used by SO to recover a lost USER
+credential. Optional per-slot discovery restores encrypted public objects
+before login. Secret keys added by this plan must remain exclusively in the
+private realm.
+
+## Future master-key cycling
+
+Add a non-PKCS #11 maintenance operation for explicit key rotation. Public
+cycling rewrites every public envelope and the discovery, SO, and USER public
+wrappers. Private cycling requires USER authorization, rewrites every private
+envelope, and replaces only the USER private wrapper. Publish through a new
+epoch/generation so interruption leaves a complete old or new realm. SO and
+discovery must never participate in private cycling; `C_SetPIN` remains a
+wrapper-only operation.
+
 ## Objective
 
 Extend named software slots so AES and HMAC keys have the same lifecycle as
@@ -33,9 +53,9 @@ The repository already contains most of the required primitives:
 - HMAC sign and verify dispatch exists for YubiHSM keys.
 - ECDH and X25519 derivation already produce a session
   `KeyMaterial::DerivedSecret`.
-- The software token store already provides a PIN-wrapped master key,
-  per-record AES-256-GCM encryption, canonical encoding, atomic publication,
-  durable deletion, and login/logout loading boundaries.
+- The software token store already provides PIN-wrapped public and private
+  master keys, per-record AES-256-GCM encryption, canonical encoding, atomic
+  publication, durable deletion, and login/logout loading boundaries.
 
 The main gaps are object typing, capability advertisement, local operation
 dispatch, and routing secrets through the encrypted software-token store.
@@ -458,7 +478,8 @@ Persist and enforce:
 Template-valued attributes require canonical encoding, strict merge rules, and
 duplicate/conflict rejection.
 
-Named software slots currently have no Security Officer lifecycle. Therefore:
+Named software slots have separate Security Officer and user PIN wrappers, but
+do not yet implement trusted-object administration. Therefore:
 
 - `CKA_TRUSTED=CK_TRUE` remains unsupported initially; and
 - a target requiring `CKA_WRAP_WITH_TRUSTED=CK_TRUE` must fail closed.
