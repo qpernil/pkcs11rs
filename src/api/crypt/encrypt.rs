@@ -1,4 +1,6 @@
-use super::shared::{rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad};
+use super::shared::{
+    parse_rsa_oaep_parameters, rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad,
+};
 use crate::backed_object::projected_public_key_material;
 use crate::*;
 use ghash::{universal_hash::UniversalHash, GHash};
@@ -299,45 +301,14 @@ fn crypt_init(
                 None,
                 None,
             ),
-            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => {
-                if mechanism.ulParameterLen as usize
-                    != std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>()
-                {
-                    return Err(CKR_MECHANISM_PARAM_INVALID.into());
-                }
-                let parameters =
-                    unsafe { _as_ref(mechanism.pParameter as CK_RSA_PKCS_OAEP_PARAMS_PTR) }?;
-                if parameters.source != CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE {
-                    return Err(CKR_MECHANISM_PARAM_INVALID.into());
-                }
-                let digest = digest_for_hash_mechanism(parameters.hashAlg)?;
-                let mgf = match parameters.mgf {
-                    x if x == CKG_MGF1_SHA1 as CK_RSA_PKCS_MGF_TYPE => 32,
-                    x if x == CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE => 33,
-                    x if x == CKG_MGF1_SHA384 as CK_RSA_PKCS_MGF_TYPE => 34,
-                    x if x == CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE => 35,
-                    x if x == CKG_MGF1_SHA224 as CK_RSA_PKCS_MGF_TYPE => 36,
-                    x if x == CKG_MGF1_SHA3_224 as CK_RSA_PKCS_MGF_TYPE => 37,
-                    x if x == CKG_MGF1_SHA3_256 as CK_RSA_PKCS_MGF_TYPE => 38,
-                    x if x == CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE => 39,
-                    x if x == CKG_MGF1_SHA3_512 as CK_RSA_PKCS_MGF_TYPE => 40,
-                    _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
-                };
-                let label = unsafe {
-                    from_raw_parts(
-                        parameters.pSourceData as *const u8,
-                        parameters.ulSourceDataLen as usize,
-                    )
-                }?;
-                (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some((mgf, parameters.hashAlg, hash(digest, label)?.to_vec())),
-                )
-            }
+            x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(parse_rsa_oaep_parameters(mechanism)?),
+            ),
             _ => return Err(CKR_MECHANISM_INVALID.into()),
         };
         let object = ctx
