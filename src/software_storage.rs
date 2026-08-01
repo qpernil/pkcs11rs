@@ -1612,7 +1612,9 @@ fn record_unique_id(reference: &ContentReference) -> String {
     id
 }
 
-fn material_to_pkcs8(material: &SoftwarePrivateKeyMaterial) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub(crate) fn material_to_pkcs8(
+    material: &SoftwarePrivateKeyMaterial,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     if let SoftwarePrivateKeyMaterial::Rsa(key) = material {
         let pkcs1 = key
             .to_pkcs1_der()
@@ -1727,6 +1729,16 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         ));
     }
     Err(CKR_DATA_INVALID.into())
+}
+
+pub(crate) fn material_from_bare_pkcs8(
+    encoded: &[u8],
+) -> Result<SoftwarePrivateKeyMaterial, Error> {
+    let material = material_from_pkcs8(encoded)?;
+    if material_to_pkcs8(&material)?.as_slice() != encoded {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(material)
 }
 
 fn material_from_ec_scalar(
