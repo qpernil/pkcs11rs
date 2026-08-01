@@ -1177,7 +1177,8 @@ fn encode_stored_secret_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<u
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
         None => encoder.null().map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
     };
-    encode_allowed_mechanisms(encoder, object.allowed_mechanisms.as_deref())?;
+    let allowed_mechanisms = stored_allowed_mechanisms(object.allowed_mechanisms.as_deref());
+    encode_allowed_mechanisms(encoder, allowed_mechanisms.as_deref())?;
     encoder
         .bool(object.wrap_with_trusted)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
@@ -1366,6 +1367,10 @@ fn decode_public_record(
     decrypt(master_key, &nonce, &aad, ciphertext).map(|value| value.to_vec())
 }
 
+fn stored_allowed_mechanisms<T: Copy + Into<u64>>(mechanisms: Option<&[T]>) -> Option<Vec<u64>> {
+    mechanisms.map(|mechanisms| mechanisms.iter().copied().map(Into::into).collect())
+}
+
 fn validate_allowed_mechanisms(mechanisms: &[u64]) -> Result<(), Error> {
     if mechanisms.len() > 256 || mechanisms.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(CKR_DATA_INVALID.into());
@@ -1485,13 +1490,7 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
         never_extractable: object.never_extractable,
         local: object.local,
         key_gen_mechanism: object.key_gen_mechanism.map(cryptoki_ulong_to_u64),
-        allowed_mechanisms: object.allowed_mechanisms.as_ref().map(|mechanisms| {
-            mechanisms
-                .iter()
-                .copied()
-                .map(cryptoki_ulong_to_u64)
-                .collect()
-        }),
+        allowed_mechanisms: stored_allowed_mechanisms(object.allowed_mechanisms.as_deref()),
         wrap_with_trusted: object.wrap_with_trusted,
         wrap_template: encode_policy_template(object.policy_templates.wrap.as_ref())?,
         unwrap_template: encode_policy_template(object.policy_templates.unwrap.as_ref())?,
@@ -2177,6 +2176,27 @@ mod tests {
             &tampered,
         )
         .is_err());
+    }
+
+    #[test]
+    fn allowed_mechanism_encoding_is_binary_equivalent_across_platform_widths() {
+        let mechanisms_32 = [1_u32, 0x0102_0304];
+        let mechanisms_64 = mechanisms_32.map(u64::from);
+        let stored_32 = stored_allowed_mechanisms(Some(&mechanisms_32)).unwrap();
+        let stored_64 = stored_allowed_mechanisms(Some(&mechanisms_64)).unwrap();
+        let mut encoded_32 = Vec::new();
+        let mut encoded_64 = Vec::new();
+
+        encode_allowed_mechanisms(&mut Encoder::new(&mut encoded_32), Some(&stored_32)).unwrap();
+        encode_allowed_mechanisms(&mut Encoder::new(&mut encoded_64), Some(&stored_64)).unwrap();
+
+        assert_eq!(stored_32, stored_64);
+        assert_eq!(encoded_32, encoded_64);
+        assert_eq!(encoded_32, [0x82, 0x01, 0x1a, 0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(
+            decode_allowed_mechanisms(&mut Decoder::new(&encoded_32)).unwrap(),
+            Some(mechanisms_64.to_vec())
+        );
     }
 
     #[test]
