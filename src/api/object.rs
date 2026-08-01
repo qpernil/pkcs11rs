@@ -276,8 +276,8 @@ fn create_object(
             parse_create_object_template(templ)?
         };
         validate_new_object_access(&object, flags, logged_in)?;
-        if software_secret && object.token {
-            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
+        if software_secret && object.token && !object.private {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         if crate::backed_object::supports_backed_object(&object) {
             *object_handle = ctx.store_backed_object(session_handle, object)?;
@@ -323,29 +323,13 @@ fn create_object(
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        if object.token && matches!(object.material, KeyMaterial::SoftwarePrivate(_)) {
-            let stored = ctx
-                ._get_slot_mut(slot_id)?
-                .store_software_private_key(slot_id, &object)?;
-            let unique_id = stored.unique_id.clone();
-            if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
-                let _ = ctx
-                    ._get_slot_mut(slot_id)?
-                    .destroy_software_private_key(&unique_id);
-                return Err(error);
-            }
-            let handle = ctx
-                .resolved_objects()?
-                .into_iter()
-                .find_map(|(handle, object)| (object.unique_id == unique_id).then_some(handle));
-            let Some(handle) = handle else {
-                let _ = ctx
-                    ._get_slot_mut(slot_id)?
-                    .destroy_software_private_key(&unique_id);
-                let _ = ctx.refresh_slot_token_objects(slot_id);
-                return Err(CKR_DEVICE_ERROR.into());
-            };
-            *object_handle = handle;
+        if object.token
+            && matches!(
+                object.material,
+                KeyMaterial::SoftwarePrivate(_) | KeyMaterial::SoftwareSecret(_)
+            )
+        {
+            *object_handle = persist_software_private_object(ctx, slot_id, &object)?;
             return Ok(());
         }
         object.set_creator(session_handle, slot_id);
@@ -353,6 +337,35 @@ fn create_object(
         *object_handle = handle;
         Ok(())
     })
+}
+
+pub(crate) fn persist_software_private_object(
+    ctx: &mut SlotContext,
+    slot_id: CK_SLOT_ID,
+    object: &TokenObject,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    let stored = ctx
+        ._get_slot_mut(slot_id)?
+        .store_software_private_object(slot_id, object)?;
+    let unique_id = stored.unique_id.clone();
+    if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
+        let _ = ctx
+            ._get_slot_mut(slot_id)?
+            .destroy_software_private_object(&unique_id);
+        return Err(error);
+    }
+    let handle = ctx
+        .resolved_objects()?
+        .into_iter()
+        .find_map(|(handle, object)| (object.unique_id == unique_id).then_some(handle));
+    let Some(handle) = handle else {
+        let _ = ctx
+            ._get_slot_mut(slot_id)?
+            .destroy_software_private_object(&unique_id);
+        let _ = ctx.refresh_slot_token_objects(slot_id);
+        return Err(CKR_DEVICE_ERROR.into());
+    };
+    Ok(handle)
 }
 
 pub(crate) struct OpenPgpImport {
@@ -1424,12 +1437,20 @@ fn copy_object(
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
-            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
+        if copied_object.token
+            && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_))
+            && !copied_object.private
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
         validate_new_object_access(&copied_object, flags, logged_in)?;
-        copied_object.set_creator(session_handle, slot_id);
         copied_object.unique_id.clear();
+
+        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
+            *new_object_handle = persist_software_private_object(ctx, slot_id, &copied_object)?;
+            return Ok(());
+        }
+        copied_object.set_creator(session_handle, slot_id);
 
         let handle = if crate::backed_object::supports_backed_object(&copied_object) {
             ctx.store_backed_object(session_handle, copied_object)?
@@ -1496,11 +1517,14 @@ fn destroy_object(
             return Ok(());
         }
         if stored_object.token
-            && matches!(stored_object.material, KeyMaterial::SoftwarePrivate(_))
+            && matches!(
+                stored_object.material,
+                KeyMaterial::SoftwarePrivate(_) | KeyMaterial::SoftwareSecret(_)
+            )
             && ctx.get_slot(slot_id)?.kind() == SlotKind::Software
         {
             ctx._get_slot_mut(slot_id)?
-                .destroy_software_private_key(&stored_object.unique_id)?;
+                .destroy_software_private_object(&stored_object.unique_id)?;
             ctx.refresh_slot_token_objects(slot_id)?;
             return Ok(());
         }

@@ -40,6 +40,7 @@ const PUBLIC_DIRECTORY: &str = "public-objects-v1";
 const PUBLIC_RECORD_SCHEMA: &str = "pkcs11rs-software-public-object";
 const HEADER_SCHEMA: &str = "pkcs11rs-software-token-key";
 const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
+const SECRET_RECORD_SCHEMA: &str = "pkcs11rs-software-secret-key";
 const FORMAT_VERSION: u64 = 1;
 const HEADER_FORMAT_VERSION: u64 = 3;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
@@ -842,11 +843,15 @@ fn header_aad(name: &str, role: PinRole, generation: u64) -> Vec<u8> {
     aad
 }
 
-fn record_aad(name: &str) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(RECORD_SCHEMA.len() + name.len() + 1);
-    aad.extend_from_slice(RECORD_SCHEMA.as_bytes());
+fn record_aad(name: &str, schema: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(schema.len() + name.len() + 9);
+    aad.extend_from_slice(schema.as_bytes());
     aad.push(0);
     aad.extend_from_slice(name.as_bytes());
+    if schema == SECRET_RECORD_SCHEMA {
+        aad.push(0);
+        aad.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    }
     aad
 }
 
@@ -1002,14 +1007,25 @@ fn encode_record(
     master_key: &[u8; MASTER_KEY_LENGTH],
     object: &TokenObject,
 ) -> Result<Vec<u8>, Error> {
-    if !object.token || object.class != crate::CKO_PRIVATE_KEY as crate::CK_OBJECT_CLASS {
+    if !object.token {
         return Err(CKR_DATA_INVALID.into());
     }
-    let plaintext = encode_stored_private_key_info(object)?;
+    let (schema, plaintext) = match &object.material {
+        KeyMaterial::SoftwarePrivate(_) => (RECORD_SCHEMA, encode_stored_private_key_info(object)?),
+        KeyMaterial::SoftwareSecret(_) if object.private => {
+            (SECRET_RECORD_SCHEMA, encode_stored_secret_key_info(object)?)
+        }
+        _ => return Err(CKR_DATA_INVALID.into()),
+    };
     let mut nonce = [0u8; NONCE_LENGTH];
     getrandom::fill(&mut nonce).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let ciphertext = encrypt(master_key, &nonce, &record_aad(name), plaintext.as_ref())?;
-    encode_record_envelope(&nonce, &ciphertext)
+    let ciphertext = encrypt(
+        master_key,
+        &nonce,
+        &record_aad(name, schema),
+        plaintext.as_ref(),
+    )?;
+    encode_record_envelope(schema, &nonce, &ciphertext)
 }
 
 fn decode_record(
@@ -1020,8 +1036,11 @@ fn decode_record(
     encoded: &[u8],
 ) -> Result<TokenObject, Error> {
     let mut outer = Decoder::new(encoded);
-    if outer.array().map_err(|_| CKR_DATA_INVALID)? != Some(4)
-        || outer.str().map_err(|_| CKR_DATA_INVALID)? != RECORD_SCHEMA
+    if outer.array().map_err(|_| CKR_DATA_INVALID)? != Some(4) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let schema = outer.str().map_err(|_| CKR_DATA_INVALID)?;
+    if !matches!(schema, RECORD_SCHEMA | SECRET_RECORD_SCHEMA)
         || outer.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
     {
         return Err(CKR_DATA_INVALID.into());
@@ -1035,11 +1054,20 @@ fn decode_record(
     if ciphertext.len() < TAG_LENGTH || outer.position() != encoded.len() {
         return Err(CKR_DATA_INVALID.into());
     }
-    if encode_record_envelope(&nonce, ciphertext)? != encoded {
+    if encode_record_envelope(schema, &nonce, ciphertext)? != encoded {
         return Err(CKR_DATA_INVALID.into());
     }
-    let plaintext = decrypt(master_key, &nonce, &record_aad(name), ciphertext)
+    let plaintext = decrypt(master_key, &nonce, &record_aad(name, schema), ciphertext)
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    if schema == SECRET_RECORD_SCHEMA {
+        if !stored_secret_key_info(plaintext.as_ref()) {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return decode_stored_secret_key_info(slot_id, unique_id, plaintext.as_ref());
+    }
+    if stored_secret_key_info(plaintext.as_ref()) {
+        return Err(CKR_DATA_INVALID.into());
+    }
     let (attributes, material) = decode_stored_private_key_info(plaintext.as_ref())?;
     let class: crate::CK_OBJECT_CLASS = stored_u64_to_cryptoki_ulong(attributes.class)?;
     let key_type: crate::CK_KEY_TYPE = stored_u64_to_cryptoki_ulong(attributes.key_type)?;
@@ -1081,11 +1109,158 @@ fn decode_record(
     })
 }
 
-fn encode_record_envelope(nonce: &[u8; NONCE_LENGTH], ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+fn stored_secret_key_info(encoded: &[u8]) -> bool {
+    let mut decoder = Decoder::new(encoded);
+    decoder.array().ok().flatten() == Some(20) && decoder.str().ok() == Some(SECRET_RECORD_SCHEMA)
+}
+
+fn encode_stored_secret_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let KeyMaterial::SoftwareSecret(value) = &object.material else {
+        return Err(CKR_DATA_INVALID.into());
+    };
+    if object.class != crate::CKO_SECRET_KEY as crate::CK_OBJECT_CLASS || !object.private {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    validate_stored_secret_key(object.key_type, value.len())?;
+    let mut encoded = Zeroizing::new(Vec::new());
+    let mut encoder = Encoder::new(&mut *encoded);
+    let encoder = encoder
+        .array(20)
+        .and_then(|encoder| encoder.str(SECRET_RECORD_SCHEMA))
+        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+        .and_then(|encoder| encoder.u64(cryptoki_ulong_to_u64(object.key_type)))
+        .and_then(|encoder| encoder.str(&object.label))
+        .and_then(|encoder| encoder.bytes(&object.id))
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    for flag in [
+        object.private,
+        object.encrypt,
+        object.decrypt,
+        object.sign,
+        object.verify,
+        object.derive,
+        object.wrap,
+        object.unwrap,
+        object.sensitive,
+        object.extractable,
+        object.always_sensitive,
+        object.never_extractable,
+        object.local,
+    ] {
+        encoder.bool(flag).map_err(|_| CKR_DEVICE_ERROR)?;
+    }
+    match object.key_gen_mechanism {
+        Some(mechanism) => encoder
+            .u64(cryptoki_ulong_to_u64(mechanism))
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
+        None => encoder.null().map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
+    };
+    encoder
+        .bytes(value)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(encoded)
+}
+
+fn decode_stored_secret_key_info(
+    slot_id: crate::CK_SLOT_ID,
+    unique_id: &str,
+    encoded: &[u8],
+) -> Result<TokenObject, Error> {
+    let mut decoder = Decoder::new(encoded);
+    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(20)
+        || decoder.str().map_err(|_| CKR_DATA_INVALID)? != SECRET_RECORD_SCHEMA
+        || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let key_type = stored_u64_to_cryptoki_ulong(decoder.u64().map_err(|_| CKR_DATA_INVALID)?)?;
+    let label = decoder.str().map_err(|_| CKR_DATA_INVALID)?.to_owned();
+    let id = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec();
+    let private = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let encrypt = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let decrypt = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let sign = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let verify = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let derive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let wrap = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let unwrap = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let sensitive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let extractable = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let always_sensitive = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let never_extractable = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let local = decoder.bool().map_err(|_| CKR_DATA_INVALID)?;
+    let key_gen_mechanism =
+        if decoder.datatype().map_err(|_| CKR_DATA_INVALID)? == minicbor::data::Type::Null {
+            decoder.null().map_err(|_| CKR_DATA_INVALID)?;
+            None
+        } else {
+            Some(stored_u64_to_cryptoki_ulong(
+                decoder.u64().map_err(|_| CKR_DATA_INVALID)?,
+            )?)
+        };
+    let value = Zeroizing::new(decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec());
+    validate_stored_secret_key(key_type, value.len())?;
+    let object = TokenObject {
+        slot_id: Some(slot_id),
+        unique_id: unique_id.to_owned(),
+        class: crate::CKO_SECRET_KEY as crate::CK_OBJECT_CLASS,
+        key_type,
+        label,
+        id,
+        token: true,
+        private,
+        encrypt,
+        decrypt,
+        sign,
+        verify,
+        derive,
+        wrap,
+        unwrap,
+        sensitive,
+        extractable,
+        always_sensitive,
+        never_extractable,
+        local,
+        key_gen_mechanism,
+        creator_session: None,
+        public_key: None,
+        rp_id: None,
+        material: KeyMaterial::SoftwareSecret(value),
+    };
+    if !object.private
+        || decoder.position() != encoded.len()
+        || encode_stored_secret_key_info(&object)?.as_slice() != encoded
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(object)
+}
+
+fn validate_stored_secret_key(key_type: crate::CK_KEY_TYPE, length: usize) -> Result<(), Error> {
+    let valid = if key_type == crate::CKK_AES as crate::CK_KEY_TYPE {
+        matches!(length, 16 | 24 | 32)
+    } else if key_type == crate::CKK_GENERIC_SECRET as crate::CK_KEY_TYPE
+        || crate::is_hmac_key_type(key_type)
+    {
+        (1..=1024).contains(&length)
+    } else {
+        false
+    };
+    if !valid {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(())
+}
+
+fn encode_record_envelope(
+    schema: &str,
+    nonce: &[u8; NONCE_LENGTH],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, Error> {
     let mut encoded = Vec::new();
     Encoder::new(&mut encoded)
         .array(4)
-        .and_then(|encoder| encoder.str(RECORD_SCHEMA))
+        .and_then(|encoder| encoder.str(schema))
         .and_then(|encoder| encoder.u64(FORMAT_VERSION))
         .and_then(|encoder| encoder.bytes(nonce))
         .and_then(|encoder| encoder.bytes(ciphertext))
@@ -1648,6 +1823,36 @@ mod tests {
         }
     }
 
+    fn secret_object() -> TokenObject {
+        TokenObject {
+            slot_id: Some(7),
+            unique_id: String::new(),
+            class: crate::CKO_SECRET_KEY as crate::CK_OBJECT_CLASS,
+            key_type: crate::CKK_AES as crate::CK_KEY_TYPE,
+            label: String::from("persistent AES key"),
+            id: vec![4, 3, 2, 1],
+            token: true,
+            private: true,
+            encrypt: true,
+            decrypt: true,
+            sign: true,
+            verify: true,
+            derive: false,
+            wrap: true,
+            unwrap: true,
+            sensitive: true,
+            extractable: false,
+            always_sensitive: true,
+            never_extractable: true,
+            local: true,
+            key_gen_mechanism: Some(crate::CKM_AES_KEY_GEN as crate::CK_MECHANISM_TYPE),
+            creator_session: None,
+            public_key: None,
+            rp_id: None,
+            material: KeyMaterial::SoftwareSecret(Zeroizing::new((0u8..16).collect())),
+        }
+    }
+
     fn scalar(length: usize) -> Vec<u8> {
         let mut scalar = vec![0; length];
         scalar[length - 1] = 7;
@@ -1666,7 +1871,13 @@ mod tests {
         let nonce: [u8; NONCE_LENGTH] = decoder.bytes().unwrap().try_into().unwrap();
         let ciphertext = decoder.bytes().unwrap();
         assert_eq!(decoder.position(), encoded.len());
-        decrypt(master_key, &nonce, &record_aad(&store.name), ciphertext).unwrap()
+        decrypt(
+            master_key,
+            &nonce,
+            &record_aad(&store.name, RECORD_SCHEMA),
+            ciphertext,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1714,6 +1925,51 @@ mod tests {
                     || info.algorithm.oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1")
             );
         }
+    }
+
+    #[test]
+    fn software_secret_record_round_trips_with_all_private_attributes() {
+        let master_key = [0x5a; MASTER_KEY_LENGTH];
+        let original = secret_object();
+        let encoded = encode_record("secret storage", &master_key, &original).unwrap();
+        assert!(!encoded
+            .windows(original.label.len())
+            .any(|window| window == original.label.as_bytes()));
+        let decoded = decode_record(
+            "secret storage",
+            9,
+            "software-private-test",
+            &master_key,
+            &encoded,
+        )
+        .unwrap();
+        assert_eq!(decoded.slot_id, Some(9));
+        assert_eq!(decoded.unique_id, "software-private-test");
+        assert_eq!(decoded.class, original.class);
+        assert_eq!(decoded.key_type, original.key_type);
+        assert_eq!(decoded.label, original.label);
+        assert_eq!(decoded.id, original.id);
+        assert!(decoded.token && decoded.private);
+        assert!(decoded.encrypt && decoded.decrypt && decoded.sign && decoded.verify);
+        assert!(decoded.wrap && decoded.unwrap);
+        assert!(decoded.sensitive && !decoded.extractable);
+        assert!(decoded.always_sensitive && decoded.never_extractable && decoded.local);
+        assert_eq!(decoded.key_gen_mechanism, original.key_gen_mechanism);
+        let KeyMaterial::SoftwareSecret(value) = decoded.material else {
+            panic!("persistent secret record changed material type");
+        };
+        assert_eq!(value.as_slice(), &(0u8..16).collect::<Vec<_>>());
+
+        let mut tampered = encoded;
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(decode_record(
+            "secret storage",
+            9,
+            "software-private-test",
+            &master_key,
+            &tampered,
+        )
+        .is_err());
     }
 
     #[test]

@@ -312,7 +312,7 @@ impl Slot for SoftwareSlot {
             }))
     }
 
-    fn store_software_private_key(
+    fn store_software_private_object(
         &mut self,
         slot_id: CK_SLOT_ID,
         object: &TokenObject,
@@ -332,7 +332,7 @@ impl Slot for SoftwareSlot {
         Ok(stored)
     }
 
-    fn destroy_software_private_key(&mut self, unique_id: &str) -> Result<(), Error> {
+    fn destroy_software_private_object(&mut self, unique_id: &str) -> Result<(), Error> {
         if !self.logged_in {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
