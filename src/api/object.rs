@@ -323,12 +323,11 @@ fn create_object(
         {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        if object.token
-            && matches!(
-                object.material,
-                KeyMaterial::SoftwarePrivate(_) | KeyMaterial::SoftwareSecret(_)
-            )
-        {
+        if matches!(object.material, KeyMaterial::SoftwareSecret(_)) {
+            *object_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
+            return Ok(());
+        }
+        if object.token && matches!(object.material, KeyMaterial::SoftwarePrivate(_)) {
             *object_handle = persist_software_private_object(ctx, slot_id, &object)?;
             return Ok(());
         }
@@ -337,6 +336,26 @@ fn create_object(
         *object_handle = handle;
         Ok(())
     })
+}
+
+pub(crate) fn publish_software_secret_object(
+    ctx: &mut SlotContext,
+    session_handle: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+    mut object: TokenObject,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    if !matches!(object.material, KeyMaterial::SoftwareSecret(_)) {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    if object.token {
+        if !object.private {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        persist_software_private_object(ctx, slot_id, &object)
+    } else {
+        object.set_creator(session_handle, slot_id);
+        ctx.insert_object(object)
+    }
 }
 
 pub(crate) fn persist_software_private_object(
@@ -1446,8 +1465,9 @@ fn copy_object(
         validate_new_object_access(&copied_object, flags, logged_in)?;
         copied_object.unique_id.clear();
 
-        if copied_object.token && matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
-            *new_object_handle = persist_software_private_object(ctx, slot_id, &copied_object)?;
+        if matches!(copied_object.material, KeyMaterial::SoftwareSecret(_)) {
+            *new_object_handle =
+                publish_software_secret_object(ctx, session_handle, slot_id, copied_object)?;
             return Ok(());
         }
         copied_object.set_creator(session_handle, slot_id);
