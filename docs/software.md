@@ -27,10 +27,10 @@ followed by the zero-padded configuration-list ordinal.
 `CK_SLOT_INFO.flags` contains only `CKF_TOKEN_PRESENT`; it never contains
 `CKF_HW_SLOT`. Mechanism flags never contain `CKF_HW`.
 
-The token has a random-number generator and reports `CKF_RNG |
-CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED`. It has no protected
-authentication path. Its minimum and maximum PIN lengths are 8 and 1024 UTF-8
-bytes.
+The token reports `CKF_RNG | CKF_LOGIN_REQUIRED`. `C_InitToken` sets
+`CKF_TOKEN_INITIALIZED`; the first `C_InitPIN` separately sets
+`CKF_USER_PIN_INITIALIZED`. Software tokens have no protected authentication
+path. PINs contain 8–1024 UTF-8 bytes.
 
 ## Login and PIN initialization
 
@@ -41,26 +41,30 @@ Without `PKCS11RS_TOKEN_STORAGE`, login is an ephemeral access gate: any
 well-formed PIN in the reported length range succeeds, no verifier is saved,
 and persistent token-object requests remain write-protected.
 
-With `PKCS11RS_TOKEN_STORAGE`, the first successful login atomically
-initializes the software token:
+With storage, `C_InitToken` creates the public realm, records the supplied
+32-byte label, and sets the SO PIN. With no sessions open, the caller then
+opens a read/write session, logs in as SO, and calls `C_InitPIN`; this creates
+an independent private master key and USER wrappers for both realms. A later
+`C_InitPIN` is rejected because SO deliberately cannot unwrap the private key.
+A lost USER PIN therefore requires destructive `C_InitToken` reinitialization.
+Reinitialization requires the current SO PIN, is rejected while any session is
+open, destroys both public and private token objects, replaces the public
+master key, and returns the token to the state before its first `C_InitPIN`.
 
-1. pkcs11rs generates a random 256-bit master key and a random KDF salt.
-2. The login PIN derives a wrapping key.
-3. The wrapping key encrypts the master key in the first immutable header.
+SO login unlocks only public objects. USER login unlocks public and private
+objects. `C_SetPIN` preserves login: SO rewraps only the public key, while USER
+rewraps both keys. It never rewrites object records.
 
-Before initialization, `CKF_USER_PIN_INITIALIZED` is clear. It is set after
-the header is published. Simultaneous first logins race to publish the same
-header generation; one wins, and the other succeeds only if its PIN unlocks
-the winning header.
+Pre-login discovery is configured per slot with
+`PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>`, where `<HEXNAME>` is the uppercase hex
+encoding of the slot name's UTF-8 bytes. Discovery is read-only and unwraps
+only the public key. Without it, logout returns to profile objects only; with
+it, logout restores the encrypted public-object view. The credential must be
+configured when `C_InitToken` creates the token. Changing or adding it later
+cannot unwrap that token's public master key; reinitialize the token to adopt
+the new credential. A missing or incorrect discovery credential never blocks
+SO or USER login.
 
-`C_SetPIN` in a read/write session verifies the old PIN and publishes a new
-header wrapping the same master key under the new PIN. It does not rewrite
-private-key records. Both PINs must satisfy the 8–1024 byte range. On an
-uninitialized persistent token it returns `CKR_USER_PIN_NOT_INITIALIZED`.
-`C_InitPIN`, SO login, and `C_InitToken` are not software-slot initialization
-paths. A supported `C_SetPIN` attempt clears login state and releases decrypted
-state whether it succeeds or fails; log in again with the new PIN after a
-successful change.
 
 ## Private-key lifecycle
 
@@ -88,30 +92,30 @@ and are restored when that same name is configured again. Without a configured
 provider, a requested public token object fails with
 `CKR_TOKEN_WRITE_PROTECTED`.
 
-Private key material and the unwrapped master key are held only while the
-token is logged in. `C_Logout`, closing the last session, `C_CloseAllSessions`,
-module finalization, failed login/loading, and PIN-change error paths release
-that material and clear active private-key operations.
+Private key material and the unwrapped private master key are held only while
+the USER role is logged in. `C_Logout`, closing the last session,
+`C_CloseAllSessions`, module finalization, and failed login/loading release
+that material and clear active private-key operations. PIN changes preserve
+the authenticated role and its already-unwrapped keys.
 
 ## Encrypted storage format
 
 Persistent private records use envelope encryption. A PIN is not applied
 independently to every PKCS #8 key:
 
-- PBKDF2-HMAC-SHA-256 with 10,000 iterations and a random 16-byte salt derives
-  a 256-bit wrapping key.
-- AES-256-GCM with a random 12-byte nonce and a 128-bit tag wraps the random
-  256-bit master key.
-- Each private record uses AES-256-GCM with a fresh 12-byte nonce and the
-  master key.
+- PBKDF2-HMAC-SHA-256 with 10,000 iterations and independent salts derives
+  discovery, SO, and USER wrapping keys.
+- AES-256-GCM wraps independent random public and private master keys. SO and
+  discovery have only public wrappers; USER has both.
+- Public provider records and private records use fresh AES-256-GCM nonces
+  under their respective master keys.
 - Header and record associated data include the configured software-token
   name and format context, preventing ciphertext from being moved between
   names.
 
 Headers and record envelopes are strict canonical CBOR with explicit schema,
-version, KDF, AEAD, and parameter identifiers. Headers declaring any other
-PBKDF2 iteration count are rejected; storage created with an earlier iteration
-count must be recreated.
+version, KDF, AEAD, and parameter identifiers. Development-era formats have no
+migration or compatibility path.
 
 The complete plaintext of each record is DER-encoded PKCS #8
 `OneAsymmetricKey` version 0:

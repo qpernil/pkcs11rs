@@ -86,9 +86,6 @@ pub(crate) trait Slot {
         }
         .physical_key()
     }
-    fn software_token_name(&self) -> Option<&str> {
-        None
-    }
     fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
         None
     }
@@ -194,6 +191,9 @@ pub(crate) trait Slot {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn init_user_pin(&mut self, _new_pin: &[u8]) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn init_token(&mut self, _so_pin: &[u8], _label: [CK_UTF8CHAR; 32]) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn login_context_specific(

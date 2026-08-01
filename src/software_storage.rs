@@ -19,24 +19,29 @@ use rsa::RsaPrivateKey;
 #[cfg(unix)]
 use std::fs::File;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
 use zeroize::Zeroizing;
 
 use crate::key_metadata::cryptoki_ulong_to_u64;
-use crate::storage::{ContentReference, LocalStorageProvider, StorageProvider};
+use crate::storage::{ContentReference, LocalStorageProvider, StorageError, StorageProvider};
 
 const HEADER_PREFIX: &str = "header-";
 const HEADER_SUFFIX: &str = ".cbor";
 const TEMPORARY_PREFIX: &str = ".pkcs11rs-header-";
 const PRIVATE_DIRECTORY: &str = "private-keys-v1";
+const PUBLIC_DIRECTORY: &str = "public-objects-v1";
+const PUBLIC_RECORD_SCHEMA: &str = "pkcs11rs-software-public-object";
 const HEADER_SCHEMA: &str = "pkcs11rs-software-token-key";
 const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
 const FORMAT_VERSION: u64 = 1;
+const HEADER_FORMAT_VERSION: u64 = 3;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 const KDF_ITERATIONS: u32 = 10_000;
 const AEAD_NAME: &str = "aes-256-gcm";
@@ -66,6 +71,8 @@ const PKCS11RS_ATTRIBUTES_OID_VALUE: &[u8] = &[
 
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
+type UnwrappedMasterKey = Zeroizing<[u8; MASTER_KEY_LENGTH]>;
+
 fn stored_u64_to_cryptoki_ulong(value: u64) -> Result<crate::CK_ULONG, Error> {
     #[cfg(any(windows, target_pointer_width = "32"))]
     {
@@ -78,11 +85,205 @@ fn stored_u64_to_cryptoki_ulong(value: u64) -> Result<crate::CK_ULONG, Error> {
 }
 
 #[derive(Debug)]
+pub(crate) struct SoftwarePublicStorageProvider {
+    store: SoftwareTokenStore,
+    records: LocalStorageProvider,
+    active_key: Rc<RefCell<Option<Zeroizing<[u8; MASTER_KEY_LENGTH]>>>>,
+}
+
+impl SoftwarePublicStorageProvider {
+    pub(crate) fn open(
+        name: String,
+        token_root: PathBuf,
+        discovery_pin: Option<Vec<u8>>,
+        active_key: Rc<RefCell<Option<Zeroizing<[u8; MASTER_KEY_LENGTH]>>>>,
+    ) -> Result<Self, Error> {
+        let records = LocalStorageProvider::open(token_root.join(PUBLIC_DIRECTORY))
+            .map_err(crate::backed_object::storage_error)?;
+        Ok(Self {
+            store: SoftwareTokenStore::open(name, token_root, discovery_pin)?,
+            records,
+            active_key,
+        })
+    }
+
+    fn public_key(&self) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, StorageError> {
+        if let Some(key) = self
+            .active_key
+            .try_borrow()
+            .map_err(|_| StorageError::Provider(String::from("software public key is borrowed")))?
+            .as_ref()
+        {
+            return Ok(Zeroizing::new(**key));
+        }
+        let discovery_pin = self
+            .store
+            .discovery_pin
+            .as_ref()
+            .ok_or(StorageError::Unavailable)?;
+        let (_, encoded) = self
+            .store
+            .read_current_header()
+            .map_err(public_storage_error)?
+            .ok_or(StorageError::Unavailable)?;
+        let header = decode_header(&encoded).map_err(public_storage_error)?;
+        self.store
+            .unwrap_master_key(
+                discovery_pin.as_ref(),
+                PinRole::DiscoveryPublic,
+                &header.discovery_public,
+            )
+            .map_err(public_storage_error)
+    }
+
+    fn has_login_key(&self) -> Result<bool, StorageError> {
+        Ok(self
+            .active_key
+            .try_borrow()
+            .map_err(|_| StorageError::Provider(String::from("software public key is borrowed")))?
+            .is_some())
+    }
+
+    pub(crate) fn clear(&self) -> Result<(), Error> {
+        for reference in self
+            .records
+            .list()
+            .map_err(crate::backed_object::storage_error)?
+        {
+            self.records
+                .delete(&reference)
+                .map_err(crate::backed_object::storage_error)?;
+        }
+        Ok(())
+    }
+
+    fn logical_objects(
+        &self,
+    ) -> Result<Vec<(ContentReference, ContentReference, Vec<u8>)>, StorageError> {
+        let key = self.public_key()?;
+        let mut objects = Vec::new();
+        for physical in self.records.list()? {
+            let encoded = self
+                .records
+                .get(&physical)?
+                .ok_or(StorageError::Integrity)?;
+            let logical = decode_public_record(&self.store.name, &key, &encoded)
+                .map_err(public_storage_error)?;
+            objects.push((ContentReference::for_object(&logical), physical, logical));
+        }
+        Ok(objects)
+    }
+}
+
+fn public_storage_error(error: Error) -> StorageError {
+    StorageError::Provider(format!("software public storage: {error:?}"))
+}
+
+impl StorageProvider for SoftwarePublicStorageProvider {
+    fn supports_mutation(&self) -> bool {
+        self.public_key().is_ok()
+    }
+
+    fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
+        if !self.store.is_initialized().map_err(public_storage_error)? {
+            return Ok(Vec::new());
+        }
+        if let Err(error) = self.public_key() {
+            if !self.has_login_key()? {
+                return Ok(Vec::new());
+            }
+            return Err(error);
+        }
+        let mut references = self
+            .logical_objects()?
+            .into_iter()
+            .map(|(logical, _, _)| logical)
+            .collect::<Vec<_>>();
+        references.sort();
+        references.dedup();
+        Ok(references)
+    }
+
+    fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
+        if let Err(error) = self.public_key() {
+            if !self.has_login_key()? {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        Ok(self
+            .logical_objects()?
+            .into_iter()
+            .find_map(|(logical, _, object)| (&logical == reference).then_some(object)))
+    }
+
+    fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
+        let logical = ContentReference::for_object(object);
+        if self.get(&logical)?.is_some() {
+            return Ok(logical);
+        }
+        let key = self.public_key()?;
+        let encoded =
+            encode_public_record(&self.store.name, &key, object).map_err(public_storage_error)?;
+        self.records.put(&encoded)?;
+        Ok(logical)
+    }
+
+    fn delete(&self, reference: &ContentReference) -> Result<bool, StorageError> {
+        self.public_key()?;
+        let physical = self
+            .logical_objects()?
+            .into_iter()
+            .filter_map(|(logical, physical, _)| (&logical == reference).then_some(physical))
+            .collect::<Vec<_>>();
+        let found = !physical.is_empty();
+        for reference in physical {
+            self.records.delete(&reference)?;
+        }
+        Ok(found)
+    }
+}
+
+#[derive(Debug)]
 struct Header {
+    generation: u64,
+    label: [u8; 32],
+    discovery_public: WrappedMasterKey,
+    so_public: WrappedMasterKey,
+    user: Option<UserWrappedMasterKeys>,
+}
+
+#[derive(Debug)]
+struct UserWrappedMasterKeys {
+    public: WrappedMasterKey,
+    private: WrappedMasterKey,
+}
+
+#[derive(Clone, Debug)]
+struct WrappedMasterKey {
     generation: u64,
     salt: [u8; SALT_LENGTH],
     nonce: [u8; NONCE_LENGTH],
     wrapped_master_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum PinRole {
+    UserPublic,
+    UserPrivate,
+    SoPublic,
+    DiscoveryPublic,
+}
+
+impl PinRole {
+    fn aad_label(self) -> &'static [u8] {
+        match self {
+            Self::UserPublic => b"user-public",
+            Self::UserPrivate => b"user-private",
+            Self::SoPublic => b"so-public",
+            Self::DiscoveryPublic => b"discovery-public",
+        }
+    }
 }
 
 /// PKCS #8 v1 `PrivateKeyInfo`, also known as an RFC 5958
@@ -135,10 +336,18 @@ pub(crate) struct SoftwareTokenStore {
     name: String,
     root: PathBuf,
     records: LocalStorageProvider,
+    discovery_pin: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl SoftwareTokenStore {
-    pub(crate) fn open(name: String, token_root: PathBuf) -> Result<Self, Error> {
+    pub(crate) fn open(
+        name: String,
+        token_root: PathBuf,
+        discovery_pin: Option<Vec<u8>>,
+    ) -> Result<Self, Error> {
+        if let Some(pin) = &discovery_pin {
+            validate_software_pin(pin)?;
+        }
         let root = token_root.join(PRIVATE_DIRECTORY);
         create_private_directory(&root)?;
         let records = LocalStorageProvider::open(root.join("records"))
@@ -151,6 +360,7 @@ impl SoftwareTokenStore {
             name,
             root,
             records,
+            discovery_pin: discovery_pin.map(Zeroizing::new),
         })
     }
 
@@ -158,20 +368,60 @@ impl SoftwareTokenStore {
         Ok(self.current_header_path()?.is_some())
     }
 
-    pub(crate) fn login(&self, pin: &[u8]) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
+    pub(crate) fn user_pin_is_initialized(&self) -> Result<bool, Error> {
+        let Some((_, encoded)) = self.read_current_header()? else {
+            return Ok(false);
+        };
+        Ok(decode_header(&encoded)?.user.is_some())
+    }
+
+    pub(crate) fn label(&self) -> Result<Option<[u8; 32]>, Error> {
+        self.read_current_header()?
+            .map(|(_, encoded)| decode_header(&encoded).map(|header| header.label))
+            .transpose()
+    }
+
+    pub(crate) fn login(
+        &self,
+        pin: &[u8],
+    ) -> Result<(UnwrappedMasterKey, UnwrappedMasterKey), Error> {
         validate_software_pin(pin)?;
-        if self.current_header_path()?.is_none() {
-            self.initialize(pin)?;
-        }
-        let (_, encoded) = self.read_current_header()?.ok_or(CKR_DEVICE_ERROR)?;
+        let Some((_, encoded)) = self.read_current_header()? else {
+            return Err(crate::CKR_TOKEN_NOT_INITIALIZED.into());
+        };
         let header = decode_header(&encoded)?;
-        let wrapping_key = derive_wrapping_key(pin, &header.salt);
-        let aad = header_aad(&self.name, header.generation);
+        let user = header
+            .user
+            .as_ref()
+            .ok_or(crate::CKR_USER_PIN_NOT_INITIALIZED)?;
+        let public = self.unwrap_master_key(pin, PinRole::UserPublic, &user.public)?;
+        let private = self.unwrap_master_key(pin, PinRole::UserPrivate, &user.private)?;
+        Ok((public, private))
+    }
+
+    pub(crate) fn login_so(&self, pin: &[u8]) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
+        validate_software_pin(pin)?;
+        let Some((_, encoded)) = self.read_current_header()? else {
+            return Err(crate::CKR_TOKEN_NOT_INITIALIZED.into());
+        };
+        let header = decode_header(&encoded)?;
+        let public = self.unwrap_master_key(pin, PinRole::SoPublic, &header.so_public)?;
+        Ok(public)
+    }
+
+    fn unwrap_master_key(
+        &self,
+        pin: &[u8],
+        role: PinRole,
+        wrapped: &WrappedMasterKey,
+    ) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
+        let wrapping_key = derive_wrapping_key(pin, &wrapped.salt);
+        let aad = header_aad(&self.name, role, wrapped.generation);
         let plaintext = match decrypt(
             wrapping_key.as_ref(),
-            &header.nonce,
+            &wrapped.nonce,
             &aad,
-            &header.wrapped_master_key,
+            &wrapped.wrapped_master_key,
         ) {
             Ok(plaintext) => plaintext,
             Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV => {
@@ -186,22 +436,148 @@ impl SoftwareTokenStore {
         Ok(Zeroizing::new(master_key))
     }
 
-    pub(crate) fn change_pin(
+    pub(crate) fn init_token(
         &self,
-        old_pin: &[u8],
-        new_pin: &[u8],
+        so_pin: &[u8],
+        label: [u8; 32],
     ) -> Result<Zeroizing<[u8; MASTER_KEY_LENGTH]>, Error> {
-        validate_software_pin(new_pin)?;
-        if !self.is_initialized()? {
-            return Err(crate::CKR_USER_PIN_NOT_INITIALIZED.into());
+        validate_software_pin(so_pin)?;
+        let generation = match self.read_current_header()? {
+            Some((generation, encoded)) => {
+                let header = decode_header(&encoded)?;
+                let _existing =
+                    self.unwrap_master_key(so_pin, PinRole::SoPublic, &header.so_public)?;
+                generation.checked_add(1).ok_or(CKR_DEVICE_ERROR)?
+            }
+            None => 1,
+        };
+        for reference in self
+            .records
+            .list()
+            .map_err(crate::backed_object::storage_error)?
+        {
+            self.records
+                .delete(&reference)
+                .map_err(crate::backed_object::storage_error)?;
         }
-        let master_key = self.login(old_pin)?;
-        let current = self.read_current_header()?.ok_or(CKR_DEVICE_ERROR)?.0;
-        let generation = current.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
-        let encoded = encode_new_header(&self.name, generation, new_pin, master_key.as_ref())?;
+        let mut public_master_key = Zeroizing::new([0u8; MASTER_KEY_LENGTH]);
+        getrandom::fill(public_master_key.as_mut()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let discovery_pin = match &self.discovery_pin {
+            Some(pin) => Zeroizing::new(pin.as_slice().to_vec()),
+            None => {
+                let mut pin = Zeroizing::new(vec![0u8; MASTER_KEY_LENGTH]);
+                getrandom::fill(pin.as_mut_slice()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+                pin
+            }
+        };
+        let header = Header {
+            generation,
+            label,
+            discovery_public: wrap_master_key(
+                &self.name,
+                PinRole::DiscoveryPublic,
+                generation,
+                discovery_pin.as_ref(),
+                public_master_key.as_ref(),
+            )?,
+            so_public: wrap_master_key(
+                &self.name,
+                PinRole::SoPublic,
+                generation,
+                so_pin,
+                public_master_key.as_ref(),
+            )?,
+            user: None,
+        };
+        let encoded = encode_header(&header)?;
         self.publish_header(generation, &encoded)?;
         self.remove_old_headers(generation)?;
-        Ok(master_key)
+        Ok(public_master_key)
+    }
+
+    pub(crate) fn change_pin(&self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        validate_software_pin(new_pin)?;
+        let (public, private) = self.login(old_pin)?;
+        let (_, encoded) = self.read_current_header()?.ok_or(CKR_DEVICE_ERROR)?;
+        let mut header = decode_header(&encoded)?;
+        let generation = header.generation.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
+        header.generation = generation;
+        header.user = Some(UserWrappedMasterKeys {
+            public: wrap_master_key(
+                &self.name,
+                PinRole::UserPublic,
+                generation,
+                new_pin,
+                public.as_ref(),
+            )?,
+            private: wrap_master_key(
+                &self.name,
+                PinRole::UserPrivate,
+                generation,
+                new_pin,
+                private.as_ref(),
+            )?,
+        });
+        self.publish_replacement_header(&header)
+    }
+
+    pub(crate) fn change_so_pin(&self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        validate_software_pin(new_pin)?;
+        let public = self.login_so(old_pin)?;
+        let (_, encoded) = self.read_current_header()?.ok_or(CKR_DEVICE_ERROR)?;
+        let mut header = decode_header(&encoded)?;
+        let generation = header.generation.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
+        header.generation = generation;
+        header.so_public = wrap_master_key(
+            &self.name,
+            PinRole::SoPublic,
+            generation,
+            new_pin,
+            public.as_ref(),
+        )?;
+        self.publish_replacement_header(&header)
+    }
+
+    pub(crate) fn init_user_pin(
+        &self,
+        new_pin: &[u8],
+        public_master_key: &[u8; MASTER_KEY_LENGTH],
+    ) -> Result<(), Error> {
+        validate_software_pin(new_pin)?;
+        let (_, encoded) = self.read_current_header()?.ok_or(CKR_DEVICE_ERROR)?;
+        let mut header = decode_header(&encoded)?;
+        if header.user.is_some() {
+            // The SO has no private-key wrapper and therefore cannot replace
+            // a lost user credential without weakening role separation.
+            return Err(crate::CKR_FUNCTION_FAILED.into());
+        }
+        let generation = header.generation.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
+        let mut private_master_key = Zeroizing::new([0u8; MASTER_KEY_LENGTH]);
+        getrandom::fill(private_master_key.as_mut()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        header.generation = generation;
+        header.user = Some(UserWrappedMasterKeys {
+            public: wrap_master_key(
+                &self.name,
+                PinRole::UserPublic,
+                generation,
+                new_pin,
+                public_master_key,
+            )?,
+            private: wrap_master_key(
+                &self.name,
+                PinRole::UserPrivate,
+                generation,
+                new_pin,
+                private_master_key.as_ref(),
+            )?,
+        });
+        self.publish_replacement_header(&header)
+    }
+
+    fn publish_replacement_header(&self, header: &Header) -> Result<(), Error> {
+        let encoded = encode_header(header)?;
+        self.publish_header(header.generation, &encoded)?;
+        self.remove_old_headers(header.generation)
     }
 
     pub(crate) fn load_objects(
@@ -258,27 +634,6 @@ impl SoftwareTokenStore {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(())
-    }
-
-    fn initialize(&self, pin: &[u8]) -> Result<(), Error> {
-        if !self
-            .records
-            .list()
-            .map_err(crate::backed_object::storage_error)?
-            .is_empty()
-        {
-            // Never replace a missing header with a fresh master key: that
-            // would make the existing encrypted records unrecoverable.
-            return Err(CKR_DATA_INVALID.into());
-        }
-        let mut master_key = Zeroizing::new([0u8; MASTER_KEY_LENGTH]);
-        getrandom::fill(master_key.as_mut()).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        let encoded = encode_new_header(&self.name, 1, pin, master_key.as_ref())?;
-        match self.publish_header(1, &encoded) {
-            Ok(()) => Ok(()),
-            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(error) => Err(error),
-        }
     }
 
     fn current_header_path(&self) -> Result<Option<(u64, PathBuf)>, Error> {
@@ -475,11 +830,13 @@ fn crypt(
     })
 }
 
-fn header_aad(name: &str, generation: u64) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(HEADER_SCHEMA.len() + name.len() + 16);
+fn header_aad(name: &str, role: PinRole, generation: u64) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(HEADER_SCHEMA.len() + name.len() + 20);
     aad.extend_from_slice(HEADER_SCHEMA.as_bytes());
     aad.push(0);
     aad.extend_from_slice(name.as_bytes());
+    aad.push(0);
+    aad.extend_from_slice(role.aad_label());
     aad.push(0);
     aad.extend_from_slice(&generation.to_be_bytes());
     aad
@@ -493,12 +850,13 @@ fn record_aad(name: &str) -> Vec<u8> {
     aad
 }
 
-fn encode_new_header(
+fn wrap_master_key(
     name: &str,
+    role: PinRole,
     generation: u64,
     pin: &[u8],
     master_key: &[u8],
-) -> Result<Vec<u8>, Error> {
+) -> Result<WrappedMasterKey, Error> {
     validate_software_pin(pin)?;
     let mut salt = [0u8; SALT_LENGTH];
     let mut nonce = [0u8; NONCE_LENGTH];
@@ -508,30 +866,23 @@ fn encode_new_header(
     let wrapped = encrypt(
         wrapping_key.as_ref(),
         &nonce,
-        &header_aad(name, generation),
+        &header_aad(name, role, generation),
         master_key,
     )?;
-    let mut encoded = Vec::new();
-    Encoder::new(&mut encoded)
-        .array(9)
-        .and_then(|encoder| encoder.str(HEADER_SCHEMA))
-        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
-        .and_then(|encoder| encoder.u64(generation))
-        .and_then(|encoder| encoder.str(KDF_NAME))
-        .and_then(|encoder| encoder.u32(KDF_ITERATIONS))
-        .and_then(|encoder| encoder.bytes(&salt))
-        .and_then(|encoder| encoder.str(AEAD_NAME))
-        .and_then(|encoder| encoder.bytes(&nonce))
-        .and_then(|encoder| encoder.bytes(&wrapped))
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    Ok(encoded)
+    Ok(WrappedMasterKey {
+        generation,
+        salt,
+        nonce,
+        wrapped_master_key: wrapped,
+    })
 }
 
 fn decode_header(encoded: &[u8]) -> Result<Header, Error> {
     let mut decoder = Decoder::new(encoded);
-    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(9)
+    let field_count = decoder.array().map_err(|_| CKR_DATA_INVALID)?;
+    if !matches!(field_count, Some(16 | 24))
         || decoder.str().map_err(|_| CKR_DATA_INVALID)? != HEADER_SCHEMA
-        || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
+        || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != HEADER_FORMAT_VERSION
     {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -539,33 +890,41 @@ fn decode_header(encoded: &[u8]) -> Result<Header, Error> {
     if generation == 0
         || decoder.str().map_err(|_| CKR_DATA_INVALID)? != KDF_NAME
         || decoder.u32().map_err(|_| CKR_DATA_INVALID)? != KDF_ITERATIONS
+        || decoder.str().map_err(|_| CKR_DATA_INVALID)? != AEAD_NAME
     {
         return Err(CKR_DATA_INVALID.into());
     }
-    let salt: [u8; SALT_LENGTH] = decoder
+    let label = decoder
         .bytes()
         .map_err(|_| CKR_DATA_INVALID)?
         .try_into()
         .map_err(|_| Error::from(CKR_DATA_INVALID))?;
-    if decoder.str().map_err(|_| CKR_DATA_INVALID)? != AEAD_NAME {
-        return Err(CKR_DATA_INVALID.into());
-    }
-    let nonce: [u8; NONCE_LENGTH] = decoder
-        .bytes()
-        .map_err(|_| CKR_DATA_INVALID)?
-        .try_into()
-        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
-    let wrapped_master_key = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec();
-    if wrapped_master_key.len() != MASTER_KEY_LENGTH + TAG_LENGTH
+    let discovery_public = decode_wrapped_master_key(&mut decoder, generation)?;
+    let so_public = decode_wrapped_master_key(&mut decoder, generation)?;
+    let user = match decoder.bool().map_err(|_| CKR_DATA_INVALID)? {
+        false => None,
+        true => Some(UserWrappedMasterKeys {
+            public: decode_wrapped_master_key(&mut decoder, generation)?,
+            private: decode_wrapped_master_key(&mut decoder, generation)?,
+        }),
+    };
+    if field_count != Some(if user.is_some() { 24 } else { 16 })
+        || discovery_public.wrapped_master_key.len() != MASTER_KEY_LENGTH + TAG_LENGTH
+        || so_public.wrapped_master_key.len() != MASTER_KEY_LENGTH + TAG_LENGTH
+        || user.as_ref().is_some_and(|user| {
+            user.public.wrapped_master_key.len() != MASTER_KEY_LENGTH + TAG_LENGTH
+                || user.private.wrapped_master_key.len() != MASTER_KEY_LENGTH + TAG_LENGTH
+        })
         || decoder.position() != encoded.len()
     {
         return Err(CKR_DATA_INVALID.into());
     }
     let header = Header {
         generation,
-        salt,
-        nonce,
-        wrapped_master_key,
+        label,
+        discovery_public,
+        so_public,
+        user,
     };
     if encode_header(&header)? != encoded {
         return Err(CKR_DATA_INVALID.into());
@@ -573,20 +932,68 @@ fn decode_header(encoded: &[u8]) -> Result<Header, Error> {
     Ok(header)
 }
 
+fn decode_wrapped_master_key(
+    decoder: &mut Decoder<'_>,
+    header_generation: u64,
+) -> Result<WrappedMasterKey, Error> {
+    let generation = decoder.u64().map_err(|_| CKR_DATA_INVALID)?;
+    if generation == 0 || generation > header_generation {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let salt = decoder
+        .bytes()
+        .map_err(|_| CKR_DATA_INVALID)?
+        .try_into()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let nonce = decoder
+        .bytes()
+        .map_err(|_| CKR_DATA_INVALID)?
+        .try_into()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let wrapped_master_key = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec();
+    Ok(WrappedMasterKey {
+        generation,
+        salt,
+        nonce,
+        wrapped_master_key,
+    })
+}
+
 fn encode_header(header: &Header) -> Result<Vec<u8>, Error> {
     let mut encoded = Vec::new();
-    Encoder::new(&mut encoded)
-        .array(9)
+    let field_count = if header.user.is_some() { 24 } else { 16 };
+    let mut encoder = Encoder::new(&mut encoded);
+    encoder
+        .array(field_count)
         .and_then(|encoder| encoder.str(HEADER_SCHEMA))
-        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+        .and_then(|encoder| encoder.u64(HEADER_FORMAT_VERSION))
         .and_then(|encoder| encoder.u64(header.generation))
         .and_then(|encoder| encoder.str(KDF_NAME))
         .and_then(|encoder| encoder.u32(KDF_ITERATIONS))
-        .and_then(|encoder| encoder.bytes(&header.salt))
         .and_then(|encoder| encoder.str(AEAD_NAME))
-        .and_then(|encoder| encoder.bytes(&header.nonce))
-        .and_then(|encoder| encoder.bytes(&header.wrapped_master_key))
+        .and_then(|encoder| encoder.bytes(&header.label))
+        .and_then(|encoder| encoder.u64(header.discovery_public.generation))
+        .and_then(|encoder| encoder.bytes(&header.discovery_public.salt))
+        .and_then(|encoder| encoder.bytes(&header.discovery_public.nonce))
+        .and_then(|encoder| encoder.bytes(&header.discovery_public.wrapped_master_key))
+        .and_then(|encoder| encoder.u64(header.so_public.generation))
+        .and_then(|encoder| encoder.bytes(&header.so_public.salt))
+        .and_then(|encoder| encoder.bytes(&header.so_public.nonce))
+        .and_then(|encoder| encoder.bytes(&header.so_public.wrapped_master_key))
+        .and_then(|encoder| encoder.bool(header.user.is_some()))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    if let Some(user) = &header.user {
+        encoder
+            .u64(user.public.generation)
+            .and_then(|encoder| encoder.bytes(&user.public.salt))
+            .and_then(|encoder| encoder.bytes(&user.public.nonce))
+            .and_then(|encoder| encoder.bytes(&user.public.wrapped_master_key))
+            .and_then(|encoder| encoder.u64(user.private.generation))
+            .and_then(|encoder| encoder.bytes(&user.private.salt))
+            .and_then(|encoder| encoder.bytes(&user.private.nonce))
+            .and_then(|encoder| encoder.bytes(&user.private.wrapped_master_key))
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    }
     Ok(encoded)
 }
 
@@ -682,6 +1089,55 @@ fn encode_record_envelope(nonce: &[u8; NONCE_LENGTH], ciphertext: &[u8]) -> Resu
         .and_then(|encoder| encoder.bytes(ciphertext))
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     Ok(encoded)
+}
+
+fn encode_public_record(
+    name: &str,
+    master_key: &[u8; MASTER_KEY_LENGTH],
+    object: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut nonce = [0u8; NONCE_LENGTH];
+    getrandom::fill(&mut nonce).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    let mut aad = PUBLIC_RECORD_SCHEMA.as_bytes().to_vec();
+    aad.push(0);
+    aad.extend_from_slice(name.as_bytes());
+    let ciphertext = encrypt(master_key, &nonce, &aad, object)?;
+    let mut encoded = Vec::new();
+    Encoder::new(&mut encoded)
+        .array(4)
+        .and_then(|encoder| encoder.str(PUBLIC_RECORD_SCHEMA))
+        .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+        .and_then(|encoder| encoder.bytes(&nonce))
+        .and_then(|encoder| encoder.bytes(&ciphertext))
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+    Ok(encoded)
+}
+
+fn decode_public_record(
+    name: &str,
+    master_key: &[u8; MASTER_KEY_LENGTH],
+    encoded: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut decoder = Decoder::new(encoded);
+    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(4)
+        || decoder.str().map_err(|_| CKR_DATA_INVALID)? != PUBLIC_RECORD_SCHEMA
+        || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
+    {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let nonce = decoder
+        .bytes()
+        .map_err(|_| CKR_DATA_INVALID)?
+        .try_into()
+        .map_err(|_| Error::from(CKR_DATA_INVALID))?;
+    let ciphertext = decoder.bytes().map_err(|_| CKR_DATA_INVALID)?;
+    if decoder.position() != encoded.len() {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let mut aad = PUBLIC_RECORD_SCHEMA.as_bytes().to_vec();
+    aad.push(0);
+    aad.extend_from_slice(name.as_bytes());
+    decrypt(master_key, &nonce, &aad, ciphertext).map(|value| value.to_vec())
 }
 
 fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
@@ -1127,10 +1583,16 @@ mod tests {
     use crate::CKM_RSA_PKCS_KEY_PAIR_GEN;
     use pkcs8::EncryptedPrivateKeyInfoRef;
     use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-    use std::sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Barrier,
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn open_store(name: &str, root: PathBuf) -> SoftwareTokenStore {
+        SoftwareTokenStore::open(
+            name.to_owned(),
+            root,
+            Some(b"software public discovery test pin".to_vec()),
+        )
+        .unwrap()
+    }
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -1292,10 +1754,28 @@ mod tests {
     #[test]
     fn login_persistence_wrong_pin_rotation_and_encrypted_attributes() {
         let directory = TestDirectory::new();
-        let store = SoftwareTokenStore::open(String::from("signing"), directory.0.clone()).unwrap();
+        let store = open_store("signing", directory.0.clone());
         assert!(!store.is_initialized().unwrap());
-        let key = store.login(b"correct horse battery staple").unwrap();
+        assert!(matches!(
+            store.login(b"correct horse battery staple"),
+            Err(Error::Generic(rv)) if rv == crate::CKR_TOKEN_NOT_INITIALIZED as crate::CK_RV
+        ));
+        let label = *b"signing token                   ";
+        let so_public = store
+            .init_token(b"correct security officer pin", label)
+            .unwrap();
         assert!(store.is_initialized().unwrap());
+        assert!(!store.user_pin_is_initialized().unwrap());
+        assert!(matches!(
+            store.login(b"correct horse battery staple"),
+            Err(Error::Generic(rv)) if rv == crate::CKR_USER_PIN_NOT_INITIALIZED as crate::CK_RV
+        ));
+        store
+            .init_user_pin(b"correct horse battery staple", &so_public)
+            .unwrap();
+        let (user_public, key) = store.login(b"correct horse battery staple").unwrap();
+        assert_eq!(so_public.as_ref(), user_public.as_ref());
+        assert_ne!(user_public.as_ref(), key.as_ref());
 
         let material =
             SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
@@ -1333,26 +1813,52 @@ mod tests {
             store.login(b"wrong password"),
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
-        let key = store.login(b"correct horse battery staple").unwrap();
+        let (_, key) = store.login(b"correct horse battery staple").unwrap();
         let (objects, _) = store.load_objects(9, &key).unwrap();
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].slot_id, Some(9));
         assert_eq!(objects[0].label, original.label);
         assert_eq!(objects[0].id, original.id);
 
-        let rotated = store
+        store
             .change_pin(
                 b"correct horse battery staple",
                 b"new correct horse battery staple",
             )
             .unwrap();
-        assert_eq!(rotated.as_ref(), key.as_ref());
         assert!(matches!(
             store.login(b"correct horse battery staple"),
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
-        let rotated = store.login(b"new correct horse battery staple").unwrap();
-        assert_eq!(store.load_objects(9, &rotated).unwrap().0.len(), 1);
+        let (rotated_public, rotated_private) =
+            store.login(b"new correct horse battery staple").unwrap();
+        assert_eq!(rotated_private.as_ref(), key.as_ref());
+        assert_eq!(store.load_objects(9, &rotated_private).unwrap().0.len(), 1);
+        let so_key = store.login_so(b"correct security officer pin").unwrap();
+        assert_eq!(so_key.as_ref(), rotated_public.as_ref());
+        assert_ne!(so_key.as_ref(), rotated_private.as_ref());
+        assert!(matches!(
+            store.init_user_pin(b"reset user pin after SO login", &so_key),
+            Err(Error::Generic(rv)) if rv == crate::CKR_FUNCTION_FAILED as crate::CK_RV
+        ));
+        assert!(store.login(b"new correct horse battery staple").is_ok());
+        store
+            .change_so_pin(
+                b"correct security officer pin",
+                b"rotated security officer pin",
+            )
+            .unwrap();
+        assert!(matches!(
+            store.login_so(b"correct security officer pin"),
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
+        ));
+        assert_eq!(
+            store
+                .login_so(b"rotated security officer pin")
+                .unwrap()
+                .as_ref(),
+            rotated_public.as_ref()
+        );
         assert_eq!(
             fs::read_dir(&store.root)
                 .unwrap()
@@ -1367,6 +1873,73 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn public_discovery_is_encrypted_optional_and_independent_of_login() {
+        let directory = TestDirectory::new();
+        let name = String::from("discovery");
+        let discovery_pin = b"correct discovery password".to_vec();
+        let store = SoftwareTokenStore::open(
+            name.clone(),
+            directory.0.clone(),
+            Some(discovery_pin.clone()),
+        )
+        .unwrap();
+        let active = Rc::new(RefCell::new(None));
+        let provider = SoftwarePublicStorageProvider::open(
+            name.clone(),
+            directory.0.clone(),
+            Some(discovery_pin),
+            active.clone(),
+        )
+        .unwrap();
+        let public = store
+            .init_token(
+                b"correct security officer pin",
+                *b"discovery token                 ",
+            )
+            .unwrap();
+        store
+            .init_user_pin(b"correct user password", &public)
+            .unwrap();
+        *active.borrow_mut() = Some(Zeroizing::new(*public));
+
+        let logical = minicbor::to_vec(("public marker", 7u8)).unwrap();
+        let reference = provider.put(&logical).unwrap();
+        assert_eq!(provider.get(&reference).unwrap(), Some(logical.clone()));
+        for physical in provider.records.list().unwrap() {
+            let encoded = provider.records.get(&physical).unwrap().unwrap();
+            assert!(!encoded
+                .windows(b"public marker".len())
+                .any(|window| window == b"public marker"));
+        }
+
+        *active.borrow_mut() = None;
+        assert_eq!(provider.list().unwrap(), vec![reference]);
+
+        let wrong_active = Rc::new(RefCell::new(None));
+        let wrong_discovery = SoftwarePublicStorageProvider::open(
+            name.clone(),
+            directory.0.clone(),
+            Some(b"wrong discovery password".to_vec()),
+            wrong_active,
+        )
+        .unwrap();
+        assert!(wrong_discovery.list().unwrap().is_empty());
+
+        let wrong_discovery_store = SoftwareTokenStore::open(
+            name,
+            directory.0.clone(),
+            Some(b"wrong discovery password".to_vec()),
+        )
+        .unwrap();
+        assert!(wrong_discovery_store
+            .login_so(b"correct security officer pin")
+            .is_ok());
+        assert!(wrong_discovery_store
+            .login(b"correct user password")
+            .is_ok());
     }
 
     #[test]
@@ -1412,10 +1985,17 @@ mod tests {
     #[test]
     fn name_binding_and_corrupt_current_header_fail_closed() {
         let directory = TestDirectory::new();
-        let first = SoftwareTokenStore::open(String::from("first"), directory.0.clone()).unwrap();
-        first.login(b"one sufficiently long pin").unwrap();
-        let other_name_same_root =
-            SoftwareTokenStore::open(String::from("second"), directory.0.clone()).unwrap();
+        let first = open_store("first", directory.0.clone());
+        let first_public = first
+            .init_token(
+                b"one sufficiently long SO pin",
+                *b"first token                     ",
+            )
+            .unwrap();
+        first
+            .init_user_pin(b"one sufficiently long pin", &first_public)
+            .unwrap();
+        let other_name_same_root = open_store("second", directory.0.clone());
         assert!(matches!(
             other_name_same_root.login(b"one sufficiently long pin"),
             Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
@@ -1433,16 +2013,23 @@ mod tests {
     fn headers_require_the_current_kdf_iteration_count() {
         let mut encoded = Vec::new();
         Encoder::new(&mut encoded)
-            .array(9)
+            .array(16)
             .and_then(|encoder| encoder.str(HEADER_SCHEMA))
-            .and_then(|encoder| encoder.u64(FORMAT_VERSION))
+            .and_then(|encoder| encoder.u64(HEADER_FORMAT_VERSION))
             .and_then(|encoder| encoder.u64(1))
             .and_then(|encoder| encoder.str(KDF_NAME))
             .and_then(|encoder| encoder.u32(600_000))
-            .and_then(|encoder| encoder.bytes(&[1; SALT_LENGTH]))
             .and_then(|encoder| encoder.str(AEAD_NAME))
+            .and_then(|encoder| encoder.bytes(&[b' '; 32]))
+            .and_then(|encoder| encoder.u64(1))
+            .and_then(|encoder| encoder.bytes(&[7; SALT_LENGTH]))
+            .and_then(|encoder| encoder.bytes(&[8; NONCE_LENGTH]))
+            .and_then(|encoder| encoder.bytes(&[9; MASTER_KEY_LENGTH + TAG_LENGTH]))
+            .and_then(|encoder| encoder.u64(1))
+            .and_then(|encoder| encoder.bytes(&[1; SALT_LENGTH]))
             .and_then(|encoder| encoder.bytes(&[2; NONCE_LENGTH]))
             .and_then(|encoder| encoder.bytes(&[3; MASTER_KEY_LENGTH + TAG_LENGTH]))
+            .and_then(|encoder| encoder.bool(false))
             .unwrap();
         assert!(matches!(
             decode_header(&encoded),
@@ -1451,35 +2038,46 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_initialization_converges_and_newest_durable_header_wins() {
+    fn newest_durable_header_wins() {
         let directory = TestDirectory::new();
-        let barrier = Arc::new(Barrier::new(2));
-        let mut threads = Vec::new();
-        for _ in 0..2 {
-            let path = directory.0.clone();
-            let barrier = barrier.clone();
-            threads.push(std::thread::spawn(move || {
-                let store = SoftwareTokenStore::open(String::from("race"), path).unwrap();
-                barrier.wait();
-                *store.login(b"one shared initialization pin").unwrap()
-            }));
-        }
-        let first = threads.remove(0).join().unwrap();
-        let second = threads.remove(0).join().unwrap();
-        assert_eq!(first, second);
-
-        let store = SoftwareTokenStore::open(String::from("race"), directory.0.clone()).unwrap();
-        let current = store.login(b"one shared initialization pin").unwrap();
-        let replacement = encode_new_header(
-            &store.name,
-            2,
-            b"replacement pin after durable publish",
-            current.as_ref(),
-        )
-        .unwrap();
+        let store = open_store("race", directory.0.clone());
+        let race_public = store
+            .init_token(
+                b"one shared initialization SO pin",
+                *b"race token                      ",
+            )
+            .unwrap();
+        store
+            .init_user_pin(b"one shared initialization pin", &race_public)
+            .unwrap();
+        let (current_public, current_private) =
+            store.login(b"one shared initialization pin").unwrap();
+        let (_, encoded) = store.read_current_header().unwrap().unwrap();
+        let mut replacement = decode_header(&encoded).unwrap();
+        let next_generation = replacement.generation + 1;
+        replacement.generation = next_generation;
+        replacement.user = Some(UserWrappedMasterKeys {
+            public: wrap_master_key(
+                &store.name,
+                PinRole::UserPublic,
+                next_generation,
+                b"replacement pin after durable publish",
+                current_public.as_ref(),
+            )
+            .unwrap(),
+            private: wrap_master_key(
+                &store.name,
+                PinRole::UserPrivate,
+                next_generation,
+                b"replacement pin after durable publish",
+                current_private.as_ref(),
+            )
+            .unwrap(),
+        });
+        let replacement = encode_header(&replacement).unwrap();
         // Model a crash after publishing generation 2 but before removing
         // generation 1, plus an abandoned partial temporary file.
-        store.publish_header(2, &replacement).unwrap();
+        store.publish_header(next_generation, &replacement).unwrap();
         fs::write(store.root.join(format!("{TEMPORARY_PREFIX}crash")), [0x81]).unwrap();
         assert!(matches!(
             store.login(b"one shared initialization pin"),
@@ -1489,17 +2087,20 @@ mod tests {
             store
                 .login(b"replacement pin after durable publish")
                 .unwrap()
+                .1
                 .as_ref(),
-            current.as_ref()
+            current_private.as_ref()
         );
-        assert_eq!(store.current_header_path().unwrap().unwrap().0, 2);
+        assert_eq!(
+            store.current_header_path().unwrap().unwrap().0,
+            next_generation
+        );
     }
 
     #[test]
     fn malformed_records_and_short_pins_are_rejected_without_state() {
         let directory = TestDirectory::new();
-        let store =
-            SoftwareTokenStore::open(String::from("malformed"), directory.0.clone()).unwrap();
+        let store = open_store("malformed", directory.0.clone());
         assert!(matches!(
             store.login(b"short"),
             Err(Error::Generic(rv)) if rv == CKR_PIN_LEN_RANGE as crate::CK_RV
@@ -1508,10 +2109,19 @@ mod tests {
         assert!(matches!(
             store.change_pin(b"old sufficiently long pin", b"new sufficiently long pin"),
             Err(Error::Generic(rv))
-                if rv == crate::CKR_USER_PIN_NOT_INITIALIZED as crate::CK_RV
+                if rv == crate::CKR_TOKEN_NOT_INITIALIZED as crate::CK_RV
         ));
         assert!(!store.is_initialized().unwrap());
-        let key = store.login(b"a sufficiently long pin").unwrap();
+        let malformed_public = store
+            .init_token(
+                b"a sufficiently long SO pin",
+                *b"malformed token                 ",
+            )
+            .unwrap();
+        store
+            .init_user_pin(b"a sufficiently long pin", &malformed_public)
+            .unwrap();
+        let key = store.login(b"a sufficiently long pin").unwrap().1;
         let malformed = minicbor::to_vec((RECORD_SCHEMA, FORMAT_VERSION)).unwrap();
         store.records.put(&malformed).unwrap();
         assert!(matches!(
@@ -1520,24 +2130,16 @@ mod tests {
         ));
 
         let missing_header_directory = TestDirectory::new();
-        let missing_header = SoftwareTokenStore::open(
-            String::from("missing-header"),
-            missing_header_directory.0.clone(),
-        )
-        .unwrap();
+        let missing_header = open_store("missing-header", missing_header_directory.0.clone());
         missing_header.records.put(&malformed).unwrap();
         assert!(matches!(
             missing_header.login(b"a sufficiently long pin"),
-            Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
+            Err(Error::Generic(rv)) if rv == crate::CKR_TOKEN_NOT_INITIALIZED as crate::CK_RV
         ));
         assert!(!missing_header.is_initialized().unwrap());
 
         let malformed_header_directory = TestDirectory::new();
-        let malformed_header = SoftwareTokenStore::open(
-            String::from("malformed-header"),
-            malformed_header_directory.0.clone(),
-        )
-        .unwrap();
+        let malformed_header = open_store("malformed-header", malformed_header_directory.0.clone());
         fs::write(malformed_header.root.join("header-invalid.cbor"), [0x80]).unwrap();
         assert!(matches!(
             malformed_header.login(b"a sufficiently long pin"),

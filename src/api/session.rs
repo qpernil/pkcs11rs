@@ -1,11 +1,30 @@
 use crate::*;
 
-non_session_unsupported_stub!(C_InitToken(
-    _slotID: CK_SLOT_ID,
-    _pin: *mut ::std::os::raw::c_uchar,
-    _pin_len: ::std::os::raw::c_ulong,
-    _label: *mut ::std::os::raw::c_uchar,
-));
+ffi_entry_point! {
+    pub fn C_InitToken(
+        slot_id: CK_SLOT_ID,
+        pin: *mut ::std::os::raw::c_uchar,
+        pin_len: ::std::os::raw::c_ulong,
+        label: *mut ::std::os::raw::c_uchar,
+    ) -> CK_RV {
+        log!(2, "C_InitToken called with {:?}", (slot_id, pin, pin_len, label));
+        map(init_token(slot_id, pin, pin_len, label))
+    }
+}
+
+fn init_token(
+    slot_id: CK_SLOT_ID,
+    pin: *const CK_UTF8CHAR,
+    pin_len: CK_ULONG,
+    label: *const CK_UTF8CHAR,
+) -> Result<(), Error> {
+    let label = unsafe { from_raw_parts(label, 32) }?;
+    std::str::from_utf8(label).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let label: [CK_UTF8CHAR; 32] = label.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+    with_pin(pin, pin_len, |pin| {
+        with_slot_context_mut(slot_id, |ctx| ctx.init_token(pin, label))
+    })
+}
 
 ffi_entry_point! {
     pub fn C_InitPIN(
@@ -79,10 +98,6 @@ fn set_pin(
                     Some(LoginRole::So) => ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin),
                     _ => ctx._get_slot_mut(slot_id)?.set_pin(old_pin, new_pin),
                 };
-                if !matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_FUNCTION_NOT_SUPPORTED as CK_RV)
-                {
-                    ctx.clear_login_state(slot_id);
-                }
                 result
             })
         })
@@ -371,7 +386,7 @@ fn login_role(
     }
     authenticate(ctx._get_slot_mut(slot_id)?)?;
     ctx.login_role = Some(role);
-    if role == LoginRole::User && ctx.get_slot(slot_id)?.refresh_token_objects_after_login() {
+    if ctx.get_slot(slot_id)?.refresh_token_objects_after_login() {
         if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
             let _ = ctx._get_slot_mut(slot_id)?.logout();
             ctx.clear_login_state(slot_id);
