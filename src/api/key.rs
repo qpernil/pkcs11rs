@@ -1,11 +1,12 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    persist_software_private_object, piv_key_object_handles, required_template_value,
+    piv_key_object_handles, publish_software_secret_object, required_template_value,
     validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
     yubihsm_id, yubihsm_object_parameters,
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
+use zeroize::Zeroize;
 
 ffi_entry_point! {
     pub fn C_GenerateKey(
@@ -77,11 +78,8 @@ fn generate_key(
         let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
         let mut key = generate_key_object(mechanism, templ, software_secret)?;
         validate_new_object_access(&key, flags, logged_in)?;
-        if software_secret && key.token {
-            if !key.private {
-                return Err(CKR_TEMPLATE_INCONSISTENT.into());
-            }
-            *key_handle = persist_software_private_object(ctx, slot_id, &key)?;
+        if software_secret {
+            *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, key)?;
             return Ok(());
         }
         key.set_creator(session_handle, slot_id);
@@ -1725,11 +1723,13 @@ fn derive_key(
         {
             return Err(CKR_DATA_LEN_RANGE.into());
         }
-        let (mut derived_object, requested_length) = derived_secret_object(templ, expected_length)?;
+        let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
+        let (mut derived_object, requested_length) =
+            derived_secret_object(templ, expected_length, software_secret)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
-        let derived =
-            match source {
+        let mut derived =
+            Zeroizing::new(match source {
                 DeriveSource::Software(key) => match key.as_ref() {
                     SoftwarePrivateKeyMaterial::X25519(key) => {
                         let peer: [u8; 32] = public_data
@@ -1766,13 +1766,26 @@ fn derive_key(
                         &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
                     )?
                 }
-            };
+            });
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        derived_object.material =
-            KeyMaterial::DerivedSecret(Zeroizing::new(derived[..requested_length].to_vec()));
+        derived[requested_length..].zeroize();
+        derived.truncate(requested_length);
+        derived_object.material = if software_secret {
+            KeyMaterial::SoftwareSecret(derived)
+        } else {
+            KeyMaterial::DerivedSecret(derived)
+        };
+        derived_object.always_sensitive = object.always_sensitive && derived_object.sensitive;
+        derived_object.never_extractable = object.never_extractable && !derived_object.extractable;
         derived_object.local = false;
+        derived_object.key_gen_mechanism = Some(mechanism.mechanism);
+        if software_secret {
+            *key_handle =
+                publish_software_secret_object(ctx, session_handle, slot_id, derived_object)?;
+            return Ok(());
+        }
         derived_object.set_creator(session_handle, slot_id);
         *key_handle = ctx.insert_object(derived_object)?;
         Ok(())
@@ -1782,13 +1795,14 @@ fn derive_key(
 fn derived_secret_object(
     templ: &[CK_ATTRIBUTE],
     expected_length: usize,
+    software_secret: bool,
 ) -> Result<(TokenObject, usize), Error> {
     let mut object_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
         key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
-        private: true,
-        sensitive: Some(true),
-        extractable: Some(false),
+        private: !software_secret,
+        sensitive: Some(!software_secret),
+        extractable: Some(software_secret),
         ..TokenObjectTemplate::default()
     };
     let mut requested_length = None;
@@ -1806,23 +1820,41 @@ fn derived_secret_object(
     if requested_length == 0 || requested_length > expected_length {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
-    let mut object = object_template.into_object().map_err(Error::from)?;
-    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-        || object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
-        || object.token
-    {
+    let mut object = if software_secret {
+        object_template.into_software_secret_object()
+    } else {
+        object_template.into_object()
+    }
+    .map_err(Error::from)?;
+    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    object.private = false;
-    object.sensitive = false;
-    object.extractable = true;
-    object.always_sensitive = false;
-    object.never_extractable = false;
-    object.encrypt = false;
-    object.decrypt = false;
-    object.sign = false;
-    object.verify = false;
-    object.derive = false;
+    if software_secret {
+        if object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+            && object.key_type != CKK_AES as CK_KEY_TYPE
+            && !is_hmac_key_type(object.key_type)
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        validate_software_secret_length(object.key_type, requested_length)?;
+        if object.token && !object.private {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+    } else {
+        if object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE || object.token {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        object.private = false;
+        object.sensitive = false;
+        object.extractable = true;
+        object.always_sensitive = false;
+        object.never_extractable = false;
+        object.encrypt = false;
+        object.decrypt = false;
+        object.sign = false;
+        object.verify = false;
+        object.derive = false;
+    }
     Ok((object, requested_length))
 }
 

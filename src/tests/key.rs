@@ -385,6 +385,31 @@ fn derive_secret(
     private: CK_OBJECT_HANDLE,
     peer: &mut [u8],
 ) -> Vec<u8> {
+    let object = derive_key_object(session, private, peer, &mut []);
+    let mut attribute = CK_ATTRIBUTE {
+        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
+        pValue: std::ptr::null_mut(),
+        ulValueLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    let mut value = vec![0; attribute.ulValueLen as usize];
+    attribute.pValue = value.as_mut_ptr().cast();
+    assert_eq!(
+        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        CKR_OK as CK_RV
+    );
+    value
+}
+
+fn derive_key_object(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    peer: &mut [u8],
+    templ: &mut [CK_ATTRIBUTE],
+) -> CK_OBJECT_HANDLE {
     let mut parameters = CK_ECDH1_DERIVE_PARAMS {
         kdf: CKD_NULL as CK_EC_KDF_TYPE,
         pSharedData: std::ptr::null_mut(),
@@ -403,28 +428,129 @@ fn derive_secret(
             session,
             &mut mechanism,
             private,
-            std::ptr::null_mut(),
-            0,
+            templ.as_mut_ptr(),
+            templ.len() as CK_ULONG,
             &mut object,
         ),
         CKR_OK as CK_RV
     );
-    let mut attribute = CK_ATTRIBUTE {
-        type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
-        pValue: std::ptr::null_mut(),
-        ulValueLen: 0,
+    object
+}
+
+#[test]
+fn software_ecdh_materializes_typed_session_keys() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let (public, private) = generate_software_key_pair(
+        TEST_SESSION_HANDLE,
+        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        Some(
+            &mut crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .unwrap()
+                .to_vec(),
+        ),
+    );
+    let mut peer = object_ec_point(TEST_SESSION_HANDLE, public);
+    let mut aes_type = CKK_AES as CK_KEY_TYPE;
+    let mut aes_length = 16 as CK_ULONG;
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut aes_template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut aes_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut aes_length),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+    ];
+    let aes = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut aes_template);
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(aes).unwrap().unwrap();
+        assert_eq!(object.key_type, CKK_AES as CK_KEY_TYPE);
+        assert!(object.encrypt && object.decrypt);
+        assert!(object.sensitive && !object.extractable);
+        assert!(object.always_sensitive && object.never_extractable);
+        assert!(!object.local);
+        assert_eq!(
+            object.key_gen_mechanism,
+            Some(CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE)
+        );
+        assert!(
+            matches!(object.material, crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 16)
+        );
+    });
+    let mut ecb = CK_MECHANISM {
+        mechanism: CKM_AES_ECB as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
     };
+    let mut plaintext = *b"derived AES key!";
+    let mut ciphertext = [0; 16];
+    let mut ciphertext_length = ciphertext.len() as CK_ULONG;
     assert_eq!(
-        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
         CKR_OK as CK_RV
     );
-    let mut value = vec![0; attribute.ulValueLen as usize];
-    attribute.pValue = value.as_mut_ptr().cast();
     assert_eq!(
-        crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_length,
+        ),
         CKR_OK as CK_RV
     );
-    value
+    let mut recovered = [0; 16];
+    let mut recovered_length = recovered.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut ecb, aes),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            ciphertext.as_mut_ptr(),
+            ciphertext_length,
+            recovered.as_mut_ptr(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(recovered, plaintext);
+
+    let mut hmac_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut hmac_length = 32 as CK_ULONG;
+    let mut nonsensitive = CK_FALSE as CK_BBOOL;
+    let mut hmac_extractable = CK_TRUE as CK_BBOOL;
+    let mut hmac_template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut hmac_length),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut nonsensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut hmac_extractable),
+    ];
+    let hmac = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut hmac_template);
+    sign_and_verify(
+        TEST_SESSION_HANDLE,
+        hmac,
+        hmac,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(hmac).unwrap().unwrap();
+        assert!(!object.always_sensitive);
+        assert!(!object.never_extractable);
+    });
+    finalize_for_test();
 }
 
 #[test]

@@ -98,6 +98,7 @@ CKM_SHA3_512 = 0x000002D0
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
+CKM_ECDH1_DERIVE = 0x00001050
 CKM_AES_KEY_GEN = 0x00001080
 CKM_AES_ECB = 0x00001081
 CKM_AES_CBC = 0x00001082
@@ -113,6 +114,7 @@ CKM_AES_KEY_WRAP_KWP = 0x0000210B
 CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
 CKG_MGF1_SHA256 = 2
+CKD_NULL = 1
 CKZ_DATA_SPECIFIED = 1
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
@@ -2417,6 +2419,32 @@ class Pkcs11AbiTests(unittest.TestCase):
                     self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
                     return list(handles[: found.value])
 
+                def read_attribute(
+                    session: int, object_handle: int, attribute_type: int
+                ) -> bytes:
+                    attribute = CK_ATTRIBUTE(attribute_type, None, 0)
+                    self.assertEqual(
+                        self.lib.C_GetAttributeValue(
+                            session,
+                            object_handle,
+                            ctypes.byref(attribute),
+                            1,
+                        ),
+                        CKR_OK,
+                    )
+                    value = (CK_BYTE * attribute.ulValueLen)()
+                    attribute.pValue = ctypes.cast(value, CK_VOID_PTR)
+                    self.assertEqual(
+                        self.lib.C_GetAttributeValue(
+                            session,
+                            object_handle,
+                            ctypes.byref(attribute),
+                            1,
+                        ),
+                        CKR_OK,
+                    )
+                    return bytes(value)
+
                 self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
                 slot_id = named_slot()
                 session = self.open_slot_session(
@@ -2556,6 +2584,121 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
+
+                ec_parameters_bytes = bytes.fromhex("06082a8648ce3d030107")
+                ec_parameters = (CK_BYTE * len(ec_parameters_bytes))(
+                    *ec_parameters_bytes
+                )
+                derive_enabled = CK_BYTE(1)
+                ec_public_template = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_EC_PARAMS,
+                        ctypes.cast(ec_parameters, CK_VOID_PTR),
+                        len(ec_parameters),
+                    )
+                )
+                ec_private_template = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_DERIVE,
+                        ctypes.cast(ctypes.byref(derive_enabled), CK_VOID_PTR),
+                        ctypes.sizeof(derive_enabled),
+                    )
+                )
+                ec_generate = CK_MECHANISM(CKM_EC_KEY_PAIR_GEN, None, 0)
+                ec_public = CK_ULONG()
+                ec_private = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKeyPair(
+                        session,
+                        ctypes.byref(ec_generate),
+                        ec_public_template,
+                        len(ec_public_template),
+                        ec_private_template,
+                        len(ec_private_template),
+                        ctypes.byref(ec_public),
+                        ctypes.byref(ec_private),
+                    ),
+                    CKR_OK,
+                )
+                peer_bytes = read_attribute(session, ec_public.value, CKA_EC_POINT)
+                peer = (CK_BYTE * len(peer_bytes))(*peer_bytes)
+                derive_parameters = CK_ECDH1_DERIVE_PARAMS(
+                    CKD_NULL,
+                    0,
+                    None,
+                    len(peer),
+                    peer,
+                )
+                derive_mechanism = CK_MECHANISM(
+                    CKM_ECDH1_DERIVE,
+                    ctypes.cast(ctypes.pointer(derive_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(derive_parameters),
+                )
+                derived_length = CK_ULONG(32)
+                derived_label_bytes = b"derived persistent HMAC"
+                derived_label = (CK_BYTE * len(derived_label_bytes))(
+                    *derived_label_bytes
+                )
+                disabled = CK_BYTE(0)
+                derived_template = (CK_ATTRIBUTE * 9)(
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(hmac_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(hmac_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VALUE_LEN,
+                        ctypes.cast(ctypes.byref(derived_length), CK_VOID_PTR),
+                        ctypes.sizeof(derived_length),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SIGN,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VERIFY,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SENSITIVE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_EXTRACTABLE,
+                        ctypes.cast(ctypes.byref(disabled), CK_VOID_PTR),
+                        ctypes.sizeof(disabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(derived_label, CK_VOID_PTR),
+                        len(derived_label),
+                    ),
+                )
+                derived_hmac = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_DeriveKey(
+                        session,
+                        ctypes.byref(derive_mechanism),
+                        ec_private.value,
+                        derived_template,
+                        len(derived_template),
+                        ctypes.byref(derived_hmac),
+                    ),
+                    CKR_OK,
+                )
                 self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
                 self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
 
@@ -2567,15 +2710,18 @@ class Pkcs11AbiTests(unittest.TestCase):
                     aes_label_bytes,
                     hmac_label_bytes,
                     copied_label_bytes,
+                    derived_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
                 self.login_with_pin(restored, b"secret vault user password")
                 restored_aes = find_label(restored, aes_label_bytes)
                 restored_hmac = find_label(restored, hmac_label_bytes)
                 restored_copy = find_label(restored, copied_label_bytes)
+                restored_derived = find_label(restored, derived_label_bytes)
                 self.assertEqual(len(restored_aes), 1)
                 self.assertEqual(len(restored_hmac), 1)
                 self.assertEqual(len(restored_copy), 1)
+                self.assertEqual(len(restored_derived), 1)
 
                 iv = (CK_BYTE * 16)(*range(16))
                 cbc_pad = CK_MECHANISM(
@@ -2659,11 +2805,71 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
+                derived_local = CK_BYTE(1)
+                derived_mechanism = CK_ULONG()
+                derived_attributes = (CK_ATTRIBUTE * 2)(
+                    CK_ATTRIBUTE(
+                        CKA_LOCAL,
+                        ctypes.cast(ctypes.byref(derived_local), CK_VOID_PTR),
+                        ctypes.sizeof(derived_local),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_KEY_GEN_MECHANISM,
+                        ctypes.cast(ctypes.byref(derived_mechanism), CK_VOID_PTR),
+                        ctypes.sizeof(derived_mechanism),
+                    ),
+                )
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored,
+                        restored_derived[0],
+                        derived_attributes,
+                        len(derived_attributes),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(derived_local.value, 0)
+                self.assertEqual(derived_mechanism.value, CKM_ECDH1_DERIVE)
+                self.assertEqual(
+                    self.lib.C_SignInit(
+                        restored, ctypes.byref(hmac), restored_derived[0]
+                    ),
+                    CKR_OK,
+                )
+                derived_signature = (CK_BYTE * 32)()
+                derived_signature_len = CK_ULONG(len(derived_signature))
+                self.assertEqual(
+                    self.lib.C_Sign(
+                        restored,
+                        message,
+                        len(message),
+                        derived_signature,
+                        ctypes.byref(derived_signature_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_VerifyInit(
+                        restored, ctypes.byref(hmac), restored_derived[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Verify(
+                        restored,
+                        message,
+                        len(message),
+                        derived_signature,
+                        derived_signature_len.value,
+                    ),
+                    CKR_OK,
+                )
                 self.assertEqual(self.lib.C_Logout(restored), CKR_OK)
                 for label in (
                     aes_label_bytes,
                     hmac_label_bytes,
                     copied_label_bytes,
+                    derived_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
                 self.login_with_pin(restored, b"secret vault user password")
@@ -2683,6 +2889,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(find_label(final_session, hmac_label_bytes), [])
                 self.assertEqual(len(find_label(final_session, aes_label_bytes)), 1)
                 self.assertEqual(len(find_label(final_session, copied_label_bytes)), 1)
+                self.assertEqual(len(find_label(final_session, derived_label_bytes)), 1)
                 self.assertEqual(self.lib.C_CloseSession(final_session), CKR_OK)
             finally:
                 self.lib.C_Finalize(None)
