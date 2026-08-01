@@ -1,7 +1,7 @@
 # Software AES, HMAC, derivation, and wrapping plan
 
-Status: design roadmap. This document describes planned work, not current
-software-slot behavior.
+Status: implementation roadmap. Completed work is called out below; later
+phases still describe planned behavior.
 
 This work is also the first design probe for the
 [pure Rust provider abstraction](provider-abstraction-plan.md). New AES, HMAC,
@@ -23,8 +23,16 @@ The object-model boundary for secret-key work is also implemented:
 `KeyMaterial::SoftwareSecret` is distinct from transient and backend-import
 secret material, `CKA_WRAP` and `CKA_UNWRAP` have explicit object fields, and
 named software slots have a separate secret-operation capability. Its
-mechanism set remains deliberately empty until the Phase 2 operation paths are
-complete. Existing asymmetric storage records are unchanged.
+mechanism set is populated only as complete operation paths are added. Existing
+asymmetric storage records are unchanged.
+
+The first Phase 2 session-key slice is implemented. Named software slots can
+generate or import generic and hash-specific HMAC session keys and use them for
+one-shot or multipart `CKM_SHA_1_HMAC`, `CKM_SHA256_HMAC`, `CKM_SHA384_HMAC`,
+and `CKM_SHA512_HMAC` signing and verification. These mechanisms and
+`CKM_GENERIC_SECRET_KEY_GEN` are advertised without `CKF_HW`. Requests for
+token HMAC objects fail with `CKR_TOKEN_WRITE_PROTECTED`; AES operations and
+secret-key persistence remain unadvertised until their complete paths exist.
 
 ## Future master-key cycling
 

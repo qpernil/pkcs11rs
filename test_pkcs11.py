@@ -122,6 +122,7 @@ CKK_GENERIC_SECRET = 0x00000010
 CKK_RSA = 0x00000000
 CKK_EC = 0x00000003
 CKK_AES = 0x0000001F
+CKK_SHA256_HMAC = 0x0000002B
 CKK_YUBICO_AES128_CCM_WRAP = 0xD955421D
 CKA_CLASS = 0x00000000
 CKA_TOKEN = 0x00000001
@@ -1720,6 +1721,186 @@ class Pkcs11AbiTests(unittest.TestCase):
                 os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
             else:
                 os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous
+            if previous_hardware is None:
+                os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
+            else:
+                os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous_hardware
+
+    def test_named_software_slot_hmac_session_key(self) -> None:
+        previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        previous_hardware = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
+        os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "hmac session"
+        os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = "0"
+        try:
+            self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+            count = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GetSlotList(1, None, ctypes.byref(count)),
+                CKR_OK,
+            )
+            slots = (CK_ULONG * count.value)()
+            self.assertEqual(
+                self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+                CKR_OK,
+            )
+            slot_id = None
+            for candidate in slots:
+                token_info = CK_TOKEN_INFO()
+                self.assertEqual(
+                    self.lib.C_GetTokenInfo(
+                        candidate,
+                        ctypes.byref(token_info),
+                    ),
+                    CKR_OK,
+                )
+                if bytes(token_info.label).rstrip(b" ") == b"hmac session":
+                    slot_id = candidate
+                    break
+            self.assertIsNotNone(slot_id)
+
+            info = CK_MECHANISM_INFO()
+            for mechanism_type, flags in (
+                (CKM_GENERIC_SECRET_KEY_GEN, CKF_GENERATE),
+                (CKM_SHA256_HMAC, CKF_SIGN | CKF_VERIFY),
+            ):
+                self.assertEqual(
+                    self.lib.C_GetMechanismInfo(
+                        slot_id,
+                        mechanism_type,
+                        ctypes.byref(info),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(info.flags & (flags | CKF_HW), flags)
+
+            session = self.open_slot_session(
+                slot_id,
+                CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            )
+            self.login_with_pin(session, b"hmac session password")
+            key_type = CK_ULONG(CKK_SHA256_HMAC)
+            value_len = CK_ULONG(32)
+            session_object = CK_BYTE(0)
+            enabled = CK_BYTE(1)
+            template = (CK_ATTRIBUTE * 5)(
+                CK_ATTRIBUTE(
+                    CKA_KEY_TYPE,
+                    ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
+                    ctypes.sizeof(key_type),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_VALUE_LEN,
+                    ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                    ctypes.sizeof(value_len),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                    ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_SIGN,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_VERIFY,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+            )
+            generate = CK_MECHANISM(CKM_GENERIC_SECRET_KEY_GEN, None, 0)
+            key = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GenerateKey(
+                    session,
+                    ctypes.byref(generate),
+                    template,
+                    len(template),
+                    ctypes.byref(key),
+                ),
+                CKR_OK,
+            )
+
+            hmac_mechanism = CK_MECHANISM(CKM_SHA256_HMAC, None, 0)
+            message = (CK_BYTE * len(b"software HMAC ABI"))(
+                *b"software HMAC ABI"
+            )
+            self.assertEqual(
+                self.lib.C_SignInit(
+                    session,
+                    ctypes.byref(hmac_mechanism),
+                    key.value,
+                ),
+                CKR_OK,
+            )
+            signature_length = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_Sign(
+                    session,
+                    message,
+                    len(message),
+                    None,
+                    ctypes.byref(signature_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(signature_length.value, 32)
+            signature = (CK_BYTE * signature_length.value)()
+            self.assertEqual(
+                self.lib.C_Sign(
+                    session,
+                    message,
+                    len(message),
+                    signature,
+                    ctypes.byref(signature_length),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_VerifyInit(
+                    session,
+                    ctypes.byref(hmac_mechanism),
+                    key.value,
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Verify(
+                    session,
+                    message,
+                    len(message),
+                    signature,
+                    signature_length.value,
+                ),
+                CKR_OK,
+            )
+
+            token_object = CK_BYTE(1)
+            template[2] = CK_ATTRIBUTE(
+                CKA_TOKEN,
+                ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                ctypes.sizeof(token_object),
+            )
+            rejected = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GenerateKey(
+                    session,
+                    ctypes.byref(generate),
+                    template,
+                    len(template),
+                    ctypes.byref(rejected),
+                ),
+                CKR_TOKEN_WRITE_PROTECTED,
+            )
+            self.assertEqual(rejected.value, 0)
+            self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+        finally:
+            self.lib.C_Finalize(None)
+            if previous_slots is None:
+                os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
+            else:
+                os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous_slots
             if previous_hardware is None:
                 os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
             else:

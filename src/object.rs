@@ -1093,7 +1093,8 @@ impl TokenObject {
         if self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS
             && attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
         {
-            return self.sensitive;
+            return self.sensitive
+                || (matches!(self.material, KeyMaterial::SoftwareSecret(_)) && !self.extractable);
         }
         if self.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS || !self.sensitive {
             return false;
@@ -1946,14 +1947,25 @@ impl TokenObjectTemplate {
     }
 
     pub(crate) fn into_object(self) -> Result<TokenObject, CK_RV> {
+        self.into_object_with_software_secret_policy(false)
+    }
+
+    pub(crate) fn into_software_secret_object(self) -> Result<TokenObject, CK_RV> {
+        self.into_object_with_software_secret_policy(true)
+    }
+
+    fn into_object_with_software_secret_policy(
+        self,
+        software_secret: bool,
+    ) -> Result<TokenObject, CK_RV> {
         let sensitive = self.sensitive.unwrap_or(false);
         let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
         let nonextractable_key = class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
         let private_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
         let extractable = self
             .extractable
-            .unwrap_or(!(nonextractable_key || private_key));
-        if nonextractable_key && extractable {
+            .unwrap_or(!(private_key || (nonextractable_key && !software_secret)));
+        if nonextractable_key && !software_secret && extractable {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
         }
         Ok(TokenObject {
@@ -1975,7 +1987,7 @@ impl TokenObjectTemplate {
             sensitive,
             extractable,
             always_sensitive: sensitive,
-            never_extractable: !extractable || nonextractable_key,
+            never_extractable: !extractable || (nonextractable_key && !software_secret),
             local: false,
             key_gen_mechanism: None,
             creator_session: None,

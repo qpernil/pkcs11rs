@@ -135,6 +135,47 @@ fn software_sign(
     }
 }
 
+pub(crate) fn hmac_key_type_and_length(
+    mechanism: CK_MECHANISM_TYPE,
+) -> Option<(CK_KEY_TYPE, usize)> {
+    match mechanism {
+        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, 20)),
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA256_HMAC as CK_KEY_TYPE, 32))
+        }
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA384_HMAC as CK_KEY_TYPE, 48))
+        }
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => {
+            Some((CKK_SHA512_HMAC as CK_KEY_TYPE, 64))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn software_hmac(
+    key: &[u8],
+    mechanism: CK_MECHANISM_TYPE,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    macro_rules! calculate {
+        ($digest:ty) => {{
+            use hmac::{Hmac, Mac};
+            let mut mac = <Hmac<$digest> as hmac::digest::KeyInit>::new_from_slice(key)
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+            mac.update(data);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }};
+    }
+    match mechanism {
+        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => calculate!(sha1::Sha1),
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha256),
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha384),
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha512),
+        _ => Err(CKR_MECHANISM_INVALID.into()),
+    }
+}
+
 pub(crate) fn aes_cmac_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
     match mechanism.mechanism {
         x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE => {
@@ -390,19 +431,27 @@ fn sign_init(
             }
             _ => CKK_RSA as CK_KEY_TYPE,
         };
-        let secret_yubihsm = (is_hmac_key_type(expected_key_type)
+        let secret_key_material = (is_hmac_key_type(expected_key_type)
             || expected_key_type == CKK_AES as CK_KEY_TYPE)
-            && matches!(object.material, KeyMaterial::YubiHsm { .. });
-        if ((!secret_yubihsm && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
-            || (secret_yubihsm && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
+            && matches!(
+                object.material,
+                KeyMaterial::YubiHsm { .. } | KeyMaterial::SoftwareSecret(_)
+            );
+        let software_generic_hmac = is_hmac_key_type(expected_key_type)
+            && object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
+            && matches!(object.material, KeyMaterial::SoftwareSecret(_));
+        if ((!secret_key_material && object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
+            || (secret_key_material && object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS))
             || (mechanism.mechanism != CKM_PKCS11RS_FIDO_ASSERTION
-                && object.key_type != expected_key_type)
+                && object.key_type != expected_key_type
+                && !software_generic_hmac)
             || !matches!(
                 object.material,
                 KeyMaterial::SoftwarePrivate(_)
                     | KeyMaterial::PivPrivate { .. }
                     | KeyMaterial::OpenPgpPrivate { .. }
                     | KeyMaterial::YubiHsm { .. }
+                    | KeyMaterial::SoftwareSecret(_)
                     | KeyMaterial::PreviewSignDerived { .. }
                     | KeyMaterial::FidoResidentPrivate { .. }
             )
@@ -434,6 +483,11 @@ fn sign_init(
                 key.key_type() == expected_key_type
                     && software_sign_mechanism_supported(key, mechanism.mechanism)
             }
+            KeyMaterial::SoftwareSecret(_) => hmac_key_type_and_length(mechanism.mechanism)
+                .is_some_and(|(key_type, _)| {
+                    key_type == object.key_type
+                        || object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
+                }),
             _ => false,
         };
         let yubihsm_mechanism_supported = matches!(object.material, KeyMaterial::YubiHsm { .. })
@@ -620,6 +674,9 @@ fn sign(
         let data = buffered_data.as_slice();
         let required = match &operation.key {
             KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
+            KeyMaterial::SoftwareSecret(_) => hmac_key_type_and_length(operation.mechanism)
+                .map(|(_, length)| length)
+                .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
             KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
                 piv::Algorithm::Rsa1024
                 | piv::Algorithm::Rsa2048
@@ -708,6 +765,7 @@ fn sign(
                 KeyMaterial::SoftwarePrivate(key) => {
                     software_sign(key, operation.mechanism, operation.pss, data)
                 }
+                KeyMaterial::SoftwareSecret(key) => software_hmac(key, operation.mechanism, data),
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {
