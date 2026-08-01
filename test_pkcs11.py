@@ -2462,7 +2462,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 value_len = CK_ULONG(16)
                 aes_label_bytes = b"persistent AES"
                 aes_label = (CK_BYTE * len(aes_label_bytes))(*aes_label_bytes)
-                aes_template = (CK_ATTRIBUTE * 6)(
+                aes_template = (CK_ATTRIBUTE * 8)(
                     CK_ATTRIBUTE(
                         CKA_VALUE_LEN,
                         ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
@@ -2485,6 +2485,16 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CK_ATTRIBUTE(
                         CKA_DECRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_WRAP,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_UNWRAP,
                         ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
                         ctypes.sizeof(enabled),
                     ),
@@ -2581,6 +2591,82 @@ class Pkcs11AbiTests(unittest.TestCase):
                         ctypes.byref(copy_template),
                         1,
                         ctypes.byref(copied_hmac),
+                    ),
+                    CKR_OK,
+                )
+
+                key_wrap = CK_MECHANISM(CKM_AES_KEY_WRAP_KWP, None, 0)
+                wrapped_length = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        hmac_key.value,
+                        None,
+                        ctypes.byref(wrapped_length),
+                    ),
+                    CKR_OK,
+                )
+                wrapped_hmac = (CK_BYTE * wrapped_length.value)()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        hmac_key.value,
+                        wrapped_hmac,
+                        ctypes.byref(wrapped_length),
+                    ),
+                    CKR_OK,
+                )
+                unwrapped_label_bytes = b"unwrapped persistent HMAC"
+                unwrapped_label = (CK_BYTE * len(unwrapped_label_bytes))(
+                    *unwrapped_label_bytes
+                )
+                unwrapped_template = (CK_ATTRIBUTE * 6)(
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(hmac_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(hmac_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SIGN,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VERIFY,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(unwrapped_label, CK_VOID_PTR),
+                        len(unwrapped_label),
+                    ),
+                )
+                unwrapped_hmac = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_UnwrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        wrapped_hmac,
+                        wrapped_length.value,
+                        unwrapped_template,
+                        len(unwrapped_template),
+                        ctypes.byref(unwrapped_hmac),
                     ),
                     CKR_OK,
                 )
@@ -2710,6 +2796,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     aes_label_bytes,
                     hmac_label_bytes,
                     copied_label_bytes,
+                    unwrapped_label_bytes,
                     derived_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
@@ -2717,10 +2804,12 @@ class Pkcs11AbiTests(unittest.TestCase):
                 restored_aes = find_label(restored, aes_label_bytes)
                 restored_hmac = find_label(restored, hmac_label_bytes)
                 restored_copy = find_label(restored, copied_label_bytes)
+                restored_unwrapped = find_label(restored, unwrapped_label_bytes)
                 restored_derived = find_label(restored, derived_label_bytes)
                 self.assertEqual(len(restored_aes), 1)
                 self.assertEqual(len(restored_hmac), 1)
                 self.assertEqual(len(restored_copy), 1)
+                self.assertEqual(len(restored_unwrapped), 1)
                 self.assertEqual(len(restored_derived), 1)
 
                 iv = (CK_BYTE * 16)(*range(16))
@@ -2869,6 +2958,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     aes_label_bytes,
                     hmac_label_bytes,
                     copied_label_bytes,
+                    unwrapped_label_bytes,
                     derived_label_bytes,
                 ):
                     self.assertEqual(find_label(restored, label), [])
@@ -2889,6 +2979,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(find_label(final_session, hmac_label_bytes), [])
                 self.assertEqual(len(find_label(final_session, aes_label_bytes)), 1)
                 self.assertEqual(len(find_label(final_session, copied_label_bytes)), 1)
+                self.assertEqual(
+                    len(find_label(final_session, unwrapped_label_bytes)), 1
+                )
                 self.assertEqual(len(find_label(final_session, derived_label_bytes)), 1)
                 self.assertEqual(self.lib.C_CloseSession(final_session), CKR_OK)
             finally:

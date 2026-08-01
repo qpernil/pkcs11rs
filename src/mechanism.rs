@@ -320,7 +320,11 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             type_: type_ as CK_MECHANISM_TYPE,
             min_key_size: 16,
             max_key_size: 32,
-            flags: (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+            flags: if matches!(type_, CKM_AES_KEY_WRAP | CKM_AES_KEY_WRAP_KWP) {
+                (CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS
+            } else {
+                (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+            },
         });
     }
     for type_ in [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC] {
