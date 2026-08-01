@@ -646,6 +646,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
                 local: true,
                 key_gen_mechanism: Some(CK_UNAVAILABLE_INFORMATION as CK_MECHANISM_TYPE),
                 allowed_mechanisms: None,
+                wrap_with_trusted: false,
                 creator_session: None,
                 public_key: Some(crate::PublicKeyMaterial::Rsa(
                     rsa::RsaPublicKey::new(
@@ -1470,6 +1471,7 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
         local: true,
         key_gen_mechanism: None,
         allowed_mechanisms: None,
+        wrap_with_trusted: false,
         creator_session: Some(2),
         public_key: None,
         rp_id: None,

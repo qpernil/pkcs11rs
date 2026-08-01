@@ -609,6 +609,9 @@ fn wrap_key(
                 .resolve_object(wrapping_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+            if target.wrap_with_trusted {
+                return Err(CKR_KEY_NOT_WRAPPABLE.into());
+            }
             require_key_mechanism(&wrapper, mechanism.mechanism)?;
             if !wrapper.can_wrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
@@ -699,6 +702,9 @@ fn wrap_key(
             .resolve_object(wrapping_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+        if target.wrap_with_trusted {
+            return Err(CKR_KEY_NOT_WRAPPABLE.into());
+        }
         require_key_mechanism(&wrapper, mechanism.mechanism)?;
         let (wrapping_key_id, _wrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, false)?;

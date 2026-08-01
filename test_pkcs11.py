@@ -36,6 +36,7 @@ CKR_KEY_HANDLE_INVALID = 0x60
 CKR_KEY_SIZE_RANGE = 0x62
 CKR_KEY_TYPE_INCONSISTENT = 0x63
 CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68
+CKR_KEY_NOT_WRAPPABLE = 0x69
 CKR_KEY_UNEXTRACTABLE = 0x6A
 CKR_MECHANISM_INVALID = 0x70
 CKR_MECHANISM_PARAM_INVALID = 0x71
@@ -177,6 +178,7 @@ CKA_LOCAL = 0x00000163
 CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
 CKA_KEY_GEN_MECHANISM = 0x00000166
+CKA_WRAP_WITH_TRUSTED = 0x00000210
 CKA_MODIFIABLE = 0x00000170
 CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
@@ -2668,7 +2670,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 unwrapped_label = (CK_BYTE * len(unwrapped_label_bytes))(
                     *unwrapped_label_bytes
                 )
-                unwrapped_template = (CK_ATTRIBUTE * 6)(
+                unwrapped_template = (CK_ATTRIBUTE * 7)(
                     CK_ATTRIBUTE(
                         CKA_KEY_TYPE,
                         ctypes.cast(ctypes.byref(hmac_key_type), CK_VOID_PTR),
@@ -2695,6 +2697,11 @@ class Pkcs11AbiTests(unittest.TestCase):
                         ctypes.sizeof(enabled),
                     ),
                     CK_ATTRIBUTE(
+                        CKA_WRAP_WITH_TRUSTED,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
                         CKA_LABEL,
                         ctypes.cast(unwrapped_label, CK_VOID_PTR),
                         len(unwrapped_label),
@@ -2713,6 +2720,18 @@ class Pkcs11AbiTests(unittest.TestCase):
                         ctypes.byref(unwrapped_hmac),
                     ),
                     CKR_OK,
+                )
+                trusted_only_length = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        unwrapped_hmac.value,
+                        None,
+                        ctypes.byref(trusted_only_length),
+                    ),
+                    CKR_KEY_NOT_WRAPPABLE,
                 )
 
                 rsa_modulus_bits = CK_ULONG(1024)
@@ -3378,6 +3397,14 @@ class Pkcs11AbiTests(unittest.TestCase):
                         CKA_ALLOWED_MECHANISMS,
                     ),
                     bytes(allowed_hmac_mechanisms),
+                )
+                self.assertEqual(
+                    read_attribute(
+                        restored,
+                        restored_unwrapped[0],
+                        CKA_WRAP_WITH_TRUSTED,
+                    ),
+                    b"\x01",
                 )
                 disallowed_hmac = CK_MECHANISM(CKM_SHA512_HMAC, None, 0)
                 self.assertEqual(

@@ -565,8 +565,11 @@ duplicate/conflict rejection.
 leaves the key unrestricted, while a present empty list permits no mechanisms.
 Lists are stored in sorted canonical form, duplicates are rejected, and every
 operation that consumes a key checks its active mechanism before using the key.
-The remaining template-valued and trusted-wrapping attributes are still future
-work.
+
+`CKA_WRAP_WITH_TRUSTED` is also persisted and enforced. Because trusted-object
+administration is not yet available, a key with this attribute set to true
+cannot currently be wrapped: every wrapping key is untrusted and the operation
+fails closed. The remaining template-valued attributes are still future work.
 
 Named software slots have separate Security Officer and user PIN wrappers, but
 do not yet implement trusted-object administration. Therefore:
