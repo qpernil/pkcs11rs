@@ -3,6 +3,12 @@
 Status: design roadmap. This document describes planned work, not current
 software-slot behavior.
 
+This work is also the first design probe for the
+[pure Rust provider abstraction](provider-abstraction-plan.md). New AES, HMAC,
+derivation, and wrapping paths should prefer typed internal requests that can
+be shared by the software and YubiHSM providers without exposing additional
+PKCS #11 types through the backend boundary.
+
 ## Implemented foundation
 
 Persistent software tokens now start with `C_InitToken` and use independent
