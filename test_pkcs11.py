@@ -2902,12 +2902,17 @@ class Pkcs11AbiTests(unittest.TestCase):
                         len(ec_parameters),
                     )
                 )
-                ec_private_template = (CK_ATTRIBUTE * 1)(
+                ec_private_template = (CK_ATTRIBUTE * 2)(
                     CK_ATTRIBUTE(
                         CKA_DERIVE,
                         ctypes.cast(ctypes.byref(derive_enabled), CK_VOID_PTR),
                         ctypes.sizeof(derive_enabled),
-                    )
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_EXTRACTABLE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
                 )
                 ec_generate = CK_MECHANISM(CKM_EC_KEY_PAIR_GEN, None, 0)
                 ec_public = CK_ULONG()
@@ -2922,6 +2927,85 @@ class Pkcs11AbiTests(unittest.TestCase):
                         len(ec_private_template),
                         ctypes.byref(ec_public),
                         ctypes.byref(ec_private),
+                    ),
+                    CKR_OK,
+                )
+                ec_private_public_info = read_attribute(
+                    session, ec_private.value, CKA_PUBLIC_KEY_INFO
+                )
+                wrapped_ec_length = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        ec_private.value,
+                        None,
+                        ctypes.byref(wrapped_ec_length),
+                    ),
+                    CKR_OK,
+                )
+                wrapped_ec = (CK_BYTE * wrapped_ec_length.value)()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        ec_private.value,
+                        wrapped_ec,
+                        ctypes.byref(wrapped_ec_length),
+                    ),
+                    CKR_OK,
+                )
+                private_key_class = CK_ULONG(CKO_PRIVATE_KEY)
+                ec_key_type = CK_ULONG(CKK_EC)
+                unwrapped_ec_label_bytes = b"unwrapped persistent EC private key"
+                unwrapped_ec_label = (
+                    CK_BYTE * len(unwrapped_ec_label_bytes)
+                )(*unwrapped_ec_label_bytes)
+                unwrapped_ec_template = (CK_ATTRIBUTE * 6)(
+                    CK_ATTRIBUTE(
+                        CKA_CLASS,
+                        ctypes.cast(ctypes.byref(private_key_class), CK_VOID_PTR),
+                        ctypes.sizeof(private_key_class),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(ec_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(ec_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_DERIVE,
+                        ctypes.cast(ctypes.byref(derive_enabled), CK_VOID_PTR),
+                        ctypes.sizeof(derive_enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(unwrapped_ec_label, CK_VOID_PTR),
+                        len(unwrapped_ec_label),
+                    ),
+                )
+                unwrapped_ec_private = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_UnwrapKey(
+                        session,
+                        ctypes.byref(key_wrap),
+                        aes_key.value,
+                        wrapped_ec,
+                        wrapped_ec_length.value,
+                        unwrapped_ec_template,
+                        len(unwrapped_ec_template),
+                        ctypes.byref(unwrapped_ec_private),
                     ),
                     CKR_OK,
                 )
@@ -3159,6 +3243,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     unwrapped_label_bytes,
                     rsa_unwrapped_label_bytes,
                     rsa_aes_unwrapped_label_bytes,
+                    unwrapped_ec_label_bytes,
                     derived_label_bytes,
                     hkdf_base_label_bytes,
                     hkdf_aes_label_bytes,
@@ -3175,6 +3260,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 restored_rsa_aes_unwrapped = find_label(
                     restored, rsa_aes_unwrapped_label_bytes
                 )
+                restored_unwrapped_ec = find_label(
+                    restored, unwrapped_ec_label_bytes
+                )
                 restored_derived = find_label(restored, derived_label_bytes)
                 restored_hkdf_base = find_label(restored, hkdf_base_label_bytes)
                 restored_hkdf_aes = find_label(restored, hkdf_aes_label_bytes)
@@ -3184,6 +3272,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(len(restored_unwrapped), 1)
                 self.assertEqual(len(restored_rsa_unwrapped), 1)
                 self.assertEqual(len(restored_rsa_aes_unwrapped), 1)
+                self.assertEqual(len(restored_unwrapped_ec), 1)
                 self.assertEqual(len(restored_derived), 1)
                 self.assertEqual(len(restored_hkdf_base), 1)
                 self.assertEqual(len(restored_hkdf_aes), 1)
@@ -3342,6 +3431,14 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
+                self.assertEqual(
+                    read_attribute(
+                        restored,
+                        restored_unwrapped_ec[0],
+                        CKA_PUBLIC_KEY_INFO,
+                    ),
+                    ec_private_public_info,
+                )
                 derived_local = CK_BYTE(1)
                 derived_mechanism = CK_ULONG()
                 derived_attributes = (CK_ATTRIBUTE * 2)(
@@ -3409,6 +3506,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     unwrapped_label_bytes,
                     rsa_unwrapped_label_bytes,
                     rsa_aes_unwrapped_label_bytes,
+                    unwrapped_ec_label_bytes,
                     derived_label_bytes,
                     hkdf_base_label_bytes,
                     hkdf_aes_label_bytes,
@@ -3439,6 +3537,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     len(find_label(final_session, rsa_aes_unwrapped_label_bytes)), 1
+                )
+                self.assertEqual(
+                    len(find_label(final_session, unwrapped_ec_label_bytes)), 1
                 )
                 self.assertEqual(len(find_label(final_session, derived_label_bytes)), 1)
                 self.assertEqual(

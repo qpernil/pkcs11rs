@@ -345,6 +345,76 @@ fn generate_software_rsa_wrap_key_pair(
     (public, private)
 }
 
+fn generate_extractable_software_private_key(
+    session: CK_SESSION_HANDLE,
+    mechanism_type: CK_MECHANISM_TYPE,
+    key_type: CK_KEY_TYPE,
+    mut parameters: Option<Vec<u8>>,
+) -> CK_OBJECT_HANDLE {
+    let mut modulus_bits = 1024 as CK_ULONG;
+    let mut public_template = if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        vec![scalar_attribute(
+            CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
+            &mut modulus_bits,
+        )]
+    } else {
+        vec![bytes_attribute(
+            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            parameters.as_mut().unwrap(),
+        )]
+    };
+    let mut extractable = CK_TRUE as CK_BBOOL;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_FALSE as CK_BBOOL;
+    let mut private_template = [
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut derive),
+    ];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: mechanism_type,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut public,
+            &mut private,
+        ),
+        CKR_OK as CK_RV,
+        "failed to generate key type {key_type}"
+    );
+    private
+}
+
+fn software_private_unwrap_template(
+    key_type: &mut CK_KEY_TYPE,
+    class: &mut CK_OBJECT_CLASS,
+    label: &mut [u8],
+    sign: &mut CK_BBOOL,
+    derive: &mut CK_BBOOL,
+    sensitive: &mut CK_BBOOL,
+    extractable: &mut CK_BBOOL,
+) -> [CK_ATTRIBUTE; 7] {
+    [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, key_type),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, label),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, sign),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, derive),
+        scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, sensitive),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, extractable),
+    ]
+}
+
 fn software_rsa_wrap_round_trip(
     session: CK_SESSION_HANDLE,
     mechanism: &mut CK_MECHANISM,
@@ -610,6 +680,334 @@ fn software_rsa_wrap_mechanisms_wrap_and_unwrap_secret_keys() {
             &mut invalid_length,
         ),
         CKR_WRAPPING_KEY_SIZE_RANGE as CK_RV
+    );
+    finalize_for_test();
+}
+
+#[test]
+fn software_private_keys_wrap_as_bare_pkcs8_with_template_policy() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut wrapping_value = [0x42; 32];
+    let aes_wrapper = create_software_wrap_test_key(
+        TEST_SESSION_HANDLE,
+        CKK_AES as CK_KEY_TYPE,
+        &mut wrapping_value,
+        true,
+        true,
+        false,
+    );
+    let mut kwp = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let cases = [
+        (
+            CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKK_RSA as CK_KEY_TYPE,
+            None,
+        ),
+        (
+            CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKK_EC as CK_KEY_TYPE,
+            Some(vec![
+                0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+            ]),
+        ),
+        (
+            CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKK_EC_EDWARDS as CK_KEY_TYPE,
+            Some(vec![
+                0x13, 0x0c, 0x65, 0x64, 0x77, 0x61, 0x72, 0x64, 0x73, 0x32, 0x35, 0x35, 0x31, 0x39,
+            ]),
+        ),
+        (
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            Some(vec![
+                0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+            ]),
+        ),
+    ];
+    let mut wrapped_p256 = None;
+    let mut p256_target = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    for (mechanism_type, expected_key_type, parameters) in cases {
+        let target = generate_extractable_software_private_key(
+            TEST_SESSION_HANDLE,
+            mechanism_type,
+            expected_key_type,
+            parameters,
+        );
+        let expected_public = with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(target).unwrap().unwrap();
+            assert!(object.sign);
+            object.public_key_info().unwrap()
+        });
+        let mut wrapped_length = 0;
+        assert_eq!(
+            crate::api::C_WrapKey(
+                TEST_SESSION_HANDLE,
+                &mut kwp,
+                aes_wrapper,
+                target,
+                std::ptr::null_mut(),
+                &mut wrapped_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut wrapped = vec![0; wrapped_length as usize];
+        assert_eq!(
+            crate::api::C_WrapKey(
+                TEST_SESSION_HANDLE,
+                &mut kwp,
+                aes_wrapper,
+                target,
+                wrapped.as_mut_ptr(),
+                &mut wrapped_length,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        let mut key_type = expected_key_type;
+        let mut label = b"unwrapped private key".to_vec();
+        let mut sign = CK_FALSE as CK_BBOOL;
+        let mut derive = CK_TRUE as CK_BBOOL;
+        let mut sensitive = CK_FALSE as CK_BBOOL;
+        let mut extractable = CK_TRUE as CK_BBOOL;
+        let template = software_private_unwrap_template(
+            &mut key_type,
+            &mut class,
+            &mut label,
+            &mut sign,
+            &mut derive,
+            &mut sensitive,
+            &mut extractable,
+        );
+        let mut supplied_template = template
+            .into_iter()
+            .filter(|attribute| {
+                !(expected_key_type == CKK_EC_EDWARDS as CK_KEY_TYPE
+                    && attribute.type_ == CKA_CLASS as CK_ATTRIBUTE_TYPE)
+                    && !(expected_key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+                        && attribute.type_ == CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
+            })
+            .collect::<Vec<_>>();
+        let mut unwrapped = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_UnwrapKey(
+                TEST_SESSION_HANDLE,
+                &mut kwp,
+                aes_wrapper,
+                wrapped.as_mut_ptr(),
+                wrapped.len() as CK_ULONG,
+                supplied_template.as_mut_ptr(),
+                supplied_template.len() as CK_ULONG,
+                &mut unwrapped,
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(unwrapped).unwrap().unwrap();
+            assert_eq!(object.class, CKO_PRIVATE_KEY as CK_OBJECT_CLASS);
+            assert_eq!(object.key_type, expected_key_type);
+            assert_eq!(object.label, "unwrapped private key");
+            assert!(!object.sign && object.derive);
+            assert!(!object.sensitive && object.extractable);
+            assert!(!object.always_sensitive && !object.never_extractable && !object.local);
+            assert!(matches!(object.material, KeyMaterial::SoftwarePrivate(_)));
+            assert_eq!(object.public_key_info().unwrap(), expected_public);
+        });
+        if expected_key_type == CKK_EC as CK_KEY_TYPE {
+            p256_target = target;
+            wrapped_p256 = Some(wrapped);
+        }
+    }
+
+    let mut kw = CK_MECHANISM {
+        mechanism: CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut refused_length = 0;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut kw,
+            aes_wrapper,
+            p256_target,
+            std::ptr::null_mut(),
+            &mut refused_length,
+        ),
+        CKR_KEY_NOT_WRAPPABLE as CK_RV
+    );
+
+    let mut wrapped_p256 = wrapped_p256.unwrap();
+    let object_count = with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len());
+    wrapped_p256[0] ^= 1;
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut label = b"tampered private key".to_vec();
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_FALSE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut template = software_private_unwrap_template(
+        &mut key_type,
+        &mut class,
+        &mut label,
+        &mut sign,
+        &mut derive,
+        &mut sensitive,
+        &mut extractable,
+    );
+    let mut unwrapped = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_UnwrapKey(
+            TEST_SESSION_HANDLE,
+            &mut kwp,
+            aes_wrapper,
+            wrapped_p256.as_mut_ptr(),
+            wrapped_p256.len() as CK_ULONG,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut unwrapped,
+        ),
+        CKR_WRAPPED_KEY_INVALID as CK_RV
+    );
+    assert_eq!(
+        with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len()),
+        object_count
+    );
+
+    wrapped_p256[0] ^= 1;
+    let mut mismatched_key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut mismatched_template = software_private_unwrap_template(
+        &mut mismatched_key_type,
+        &mut class,
+        &mut label,
+        &mut sign,
+        &mut derive,
+        &mut sensitive,
+        &mut extractable,
+    );
+    assert_eq!(
+        crate::api::C_UnwrapKey(
+            TEST_SESSION_HANDLE,
+            &mut kwp,
+            aes_wrapper,
+            wrapped_p256.as_mut_ptr(),
+            wrapped_p256.len() as CK_ULONG,
+            mismatched_template.as_mut_ptr(),
+            mismatched_template.len() as CK_ULONG,
+            &mut unwrapped,
+        ),
+        CKR_WRAPPED_KEY_INVALID as CK_RV
+    );
+    assert_eq!(
+        with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len()),
+        object_count
+    );
+
+    let (rsa_public, rsa_private) = generate_software_rsa_wrap_key_pair(TEST_SESSION_HANDLE);
+    let mut oaep_parameters = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA256 as CK_RSA_PKCS_MGF_TYPE,
+        source: CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+        pSourceData: std::ptr::null_mut(),
+        ulSourceDataLen: 0,
+    };
+    let mut rsa_aes_parameters = CK_RSA_AES_KEY_WRAP_PARAMS {
+        ulAESKeyBits: 256,
+        pOAEPParams: &mut oaep_parameters,
+    };
+    let mut rsa_aes = CK_MECHANISM {
+        mechanism: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        pParameter: (&mut rsa_aes_parameters as *mut CK_RSA_AES_KEY_WRAP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as CK_ULONG,
+    };
+    let mut rsa_aes_wrapped_length = 0;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut rsa_aes,
+            rsa_public,
+            p256_target,
+            std::ptr::null_mut(),
+            &mut rsa_aes_wrapped_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut rsa_aes_wrapped = vec![0; rsa_aes_wrapped_length as usize];
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut rsa_aes,
+            rsa_public,
+            p256_target,
+            rsa_aes_wrapped.as_mut_ptr(),
+            &mut rsa_aes_wrapped_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut label = b"RSA-AES unwrapped private key".to_vec();
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut derive = CK_FALSE as CK_BBOOL;
+    let mut sensitive = CK_TRUE as CK_BBOOL;
+    let mut extractable = CK_FALSE as CK_BBOOL;
+    let mut template = software_private_unwrap_template(
+        &mut key_type,
+        &mut class,
+        &mut label,
+        &mut sign,
+        &mut derive,
+        &mut sensitive,
+        &mut extractable,
+    );
+    assert_eq!(
+        crate::api::C_UnwrapKey(
+            TEST_SESSION_HANDLE,
+            &mut rsa_aes,
+            rsa_private,
+            rsa_aes_wrapped.as_mut_ptr(),
+            rsa_aes_wrapped.len() as CK_ULONG,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut unwrapped,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let original = context.resolve_object(p256_target).unwrap().unwrap();
+        let restored = context.resolve_object(unwrapped).unwrap().unwrap();
+        assert_eq!(restored.label, "RSA-AES unwrapped private key");
+        assert_eq!(restored.public_key_info(), original.public_key_info());
+    });
+
+    let mut oaep = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE,
+        pParameter: (&mut oaep_parameters as *mut CK_RSA_PKCS_OAEP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut oaep,
+            rsa_public,
+            p256_target,
+            std::ptr::null_mut(),
+            &mut refused_length,
+        ),
+        CKR_KEY_NOT_WRAPPABLE as CK_RV
     );
     finalize_for_test();
 }

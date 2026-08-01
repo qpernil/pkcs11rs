@@ -526,13 +526,20 @@ sharing key material.
 
 ## Phase 9: asymmetric private-key wrapping
 
-After secret-key wrapping is stable, support extractable software asymmetric
-private keys:
+Implemented for extractable software asymmetric private keys:
 
 - encode RSA, EC, Ed25519, and X25519 as bare PKCS #8;
 - wrap the PKCS #8 bytes with AES-KWP or RSA-AES wrapping;
 - parse and validate PKCS #8 during unwrapping; and
 - apply the unwrap template as the authoritative policy for the new object.
+
+Wrapping reuses the canonical bare PKCS #8 codecs used by software-key
+persistence. Unwrapping rejects non-canonical or attributed encodings, checks
+that the decoded key type matches the requested template, and publishes the
+key only after the complete wrapped representation has authenticated and
+validated. Session and private persistent outputs are supported. Direct RSA
+and RFC 3394 AES-KW remain secret-key-only because private keys use the
+length-independent hybrid or padded wrapping formats.
 
 Do not treat attributes embedded in a wrapped private-key representation as
 authoritative. The unwrap template defines the new token object's label, ID,

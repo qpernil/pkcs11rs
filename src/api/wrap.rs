@@ -6,8 +6,9 @@ use super::{
     },
     key::yubihsm_ec_algorithm,
     object::{
-        publish_software_secret_object, validate_software_secret_length, validate_unique_template,
-        yubihsm_hardware_import_object, yubihsm_id,
+        persist_software_private_object, publish_software_secret_object,
+        validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
+        yubihsm_id,
     },
 };
 use crate::*;
@@ -437,22 +438,72 @@ fn software_rsa_aes_unwrap(
 
 fn software_unwrap_template(template: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
     validate_unique_template(template)?;
-    let mut parsed = TokenObjectTemplate {
-        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
-        ..TokenObjectTemplate::default()
+    let requested_class = template
+        .iter()
+        .find(|attribute| attribute.type_ == CKA_CLASS as CK_ATTRIBUTE_TYPE)
+        .map(read_ulong_template_attribute)
+        .transpose()
+        .map_err(Error::from)?;
+    let requested_key_type = template
+        .iter()
+        .find(|attribute| attribute.type_ == CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)
+        .map(read_ulong_template_attribute)
+        .transpose()
+        .map_err(Error::from)?;
+    let class = requested_class.unwrap_or_else(|| {
+        if requested_key_type.is_some_and(|key_type| {
+            matches!(
+                key_type,
+                x if x == CKK_RSA as CK_KEY_TYPE
+                    || x == CKK_EC as CK_KEY_TYPE
+                    || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                    || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+            )
+        }) {
+            CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+        } else {
+            CKO_SECRET_KEY as CK_OBJECT_CLASS
+        }
+    });
+    let mut parsed = match class {
+        x if x == CKO_SECRET_KEY as CK_OBJECT_CLASS => TokenObjectTemplate {
+            class: Some(class),
+            ..TokenObjectTemplate::default()
+        },
+        x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => TokenObjectTemplate {
+            class: Some(class),
+            private: true,
+            extractable: Some(true),
+            ..TokenObjectTemplate::default()
+        },
+        _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
     };
     for attribute in template {
         parsed.apply_attribute(attribute).map_err(Error::from)?;
     }
-    let mut object = parsed.into_software_secret_object().map_err(Error::from)?;
-    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
-        || (object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
-            && object.key_type != CKK_AES as CK_KEY_TYPE
-            && !is_hmac_key_type(object.key_type))
-    {
-        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    let mut object = if class == CKO_SECRET_KEY as CK_OBJECT_CLASS {
+        parsed.into_software_secret_object()
+    } else {
+        parsed.into_object()
     }
-    if object.token && !object.private {
+    .map_err(Error::from)?;
+    let supported = if object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS {
+        object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
+            || object.key_type == CKK_AES as CK_KEY_TYPE
+            || is_hmac_key_type(object.key_type)
+    } else {
+        object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+            && matches!(
+                object.key_type,
+                x if x == CKK_RSA as CK_KEY_TYPE
+                    || x == CKK_EC as CK_KEY_TYPE
+                    || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                    || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE
+            )
+    };
+    if !supported
+        || (object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS && object.token && !object.private)
+    {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
     object.always_sensitive = false;
@@ -531,9 +582,29 @@ fn wrap_key(
             if !target.extractable || target.never_extractable {
                 return Err(CKR_KEY_UNEXTRACTABLE.into());
             }
-            let KeyMaterial::SoftwareSecret(target_value) = &target.material else {
-                return Err(CKR_KEY_NOT_WRAPPABLE.into());
+            let (target_value, private_target) = match &target.material {
+                KeyMaterial::SoftwareSecret(value) => (Zeroizing::new(value.to_vec()), false),
+                KeyMaterial::SoftwarePrivate(material) => {
+                    (crate::software_storage::material_to_pkcs8(material)?, true)
+                }
+                _ => return Err(CKR_KEY_NOT_WRAPPABLE.into()),
             };
+            if private_target
+                && !matches!(
+                    parsed_mechanism,
+                    SoftwareWrapMechanism::Aes(SoftwareAesWrapMechanism::Kwp(_))
+                        | SoftwareWrapMechanism::RsaAes(_)
+                )
+            {
+                return Err(CKR_KEY_NOT_WRAPPABLE.into());
+            }
+            if private_target
+                && !ctx
+                    .get_slot(slot_id)?
+                    .supports_software_private_operations()
+            {
+                return Err(CKR_KEY_NOT_WRAPPABLE.into());
+            }
             let wrapper = ctx
                 .resolve_object(wrapping_key)?
                 .filter(|object| object.is_visible_to(logged_in))
@@ -583,16 +654,16 @@ fn wrap_key(
             }
             let response = match (&parsed_mechanism, &wrapping_material) {
                 (SoftwareWrapMechanism::Aes(aes), SoftwareWrappingKey::Aes(key)) => {
-                    transform_software_wrapped_key(aes, key, target_value, true)
+                    transform_software_wrapped_key(aes, key, &target_value, true)
                         .map_err(software_wrap_error)?
                 }
                 (
                     SoftwareWrapMechanism::RsaPkcs | SoftwareWrapMechanism::RsaOaep(_),
                     SoftwareWrappingKey::Rsa(key),
-                ) => software_rsa_wrap(&parsed_mechanism, key, target_value)
+                ) => software_rsa_wrap(&parsed_mechanism, key, &target_value)
                     .map_err(software_wrap_error)?,
                 (SoftwareWrapMechanism::RsaAes(parameters), SoftwareWrappingKey::Rsa(key)) => {
-                    software_rsa_aes_wrap(parameters, key, target_value)
+                    software_rsa_aes_wrap(parameters, key, &target_value)
                         .map_err(software_wrap_error)?
                 }
                 _ => return Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into()),
@@ -729,6 +800,23 @@ fn unwrap_key(
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
             let mut object = software_unwrap_template(template)?;
+            let private_target = object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+            if private_target
+                && !matches!(
+                    parsed_mechanism,
+                    SoftwareWrapMechanism::Aes(SoftwareAesWrapMechanism::Kwp(_))
+                        | SoftwareWrapMechanism::RsaAes(_)
+                )
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            if private_target
+                && !ctx
+                    .get_slot(slot_id)?
+                    .supports_software_private_operations()
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
             validate_new_object_access(&object, flags, logged_in)?;
             let wrapper = ctx
                 .resolve_object(unwrapping_key)?
@@ -769,9 +857,26 @@ fn unwrap_key(
                     }
                 }
             });
-            validate_software_secret_length(object.key_type, value.len())?;
-            object.material = KeyMaterial::SoftwareSecret(value);
-            *output_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
+            if private_target {
+                let material = crate::software_storage::material_from_bare_pkcs8(value.as_ref())
+                    .map_err(software_unwrap_error)?;
+                if material.key_type() != object.key_type {
+                    return Err(CKR_WRAPPED_KEY_INVALID.into());
+                }
+                object.public_key = Some(material.public_key()?);
+                object.material = KeyMaterial::SoftwarePrivate(material);
+                *output_handle = if object.token {
+                    persist_software_private_object(ctx, slot_id, &object)?
+                } else {
+                    object.set_creator(session_handle, slot_id);
+                    ctx.insert_object(object)?
+                };
+            } else {
+                validate_software_secret_length(object.key_type, value.len())?;
+                object.material = KeyMaterial::SoftwareSecret(value);
+                *output_handle =
+                    publish_software_secret_object(ctx, session_handle, slot_id, object)?;
+            }
             return Ok(());
         }
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
