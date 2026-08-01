@@ -42,13 +42,14 @@ keys require `CKA_PRIVATE=CK_TRUE`; without configured storage their creation
 fails with `CKR_TOKEN_WRITE_PROTECTED` and never falls back to session memory.
 
 The common publication boundary and typed ECDH materialization described in
-Phases 4 and 5 are implemented for `CKD_NULL`. ECDH and X25519 output on named
-software slots can become generic, AES, or hash-specific HMAC session keys, or
-private persistent token keys. Caller usage and policy attributes are retained;
-`CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` are inherited from the base
-key, while `CKA_LOCAL` is false and `CKA_KEY_GEN_MECHANISM` records the derive
-mechanism. Legacy hardware and applet slots retain their generic session-secret
-behavior and do not gain a host-software AES or HMAC fallback.
+Phases 4 and 5 are implemented. `CKD_NULL` and the SHA-1, SHA-2, and SHA-3
+ANSI X9.63 KDF variants support optional shared data. ECDH and X25519 output on
+named software slots can become generic, AES, or hash-specific HMAC session
+keys, or private persistent token keys. Caller usage and policy attributes are
+retained; `CKA_ALWAYS_SENSITIVE` and `CKA_NEVER_EXTRACTABLE` are inherited from
+the base key, while `CKA_LOCAL` is false and `CKA_KEY_GEN_MECHANISM` records the
+derive mechanism. Legacy hardware and applet slots retain their generic
+session-secret behavior and do not gain a host-software AES or HMAC fallback.
 
 Phase 7 AES wrapping and unwrapping is implemented for software secret keys.
 `CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` support length queries,
@@ -365,8 +366,9 @@ token publication helper, so lifetime semantics cannot diverge.
 
 ## Phase 5: typed ECDH derivation
 
-Implemented for `CKD_NULL`. The remaining work in this phase is the X9.63 KDF
-sequence below.
+Implemented for `CKD_NULL` and every SHA-1, SHA-2, and SHA-3 X9.63 KDF listed
+below, including optional shared data and multi-block expansion. Raw
+`CKD_NULL` shortening removes leading bytes as required by Cryptoki.
 
 Refactor the current ECDH path so its output template may request:
 

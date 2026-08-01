@@ -54,7 +54,8 @@ pub(crate) use crypt::{
 };
 #[cfg(test)]
 pub(crate) use key::{
-    openpgp_generate_key_pair_parameters, yubihsm_ec_algorithm, yubihsm_generate_key_pair_command,
+    openpgp_generate_key_pair_parameters, x963_kdf, yubihsm_ec_algorithm,
+    yubihsm_generate_key_pair_command,
 };
 #[cfg(test)]
 pub(crate) use object::{openpgp_private_import, parse_create_object_template};

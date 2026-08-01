@@ -1567,16 +1567,17 @@ fn derive_key(
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
     let parameters = unsafe { _as_ref(mechanism.pParameter as CK_ECDH1_DERIVE_PARAMS_PTR) }?;
-    if parameters.kdf != CKD_NULL as CK_EC_KDF_TYPE {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
+    let kdf = ecdh_kdf(parameters.kdf)?;
     let shared_data = unsafe {
         from_raw_parts(
             parameters.pSharedData as *const u8,
             parameters.ulSharedDataLen as usize,
         )
-    }?;
-    if !shared_data.is_empty() {
+    }
+    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if matches!(kdf, EcdhKdf::Null)
+        && (!parameters.pSharedData.is_null() || !shared_data.is_empty())
+    {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
     let public_data = unsafe {
@@ -1724,8 +1725,13 @@ fn derive_key(
             return Err(CKR_DATA_LEN_RANGE.into());
         }
         let software_secret = ctx.get_slot(slot_id)?.supports_software_secret_operations();
+        let maximum_length = if matches!(kdf, EcdhKdf::Null) {
+            expected_length
+        } else {
+            1024
+        };
         let (mut derived_object, requested_length) =
-            derived_secret_object(templ, expected_length, software_secret)?;
+            derived_secret_object(templ, expected_length, maximum_length, software_secret)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
         let mut derived =
@@ -1770,8 +1776,17 @@ fn derive_key(
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        derived[requested_length..].zeroize();
-        derived.truncate(requested_length);
+        match kdf {
+            EcdhKdf::Null => {
+                let removed = derived.len() - requested_length;
+                derived.rotate_left(removed);
+                derived[requested_length..].zeroize();
+                derived.truncate(requested_length);
+            }
+            EcdhKdf::X963(digest) => {
+                derived = x963_kdf(digest, &derived, shared_data, requested_length)?;
+            }
+        }
         derived_object.material = if software_secret {
             KeyMaterial::SoftwareSecret(derived)
         } else {
@@ -1792,9 +1807,61 @@ fn derive_key(
     })
 }
 
+#[derive(Clone, Copy)]
+enum EcdhKdf {
+    Null,
+    X963(MessageDigest),
+}
+
+fn ecdh_kdf(kdf: CK_EC_KDF_TYPE) -> Result<EcdhKdf, Error> {
+    let digest = match kdf {
+        x if x == CKD_NULL as CK_EC_KDF_TYPE => return Ok(EcdhKdf::Null),
+        x if x == CKD_SHA1_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha1,
+        x if x == CKD_SHA224_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha224,
+        x if x == CKD_SHA256_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha256,
+        x if x == CKD_SHA384_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha384,
+        x if x == CKD_SHA512_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha512,
+        x if x == CKD_SHA3_224_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha3_224,
+        x if x == CKD_SHA3_256_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha3_256,
+        x if x == CKD_SHA3_384_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha3_384,
+        x if x == CKD_SHA3_512_KDF as CK_EC_KDF_TYPE => MessageDigest::Sha3_512,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    Ok(EcdhKdf::X963(digest))
+}
+
+pub(crate) fn x963_kdf(
+    digest: MessageDigest,
+    secret: &[u8],
+    shared_data: &[u8],
+    output_length: usize,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let blocks = output_length.div_ceil(digest.size());
+    if output_length == 0 || blocks > u32::MAX as usize {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    let input_length = secret
+        .len()
+        .checked_add(std::mem::size_of::<u32>())
+        .and_then(|length| length.checked_add(shared_data.len()))
+        .ok_or(CKR_KEY_SIZE_RANGE)?;
+    let mut output = Zeroizing::new(Vec::with_capacity(output_length));
+    for counter in 1..=blocks {
+        let mut input = Zeroizing::new(Vec::with_capacity(input_length));
+        input.extend_from_slice(secret);
+        input.extend_from_slice(&(counter as u32).to_be_bytes());
+        input.extend_from_slice(shared_data);
+        let block = Zeroizing::new(hash(digest, &input)?);
+        let remaining = output_length - output.len();
+        output.extend_from_slice(&block[..remaining.min(block.len())]);
+    }
+    Ok(output)
+}
+
 fn derived_secret_object(
     templ: &[CK_ATTRIBUTE],
-    expected_length: usize,
+    default_length: usize,
+    maximum_length: usize,
     software_secret: bool,
 ) -> Result<(TokenObject, usize), Error> {
     let mut object_template = TokenObjectTemplate {
@@ -1816,8 +1883,8 @@ fn derived_secret_object(
                 .map_err(Error::from)?;
         }
     }
-    let requested_length = requested_length.unwrap_or(expected_length);
-    if requested_length == 0 || requested_length > expected_length {
+    let requested_length = requested_length.unwrap_or(default_length);
+    if requested_length == 0 || requested_length > maximum_length {
         return Err(CKR_KEY_SIZE_RANGE.into());
     }
     let mut object = if software_secret {
