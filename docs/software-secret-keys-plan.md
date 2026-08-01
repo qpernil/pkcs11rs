@@ -66,11 +66,13 @@ publication boundary. Unwrapped keys are non-local and begin with
 `CKA_ALWAYS_SENSITIVE=CK_FALSE` and `CKA_NEVER_EXTRACTABLE=CK_FALSE`, reflecting
 that their material entered the module in wrapped form.
 
-The direct-RSA portion of Phase 8 is implemented. Software RSA public keys can
-wrap extractable software secret keys with PKCS #1 v1.5 or OAEP, and matching
-software RSA private keys can unwrap them into session or private persistent
-objects. OAEP parameter parsing is shared with RSA encryption and the YubiHSM
-RSA-AES path so hash, MGF, source, and label validation stay identical.
+Phase 8 RSA wrapping is implemented for software secret-key targets. Software
+RSA public keys support direct PKCS #1 v1.5 and OAEP wrapping as well as hybrid
+`CKM_RSA_AES_KEY_WRAP`; matching private keys unwrap into session or private
+persistent objects. The hybrid path composes a fresh 128-, 192-, or 256-bit
+ephemeral AES key, AES-KWP, and RSA-OAEP using the standard concatenated format.
+OAEP parameter parsing is shared with RSA encryption and the YubiHSM RSA-AES
+path so hash, MGF, source, and label validation stay identical.
 
 ## Future master-key cycling
 
@@ -506,7 +508,7 @@ mechanism and hash parameters.
 
 ### RSA-AES wrapping
 
-Implement `CKM_RSA_AES_KEY_WRAP`:
+Implemented for software secret-key targets with `CKM_RSA_AES_KEY_WRAP`:
 
 1. generate a fresh ephemeral AES key;
 2. wrap the target with AES-KWP;
@@ -514,12 +516,12 @@ Implement `CKM_RSA_AES_KEY_WRAP`:
 4. encode the output exactly as Cryptoki specifies; and
 5. zeroize the ephemeral key and all intermediate plaintexts on every path.
 
-Split the existing YubiHSM RSA-AES parameter parser into:
+The YubiHSM RSA-AES parameter parser is split into:
 
 - backend-neutral Cryptoki parameter validation; and
 - YubiHSM-specific command construction.
 
-Software and YubiHSM execution can then share parameter semantics without
+Software and YubiHSM execution share parameter semantics without
 sharing key material.
 
 ## Phase 9: asymmetric private-key wrapping

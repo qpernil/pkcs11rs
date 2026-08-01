@@ -1806,6 +1806,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKM_RSA_PKCS_OAEP,
                     CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP,
                 ),
+                (CKM_RSA_AES_KEY_WRAP, CKF_WRAP | CKF_UNWRAP),
             ):
                 self.assertEqual(
                     self.lib.C_GetMechanismInfo(
@@ -2833,6 +2834,62 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKR_OK,
                 )
 
+                rsa_aes_parameters = CK_RSA_AES_KEY_WRAP_PARAMS(
+                    256, ctypes.pointer(rsa_oaep_parameters)
+                )
+                rsa_aes = CK_MECHANISM(
+                    CKM_RSA_AES_KEY_WRAP,
+                    ctypes.cast(ctypes.pointer(rsa_aes_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(rsa_aes_parameters),
+                )
+                rsa_aes_wrapped_length = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(rsa_aes),
+                        rsa_public.value,
+                        hmac_key.value,
+                        None,
+                        ctypes.byref(rsa_aes_wrapped_length),
+                    ),
+                    CKR_OK,
+                )
+                rsa_aes_wrapped_hmac = (CK_BYTE * rsa_aes_wrapped_length.value)()
+                self.assertEqual(
+                    self.lib.C_WrapKey(
+                        session,
+                        ctypes.byref(rsa_aes),
+                        rsa_public.value,
+                        hmac_key.value,
+                        rsa_aes_wrapped_hmac,
+                        ctypes.byref(rsa_aes_wrapped_length),
+                    ),
+                    CKR_OK,
+                )
+                rsa_aes_unwrapped_label_bytes = b"RSA-AES unwrapped persistent HMAC"
+                rsa_aes_unwrapped_label = (
+                    CK_BYTE * len(rsa_aes_unwrapped_label_bytes)
+                )(*rsa_aes_unwrapped_label_bytes)
+                rsa_unwrapped_template[5] = CK_ATTRIBUTE(
+                    CKA_LABEL,
+                    ctypes.cast(rsa_aes_unwrapped_label, CK_VOID_PTR),
+                    len(rsa_aes_unwrapped_label),
+                )
+                rsa_aes_unwrapped_hmac = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_UnwrapKey(
+                        session,
+                        ctypes.byref(rsa_aes),
+                        rsa_private.value,
+                        rsa_aes_wrapped_hmac,
+                        rsa_aes_wrapped_length.value,
+                        rsa_unwrapped_template,
+                        len(rsa_unwrapped_template),
+                        ctypes.byref(rsa_aes_unwrapped_hmac),
+                    ),
+                    CKR_OK,
+                )
+
                 ec_parameters_bytes = bytes.fromhex("06082a8648ce3d030107")
                 ec_parameters = (CK_BYTE * len(ec_parameters_bytes))(
                     *ec_parameters_bytes
@@ -3101,6 +3158,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     copied_label_bytes,
                     unwrapped_label_bytes,
                     rsa_unwrapped_label_bytes,
+                    rsa_aes_unwrapped_label_bytes,
                     derived_label_bytes,
                     hkdf_base_label_bytes,
                     hkdf_aes_label_bytes,
@@ -3114,6 +3172,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 restored_rsa_unwrapped = find_label(
                     restored, rsa_unwrapped_label_bytes
                 )
+                restored_rsa_aes_unwrapped = find_label(
+                    restored, rsa_aes_unwrapped_label_bytes
+                )
                 restored_derived = find_label(restored, derived_label_bytes)
                 restored_hkdf_base = find_label(restored, hkdf_base_label_bytes)
                 restored_hkdf_aes = find_label(restored, hkdf_aes_label_bytes)
@@ -3122,6 +3183,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(len(restored_copy), 1)
                 self.assertEqual(len(restored_unwrapped), 1)
                 self.assertEqual(len(restored_rsa_unwrapped), 1)
+                self.assertEqual(len(restored_rsa_aes_unwrapped), 1)
                 self.assertEqual(len(restored_derived), 1)
                 self.assertEqual(len(restored_hkdf_base), 1)
                 self.assertEqual(len(restored_hkdf_aes), 1)
@@ -3262,6 +3324,24 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
+                self.assertEqual(
+                    self.lib.C_VerifyInit(
+                        restored,
+                        ctypes.byref(hmac),
+                        restored_rsa_aes_unwrapped[0],
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Verify(
+                        restored,
+                        message,
+                        len(message),
+                        signature,
+                        signature_len.value,
+                    ),
+                    CKR_OK,
+                )
                 derived_local = CK_BYTE(1)
                 derived_mechanism = CK_ULONG()
                 derived_attributes = (CK_ATTRIBUTE * 2)(
@@ -3328,6 +3408,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     copied_label_bytes,
                     unwrapped_label_bytes,
                     rsa_unwrapped_label_bytes,
+                    rsa_aes_unwrapped_label_bytes,
                     derived_label_bytes,
                     hkdf_base_label_bytes,
                     hkdf_aes_label_bytes,
@@ -3355,6 +3436,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     len(find_label(final_session, rsa_unwrapped_label_bytes)), 1
+                )
+                self.assertEqual(
+                    len(find_label(final_session, rsa_aes_unwrapped_label_bytes)), 1
                 )
                 self.assertEqual(len(find_label(final_session, derived_label_bytes)), 1)
                 self.assertEqual(
