@@ -41,7 +41,7 @@ const PUBLIC_RECORD_SCHEMA: &str = "pkcs11rs-software-public-object";
 const HEADER_SCHEMA: &str = "pkcs11rs-software-token-key";
 const RECORD_SCHEMA: &str = "pkcs11rs-software-private-key";
 const SECRET_RECORD_SCHEMA: &str = "pkcs11rs-software-secret-key";
-const FORMAT_VERSION: u64 = 1;
+const FORMAT_VERSION: u64 = 2;
 const HEADER_FORMAT_VERSION: u64 = 3;
 const KDF_NAME: &str = "pbkdf2-hmac-sha256";
 const KDF_ITERATIONS: u32 = 10_000;
@@ -330,6 +330,7 @@ struct StoredAttributes {
     never_extractable: bool,
     local: bool,
     key_gen_mechanism: Option<u64>,
+    allowed_mechanisms: Option<Vec<u64>>,
 }
 
 #[derive(Debug)]
@@ -1075,6 +1076,15 @@ fn decode_record(
         .key_gen_mechanism
         .map(stored_u64_to_cryptoki_ulong)
         .transpose()?;
+    let allowed_mechanisms = attributes
+        .allowed_mechanisms
+        .map(|mechanisms| {
+            mechanisms
+                .into_iter()
+                .map(stored_u64_to_cryptoki_ulong)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     if class != crate::CKO_PRIVATE_KEY as crate::CK_OBJECT_CLASS || key_type != material.key_type()
     {
         return Err(CKR_DATA_INVALID.into());
@@ -1102,6 +1112,7 @@ fn decode_record(
         never_extractable: attributes.never_extractable,
         local: attributes.local,
         key_gen_mechanism,
+        allowed_mechanisms,
         creator_session: None,
         public_key: Some(public_key),
         rp_id: None,
@@ -1111,7 +1122,7 @@ fn decode_record(
 
 fn stored_secret_key_info(encoded: &[u8]) -> bool {
     let mut decoder = Decoder::new(encoded);
-    decoder.array().ok().flatten() == Some(20) && decoder.str().ok() == Some(SECRET_RECORD_SCHEMA)
+    decoder.array().ok().flatten() == Some(21) && decoder.str().ok() == Some(SECRET_RECORD_SCHEMA)
 }
 
 fn encode_stored_secret_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -1125,7 +1136,7 @@ fn encode_stored_secret_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<u
     let mut encoded = Zeroizing::new(Vec::new());
     let mut encoder = Encoder::new(&mut *encoded);
     let encoder = encoder
-        .array(20)
+        .array(21)
         .and_then(|encoder| encoder.str(SECRET_RECORD_SCHEMA))
         .and_then(|encoder| encoder.u64(FORMAT_VERSION))
         .and_then(|encoder| encoder.u64(cryptoki_ulong_to_u64(object.key_type)))
@@ -1155,6 +1166,7 @@ fn encode_stored_secret_key_info(object: &TokenObject) -> Result<Zeroizing<Vec<u
             .map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
         None => encoder.null().map_err(|_| Error::from(CKR_DEVICE_ERROR))?,
     };
+    encode_allowed_mechanisms(encoder, object.allowed_mechanisms.as_deref())?;
     encoder
         .bytes(value)
         .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
@@ -1167,7 +1179,7 @@ fn decode_stored_secret_key_info(
     encoded: &[u8],
 ) -> Result<TokenObject, Error> {
     let mut decoder = Decoder::new(encoded);
-    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(20)
+    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(21)
         || decoder.str().map_err(|_| CKR_DATA_INVALID)? != SECRET_RECORD_SCHEMA
         || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
     {
@@ -1198,6 +1210,14 @@ fn decode_stored_secret_key_info(
                 decoder.u64().map_err(|_| CKR_DATA_INVALID)?,
             )?)
         };
+    let allowed_mechanisms = decode_allowed_mechanisms(&mut decoder)?
+        .map(|mechanisms| {
+            mechanisms
+                .into_iter()
+                .map(stored_u64_to_cryptoki_ulong)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let value = Zeroizing::new(decoder.bytes().map_err(|_| CKR_DATA_INVALID)?.to_vec());
     validate_stored_secret_key(key_type, value.len())?;
     let object = TokenObject {
@@ -1222,6 +1242,7 @@ fn decode_stored_secret_key_info(
         never_extractable,
         local,
         key_gen_mechanism,
+        allowed_mechanisms,
         creator_session: None,
         public_key: None,
         rp_id: None,
@@ -1317,6 +1338,56 @@ fn decode_public_record(
     decrypt(master_key, &nonce, &aad, ciphertext).map(|value| value.to_vec())
 }
 
+fn validate_allowed_mechanisms(mechanisms: &[u64]) -> Result<(), Error> {
+    if mechanisms.len() > 256 || mechanisms.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    Ok(())
+}
+
+fn encode_allowed_mechanisms(
+    encoder: &mut Encoder<&mut Vec<u8>>,
+    mechanisms: Option<&[u64]>,
+) -> Result<(), Error> {
+    match mechanisms {
+        Some(mechanisms) => {
+            validate_allowed_mechanisms(mechanisms)?;
+            encoder
+                .array(mechanisms.len() as u64)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            for mechanism in mechanisms {
+                encoder
+                    .u64(*mechanism)
+                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            }
+        }
+        None => {
+            encoder.null().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_allowed_mechanisms(decoder: &mut Decoder<'_>) -> Result<Option<Vec<u64>>, Error> {
+    if decoder.datatype().map_err(|_| CKR_DATA_INVALID)? == minicbor::data::Type::Null {
+        decoder.null().map_err(|_| CKR_DATA_INVALID)?;
+        return Ok(None);
+    }
+    let count = decoder
+        .array()
+        .map_err(|_| CKR_DATA_INVALID)?
+        .ok_or(CKR_DATA_INVALID)?;
+    if count > 256 {
+        return Err(CKR_DATA_INVALID.into());
+    }
+    let mut mechanisms = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        mechanisms.push(decoder.u64().map_err(|_| CKR_DATA_INVALID)?);
+    }
+    validate_allowed_mechanisms(&mechanisms)?;
+    Ok(Some(mechanisms))
+}
+
 fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
     Ok(StoredAttributes {
         class: cryptoki_ulong_to_u64(object.class),
@@ -1335,6 +1406,13 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
         never_extractable: object.never_extractable,
         local: object.local,
         key_gen_mechanism: object.key_gen_mechanism.map(cryptoki_ulong_to_u64),
+        allowed_mechanisms: object.allowed_mechanisms.as_ref().map(|mechanisms| {
+            mechanisms
+                .iter()
+                .copied()
+                .map(cryptoki_ulong_to_u64)
+                .collect()
+        }),
     })
 }
 
@@ -1342,7 +1420,7 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
     let mut encoded = Zeroizing::new(Vec::new());
     let mut encoder = Encoder::new(&mut *encoded);
     let encoder = encoder
-        .array(18)
+        .array(19)
         .and_then(|encoder| encoder.str(RECORD_SCHEMA))
         .and_then(|encoder| encoder.u64(FORMAT_VERSION))
         .and_then(|encoder| encoder.u64(attributes.class))
@@ -1373,12 +1451,13 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
             encoder.null().map_err(|_| CKR_DEVICE_ERROR)?;
         }
     }
+    encode_allowed_mechanisms(encoder, attributes.allowed_mechanisms.as_deref())?;
     Ok(encoded)
 }
 
 fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
     let mut decoder = Decoder::new(encoded);
-    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(18)
+    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(19)
         || decoder.str().map_err(|_| CKR_DATA_INVALID)? != RECORD_SCHEMA
         || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
     {
@@ -1408,6 +1487,7 @@ fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
         } else {
             Some(decoder.u64().map_err(|_| CKR_DATA_INVALID)?)
         },
+        allowed_mechanisms: decode_allowed_mechanisms(&mut decoder)?,
     };
     if decoder.position() != encoded.len()
         || encode_stored_attributes(&attributes)?.as_slice() != encoded
@@ -1828,6 +1908,7 @@ mod tests {
             never_extractable: true,
             local: true,
             key_gen_mechanism: Some(CKM_RSA_PKCS_KEY_PAIR_GEN as crate::CK_MECHANISM_TYPE),
+            allowed_mechanisms: None,
             creator_session: None,
             public_key: Some(material.public_key().unwrap()),
             rp_id: None,
@@ -1858,6 +1939,7 @@ mod tests {
             never_extractable: true,
             local: true,
             key_gen_mechanism: Some(crate::CKM_AES_KEY_GEN as crate::CK_MECHANISM_TYPE),
+            allowed_mechanisms: None,
             creator_session: None,
             public_key: None,
             rp_id: None,
@@ -1942,7 +2024,11 @@ mod tests {
     #[test]
     fn software_secret_record_round_trips_with_all_private_attributes() {
         let master_key = [0x5a; MASTER_KEY_LENGTH];
-        let original = secret_object();
+        let mut original = secret_object();
+        original.allowed_mechanisms = Some(vec![
+            crate::CKM_AES_CBC as crate::CK_MECHANISM_TYPE,
+            crate::CKM_AES_GCM as crate::CK_MECHANISM_TYPE,
+        ]);
         let encoded = encode_record("secret storage", &master_key, &original).unwrap();
         assert!(!encoded
             .windows(original.label.len())
@@ -1967,6 +2053,7 @@ mod tests {
         assert!(decoded.sensitive && !decoded.extractable);
         assert!(decoded.always_sensitive && decoded.never_extractable && decoded.local);
         assert_eq!(decoded.key_gen_mechanism, original.key_gen_mechanism);
+        assert_eq!(decoded.allowed_mechanisms, original.allowed_mechanisms);
         let KeyMaterial::SoftwareSecret(value) = decoded.material else {
             panic!("persistent secret record changed material type");
         };
@@ -1991,6 +2078,7 @@ mod tests {
         let mut original = object(material);
         original.extractable = true;
         original.never_extractable = false;
+        original.allowed_mechanisms = Some(vec![crate::CKM_ECDSA as crate::CK_MECHANISM_TYPE]);
         let password = b"OpenSSL compatible export password";
 
         let expected_len = encrypted_private_key_info_len(&original).unwrap();
@@ -2018,6 +2106,10 @@ mod tests {
         assert_eq!(attributes.label, original.label);
         assert_eq!(attributes.id, original.id);
         assert!(attributes.extractable);
+        assert_eq!(
+            attributes.allowed_mechanisms,
+            Some(vec![u64::from(crate::CKM_ECDSA)])
+        );
         assert_eq!(material.private_value().unwrap(), scalar(32));
 
         assert!(encrypted.decrypt(b"wrong export password").is_err());

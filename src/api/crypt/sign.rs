@@ -427,6 +427,7 @@ fn sign_init(
         if !object.is_visible_to(logged_in) {
             return Err(CKR_KEY_HANDLE_INVALID.into());
         }
+        require_key_mechanism(&object, mechanism.mechanism)?;
         if !object.sign {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }

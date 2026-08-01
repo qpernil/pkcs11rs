@@ -609,6 +609,7 @@ fn wrap_key(
                 .resolve_object(wrapping_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+            require_key_mechanism(&wrapper, mechanism.mechanism)?;
             if !wrapper.can_wrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
@@ -698,6 +699,7 @@ fn wrap_key(
             .resolve_object(wrapping_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+        require_key_mechanism(&wrapper, mechanism.mechanism)?;
         let (wrapping_key_id, _wrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, false)?;
 
@@ -822,6 +824,7 @@ fn unwrap_key(
                 .resolve_object(unwrapping_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+            require_key_mechanism(&wrapper, mechanism.mechanism)?;
             if !wrapper.can_unwrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
@@ -895,6 +898,7 @@ fn unwrap_key(
             .resolve_object(unwrapping_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+        require_key_mechanism(&wrapper, mechanism.mechanism)?;
         let (unwrapping_key_id, _unwrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, true)?;
 

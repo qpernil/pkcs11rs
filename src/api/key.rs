@@ -1429,6 +1429,7 @@ fn derive_key(
                 .resolve_object(base_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            require_key_mechanism(&base, mechanism.mechanism)?;
             if base.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
             }
@@ -1514,6 +1515,7 @@ fn derive_key(
                 .resolve_object(base_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            require_key_mechanism(&base, mechanism.mechanism)?;
             if !base.derive {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
@@ -1607,6 +1609,7 @@ fn derive_key(
             .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        require_key_mechanism(&object, mechanism.mechanism)?;
         if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -1907,6 +1910,7 @@ fn derive_hkdf_key(
             .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        require_key_mechanism(&base, mechanism.mechanism)?;
         if base.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
             || base.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
         {
