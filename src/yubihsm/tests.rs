@@ -98,15 +98,11 @@ pub(crate) struct TestTrustEntry {
 
 impl TestTrustEntry {
     fn new() -> Self {
-        use p256::pkcs8::{EncodePublicKey, LineEnding};
-
         let private = test_private_key(&DEVICE_STATIC_PRIVATE_KEY).unwrap();
         let point = p256_public_key(&private).unwrap();
-        let public = parse_p256_public_key(&point).unwrap();
-        let pem = public.to_public_key_pem(LineEnding::LF).unwrap();
         let prefix = unused_trust_prefix();
         let path = trust::entry_path(&point, Some(&prefix)).unwrap();
-        fs::write(&path, pem).unwrap();
+        trust::install_public_key(&point, Some(&prefix)).unwrap();
         Self { prefix, path }
     }
 }

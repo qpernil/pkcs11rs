@@ -2,8 +2,7 @@ use crate::{Error, CKR_ARGUMENTS_BAD};
 use const_oid::ObjectIdentifier;
 use der::{
     asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
-    pem::LineEnding,
-    Decode, DecodePem, Encode, EncodePem,
+    Decode, DecodePem, Encode,
 };
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
@@ -397,12 +396,6 @@ pub(crate) fn decode_chain(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
         })
         .collect()
-}
-
-pub(crate) fn encode_pem(encoded: &[u8]) -> Result<String, Error> {
-    Certificate::from_der(encoded)
-        .and_then(|certificate| certificate.to_pem(LineEnding::LF))
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
