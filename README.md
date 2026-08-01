@@ -398,6 +398,7 @@ Detailed configuration:
 
 - [Named software slots](docs/software.md)
 - [Planned software AES, HMAC, derivation, and wrapping support](docs/software-secret-keys-plan.md)
+- [Planned pure Rust provider abstraction](docs/provider-abstraction-plan.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
 - [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)
 - [PIV backend](docs/piv.md)
