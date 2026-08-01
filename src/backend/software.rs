@@ -454,7 +454,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.supports_software_secret_operations());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 54);
+        assert_eq!(mechanisms.len(), 66);
         assert_eq!(
             mechanisms
                 .iter()
@@ -560,6 +560,28 @@ mod tests {
                 x if x == CKM_PKCS11RS_PROJECT_PUBLIC_KEY => (0, 0, CKF_DERIVE),
                 x if x == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE => {
                     (1, 1024, CKF_GENERATE)
+                }
+                x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => (16, 32, CKF_GENERATE),
+                x if [
+                    CKM_AES_ECB,
+                    CKM_AES_CBC,
+                    CKM_AES_CBC_PAD,
+                    CKM_AES_CTR,
+                    CKM_AES_CCM,
+                    CKM_AES_GCM,
+                    CKM_AES_KEY_WRAP,
+                    CKM_AES_KEY_WRAP_KWP,
+                ]
+                .map(|type_| type_ as CK_MECHANISM_TYPE)
+                .contains(&x) =>
+                {
+                    (16, 32, CKF_ENCRYPT | CKF_DECRYPT)
+                }
+                x if [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC]
+                    .map(|type_| type_ as CK_MECHANISM_TYPE)
+                    .contains(&x) =>
+                {
+                    (16, 32, CKF_SIGN | CKF_VERIFY)
                 }
                 x if [
                     CKM_SHA_1_HMAC,

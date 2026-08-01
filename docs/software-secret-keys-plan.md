@@ -26,13 +26,14 @@ named software slots have a separate secret-operation capability. Its
 mechanism set is populated only as complete operation paths are added. Existing
 asymmetric storage records are unchanged.
 
-The first Phase 2 session-key slice is implemented. Named software slots can
-generate or import generic and hash-specific HMAC session keys and use them for
-one-shot or multipart `CKM_SHA_1_HMAC`, `CKM_SHA256_HMAC`, `CKM_SHA384_HMAC`,
-and `CKM_SHA512_HMAC` signing and verification. These mechanisms and
-`CKM_GENERIC_SECRET_KEY_GEN` are advertised without `CKF_HW`. Requests for
-token HMAC objects fail with `CKR_TOKEN_WRITE_PROTECTED`; AES operations and
-secret-key persistence remain unadvertised until their complete paths exist.
+Phase 2 session keys are implemented. Named software slots can generate or
+import AES, generic, and hash-specific HMAC session keys. AES supports ECB,
+CBC, CBC-PAD, CTR, CCM, GCM, key wrap, KWP, CMAC, CMAC-GENERAL, and GMAC;
+HMAC supports one-shot and multipart SHA-1, SHA-256, SHA-384, and SHA-512
+signing and verification. All corresponding mechanisms are advertised without
+`CKF_HW`. Local cipher and MAC key schedules and intermediate plaintext copies
+are zeroized. Requests for token secret objects still fail with
+`CKR_TOKEN_WRITE_PROTECTED`; secret-key persistence remains Phase 3 work.
 
 ## Future master-key cycling
 

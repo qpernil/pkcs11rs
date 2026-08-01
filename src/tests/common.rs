@@ -3714,6 +3714,25 @@ fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error
     )
 }
 
+#[test]
+fn software_aes_blocks_match_nist_vector() {
+    let key = test_hex("2b7e151628aed2a6abf7158809cf4f3c");
+    let plaintext = test_hex(concat!(
+        "6bc1bee22e409f96e93d7e117393172a",
+        "ae2d8a571e03ac9c9eb76fac45af8e51"
+    ));
+    let expected = test_hex(concat!(
+        "3ad77bb40d7a3660a89ecaf32466ef97",
+        "f5d3d58503b9699de785895a96fdbaaf"
+    ));
+    let encrypted = crate::api::software_crypt_ecb_blocks(&key, &plaintext, true).unwrap();
+    assert_eq!(encrypted, expected);
+    assert_eq!(
+        crate::api::software_crypt_ecb_blocks(&key, &encrypted, false).unwrap(),
+        plaintext
+    );
+}
+
 fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {
     let (algorithm, length) = if key_id == crate::yubihsm::tests::RFC5649_AES_KEY_ID {
         (crate::YUBIHSM_ALGO_AES192, 24)

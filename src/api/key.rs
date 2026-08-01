@@ -177,7 +177,9 @@ fn generate_key_object(
     templ: &[CK_ATTRIBUTE],
     software_secret: bool,
 ) -> Result<TokenObject, Error> {
-    if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE {
+    let aes_generation =
+        software_secret && mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
+    if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE && !aes_generation {
         return Err(CKR_MECHANISM_INVALID.into());
     }
     if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
@@ -187,7 +189,11 @@ fn generate_key_object(
 
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
-        key_type: Some(CKK_GENERIC_SECRET as CK_KEY_TYPE),
+        key_type: Some(if aes_generation {
+            CKK_AES as CK_KEY_TYPE
+        } else {
+            CKK_GENERIC_SECRET as CK_KEY_TYPE
+        }),
         sensitive: Some(true),
         extractable: Some(false),
         ..TokenObjectTemplate::default()
@@ -213,7 +219,9 @@ fn generate_key_object(
     .map_err(Error::from)?;
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
         || (!software_secret && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE)
+        || (aes_generation && key.key_type != CKK_AES as CK_KEY_TYPE)
         || (software_secret
+            && !aes_generation
             && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
             && !is_hmac_key_type(key.key_type))
     {

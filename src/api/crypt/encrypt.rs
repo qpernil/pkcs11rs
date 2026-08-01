@@ -378,7 +378,10 @@ fn crypt_init(
             }
             _ => {
                 object.key_type == CKK_AES as CK_KEY_TYPE
-                    && matches!(object.material, KeyMaterial::YubiHsm { .. })
+                    && matches!(
+                        object.material,
+                        KeyMaterial::YubiHsm { .. } | KeyMaterial::SoftwareSecret(_)
+                    )
             }
         };
         if !valid_key {
@@ -427,6 +430,113 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
 pub(crate) const AES_BLOCK_LENGTH: usize = 16;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 const YUBIHSM_CBC_CHUNK_LENGTH: usize = 2000;
+
+pub(crate) fn software_crypt_ecb_blocks(
+    key: &[u8],
+    blocks: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+
+    if !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let mut output = blocks.to_vec();
+    macro_rules! transform {
+        ($cipher:ty) => {{
+            let cipher = <$cipher as KeyInit>::new_from_slice(key)
+                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+            for block in output.chunks_exact_mut(AES_BLOCK_LENGTH) {
+                let block = aes::cipher::Block::<$cipher>::from_mut_slice(block);
+                if encrypting {
+                    cipher.encrypt_block(block);
+                } else {
+                    cipher.decrypt_block(block);
+                }
+            }
+        }};
+    }
+    match key.len() {
+        16 => transform!(aes::Aes128),
+        24 => transform!(aes::Aes192),
+        32 => transform!(aes::Aes256),
+        _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+    }
+    Ok(output)
+}
+
+fn software_aes_cbc(
+    key: &[u8],
+    iv: &[u8; AES_BLOCK_LENGTH],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+        return Err(if encrypting {
+            CKR_DATA_LEN_RANGE.into()
+        } else {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+        });
+    }
+    let mut output = Vec::with_capacity(input.len());
+    let mut previous = *iv;
+    for input_block in input.chunks_exact(AES_BLOCK_LENGTH) {
+        if encrypting {
+            let block = Zeroizing::new(
+                input_block
+                    .iter()
+                    .zip(previous)
+                    .map(|(value, previous)| value ^ previous)
+                    .collect::<Vec<_>>(),
+            );
+            let encrypted = software_crypt_ecb_blocks(key, &block, true)?;
+            previous.copy_from_slice(&encrypted);
+            output.extend_from_slice(&encrypted);
+        } else {
+            let decrypted = Zeroizing::new(software_crypt_ecb_blocks(key, input_block, false)?);
+            output.extend(
+                decrypted
+                    .iter()
+                    .zip(previous)
+                    .map(|(value, previous)| value ^ previous),
+            );
+            previous.copy_from_slice(input_block);
+        }
+    }
+    Ok(output)
+}
+
+fn software_aes_cbc_pad(
+    key: &[u8],
+    iv: &[u8; AES_BLOCK_LENGTH],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    if encrypting {
+        let padding_length = AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH;
+        let padded_length = input
+            .len()
+            .checked_add(padding_length)
+            .ok_or(CKR_DATA_LEN_RANGE)?;
+        let mut padded = Zeroizing::new(Vec::with_capacity(padded_length));
+        padded.extend_from_slice(input);
+        padded.resize(padded_length, padding_length as u8);
+        software_aes_cbc(key, iv, &padded, true)
+    } else {
+        if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+        }
+        remove_pkcs7_padding(software_aes_cbc(key, iv, input, false)?)
+    }
+}
+
+fn software_cbc_mac(key: &[u8], blocks: &[u8]) -> Result<Vec<u8>, Error> {
+    if blocks.is_empty() || !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let output = software_aes_cbc(key, &[0; AES_BLOCK_LENGTH], blocks, true)?;
+    Ok(output[output.len() - AES_BLOCK_LENGTH..].to_vec())
+}
 
 fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
     let aad_bits = u64::try_from(aad.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
@@ -750,7 +860,7 @@ where
         transformed.as_slice()
     };
 
-    let mut mac_input = Vec::new();
+    let mut mac_input = Zeroizing::new(Vec::new());
     let mut b0 = [0; AES_BLOCK_LENGTH];
     b0[0] = u8::from(!parameters.aad.is_empty()) << 6
         | (((parameters.mac_len - 2) / 2) as u8) << 3
@@ -768,10 +878,12 @@ where
             mac_input.extend_from_slice(&(parameters.aad.len() as u32).to_be_bytes());
         }
         mac_input.extend_from_slice(&parameters.aad);
-        mac_input.resize(mac_input.len().next_multiple_of(AES_BLOCK_LENGTH), 0);
+        let padded_length = mac_input.len().next_multiple_of(AES_BLOCK_LENGTH);
+        mac_input.resize(padded_length, 0);
     }
     mac_input.extend_from_slice(plaintext);
-    mac_input.resize(mac_input.len().next_multiple_of(AES_BLOCK_LENGTH), 0);
+    let padded_length = mac_input.len().next_multiple_of(AES_BLOCK_LENGTH);
+    mac_input.resize(padded_length, 0);
     let mac = crypt(CcmOperation::CbcMac, &mac_input)?;
     let mac: [u8; AES_BLOCK_LENGTH] = mac.try_into().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
     let tag = mac[..parameters.mac_len]
@@ -1220,7 +1332,7 @@ fn crypt(
                         }
                     }
                 }
-                KeyMaterial::YubiHsm { .. } => input.len(),
+                KeyMaterial::YubiHsm { .. } | KeyMaterial::SoftwareSecret(_) => input.len(),
                 _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             }
         };
@@ -1435,6 +1547,71 @@ fn crypt(
                             .1
                             .yubihsm_command(&command)
                     }
+                    KeyMaterial::SoftwareSecret(key) => match operation.mechanism {
+                        x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => {
+                            if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+                                return Err(if encrypting {
+                                    CKR_DATA_LEN_RANGE.into()
+                                } else {
+                                    CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+                                });
+                            }
+                            software_crypt_ecb_blocks(key, input, encrypting)
+                        }
+                        x if x == CKM_AES_CBC as CK_MECHANISM_TYPE => software_aes_cbc(
+                            key,
+                            operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                        ),
+                        x if x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE => software_aes_cbc_pad(
+                            key,
+                            operation.iv.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                        ),
+                        x if x == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE => aes_key_wrap_transform(
+                            input,
+                            encrypting,
+                            operation
+                                .key_wrap_iv
+                                .as_deref()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            |block, encrypting| software_crypt_ecb_blocks(key, block, encrypting),
+                        ),
+                        x if x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE => aes_kwp_transform(
+                            input,
+                            encrypting,
+                            operation
+                                .key_wrap_iv
+                                .as_deref()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            |block, encrypting| software_crypt_ecb_blocks(key, block, encrypting),
+                        ),
+                        x if x == CKM_AES_CTR as CK_MECHANISM_TYPE => aes_ctr(
+                            operation.ctr.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            |blocks| software_crypt_ecb_blocks(key, blocks, true),
+                        ),
+                        x if x == CKM_AES_CCM as CK_MECHANISM_TYPE => aes_ccm(
+                            operation.ccm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                            |operation, blocks| match operation {
+                                CcmOperation::EncryptBlocks => {
+                                    software_crypt_ecb_blocks(key, blocks, true)
+                                }
+                                CcmOperation::CbcMac => software_cbc_mac(key, blocks),
+                            },
+                        ),
+                        x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => aes_gcm(
+                            operation.gcm.as_ref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                            |blocks| software_crypt_ecb_blocks(key, blocks, true),
+                        ),
+                        _ => Err(CKR_MECHANISM_INVALID.into()),
+                    },
                     _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
                 }
             })();
