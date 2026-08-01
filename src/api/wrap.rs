@@ -609,6 +609,14 @@ fn wrap_key(
                 .resolve_object(wrapping_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+            if wrapper
+                .policy_templates
+                .wrap
+                .as_ref()
+                .is_some_and(|template| !target.matches_policy_template(template))
+            {
+                return Err(CKR_KEY_HANDLE_INVALID.into());
+            }
             if target.wrap_with_trusted {
                 return Err(CKR_KEY_NOT_WRAPPABLE.into());
             }
@@ -702,6 +710,14 @@ fn wrap_key(
             .resolve_object(wrapping_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+        if wrapper
+            .policy_templates
+            .wrap
+            .as_ref()
+            .is_some_and(|template| !target.matches_policy_template(template))
+        {
+            return Err(CKR_KEY_HANDLE_INVALID.into());
+        }
         if target.wrap_with_trusted {
             return Err(CKR_KEY_NOT_WRAPPABLE.into());
         }
@@ -807,7 +823,13 @@ fn unwrap_key(
         if ctx.get_slot(slot_id)?.supports_software_secret_operations() {
             let parsed_mechanism = parse_software_wrap_mechanism(mechanism)?;
             require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
-            let mut object = software_unwrap_template(template)?;
+            let wrapper = ctx
+                .resolve_object(unwrapping_key)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+            let mut merged =
+                merge_policy_template(template, wrapper.policy_templates.unwrap.as_ref())?;
+            let mut object = software_unwrap_template(merged.as_slice())?;
             let private_target = object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
             if private_target
                 && !matches!(
@@ -826,10 +848,6 @@ fn unwrap_key(
                 return Err(CKR_TEMPLATE_INCONSISTENT.into());
             }
             validate_new_object_access(&object, flags, logged_in)?;
-            let wrapper = ctx
-                .resolve_object(unwrapping_key)?
-                .filter(|object| object.is_visible_to(logged_in))
-                .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
             require_key_mechanism(&wrapper, mechanism.mechanism)?;
             if !wrapper.can_unwrap() {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
@@ -904,6 +922,8 @@ fn unwrap_key(
             .resolve_object(unwrapping_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+        let mut merged = merge_policy_template(template, wrapper.policy_templates.unwrap.as_ref())?;
+        let template = merged.as_slice();
         require_key_mechanism(&wrapper, mechanism.mechanism)?;
         let (unwrapping_key_id, _unwrapping_key_type) =
             validate_yubihsm_wrapping_key(&wrapper, &parsed_mechanism, true)?;

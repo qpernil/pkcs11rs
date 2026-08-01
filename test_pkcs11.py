@@ -179,6 +179,9 @@ CKA_NEVER_EXTRACTABLE = 0x00000164
 CKA_ALWAYS_SENSITIVE = 0x00000165
 CKA_KEY_GEN_MECHANISM = 0x00000166
 CKA_WRAP_WITH_TRUSTED = 0x00000210
+CKA_WRAP_TEMPLATE = 0x40000211
+CKA_UNWRAP_TEMPLATE = 0x40000212
+CKA_DERIVE_TEMPLATE = 0x40000213
 CKA_MODIFIABLE = 0x00000170
 CKA_COPYABLE = 0x00000171
 CKA_DESTROYABLE = 0x00000172
@@ -2502,7 +2505,21 @@ class Pkcs11AbiTests(unittest.TestCase):
                 value_len = CK_ULONG(16)
                 aes_label_bytes = b"persistent AES"
                 aes_label = (CK_BYTE * len(aes_label_bytes))(*aes_label_bytes)
-                aes_template = (CK_ATTRIBUTE * 8)(
+                wrap_private_policy = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    )
+                )
+                unwrap_private_policy = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    )
+                )
+                aes_template = (CK_ATTRIBUTE * 10)(
                     CK_ATTRIBUTE(
                         CKA_VALUE_LEN,
                         ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
@@ -2537,6 +2554,16 @@ class Pkcs11AbiTests(unittest.TestCase):
                         CKA_UNWRAP,
                         ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
                         ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_WRAP_TEMPLATE,
+                        ctypes.cast(wrap_private_policy, CK_VOID_PTR),
+                        ctypes.sizeof(wrap_private_policy),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_UNWRAP_TEMPLATE,
+                        ctypes.cast(unwrap_private_policy, CK_VOID_PTR),
+                        ctypes.sizeof(unwrap_private_policy),
                     ),
                     CK_ATTRIBUTE(
                         CKA_LABEL,
@@ -3124,7 +3151,14 @@ class Pkcs11AbiTests(unittest.TestCase):
                 hkdf_base_label = (CK_BYTE * len(hkdf_base_label_bytes))(
                     *hkdf_base_label_bytes
                 )
-                hkdf_base_template = (CK_ATTRIBUTE * 6)(
+                derive_encrypt_policy = (CK_ATTRIBUTE * 1)(
+                    CK_ATTRIBUTE(
+                        CKA_ENCRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    )
+                )
+                hkdf_base_template = (CK_ATTRIBUTE * 7)(
                     CK_ATTRIBUTE(
                         CKA_KEY_TYPE,
                         ctypes.cast(ctypes.byref(generic_key_type), CK_VOID_PTR),
@@ -3149,6 +3183,11 @@ class Pkcs11AbiTests(unittest.TestCase):
                         CKA_DERIVE,
                         ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
                         ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_DERIVE_TEMPLATE,
+                        ctypes.cast(derive_encrypt_policy, CK_VOID_PTR),
+                        ctypes.sizeof(derive_encrypt_policy),
                     ),
                     CK_ATTRIBUTE(
                         CKA_LABEL,
@@ -3245,6 +3284,23 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                 )
                 hkdf_aes = CK_ULONG()
+                hkdf_aes_template[4].pValue = ctypes.cast(
+                    ctypes.byref(disabled), CK_VOID_PTR
+                )
+                self.assertEqual(
+                    self.lib.C_DeriveKey(
+                        session,
+                        ctypes.byref(hkdf_mechanism),
+                        hkdf_base.value,
+                        hkdf_aes_template,
+                        len(hkdf_aes_template),
+                        ctypes.byref(hkdf_aes),
+                    ),
+                    CKR_TEMPLATE_INCONSISTENT,
+                )
+                hkdf_aes_template[4].pValue = ctypes.cast(
+                    ctypes.byref(enabled), CK_VOID_PTR
+                )
                 self.assertEqual(
                     self.lib.C_DeriveKey(
                         session,
@@ -3303,6 +3359,47 @@ class Pkcs11AbiTests(unittest.TestCase):
                 self.assertEqual(len(restored_derived), 1)
                 self.assertEqual(len(restored_hkdf_base), 1)
                 self.assertEqual(len(restored_hkdf_aes), 1)
+
+                derive_outer = CK_ATTRIBUTE(CKA_DERIVE_TEMPLATE, None, 0)
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored,
+                        restored_hkdf_base[0],
+                        ctypes.byref(derive_outer),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(derive_outer.ulValueLen, ctypes.sizeof(CK_ATTRIBUTE))
+                derive_nested = CK_ATTRIBUTE(0, None, 0)
+                derive_outer.pValue = ctypes.cast(
+                    ctypes.byref(derive_nested), CK_VOID_PTR
+                )
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored,
+                        restored_hkdf_base[0],
+                        ctypes.byref(derive_outer),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(derive_nested.type_, CKA_ENCRYPT)
+                self.assertEqual(derive_nested.ulValueLen, ctypes.sizeof(CK_BYTE))
+                derive_required = CK_BYTE()
+                derive_nested.pValue = ctypes.cast(
+                    ctypes.byref(derive_required), CK_VOID_PTR
+                )
+                self.assertEqual(
+                    self.lib.C_GetAttributeValue(
+                        restored,
+                        restored_hkdf_base[0],
+                        ctypes.byref(derive_outer),
+                        1,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(derive_required.value, 1)
 
                 iv = (CK_BYTE * 16)(*range(16))
                 cbc_pad = CK_MECHANISM(

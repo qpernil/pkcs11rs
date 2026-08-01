@@ -140,6 +140,28 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
             KeyAttributeValue::Boolean(object.wrap_with_trusted),
         )?;
     }
+    for (attribute, template) in [
+        (
+            CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE,
+            object.policy_templates.wrap.as_ref(),
+        ),
+        (
+            CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE,
+            object.policy_templates.unwrap.as_ref(),
+        ),
+        (
+            CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE,
+            object.policy_templates.derive.as_ref(),
+        ),
+    ] {
+        if let Some(template) = template {
+            insert(
+                &mut attributes,
+                attribute,
+                KeyAttributeValue::Template(template.clone()),
+            )?;
+        }
+    }
     if let Some(public_key_info) = object.public_key_info() {
         insert(
             &mut attributes,
@@ -376,6 +398,17 @@ fn optional_mechanisms(
     }
 }
 
+fn optional_template(
+    attributes: &KeyAttributes,
+    attribute: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<KeyAttributes>, Error> {
+    match attributes.get(cryptoki_ulong_to_u64(attribute)) {
+        Some(KeyAttributeValue::Template(value)) => Ok(Some(value.clone())),
+        None => Ok(None),
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
+}
+
 fn decode_public_key_material(
     encoded: &[u8],
 ) -> Result<(CK_KEY_TYPE, KeyMaterial, Option<String>), Error> {
@@ -519,6 +552,11 @@ fn materialize_object(
         optional_mechanisms(attributes, CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE)?;
     let wrap_with_trusted =
         optional_bool(attributes, CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE)?.unwrap_or(false);
+    let policy_templates = crate::KeyPolicyTemplates {
+        wrap: optional_template(attributes, CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE)?,
+        unwrap: optional_template(attributes, CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE)?,
+        derive: optional_template(attributes, CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE)?,
+    };
     let object = TokenObject {
         slot_id: token.then_some(slot_id),
         unique_id: backed_object_unique_id(reference),
@@ -543,6 +581,7 @@ fn materialize_object(
         key_gen_mechanism,
         allowed_mechanisms,
         wrap_with_trusted,
+        policy_templates,
         creator_session: None,
         public_key: None,
         rp_id,
@@ -776,7 +815,7 @@ mod tests {
 
     #[test]
     fn backed_public_key_preserves_allowed_mechanisms() {
-        let object = TokenObject {
+        let mut object = TokenObject {
             slot_id: Some(7),
             unique_id: "public-key".to_owned(),
             class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
@@ -803,6 +842,7 @@ mod tests {
                 CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
             ]),
             wrap_with_trusted: false,
+            policy_templates: crate::KeyPolicyTemplates::default(),
             creator_session: None,
             public_key: None,
             rp_id: None,
@@ -814,6 +854,11 @@ mod tests {
                 .unwrap(),
             )),
         };
+        let mut wrap_policy = KeyAttributes::new();
+        wrap_policy
+            .insert_template(u64::from(CKA_PRIVATE), KeyAttributeValue::Boolean(true))
+            .unwrap();
+        object.policy_templates.wrap = Some(wrap_policy);
         let encoded = encode_backed_object(&object).unwrap().object;
         let provider = FixedProvider {
             reference: ContentReference::for_object(&encoded),
@@ -823,5 +868,6 @@ mod tests {
         let restored = stored_objects(&provider, 7, true).unwrap();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);
+        assert_eq!(restored[0].1.policy_templates, object.policy_templates);
     }
 }

@@ -32,6 +32,7 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         key_gen_mechanism: None,
         allowed_mechanisms: None,
         wrap_with_trusted: false,
+        policy_templates: crate::KeyPolicyTemplates::default(),
         creator_session: None,
         public_key: None,
         rp_id: None,

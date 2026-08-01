@@ -569,7 +569,16 @@ operation that consumes a key checks its active mechanism before using the key.
 `CKA_WRAP_WITH_TRUSTED` is also persisted and enforced. Because trusted-object
 administration is not yet available, a key with this attribute set to true
 cannot currently be wrapped: every wrapping key is untrusted and the operation
-fails closed. The remaining template-valued attributes are still future work.
+fails closed.
+
+`CKA_WRAP_TEMPLATE`, `CKA_UNWRAP_TEMPLATE`, and `CKA_DERIVE_TEMPLATE` are
+implemented as owned, canonical semantic attribute maps. Caller-owned nested
+pointers are consumed only at the FFI boundary. Token records persist a
+platform-independent CBOR encoding, and `C_GetAttributeValue` implements the
+required nested length-query and buffer protocol. Wrapping uses find-style
+attribute matching and returns `CKR_KEY_HANDLE_INVALID` for a mismatch;
+unwrapping and derivation add the policy template to the caller template and
+return `CKR_TEMPLATE_INCONSISTENT` for a conflict.
 
 Named software slots have separate Security Officer and user PIN wrappers, but
 do not yet implement trusted-object administration. Therefore:

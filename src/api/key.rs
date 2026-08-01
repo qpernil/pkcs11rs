@@ -1429,6 +1429,8 @@ fn derive_key(
                 .resolve_object(base_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            let mut merged = merge_policy_template(templ, base.policy_templates.derive.as_ref())?;
+            let templ = merged.as_slice();
             require_key_mechanism(&base, mechanism.mechanism)?;
             if base.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
                 return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -1515,6 +1517,8 @@ fn derive_key(
                 .resolve_object(base_key)?
                 .filter(|object| object.is_visible_to(logged_in))
                 .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            let mut merged = merge_policy_template(templ, base.policy_templates.derive.as_ref())?;
+            let templ = merged.as_slice();
             require_key_mechanism(&base, mechanism.mechanism)?;
             if !base.derive {
                 return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
@@ -1609,6 +1613,8 @@ fn derive_key(
             .resolve_object(base_key)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let mut merged = merge_policy_template(templ, object.policy_templates.derive.as_ref())?;
+        let templ = merged.as_slice();
         require_key_mechanism(&object, mechanism.mechanism)?;
         if object.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -1876,23 +1882,6 @@ fn derive_hkdf_key(
     };
     let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
     validate_unique_template(templ)?;
-    let requested_length = templ
-        .iter()
-        .find(|attribute| attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE)
-        .map(|attribute| read_ulong_template_attribute(attribute).map(|value| value as usize))
-        .transpose()
-        .map_err(Error::from)?;
-    let output_length = if expand {
-        requested_length.ok_or(CKR_TEMPLATE_INCOMPLETE)?
-    } else {
-        if requested_length.is_some_and(|length| length != digest.size()) {
-            return Err(CKR_TEMPLATE_INCONSISTENT.into());
-        }
-        digest.size()
-    };
-    if output_length == 0 || output_length > 1024 || output_length > digest.size() * 255 {
-        return Err(CKR_KEY_SIZE_RANGE.into());
-    }
 
     with_session_context_mut(session_handle, |ctx| {
         let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
@@ -1900,16 +1889,35 @@ fn derive_hkdf_key(
             return Err(CKR_MECHANISM_INVALID.into());
         }
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
+        let base = ctx
+            .resolve_object(base_key)?
+            .filter(|object| object.is_visible_to(logged_in))
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let mut merged = merge_policy_template(templ, base.policy_templates.derive.as_ref())?;
+        let templ = merged.as_slice();
+        let requested_length = templ
+            .iter()
+            .find(|attribute| attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE)
+            .map(|attribute| read_ulong_template_attribute(attribute).map(|value| value as usize))
+            .transpose()
+            .map_err(Error::from)?;
+        let output_length = if expand {
+            requested_length.ok_or(CKR_TEMPLATE_INCOMPLETE)?
+        } else {
+            if requested_length.is_some_and(|length| length != digest.size()) {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            digest.size()
+        };
+        if output_length == 0 || output_length > 1024 || output_length > digest.size() * 255 {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
         let (mut object, material_length) =
             derived_secret_object(templ, output_length, output_length, true)?;
         if material_length != output_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
         validate_new_object_access(&object, flags, logged_in)?;
-        let base = ctx
-            .resolve_object(base_key)?
-            .filter(|object| object.is_visible_to(logged_in))
-            .ok_or(CKR_KEY_HANDLE_INVALID)?;
         require_key_mechanism(&base, mechanism.mechanism)?;
         if base.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
             || base.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
