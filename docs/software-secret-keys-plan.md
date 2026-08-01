@@ -19,6 +19,13 @@ credential. Optional per-slot discovery restores encrypted public objects
 before login. Secret keys added by this plan must remain exclusively in the
 private realm.
 
+The object-model boundary for secret-key work is also implemented:
+`KeyMaterial::SoftwareSecret` is distinct from transient and backend-import
+secret material, `CKA_WRAP` and `CKA_UNWRAP` have explicit object fields, and
+named software slots have a separate secret-operation capability. Its
+mechanism set remains deliberately empty until the Phase 2 operation paths are
+complete. Existing asymmetric storage records are unchanged.
+
 ## Future master-key cycling
 
 Add a non-PKCS #11 maintenance operation for explicit key rotation. Public

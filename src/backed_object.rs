@@ -473,6 +473,8 @@ fn materialize_object(
         sign: required_bool(attributes, CKA_SIGN as CK_ATTRIBUTE_TYPE)?,
         verify: required_bool(attributes, CKA_VERIFY as CK_ATTRIBUTE_TYPE)?,
         derive: required_bool(attributes, CKA_DERIVE as CK_ATTRIBUTE_TYPE)?,
+        wrap: false,
+        unwrap: false,
         sensitive: required_bool(attributes, CKA_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
         extractable: required_bool(attributes, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
         always_sensitive: required_bool(attributes, CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE)?,

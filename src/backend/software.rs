@@ -266,6 +266,10 @@ impl Slot for SoftwareSlot {
         true
     }
 
+    fn supports_software_secret_operations(&self) -> bool {
+        true
+    }
+
     fn private_objects_require_login(&self) -> bool {
         true
     }
@@ -447,7 +451,9 @@ mod tests {
 
     #[test]
     fn mechanisms_are_the_exact_software_union_without_hardware_flags() {
-        let mechanisms = Slot::mechanisms(&SoftwareSlot::new(String::from("mechanism-test"), 0));
+        let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
+        assert!(slot.supports_software_secret_operations());
+        let mechanisms = Slot::mechanisms(&slot);
         assert_eq!(mechanisms.len(), 49);
         assert_eq!(
             mechanisms

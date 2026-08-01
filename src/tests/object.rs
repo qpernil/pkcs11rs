@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn software_secret_material_has_explicit_usage_and_extraction_policy() {
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut unwrap = CK_TRUE as CK_BBOOL;
+    let mut value = vec![0x5a; 32];
+    let template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+        scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
+    ];
+
+    let mut object = crate::parse_create_object_template(&template).unwrap();
+    assert!(object.can_wrap());
+    assert!(object.can_unwrap());
+    assert!(!object.extractable);
+    assert!(object.never_extractable);
+
+    object.material = crate::KeyMaterial::SoftwareSecret(zeroize::Zeroizing::new(value.clone()));
+    object.sensitive = false;
+    object.extractable = true;
+    object.never_extractable = false;
+    assert!(!object.is_nonextractable_key_object());
+    assert_eq!(
+        object.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+        Some(value)
+    );
+    assert_eq!(
+        object.attribute_value(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE),
+        Some((32 as CK_ULONG).to_ne_bytes().to_vec())
+    );
+    assert_eq!(format!("{:?}", object.material), "SoftwareSecret(32)");
+}
+
+#[test]
 pub fn openpgp_private_import_templates_select_reference_and_scalar() {
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_EC_MONTGOMERY as CK_KEY_TYPE;
@@ -406,6 +443,8 @@ pub fn yubihsm_persisted_public_objects_require_a_yubihsm_backend() {
                 sign: false,
                 verify: true,
                 derive: false,
+                wrap: false,
+                unwrap: false,
                 sensitive: false,
                 extractable: true,
                 always_sensitive: false,
@@ -544,6 +583,8 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         sign: false,
         verify: false,
         derive: false,
+        wrap: false,
+        unwrap: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -2284,6 +2325,8 @@ pub fn get_attribute_value_reads_certificate_values() {
         sign: false,
         verify: false,
         derive: false,
+        wrap: false,
+        unwrap: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -2362,6 +2405,8 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         sign: false,
         verify: false,
         derive: false,
+        wrap: false,
+        unwrap: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
