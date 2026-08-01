@@ -115,6 +115,7 @@ CKM_YUBICO_AES_CCM_WRAP = 0xD9554204
 CKM_YUBICO_RSA_WRAP = 0xD9554209
 CKG_MGF1_SHA256 = 2
 CKD_NULL = 1
+CKD_SHA256_KDF = 6
 CKZ_DATA_SPECIFIED = 1
 CKO_SECRET_KEY = 0x00000004
 CKO_PRIVATE_KEY = 0x00000003
@@ -2708,10 +2709,12 @@ class Pkcs11AbiTests(unittest.TestCase):
                 )
                 peer_bytes = read_attribute(session, ec_public.value, CKA_EC_POINT)
                 peer = (CK_BYTE * len(peer_bytes))(*peer_bytes)
+                ecdh_shared_bytes = b"persistent HMAC shared data"
+                ecdh_shared = (CK_BYTE * len(ecdh_shared_bytes))(*ecdh_shared_bytes)
                 derive_parameters = CK_ECDH1_DERIVE_PARAMS(
-                    CKD_NULL,
-                    0,
-                    None,
+                    CKD_SHA256_KDF,
+                    len(ecdh_shared),
+                    ecdh_shared,
                     len(peer),
                     peer,
                 )

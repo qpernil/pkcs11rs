@@ -386,6 +386,10 @@ fn derive_secret(
     peer: &mut [u8],
 ) -> Vec<u8> {
     let object = derive_key_object(session, private, peer, &mut []);
+    object_value(session, object)
+}
+
+fn object_value(session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE) -> Vec<u8> {
     let mut attribute = CK_ATTRIBUTE {
         type_: CKA_VALUE as CK_ATTRIBUTE_TYPE,
         pValue: std::ptr::null_mut(),
@@ -410,10 +414,32 @@ fn derive_key_object(
     peer: &mut [u8],
     templ: &mut [CK_ATTRIBUTE],
 ) -> CK_OBJECT_HANDLE {
+    derive_key_object_with_kdf(
+        session,
+        private,
+        peer,
+        CKD_NULL as CK_EC_KDF_TYPE,
+        &mut [],
+        templ,
+    )
+}
+
+fn derive_key_object_with_kdf(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    peer: &mut [u8],
+    kdf: CK_EC_KDF_TYPE,
+    shared_data: &mut [u8],
+    templ: &mut [CK_ATTRIBUTE],
+) -> CK_OBJECT_HANDLE {
     let mut parameters = CK_ECDH1_DERIVE_PARAMS {
-        kdf: CKD_NULL as CK_EC_KDF_TYPE,
-        pSharedData: std::ptr::null_mut(),
-        ulSharedDataLen: 0,
+        kdf,
+        pSharedData: if shared_data.is_empty() {
+            std::ptr::null_mut()
+        } else {
+            shared_data.as_mut_ptr()
+        },
+        ulSharedDataLen: shared_data.len() as CK_ULONG,
         pPublicData: peer.as_mut_ptr(),
         ulPublicDataLen: peer.len() as CK_ULONG,
     };
@@ -435,6 +461,134 @@ fn derive_key_object(
         CKR_OK as CK_RV
     );
     object
+}
+
+#[test]
+fn x963_kdf_matches_nist_ans_x963_2001_vector() {
+    let secret = crate::parse_hex("fd17198b89ab39c4ab5d7cca363b82f9fd7e23c3984dc8a2").unwrap();
+    let shared_data = crate::parse_hex("856a53f3e36a26bbc5792879f307cce2").unwrap();
+    let expected = crate::parse_hex(
+        "6e5fad865cb4a51c95209b16df0cc490bc2c9064405c5bccd4ee4832a531fbe7\
+         f10cb79e2eab6ab1149fbd5a23cfdabc41242269c9df22f628c4424333855b64\
+         e95e2d4fb8469c669f17176c07d103376b10b384ec5763d8b8c610409f19aca8\
+         eb31f9d85cc61a8d6d4a03d03e5a506b78d6847e93d295ee548c65afedd2efec",
+    )
+    .unwrap();
+    assert_eq!(
+        crate::api::x963_kdf(crate::MessageDigest::Sha1, &secret, &shared_data, 128)
+            .unwrap()
+            .as_slice(),
+        expected
+    );
+}
+
+#[test]
+fn software_ecdh_supports_every_x963_kdf_and_right_truncates_raw_secrets() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let (public, private) = generate_software_key_pair(
+        TEST_SESSION_HANDLE,
+        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        Some(
+            &mut crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .unwrap()
+                .to_vec(),
+        ),
+    );
+    let mut peer = object_ec_point(TEST_SESSION_HANDLE, public);
+    let raw = derive_secret(TEST_SESSION_HANDLE, private, &mut peer);
+
+    let mut nonnull_empty_shared_data = 0u8;
+    let mut invalid_parameters = CK_ECDH1_DERIVE_PARAMS {
+        kdf: CKD_NULL as CK_EC_KDF_TYPE,
+        pSharedData: &mut nonnull_empty_shared_data,
+        ulSharedDataLen: 0,
+        pPublicData: peer.as_mut_ptr(),
+        ulPublicDataLen: peer.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut invalid_parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_ECDH1_DERIVE_PARAMS>() as CK_ULONG,
+    };
+    let mut invalid = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            private,
+            std::ptr::null_mut(),
+            0,
+            &mut invalid,
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    let mut unsupported_parameters = CK_ECDH1_DERIVE_PARAMS {
+        kdf: CKD_SHA256_KDF_SP800 as CK_EC_KDF_TYPE,
+        pSharedData: std::ptr::null_mut(),
+        ulSharedDataLen: 0,
+        pPublicData: peer.as_mut_ptr(),
+        ulPublicDataLen: peer.len() as CK_ULONG,
+    };
+    mechanism.pParameter = (&mut unsupported_parameters as *mut CK_ECDH1_DERIVE_PARAMS).cast();
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            private,
+            std::ptr::null_mut(),
+            0,
+            &mut invalid,
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+
+    let mut short_length = 16 as CK_ULONG;
+    let mut short_template = [scalar_attribute(
+        CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        &mut short_length,
+    )];
+    let shortened = derive_key_object(TEST_SESSION_HANDLE, private, &mut peer, &mut short_template);
+    assert_eq!(object_value(TEST_SESSION_HANDLE, shortened), raw[16..]);
+
+    let mut shared_data = b"pkcs11rs X9.63 shared data".to_vec();
+    for (kdf, digest) in [
+        (CKD_SHA1_KDF, crate::MessageDigest::Sha1),
+        (CKD_SHA224_KDF, crate::MessageDigest::Sha224),
+        (CKD_SHA256_KDF, crate::MessageDigest::Sha256),
+        (CKD_SHA384_KDF, crate::MessageDigest::Sha384),
+        (CKD_SHA512_KDF, crate::MessageDigest::Sha512),
+        (CKD_SHA3_224_KDF, crate::MessageDigest::Sha3_224),
+        (CKD_SHA3_256_KDF, crate::MessageDigest::Sha3_256),
+        (CKD_SHA3_384_KDF, crate::MessageDigest::Sha3_384),
+        (CKD_SHA3_512_KDF, crate::MessageDigest::Sha3_512),
+    ] {
+        let mut output_length = 80 as CK_ULONG;
+        let mut template = [scalar_attribute(
+            CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            &mut output_length,
+        )];
+        let derived = derive_key_object_with_kdf(
+            TEST_SESSION_HANDLE,
+            private,
+            &mut peer,
+            kdf as CK_EC_KDF_TYPE,
+            &mut shared_data,
+            &mut template,
+        );
+        assert_eq!(
+            object_value(TEST_SESSION_HANDLE, derived),
+            crate::api::x963_kdf(digest, &raw, &shared_data, 80)
+                .unwrap()
+                .as_slice()
+        );
+    }
+    finalize_for_test();
 }
 
 #[test]
