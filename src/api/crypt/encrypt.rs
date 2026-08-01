@@ -184,7 +184,10 @@ fn parse_ccm_parameters(mechanism: &CK_MECHANISM) -> Result<CcmParameters, Error
     })
 }
 
-fn parse_key_wrap_iv(mechanism: &CK_MECHANISM, default: &[u8]) -> Result<Vec<u8>, Error> {
+pub(crate) fn parse_key_wrap_iv(
+    mechanism: &CK_MECHANISM,
+    default: &[u8],
+) -> Result<Vec<u8>, Error> {
     if mechanism.pParameter.is_null() && mechanism.ulParameterLen == 0 {
         return Ok(default.to_vec());
     }
@@ -963,7 +966,7 @@ where
     Ok((a, r))
 }
 
-fn aes_key_wrap_transform<F>(
+pub(crate) fn aes_key_wrap_transform<F>(
     input: &[u8],
     encrypting: bool,
     initial_value: &[u8],
@@ -1011,7 +1014,7 @@ where
     Ok(r)
 }
 
-fn aes_kwp_transform<F>(
+pub(crate) fn aes_kwp_transform<F>(
     input: &[u8],
     encrypting: bool,
     alternative_initial_value: &[u8],

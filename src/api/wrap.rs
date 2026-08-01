@@ -1,8 +1,15 @@
 use super::{
+    crypt::{
+        aes_key_wrap_transform, aes_kwp_transform, parse_key_wrap_iv, software_crypt_ecb_blocks,
+    },
     key::yubihsm_ec_algorithm,
-    object::{validate_unique_template, yubihsm_hardware_import_object, yubihsm_id},
+    object::{
+        publish_software_secret_object, validate_software_secret_length, validate_unique_template,
+        yubihsm_hardware_import_object, yubihsm_id,
+    },
 };
 use crate::*;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RsaAesWrapParameters {
@@ -193,6 +200,88 @@ fn parse_yubihsm_import_response(response: &[u8]) -> Result<(u8, u16), Error> {
     Ok((*object_type, u16::from_be_bytes([*high, *low])))
 }
 
+enum SoftwareAesWrapMechanism {
+    Kw(Vec<u8>),
+    Kwp(Vec<u8>),
+}
+
+fn parse_software_aes_wrap_mechanism(
+    mechanism: &CK_MECHANISM,
+) -> Result<SoftwareAesWrapMechanism, Error> {
+    match mechanism.mechanism {
+        x if x == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE => Ok(SoftwareAesWrapMechanism::Kw(
+            parse_key_wrap_iv(mechanism, &[0xa6; 8])?,
+        )),
+        x if x == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE => Ok(SoftwareAesWrapMechanism::Kwp(
+            parse_key_wrap_iv(mechanism, &[0xa6, 0x59, 0x59, 0xa6])?,
+        )),
+        _ => Err(CKR_MECHANISM_INVALID.into()),
+    }
+}
+
+fn transform_software_wrapped_key(
+    mechanism: &SoftwareAesWrapMechanism,
+    wrapping_key: &[u8],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    match mechanism {
+        SoftwareAesWrapMechanism::Kw(iv) => {
+            aes_key_wrap_transform(input, encrypting, iv, |block, encrypting| {
+                software_crypt_ecb_blocks(wrapping_key, block, encrypting)
+            })
+        }
+        SoftwareAesWrapMechanism::Kwp(iv) => {
+            aes_kwp_transform(input, encrypting, iv, |block, encrypting| {
+                software_crypt_ecb_blocks(wrapping_key, block, encrypting)
+            })
+        }
+    }
+}
+
+fn software_unwrap_template(template: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
+    validate_unique_template(template)?;
+    let mut parsed = TokenObjectTemplate {
+        class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
+        ..TokenObjectTemplate::default()
+    };
+    for attribute in template {
+        parsed.apply_attribute(attribute).map_err(Error::from)?;
+    }
+    let mut object = parsed.into_software_secret_object().map_err(Error::from)?;
+    if object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+        || (object.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+            && object.key_type != CKK_AES as CK_KEY_TYPE
+            && !is_hmac_key_type(object.key_type))
+    {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    if object.token && !object.private {
+        return Err(CKR_TEMPLATE_INCONSISTENT.into());
+    }
+    object.always_sensitive = false;
+    object.never_extractable = false;
+    object.local = false;
+    object.key_gen_mechanism = None;
+    Ok(object)
+}
+
+fn software_unwrap_error(error: Error) -> Error {
+    match error {
+        Error::Generic(rv)
+            if rv == CKR_ENCRYPTED_DATA_INVALID as CK_RV || rv == CKR_DATA_INVALID as CK_RV =>
+        {
+            CKR_WRAPPED_KEY_INVALID.into()
+        }
+        Error::Generic(rv)
+            if rv == CKR_ENCRYPTED_DATA_LEN_RANGE as CK_RV || rv == CKR_DATA_LEN_RANGE as CK_RV =>
+        {
+            CKR_WRAPPED_KEY_LEN_RANGE.into()
+        }
+        error => error,
+    }
+}
+
 ffi_entry_point! {
     pub fn C_WrapKey(
         session_handle: CK_SESSION_HANDLE,
@@ -225,6 +314,51 @@ fn wrap_key(
         let (slot_id, _flags, logged_in) = ctx.session_details(session_handle)?;
         let mechanism = unsafe { _as_ref(mechanism) }?;
         let output_len = unsafe { as_mut(wrapped_key_len) }?;
+        if ctx.get_slot(slot_id)?.supports_software_secret_operations() {
+            let parsed_mechanism = parse_software_aes_wrap_mechanism(mechanism)?;
+            require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_WRAP as CK_FLAGS)?;
+            let target = ctx
+                .resolve_object(key)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            if !target.extractable || target.never_extractable {
+                return Err(CKR_KEY_UNEXTRACTABLE.into());
+            }
+            let KeyMaterial::SoftwareSecret(target_value) = &target.material else {
+                return Err(CKR_KEY_NOT_WRAPPABLE.into());
+            };
+            let wrapper = ctx
+                .resolve_object(wrapping_key)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_WRAPPING_KEY_HANDLE_INVALID)?;
+            if !wrapper.can_wrap() {
+                return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+            }
+            let KeyMaterial::SoftwareSecret(wrapping_value) = &wrapper.material else {
+                return Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into());
+            };
+            if wrapper.key_type != CKK_AES as CK_KEY_TYPE {
+                return Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into());
+            }
+            let response = transform_software_wrapped_key(
+                &parsed_mechanism,
+                wrapping_value,
+                target_value,
+                true,
+            )?;
+            if wrapped_key.is_null() {
+                *output_len = response.len() as CK_ULONG;
+                return Ok(());
+            }
+            if *output_len < response.len() as CK_ULONG {
+                *output_len = response.len() as CK_ULONG;
+                return Err(CKR_BUFFER_TOO_SMALL.into());
+            }
+            let output = unsafe { _from_raw_parts_mut(wrapped_key, response.len()) }?;
+            output.copy_from_slice(&response);
+            *output_len = response.len() as CK_ULONG;
+            return Ok(());
+        }
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
         if slot.kind() != SlotKind::YubiHsm {
@@ -341,6 +475,33 @@ fn unwrap_key(
         let wrapped =
             unsafe { from_raw_parts(wrapped_key as *const u8, wrapped_key_len as usize) }?;
         let template = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
+        if ctx.get_slot(slot_id)?.supports_software_secret_operations() {
+            let parsed_mechanism = parse_software_aes_wrap_mechanism(mechanism)?;
+            require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_UNWRAP as CK_FLAGS)?;
+            let mut object = software_unwrap_template(template)?;
+            validate_new_object_access(&object, flags, logged_in)?;
+            let wrapper = ctx
+                .resolve_object(unwrapping_key)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_UNWRAPPING_KEY_HANDLE_INVALID)?;
+            if !wrapper.can_unwrap() {
+                return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+            }
+            let KeyMaterial::SoftwareSecret(unwrapping_value) = &wrapper.material else {
+                return Err(CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into());
+            };
+            if wrapper.key_type != CKK_AES as CK_KEY_TYPE {
+                return Err(CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into());
+            }
+            let value = Zeroizing::new(
+                transform_software_wrapped_key(&parsed_mechanism, unwrapping_value, wrapped, false)
+                    .map_err(software_unwrap_error)?,
+            );
+            validate_software_secret_length(object.key_type, value.len())?;
+            object.material = KeyMaterial::SoftwareSecret(value);
+            *output_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
+            return Ok(());
+        }
         let parsed_mechanism = parse_yubihsm_wrap_mechanism(mechanism)?;
         let slot = ctx.get_slot(slot_id)?;
         if slot.kind() != SlotKind::YubiHsm {

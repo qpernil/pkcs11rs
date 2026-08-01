@@ -50,6 +50,14 @@ key, while `CKA_LOCAL` is false and `CKA_KEY_GEN_MECHANISM` records the derive
 mechanism. Legacy hardware and applet slots retain their generic session-secret
 behavior and do not gain a host-software AES or HMAC fallback.
 
+Phase 7 AES wrapping and unwrapping is implemented for software secret keys.
+`CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` support length queries,
+short-buffer handling, caller-supplied IVs, extraction and usage policy,
+tamper rejection, and session or private persistent outputs through the common
+publication boundary. Unwrapped keys are non-local and begin with
+`CKA_ALWAYS_SENSITIVE=CK_FALSE` and `CKA_NEVER_EXTRACTABLE=CK_FALSE`, reflecting
+that their material entered the module in wrapped form.
+
 ## Future master-key cycling
 
 Add a non-PKCS #11 maintenance operation for explicit key rotation. Public
@@ -419,6 +427,10 @@ session or persistent encryption and MAC keys without exposing the base or
 derived bytes.
 
 ## Phase 7: AES wrapping and unwrapping
+
+Implemented for `CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` with software
+secret-key targets and outputs. The optional `CKM_AES_KEY_WRAP_PAD` alias is not
+currently advertised.
 
 Implement standard `C_WrapKey` and `C_UnwrapKey` support for software keys:
 

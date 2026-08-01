@@ -575,7 +575,13 @@ mod tests {
                 .map(|type_| type_ as CK_MECHANISM_TYPE)
                 .contains(&x) =>
                 {
-                    (16, 32, CKF_ENCRYPT | CKF_DECRYPT)
+                    let mut flags = CKF_ENCRYPT | CKF_DECRYPT;
+                    if matches!(x, y if y == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE
+                        || y == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE)
+                    {
+                        flags |= CKF_WRAP | CKF_UNWRAP;
+                    }
+                    (16, 32, flags)
                 }
                 x if [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC]
                     .map(|type_| type_ as CK_MECHANISM_TYPE)

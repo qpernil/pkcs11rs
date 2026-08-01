@@ -7,10 +7,13 @@ mod verify;
 pub(crate) use digest::DigestOperation;
 pub use digest::{C_Digest, C_DigestFinal, C_DigestInit, C_DigestKey, C_DigestUpdate};
 pub(crate) use encrypt::aes_gcm;
+#[cfg(test)]
+pub(crate) use encrypt::parse_gcm_parameters;
 #[cfg(feature = "abi-tests")]
 pub(crate) use encrypt::AES_BLOCK_LENGTH;
-#[cfg(test)]
-pub(crate) use encrypt::{parse_gcm_parameters, software_crypt_ecb_blocks};
+pub(crate) use encrypt::{
+    aes_key_wrap_transform, aes_kwp_transform, parse_key_wrap_iv, software_crypt_ecb_blocks,
+};
 pub use encrypt::{
     C_Decrypt, C_DecryptFinal, C_DecryptInit, C_DecryptUpdate, C_Encrypt, C_EncryptFinal,
     C_EncryptInit, C_EncryptUpdate,
