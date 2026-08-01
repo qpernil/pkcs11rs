@@ -42,6 +42,7 @@ pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUND
 pub(crate) const TOKEN_STORAGE_ENV: &str = "PKCS11RS_TOKEN_STORAGE";
 pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
 pub(crate) const SOFTWARE_SLOTS_ENV: &str = "PKCS11RS_SOFTWARE_SLOTS";
+pub(crate) const SOFTWARE_DISCOVERY_ENV_PREFIX: &str = "PKCS11RS_SOFTWARE_DISCOVERY_";
 pub(crate) const HARDWARE_DISCOVERY_ENV: &str = "PKCS11RS_HARDWARE_DISCOVERY";
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
@@ -79,11 +80,6 @@ impl TokenStorageConfig {
             "software-name-{}",
             encode_path_component(name.as_bytes())
         ))
-    }
-
-    fn software_provider(&self, name: &str) -> Result<LocalStorageProvider, Error> {
-        LocalStorageProvider::open(self.software_token_root(name))
-            .map_err(crate::backed_object::storage_error)
     }
 
     #[cfg(test)]
@@ -198,18 +194,7 @@ fn token_storage_for_slot(
         return Ok(Box::new(UnavailableStorageProvider));
     }
     if slot.kind() == SlotKind::Software {
-        let Some(config) = token_storage else {
-            return Ok(Box::new(UnavailableStorageProvider));
-        };
-        let name = slot.software_token_name().ok_or(CKR_DEVICE_ERROR)?;
-        let provider = config.software_provider(name)?;
-        log!(
-            2,
-            "Token persistence for {} uses {:?}",
-            slot.name(),
-            provider.root()
-        );
-        return Ok(Box::new(provider));
+        return Ok(Box::new(UnavailableStorageProvider));
     }
     let configured =
         token_storage.is_some() || (slot.kind() == SlotKind::Fido2 && fido_storage.is_some());
@@ -353,6 +338,7 @@ pub(crate) struct ModuleContext {
     pub(crate) hardware_discovery: bool,
     pub(crate) yubihsm_usb: bool,
     pub(crate) software_slots: Vec<String>,
+    pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
@@ -643,6 +629,10 @@ impl std::fmt::Debug for ModuleContext {
             .field("hardware_discovery", &self.hardware_discovery)
             .field("yubihsm_usb", &self.yubihsm_usb)
             .field("software_slots", &self.software_slots)
+            .field(
+                "software_public_discovery",
+                &self.software_discovery_pins.keys().collect::<Vec<_>>(),
+            )
             .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
@@ -784,6 +774,21 @@ impl ModuleContext {
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         let software_slots = configured_software_slots(std::env::var_os(SOFTWARE_SLOTS_ENV))?;
         let token_storage = configured_token_storage(std::env::var_os(TOKEN_STORAGE_ENV))?;
+        let mut software_discovery_pins = HashMap::new();
+        if token_storage.is_some() {
+            for name in &software_slots {
+                let variable = format!(
+                    "{SOFTWARE_DISCOVERY_ENV_PREFIX}{}",
+                    encode_path_component(name.as_bytes()).to_ascii_uppercase()
+                );
+                let Some(value) = std::env::var_os(&variable) else {
+                    continue;
+                };
+                let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
+                crate::software_storage::validate_software_pin(value.as_bytes())?;
+                software_discovery_pins.insert(name.clone(), Zeroizing::new(value.into_bytes()));
+            }
+        }
         let fido_storage = if token_storage.is_none() {
             configured_fido_storage(std::env::var_os(FIDO2_STORAGE_ENV))?
         } else {
@@ -815,6 +820,7 @@ impl ModuleContext {
             #[cfg(not(feature = "abi-tests"))]
             yubihsm_usb,
             software_slots,
+            software_discovery_pins,
             #[cfg(feature = "abi-tests")]
             pcsc: None,
             #[cfg(not(feature = "abi-tests"))]
@@ -1527,6 +1533,19 @@ impl SlotContext {
         self.reconcile_slot_token_objects(slot_id, objects)
     }
 
+    pub(crate) fn init_token(
+        &mut self,
+        so_pin: &[u8],
+        label: [CK_UTF8CHAR; 32],
+    ) -> Result<(), Error> {
+        if !self.sessions.is_empty() {
+            return Err(CKR_SESSION_EXISTS.into());
+        }
+        self.slot.init_token(so_pin, label)?;
+        self.login_role = None;
+        self.refresh_slot_token_objects(self.slot_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_token_storage_provider(
         &mut self,
@@ -1629,6 +1648,9 @@ impl ModuleContext {
                     name.clone(),
                     ordinal,
                     private_root,
+                    self.software_discovery_pins
+                        .get(name)
+                        .map(|pin| pin.as_slice().to_vec()),
                 )?) as Box<dyn Slot>;
                 slot.init_slot()?;
                 let token_objects = slot.token_objects(slot_id)?;
@@ -2353,6 +2375,7 @@ mod discovery_tests {
             hardware_discovery: false,
             yubihsm_usb: false,
             software_slots: Vec::new(),
+            software_discovery_pins: HashMap::new(),
             pcsc: None,
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),

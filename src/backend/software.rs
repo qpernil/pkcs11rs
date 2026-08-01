@@ -1,6 +1,6 @@
 use crate::storage::ContentReference;
 use crate::*;
-use std::{collections::HashMap, path::PathBuf};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
 use zeroize::Zeroizing;
 
 const SOFTWARE_SLOT_DESCRIPTION_PREFIX: &str = "pkcs11rs software slot: ";
@@ -11,7 +11,10 @@ pub(crate) struct SoftwareSlot {
     name: String,
     serial: String,
     store: Option<SoftwareTokenStore>,
-    master_key: Option<Zeroizing<[u8; 32]>>,
+    public_provider: Option<crate::software_storage::SoftwarePublicStorageProvider>,
+    active_public_key: Rc<RefCell<Option<Zeroizing<[u8; 32]>>>>,
+    public_master_key: Option<Zeroizing<[u8; 32]>>,
+    private_master_key: Option<Zeroizing<[u8; 32]>>,
     token_objects: Vec<TokenObject>,
     token_references: HashMap<String, ContentReference>,
     logged_in: bool,
@@ -30,7 +33,10 @@ impl SoftwareSlot {
             name,
             serial: format!("SOFTWARE{ordinal:08}"),
             store: None,
-            master_key: None,
+            public_provider: None,
+            active_public_key: Rc::new(RefCell::new(None)),
+            public_master_key: None,
+            private_master_key: None,
             token_objects: Vec::new(),
             token_references: HashMap::new(),
             logged_in: false,
@@ -41,15 +47,31 @@ impl SoftwareSlot {
         name: String,
         ordinal: usize,
         token_root: Option<PathBuf>,
+        discovery_pin: Option<Vec<u8>>,
     ) -> Result<Self, Error> {
+        let active_public_key = Rc::new(RefCell::new(None));
         let store = token_root
-            .map(|root| SoftwareTokenStore::open(name.clone(), root))
+            .clone()
+            .map(|root| SoftwareTokenStore::open(name.clone(), root, discovery_pin.clone()))
+            .transpose()?;
+        let public_provider = token_root
+            .map(|root| {
+                crate::software_storage::SoftwarePublicStorageProvider::open(
+                    name.clone(),
+                    root,
+                    discovery_pin,
+                    active_public_key.clone(),
+                )
+            })
             .transpose()?;
         Ok(Self {
             name,
             serial: format!("SOFTWARE{ordinal:08}"),
             store,
-            master_key: None,
+            public_provider,
+            active_public_key,
+            public_master_key: None,
+            private_master_key: None,
             token_objects: Vec::new(),
             token_references: HashMap::new(),
             logged_in: false,
@@ -63,7 +85,11 @@ impl SoftwareSlot {
     fn clear_sensitive_state(&mut self) {
         self.token_objects.clear();
         self.token_references.clear();
-        self.master_key = None;
+        self.public_master_key = None;
+        self.private_master_key = None;
+        if let Ok(mut key) = self.active_public_key.try_borrow_mut() {
+            *key = None;
+        }
         self.logged_in = false;
     }
 }
@@ -94,8 +120,10 @@ impl Slot for SoftwareSlot {
         None
     }
 
-    fn software_token_name(&self) -> Option<&str> {
-        Some(&self.name)
+    fn native_storage_provider(&self) -> Option<&dyn crate::storage::StorageProvider> {
+        self.public_provider
+            .as_ref()
+            .map(|provider| provider as &dyn crate::storage::StorageProvider)
     }
 
     fn name(&self) -> String {
@@ -142,12 +170,24 @@ impl Slot for SoftwareSlot {
         crate::software_storage::validate_software_pin(pin)?;
         self.clear_sensitive_state();
         if let Some(store) = &self.store {
-            let master_key = store.login(pin)?;
-            let (objects, references) = store.load_objects(0, &master_key)?;
-            self.master_key = Some(master_key);
+            let (public_master_key, private_master_key) = store.login(pin)?;
+            let (objects, references) = store.load_objects(0, &private_master_key)?;
+            self.public_master_key = Some(public_master_key);
+            self.private_master_key = Some(private_master_key);
+            *self.active_public_key.borrow_mut() = self.public_master_key.clone();
             self.token_objects = objects;
             self.token_references = references;
         }
+        self.logged_in = true;
+        Ok(())
+    }
+
+    fn login_so(&mut self, pin: &[u8]) -> Result<(), Error> {
+        crate::software_storage::validate_software_pin(pin)?;
+        self.clear_sensitive_state();
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        self.public_master_key = Some(store.login_so(pin)?);
+        *self.active_public_key.borrow_mut() = self.public_master_key.clone();
         self.logged_in = true;
         Ok(())
     }
@@ -176,15 +216,29 @@ impl Slot for SoftwareSlot {
     }
 
     fn get_token_info(&self, info: &mut CK_TOKEN_INFO) -> Result<(), Error> {
-        str_pad(&self.name, &mut info.label);
+        if let Some(label) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.label().ok())
+            .flatten()
+        {
+            info.label = label;
+        } else {
+            str_pad(&self.name, &mut info.label);
+        }
         str_pad(SOFTWARE_MANUFACTURER, &mut info.manufacturerID);
         str_pad(SOFTWARE_MODEL, &mut info.model);
         str_pad(&self.serial, &mut info.serialNumber);
-        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS;
-        if let Some(store) = &self.store {
-            if store.is_initialized()? {
-                info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
+        info.flags = (CKF_RNG | CKF_LOGIN_REQUIRED) as CK_FLAGS;
+        match &self.store {
+            Some(store) if store.is_initialized()? => {
+                info.flags |= CKF_TOKEN_INITIALIZED as CK_FLAGS;
+                if store.user_pin_is_initialized()? {
+                    info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
+                }
             }
+            None => info.flags |= CKF_TOKEN_INITIALIZED as CK_FLAGS,
+            Some(_) => {}
         }
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
         info.ulSessionCount = 0;
@@ -263,7 +317,10 @@ impl Slot for SoftwareSlot {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
-        let master_key = self.master_key.as_ref().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let master_key = self
+            .private_master_key
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let (stored, reference) = store.put_object(slot_id, master_key, object)?;
         self.token_references
             .insert(stored.unique_id.clone(), reference);
@@ -289,9 +346,35 @@ impl Slot for SoftwareSlot {
     }
 
     fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        store.change_pin(old_pin, new_pin)
+    }
+
+    fn set_so_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        store.change_so_pin(old_pin, new_pin)
+    }
+
+    fn init_user_pin(&mut self, new_pin: &[u8]) -> Result<(), Error> {
+        crate::software_storage::validate_software_pin(new_pin)?;
+        let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
+        let public = self
+            .public_master_key
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        store.init_user_pin(new_pin, public)
+    }
+
+    fn init_token(&mut self, so_pin: &[u8], label: [CK_UTF8CHAR; 32]) -> Result<(), Error> {
         self.clear_sensitive_state();
         let store = self.store.as_ref().ok_or(CKR_TOKEN_WRITE_PROTECTED)?;
-        let _master_key = store.change_pin(old_pin, new_pin)?;
+        if store.is_initialized()? {
+            let _ = store.login_so(so_pin)?;
+        }
+        if let Some(provider) = &self.public_provider {
+            provider.clear()?;
+        }
+        let _ = store.init_token(so_pin, label)?;
         Ok(())
     }
 

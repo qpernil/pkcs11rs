@@ -2212,14 +2212,14 @@ pub fn session_entry_points_validate_initialization_and_session() {
 }
 
 #[test]
-pub fn non_session_stub_entry_points_report_unsupported() {
+pub fn non_session_entry_points_validate_arguments_or_report_unsupported() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     let mut slot = 0;
 
     assert_eq!(
         crate::api::C_InitToken(0, ::std::ptr::null_mut(), 0, ::std::ptr::null_mut()),
-        CKR_FUNCTION_NOT_SUPPORTED as CK_RV
+        CKR_ARGUMENTS_BAD as CK_RV
     );
     assert_eq!(
         crate::api::C_WaitForSlotEvent(0, &mut slot, ::std::ptr::null_mut()),
@@ -2681,7 +2681,7 @@ pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
             admin_pin.as_mut_ptr(),
             admin_pin.len() as CK_ULONG,
         ),
-        CKR_OK as CK_RV
+        CKR_USER_ALREADY_LOGGED_IN as CK_RV
     );
     assert_eq!(
         crate::api::C_SetPIN(
@@ -2697,14 +2697,14 @@ pub fn so_login_enforces_session_rules_and_initializes_user_pin() {
         crate::api::C_GetSessionInfo(read_write_session, &mut info),
         CKR_OK as CK_RV
     );
-    assert_eq!(info.state, CKS_RW_PUBLIC_SESSION as CK_STATE);
+    assert_eq!(info.state, CKS_RW_SO_FUNCTIONS as CK_STATE);
     assert_eq!(
         crate::api::C_InitPIN(
             read_write_session,
             user_pin.as_mut_ptr(),
             user_pin.len() as CK_ULONG,
         ),
-        CKR_USER_NOT_LOGGED_IN as CK_RV
+        CKR_OK as CK_RV
     );
 
     assert_eq!(
