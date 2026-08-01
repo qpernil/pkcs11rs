@@ -2,6 +2,7 @@ use super::key::{
     find_openpgp_key_handle, find_piv_key_handle, key_pair_object, openpgp_curve, openpgp_key_ref,
     piv_key_pair_object, piv_policy_attribute, template_attribute,
 };
+use crate::key_metadata::{KeyAttributeValue, KeyAttributes};
 use crate::*;
 
 fn preview_sign_import_object(templ: &[CK_ATTRIBUTE]) -> Result<Option<TokenObject>, Error> {
@@ -806,6 +807,7 @@ fn piv_certificate_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         key_gen_mechanism: None,
         allowed_mechanisms: None,
         wrap_with_trusted: false,
+        policy_templates: crate::KeyPolicyTemplates::default(),
         creator_session: None,
         public_key: None,
         rp_id: None,
@@ -928,6 +930,7 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         key_gen_mechanism: None,
         allowed_mechanisms: None,
         wrap_with_trusted: false,
+        policy_templates: crate::KeyPolicyTemplates::default(),
         creator_session: None,
         public_key: None,
         rp_id: None,
@@ -1731,6 +1734,19 @@ fn get_attribute_value(
                 rv = combine_attribute_rv(rv, CKR_ATTRIBUTE_SENSITIVE as CK_RV);
                 continue;
             }
+            if matches!(
+                attribute.type_,
+                x if x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+                    || x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE
+                    || x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE
+            ) {
+                let empty = KeyAttributes::new();
+                let template = object.policy_template(attribute.type_).unwrap_or(&empty);
+                if let Err(error) = write_policy_template(attribute, template) {
+                    rv = combine_attribute_rv(rv, error);
+                }
+                continue;
+            }
             match object_attribute_value(
                 ctx,
                 session_handle,
@@ -1756,6 +1772,64 @@ fn get_attribute_value(
             Err(rv.into())
         }
     })
+}
+
+fn write_policy_template(
+    attribute: &mut CK_ATTRIBUTE,
+    template: &KeyAttributes,
+) -> Result<(), CK_RV> {
+    let count = template.iter().count();
+    let required = count
+        .checked_mul(std::mem::size_of::<CK_ATTRIBUTE>())
+        .ok_or(CKR_DATA_INVALID)?;
+    let required = CK_ULONG::try_from(required).map_err(|_| CKR_DATA_INVALID)?;
+    if attribute.pValue.is_null() {
+        attribute.ulValueLen = required;
+        return Ok(());
+    }
+    if attribute.ulValueLen < required {
+        attribute.ulValueLen = required;
+        return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
+    }
+    let output = unsafe { _from_raw_parts_mut(attribute.pValue.cast::<CK_ATTRIBUTE>(), count) }
+        .map_err(CK_RV::from)?;
+    let mut rv = CKR_OK as CK_RV;
+    for (slot, (type_, value)) in output.iter_mut().zip(template.iter()) {
+        slot.type_ = CK_ATTRIBUTE_TYPE::try_from(*type_).map_err(|_| CKR_DATA_INVALID)?;
+        let write = match value {
+            KeyAttributeValue::Template(nested) => write_policy_template(slot, nested),
+            _ => write_policy_value(slot, &key_attribute_native_value(value)?),
+        };
+        if write == Err(CKR_BUFFER_TOO_SMALL as CK_RV) {
+            slot.ulValueLen = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+        }
+        if let Err(error) = write {
+            rv = combine_attribute_rv(rv, error);
+        }
+    }
+    attribute.ulValueLen = required;
+    if rv == CKR_OK as CK_RV {
+        Ok(())
+    } else {
+        Err(rv)
+    }
+}
+
+fn write_policy_value(attribute: &mut CK_ATTRIBUTE, value: &[u8]) -> Result<(), CK_RV> {
+    let required = value.len() as CK_ULONG;
+    if attribute.pValue.is_null() {
+        attribute.ulValueLen = required;
+        return Ok(());
+    }
+    if attribute.ulValueLen < required {
+        attribute.ulValueLen = required;
+        return Err(CKR_BUFFER_TOO_SMALL as CK_RV);
+    }
+    let output = unsafe { _from_raw_parts_mut(attribute.pValue.cast::<u8>(), value.len()) }
+        .map_err(CK_RV::from)?;
+    output.copy_from_slice(value);
+    attribute.ulValueLen = required;
+    Ok(())
 }
 
 fn yubihsm_object_value(

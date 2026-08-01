@@ -1,3 +1,7 @@
+use crate::key_metadata::{
+    attribute_kind, cryptoki_ulong_to_u64, AttributeKind, KeyAttributeValue, KeyAttributes,
+    KeyMetadataError,
+};
 use crate::piv;
 use crate::pkcs11::*;
 use crate::{
@@ -19,6 +23,13 @@ use rsa::{
 };
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct KeyPolicyTemplates {
+    pub(crate) wrap: Option<KeyAttributes>,
+    pub(crate) unwrap: Option<KeyAttributes>,
+    pub(crate) derive: Option<KeyAttributes>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct TokenObject {
@@ -45,6 +56,7 @@ pub(crate) struct TokenObject {
     pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
     pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
     pub(crate) wrap_with_trusted: bool,
+    pub(crate) policy_templates: KeyPolicyTemplates,
     pub(crate) creator_session: Option<CK_SESSION_HANDLE>,
     pub(crate) public_key: Option<PublicKeyMaterial>,
     pub(crate) rp_id: Option<String>,
@@ -469,6 +481,7 @@ pub(crate) struct TokenObjectTemplate {
     pub(crate) extractable: Option<bool>,
     pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
     pub(crate) wrap_with_trusted: bool,
+    pub(crate) policy_templates: KeyPolicyTemplates,
 }
 
 #[derive(Debug)]
@@ -992,6 +1005,39 @@ impl TokenObject {
         self.allowed_mechanisms
             .as_ref()
             .is_none_or(|allowed| allowed.contains(&mechanism))
+    }
+
+    pub(crate) fn policy_template(&self, attribute: CK_ATTRIBUTE_TYPE) -> Option<&KeyAttributes> {
+        match attribute {
+            x if x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE => self.policy_templates.wrap.as_ref(),
+            x if x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE => {
+                self.policy_templates.unwrap.as_ref()
+            }
+            x if x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE => {
+                self.policy_templates.derive.as_ref()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn matches_policy_template(&self, template: &KeyAttributes) -> bool {
+        template.iter().all(|(attribute, expected)| {
+            let Some(type_) = policy_u64_to_ulong(*attribute) else {
+                return false;
+            };
+            if let KeyAttributeValue::Template(expected) = expected {
+                return self
+                    .policy_template(type_)
+                    .map_or_else(|| expected.is_empty(), |actual| actual == expected);
+            }
+            if !self.supports_attribute(type_) || self.attribute_is_sensitive(type_) {
+                return false;
+            }
+            let Some(bytes) = self.attribute_value(type_) else {
+                return false;
+            };
+            semantic_native_value(type_, &bytes).as_ref() == Ok(expected)
+        })
     }
 
     pub(crate) fn supports_public_projection(&self) -> bool {
@@ -1969,6 +2015,18 @@ impl TokenObjectTemplate {
                 self.wrap_with_trusted = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_WRAP_TEMPLATE as CK_ATTRIBUTE_TYPE => {
+                self.policy_templates.wrap = Some(read_policy_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_UNWRAP_TEMPLATE as CK_ATTRIBUTE_TYPE => {
+                self.policy_templates.unwrap = Some(read_policy_template_attribute(attribute)?);
+                Ok(())
+            }
+            x if x == CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE => {
+                self.policy_templates.derive = Some(read_policy_template_attribute(attribute)?);
+                Ok(())
+            }
             x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
                 self.sensitive = Some(read_bool_template_attribute(attribute)?);
                 Ok(())
@@ -2027,6 +2085,18 @@ impl TokenObjectTemplate {
         {
             return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
         }
+        if self.policy_templates.wrap.is_some()
+            && class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+            || self.policy_templates.unwrap.is_some()
+                && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+            || self.policy_templates.derive.is_some()
+                && class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
+        }
         let extractable = self
             .extractable
             .unwrap_or(!(private_key || (nonextractable_key && !software_secret)));
@@ -2057,6 +2127,7 @@ impl TokenObjectTemplate {
             key_gen_mechanism: None,
             allowed_mechanisms: self.allowed_mechanisms,
             wrap_with_trusted: self.wrap_with_trusted,
+            policy_templates: self.policy_templates,
             creator_session: None,
             public_key: None,
             rp_id: None,
@@ -2077,6 +2148,281 @@ pub(crate) fn read_attribute_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, 
         }
     };
     Ok(value.to_vec())
+}
+
+fn key_metadata_error(error: KeyMetadataError) -> CK_RV {
+    match error {
+        KeyMetadataError::UnsupportedAttribute(_) => CKR_ATTRIBUTE_TYPE_INVALID as CK_RV,
+        _ => CKR_ATTRIBUTE_VALUE_INVALID as CK_RV,
+    }
+}
+
+fn semantic_native_value(
+    attribute: CK_ATTRIBUTE_TYPE,
+    bytes: &[u8],
+) -> Result<KeyAttributeValue, CK_RV> {
+    match attribute_kind(cryptoki_ulong_to_u64(attribute)).map_err(key_metadata_error)? {
+        AttributeKind::Boolean if bytes.len() == std::mem::size_of::<CK_BBOOL>() => {
+            match bytes[0] {
+                x if x == CK_FALSE as CK_BBOOL => Ok(KeyAttributeValue::Boolean(false)),
+                x if x == CK_TRUE as CK_BBOOL => Ok(KeyAttributeValue::Boolean(true)),
+                _ => Err(CKR_DATA_INVALID as CK_RV),
+            }
+        }
+        AttributeKind::Unsigned if bytes.len() == std::mem::size_of::<CK_ULONG>() => {
+            let mut encoded = [0; std::mem::size_of::<CK_ULONG>()];
+            encoded.copy_from_slice(bytes);
+            Ok(KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(
+                CK_ULONG::from_ne_bytes(encoded),
+            )))
+        }
+        AttributeKind::Bytes => Ok(KeyAttributeValue::Bytes(bytes.to_vec())),
+        AttributeKind::Text => String::from_utf8(bytes.to_vec())
+            .map(KeyAttributeValue::Text)
+            .map_err(|_| CKR_DATA_INVALID as CK_RV),
+        AttributeKind::Mechanisms
+            if crate::is_multiple_of(bytes.len(), std::mem::size_of::<CK_MECHANISM_TYPE>()) =>
+        {
+            let values = bytes
+                .chunks_exact(std::mem::size_of::<CK_MECHANISM_TYPE>())
+                .map(|bytes| {
+                    let mut encoded = [0; std::mem::size_of::<CK_MECHANISM_TYPE>()];
+                    encoded.copy_from_slice(bytes);
+                    cryptoki_ulong_to_u64(CK_MECHANISM_TYPE::from_ne_bytes(encoded))
+                })
+                .collect();
+            Ok(KeyAttributeValue::Mechanisms(values))
+        }
+        _ => Err(CKR_DATA_INVALID as CK_RV),
+    }
+}
+
+pub(crate) fn key_attribute_native_value(value: &KeyAttributeValue) -> Result<Vec<u8>, CK_RV> {
+    match value {
+        KeyAttributeValue::Boolean(value) => Ok(bool_attribute(*value)),
+        KeyAttributeValue::Unsigned(value) => policy_u64_to_ulong(*value)
+            .map(ulong_attribute)
+            .ok_or(CKR_DATA_INVALID as CK_RV),
+        KeyAttributeValue::Bytes(value) => Ok(value.clone()),
+        KeyAttributeValue::Text(value) => Ok(value.as_bytes().to_vec()),
+        KeyAttributeValue::Mechanisms(values) => values
+            .iter()
+            .copied()
+            .map(CK_MECHANISM_TYPE::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_ne_bytes())
+                    .collect()
+            })
+            .map_err(|_| CKR_DATA_INVALID as CK_RV),
+        KeyAttributeValue::Template(_) => Err(CKR_DATA_INVALID as CK_RV),
+    }
+}
+
+fn policy_u64_to_ulong(value: u64) -> Option<CK_ULONG> {
+    #[cfg(any(windows, target_pointer_width = "32"))]
+    {
+        CK_ULONG::try_from(value).ok()
+    }
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
+    {
+        Some(value)
+    }
+}
+
+#[derive(Debug)]
+struct OwnedPolicyAttribute {
+    type_: CK_ATTRIBUTE_TYPE,
+    value: Vec<u8>,
+    nested: Option<OwnedPolicyTemplate>,
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedPolicyTemplate {
+    attributes: Vec<OwnedPolicyAttribute>,
+    ffi: Vec<CK_ATTRIBUTE>,
+}
+
+impl OwnedPolicyTemplate {
+    fn from_semantic(template: &KeyAttributes) -> Result<Self, CK_RV> {
+        let mut attributes = Vec::with_capacity(template.iter().count());
+        for (type_, value) in template.iter() {
+            let type_ = policy_u64_to_ulong(*type_).ok_or(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?;
+            let (value, nested) = match value {
+                KeyAttributeValue::Template(nested) => {
+                    (Vec::new(), Some(Self::from_semantic(nested)?))
+                }
+                value => (key_attribute_native_value(value)?, None),
+            };
+            attributes.push(OwnedPolicyAttribute {
+                type_,
+                value,
+                nested,
+            });
+        }
+        Ok(Self {
+            attributes,
+            ffi: Vec::new(),
+        })
+    }
+
+    fn refresh(&mut self) {
+        for attribute in &mut self.attributes {
+            if let Some(nested) = &mut attribute.nested {
+                nested.refresh();
+            }
+        }
+        self.ffi.clear();
+        self.ffi.reserve(self.attributes.len());
+        for attribute in &mut self.attributes {
+            let (pointer, length) = match &mut attribute.nested {
+                Some(nested) => (
+                    nested.ffi.as_mut_ptr().cast(),
+                    nested.ffi.len() * std::mem::size_of::<CK_ATTRIBUTE>(),
+                ),
+                None => (attribute.value.as_mut_ptr().cast(), attribute.value.len()),
+            };
+            self.ffi.push(CK_ATTRIBUTE {
+                type_: attribute.type_,
+                pValue: pointer,
+                ulValueLen: length as CK_ULONG,
+            });
+        }
+    }
+
+    pub(crate) fn as_slice(&mut self) -> &[CK_ATTRIBUTE] {
+        self.refresh();
+        &self.ffi
+    }
+}
+
+pub(crate) fn merge_policy_template(
+    caller: &[CK_ATTRIBUTE],
+    policy: Option<&KeyAttributes>,
+) -> Result<OwnedPolicyTemplate, Error> {
+    let mut merged = read_semantic_template(caller).map_err(Error::from)?;
+    if let Some(policy) = policy {
+        for (type_, value) in policy.iter() {
+            if let Some(supplied) = merged.get(*type_) {
+                if supplied != value {
+                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
+                }
+            } else {
+                merged
+                    .insert_template(*type_, value.clone())
+                    .map_err(|_| Error::from(CKR_TEMPLATE_INCONSISTENT))?;
+            }
+        }
+    }
+    OwnedPolicyTemplate::from_semantic(&merged).map_err(Error::from)
+}
+
+fn read_policy_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<KeyAttributes, CK_RV> {
+    read_policy_template(attribute, 0)
+}
+
+fn read_policy_value(attribute: &CK_ATTRIBUTE) -> Result<Vec<u8>, CK_RV> {
+    let value = unsafe {
+        crate::from_raw_parts(
+            attribute.pValue.cast::<u8>().cast_const(),
+            attribute.ulValueLen as usize,
+        )
+    }
+    .map_err(CK_RV::from)?;
+    Ok(value.to_vec())
+}
+
+fn read_policy_bool(attribute: &CK_ATTRIBUTE) -> Result<bool, CK_RV> {
+    if attribute.ulValueLen as usize != std::mem::size_of::<CK_BBOOL>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    match read_policy_value(attribute)?[0] {
+        x if x == CK_FALSE as CK_BBOOL => Ok(false),
+        x if x == CK_TRUE as CK_BBOOL => Ok(true),
+        _ => Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV),
+    }
+}
+
+fn read_policy_ulong(attribute: &CK_ATTRIBUTE) -> Result<CK_ULONG, CK_RV> {
+    if attribute.ulValueLen as usize != std::mem::size_of::<CK_ULONG>() {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let value = read_policy_value(attribute)?;
+    let mut bytes = [0; std::mem::size_of::<CK_ULONG>()];
+    bytes.copy_from_slice(&value);
+    Ok(CK_ULONG::from_ne_bytes(bytes))
+}
+
+fn read_policy_template(attribute: &CK_ATTRIBUTE, depth: usize) -> Result<KeyAttributes, CK_RV> {
+    let width = std::mem::size_of::<CK_ATTRIBUTE>();
+    if depth >= 4 || !crate::is_multiple_of(attribute.ulValueLen as usize, width) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let count = attribute.ulValueLen as usize / width;
+    if count > 256 {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+    }
+    let nested = unsafe { crate::from_raw_parts(attribute.pValue.cast::<CK_ATTRIBUTE>(), count) }
+        .map_err(CK_RV::from)?;
+    read_semantic_template_at_depth(nested, depth)
+}
+
+pub(crate) fn read_semantic_template(items: &[CK_ATTRIBUTE]) -> Result<KeyAttributes, CK_RV> {
+    read_semantic_template_at_depth(items, 0)
+}
+
+fn read_semantic_template_at_depth(
+    nested: &[CK_ATTRIBUTE],
+    depth: usize,
+) -> Result<KeyAttributes, CK_RV> {
+    let mut result = KeyAttributes::new();
+    for item in nested {
+        let kind = attribute_kind(cryptoki_ulong_to_u64(item.type_)).map_err(key_metadata_error)?;
+        let value = match kind {
+            AttributeKind::Boolean => KeyAttributeValue::Boolean(read_policy_bool(item)?),
+            AttributeKind::Unsigned => {
+                KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(read_policy_ulong(item)?))
+            }
+            AttributeKind::Bytes => KeyAttributeValue::Bytes(read_policy_value(item)?),
+            AttributeKind::Text => KeyAttributeValue::Text(
+                String::from_utf8(read_policy_value(item)?)
+                    .map_err(|_| CKR_ATTRIBUTE_VALUE_INVALID as CK_RV)?,
+            ),
+            AttributeKind::Mechanisms => {
+                let bytes = read_policy_value(item)?;
+                let mechanism_width = std::mem::size_of::<CK_MECHANISM_TYPE>();
+                if !crate::is_multiple_of(bytes.len(), mechanism_width) {
+                    return Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV);
+                }
+                let mut mechanisms = bytes
+                    .chunks_exact(mechanism_width)
+                    .map(|bytes| {
+                        let mut encoded = [0; std::mem::size_of::<CK_MECHANISM_TYPE>()];
+                        encoded.copy_from_slice(bytes);
+                        cryptoki_ulong_to_u64(CK_MECHANISM_TYPE::from_ne_bytes(encoded))
+                    })
+                    .collect::<Vec<_>>();
+                mechanisms.sort_unstable();
+                if mechanisms.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
+                }
+                KeyAttributeValue::Mechanisms(mechanisms)
+            }
+            AttributeKind::Template => {
+                KeyAttributeValue::Template(read_policy_template(item, depth + 1)?)
+            }
+        };
+        if result
+            .insert_template(cryptoki_ulong_to_u64(item.type_), value)
+            .map_err(key_metadata_error)?
+            .is_some()
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
+        }
+    }
+    Ok(result)
 }
 
 pub(crate) fn read_ulong_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<CK_ULONG, CK_RV> {

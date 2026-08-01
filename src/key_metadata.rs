@@ -189,6 +189,36 @@ impl KeyAttributes {
         Ok(self.attributes.insert(attribute, value))
     }
 
+    pub(crate) fn insert_template(
+        &mut self,
+        attribute: u64,
+        value: KeyAttributeValue,
+    ) -> Result<Option<KeyAttributeValue>, KeyMetadataError> {
+        if self.attributes.len() >= MAX_ATTRIBUTES && !self.attributes.contains_key(&attribute) {
+            return Err(KeyMetadataError::Malformed("too many key attributes"));
+        }
+        validate_template_attribute(attribute, &value)?;
+        Ok(self.attributes.insert(attribute, value))
+    }
+
+    pub(crate) fn template_to_cbor(&self) -> Result<Vec<u8>, KeyMetadataError> {
+        let mut encoded = Vec::new();
+        let mut encoder = Encoder::new(&mut encoded);
+        encode_attributes(&mut encoder, self, true)?;
+        Ok(encoded)
+    }
+
+    pub(crate) fn template_from_cbor(encoded: &[u8]) -> Result<Self, KeyMetadataError> {
+        let mut decoder = Decoder::new(encoded);
+        let attributes = decode_attributes(&mut decoder, 1)?;
+        if decoder.position() != encoded.len() || attributes.template_to_cbor()? != encoded {
+            return Err(KeyMetadataError::Malformed(
+                "attribute template is not canonically encoded",
+            ));
+        }
+        Ok(attributes)
+    }
+
     /// Return an attribute value.
     pub fn get(&self, attribute: u64) -> Option<&KeyAttributeValue> {
         self.attributes.get(&attribute)
@@ -281,7 +311,7 @@ impl BackedKeyMetadata {
             )?;
         for (class, attributes) in &self.aspects {
             encoder.u64(*class)?;
-            encode_attributes(&mut encoder, attributes)?;
+            encode_attributes(&mut encoder, attributes, false)?;
         }
         Ok(encoded)
     }
@@ -351,7 +381,7 @@ impl BackedKeyMetadata {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AttributeKind {
+pub(crate) enum AttributeKind {
     Boolean,
     Unsigned,
     Bytes,
@@ -383,12 +413,44 @@ fn validate_attributes(attributes: &KeyAttributes) -> Result<(), KeyMetadataErro
     Ok(())
 }
 
+fn validate_template_attributes(attributes: &KeyAttributes) -> Result<(), KeyMetadataError> {
+    if attributes.attributes.len() > MAX_ATTRIBUTES {
+        return Err(KeyMetadataError::Malformed("too many key attributes"));
+    }
+    for (attribute, value) in &attributes.attributes {
+        validate_template_attribute(*attribute, value)?;
+    }
+    Ok(())
+}
+
+fn validate_template_attribute(
+    attribute: u64,
+    value: &KeyAttributeValue,
+) -> Result<(), KeyMetadataError> {
+    validate_attribute_type(attribute, value)?;
+    if let KeyAttributeValue::Template(attributes) = value {
+        validate_template_attributes(attributes)?;
+    }
+    Ok(())
+}
+
 fn validate_attribute(attribute: u64, value: &KeyAttributeValue) -> Result<(), KeyMetadataError> {
     if attribute == u64::from(CKA_CLASS) || attribute == u64::from(CKA_TOKEN) {
         return Err(KeyMetadataError::Malformed(
             "structural attribute present in key aspect",
         ));
     }
+    validate_attribute_type(attribute, value)?;
+    if let KeyAttributeValue::Template(attributes) = value {
+        validate_template_attributes(attributes)?;
+    }
+    Ok(())
+}
+
+fn validate_attribute_type(
+    attribute: u64,
+    value: &KeyAttributeValue,
+) -> Result<(), KeyMetadataError> {
     let expected = attribute_kind(attribute)?;
     let actual = match value {
         KeyAttributeValue::Boolean(_) => AttributeKind::Boolean,
@@ -401,15 +463,21 @@ fn validate_attribute(attribute: u64, value: &KeyAttributeValue) -> Result<(), K
     if expected != actual {
         return Err(KeyMetadataError::InvalidAttributeType(attribute));
     }
-    if let KeyAttributeValue::Template(attributes) = value {
-        validate_attributes(attributes)?;
+    if let KeyAttributeValue::Mechanisms(mechanisms) = value {
+        if mechanisms.len() > MAX_ATTRIBUTES || mechanisms.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(KeyMetadataError::Malformed(
+                "mechanism list is not sorted and unique",
+            ));
+        }
     }
     Ok(())
 }
 
-fn attribute_kind(attribute: u64) -> Result<AttributeKind, KeyMetadataError> {
+pub(crate) fn attribute_kind(attribute: u64) -> Result<AttributeKind, KeyMetadataError> {
     let kind = match attribute {
-        x if x == u64::from(CKA_PRIVATE)
+        x if x == u64::from(CKA_TOKEN)
+            || x == u64::from(CKA_PRIVATE)
             || x == u64::from(CKA_MODIFIABLE)
             || x == u64::from(CKA_COPYABLE)
             || x == u64::from(CKA_DESTROYABLE)
@@ -435,7 +503,8 @@ fn attribute_kind(attribute: u64) -> Result<AttributeKind, KeyMetadataError> {
         {
             AttributeKind::Boolean
         }
-        x if x == u64::from(CKA_KEY_TYPE)
+        x if x == u64::from(CKA_CLASS)
+            || x == u64::from(CKA_KEY_TYPE)
             || x == u64::from(CKA_KEY_GEN_MECHANISM)
             || x == u64::from(CKA_OBJECT_VALIDATION_FLAGS)
             || x == u64::from(CKA_MODULUS_BITS)
@@ -481,8 +550,13 @@ fn attribute_kind(attribute: u64) -> Result<AttributeKind, KeyMetadataError> {
 fn encode_attributes(
     encoder: &mut Encoder<&mut Vec<u8>>,
     attributes: &KeyAttributes,
+    template: bool,
 ) -> Result<(), KeyMetadataError> {
-    validate_attributes(attributes)?;
+    if template {
+        validate_template_attributes(attributes)?;
+    } else {
+        validate_attributes(attributes)?;
+    }
     encoder.map(
         u64::try_from(attributes.attributes.len())
             .map_err(|_| KeyMetadataError::Malformed("attribute count overflow"))?,
@@ -520,7 +594,7 @@ fn encode_attribute_value(
                 encoder.u64(*mechanism)?;
             }
         }
-        KeyAttributeValue::Template(attributes) => encode_attributes(encoder, attributes)?,
+        KeyAttributeValue::Template(attributes) => encode_attributes(encoder, attributes, true)?,
     }
     Ok(())
 }
@@ -561,7 +635,12 @@ fn decode_attributes(
     for _ in 0..count {
         let attribute = decoder.u64()?;
         let value = decode_attribute_value(decoder, depth)?;
-        if attributes.insert(attribute, value)?.is_some() {
+        let previous = if depth == 0 {
+            attributes.insert(attribute, value)?
+        } else {
+            attributes.insert_template(attribute, value)?
+        };
+        if previous.is_some() {
             return Err(KeyMetadataError::Malformed("duplicate key attribute"));
         }
     }
@@ -718,7 +797,7 @@ mod tests {
         attributes
             .insert(
                 u64::from(CKA_ALLOWED_MECHANISMS),
-                KeyAttributeValue::Mechanisms(vec![u64::from(CKM_ECDSA), u64::from(CKM_SHA256)]),
+                KeyAttributeValue::Mechanisms(vec![u64::from(CKM_SHA256), u64::from(CKM_ECDSA)]),
             )
             .unwrap();
         attributes
@@ -759,6 +838,25 @@ mod tests {
                 KeyAttributeValue::Bytes(vec![0xa1, 1, 2]),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn standalone_policy_templates_allow_structural_attributes() {
+        let mut template = KeyAttributes::new();
+        template
+            .insert_template(u64::from(CKA_TOKEN), KeyAttributeValue::Boolean(true))
+            .unwrap();
+        template
+            .insert_template(
+                u64::from(CKA_CLASS),
+                KeyAttributeValue::Unsigned(u64::from(CKO_SECRET_KEY)),
+            )
+            .unwrap();
+        let encoded = template.template_to_cbor().unwrap();
+        assert_eq!(
+            KeyAttributes::template_from_cbor(&encoded).unwrap(),
+            template
+        );
     }
 
     #[test]

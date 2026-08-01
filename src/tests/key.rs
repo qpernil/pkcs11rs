@@ -872,6 +872,106 @@ fn software_hkdf_derives_typed_keys_with_data_null_and_key_salts() {
 }
 
 #[test]
+fn software_derive_template_adds_policy_and_rejects_conflicts() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut generic_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut base_value = [0x0b; 32];
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut derive_policy = [scalar_attribute(
+        CKA_SIGN as CK_ATTRIBUTE_TYPE,
+        &mut enabled,
+    )];
+    let mut base_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut generic_type),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut base_value),
+        scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut enabled),
+        CK_ATTRIBUTE {
+            type_: CKA_DERIVE_TEMPLATE as CK_ATTRIBUTE_TYPE,
+            pValue: derive_policy.as_mut_ptr().cast(),
+            ulValueLen: std::mem::size_of_val(&derive_policy) as CK_ULONG,
+        },
+    ];
+    let mut base = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            base_template.as_mut_ptr(),
+            base_template.len() as CK_ULONG,
+            &mut base,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut parameters = CK_HKDF_PARAMS {
+        bExtract: CK_FALSE as CK_BBOOL,
+        bExpand: CK_TRUE as CK_BBOOL,
+        prfHashMechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        ulSaltType: CKF_HKDF_SALT_NULL as CK_ULONG,
+        pSalt: std::ptr::null_mut(),
+        ulSaltLen: 0,
+        hSaltKey: CK_INVALID_HANDLE as CK_OBJECT_HANDLE,
+        pInfo: std::ptr::null_mut(),
+        ulInfoLen: 0,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_HKDF_DERIVE as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_HKDF_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_HKDF_PARAMS>() as CK_ULONG,
+    };
+    let mut hmac_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut length = 32 as CK_ULONG;
+    let mut output_template = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+        scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut enabled),
+    ];
+    let mut derived = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base,
+            output_template.as_mut_ptr(),
+            output_template.len() as CK_ULONG,
+            &mut derived,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(derived).unwrap().unwrap();
+        assert!(object.sign && object.verify);
+    });
+
+    let mut disabled = CK_FALSE as CK_BBOOL;
+    let mut conflicting = [
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut hmac_type),
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut length),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut disabled),
+    ];
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            TEST_SESSION_HANDLE,
+            &mut mechanism,
+            base,
+            conflicting.as_mut_ptr(),
+            conflicting.len() as CK_ULONG,
+            &mut derived,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    finalize_for_test();
+}
+
+#[test]
 fn software_ecdh_supports_every_x963_kdf_and_right_truncates_raw_secrets() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
