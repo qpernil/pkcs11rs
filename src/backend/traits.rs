@@ -22,6 +22,8 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         sign: false,
         verify: false,
         derive: false,
+        wrap: false,
+        unwrap: false,
         sensitive: false,
         extractable: false,
         always_sensitive: false,
@@ -292,6 +294,9 @@ pub(crate) trait Slot {
     fn supports_software_private_operations(&self) -> bool {
         false
     }
+    fn supports_software_secret_operations(&self) -> bool {
+        false
+    }
     fn store_software_private_key(
         &mut self,
         _slot_id: CK_SLOT_ID,
@@ -313,6 +318,9 @@ pub(crate) trait Slot {
         }
         if self.supports_software_private_operations() {
             software_mechanisms.extend(software_private_mechanisms());
+        }
+        if self.supports_software_secret_operations() {
+            software_mechanisms.extend(software_secret_mechanisms());
         }
         let mut combined_software_mechanisms: Vec<MechanismDetails> = Vec::new();
         for software in software_mechanisms {

@@ -35,6 +35,8 @@ pub(crate) struct TokenObject {
     pub(crate) sign: bool,
     pub(crate) verify: bool,
     pub(crate) derive: bool,
+    pub(crate) wrap: bool,
+    pub(crate) unwrap: bool,
     pub(crate) sensitive: bool,
     pub(crate) extractable: bool,
     pub(crate) always_sensitive: bool,
@@ -295,6 +297,8 @@ pub(crate) enum KeyMaterial {
         algorithm: u8,
         cache: SharedLazyBytes,
     },
+    #[allow(dead_code)]
+    SoftwareSecret(Zeroizing<Vec<u8>>),
     Secret(Zeroizing<Vec<u8>>),
     DerivedSecret(Zeroizing<Vec<u8>>),
 }
@@ -355,6 +359,9 @@ impl std::fmt::Debug for KeyMaterial {
                 .field("algorithm", algorithm)
                 .field("cached", &cache.borrow().value().is_some())
                 .finish(),
+            Self::SoftwareSecret(key) => {
+                fmt.debug_tuple("SoftwareSecret").field(&key.len()).finish()
+            }
             Self::Secret(key) => fmt.debug_tuple("Secret").field(&key.len()).finish(),
             Self::DerivedSecret(key) => fmt.debug_tuple("DerivedSecret").field(&key.len()).finish(),
             Self::PivCertificate {
@@ -454,6 +461,8 @@ pub(crate) struct TokenObjectTemplate {
     pub(crate) sign: bool,
     pub(crate) verify: bool,
     pub(crate) derive: bool,
+    pub(crate) wrap: bool,
+    pub(crate) unwrap: bool,
     pub(crate) sensitive: Option<bool>,
     pub(crate) extractable: Option<bool>,
 }
@@ -1366,7 +1375,9 @@ impl TokenObject {
                 Some(ulong_attribute(CKC_X_509 as CK_ULONG))
             }
             x if x == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value) => {
+                KeyMaterial::SoftwareSecret(value)
+                | KeyMaterial::Secret(value)
+                | KeyMaterial::DerivedSecret(value) => {
                     Some(ulong_attribute(value.len() as CK_ULONG))
                 }
                 KeyMaterial::HsmAuthCredential { .. } => Some(ulong_attribute(32)),
@@ -1612,7 +1623,9 @@ impl TokenObject {
                     KeyMaterial::SoftwarePrivate(key) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         key.private_value()
                     }
-                    KeyMaterial::Secret(value) | KeyMaterial::DerivedSecret(value)
+                    KeyMaterial::SoftwareSecret(value)
+                    | KeyMaterial::Secret(value)
+                    | KeyMaterial::DerivedSecret(value)
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
                         Some(value.to_vec())
@@ -1688,27 +1701,29 @@ impl TokenObject {
     }
 
     pub(crate) fn can_wrap(&self) -> bool {
-        matches!(
-            &self.material,
-            KeyMaterial::YubiHsm {
-                object_type,
-                algorithm,
-                capabilities,
-                ..
-            } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).wrap
-        )
+        self.wrap
+            || matches!(
+                &self.material,
+                KeyMaterial::YubiHsm {
+                    object_type,
+                    algorithm,
+                    capabilities,
+                    ..
+                } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).wrap
+            )
     }
 
     pub(crate) fn can_unwrap(&self) -> bool {
-        matches!(
-            &self.material,
-            KeyMaterial::YubiHsm {
-                object_type,
-                algorithm,
-                capabilities,
-                ..
-            } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).unwrap
-        )
+        self.unwrap
+            || matches!(
+                &self.material,
+                KeyMaterial::YubiHsm {
+                    object_type,
+                    algorithm,
+                    capabilities,
+                    ..
+                } if yubihsm_capabilities_to_attributes(*object_type, *algorithm, capabilities).unwrap
+            )
     }
 
     pub(crate) fn is_nonextractable_key_object(&self) -> bool {
@@ -1716,6 +1731,7 @@ impl TokenObject {
             || self.class == CKO_SECRET_KEY as CK_OBJECT_CLASS)
             && !matches!(&self.material, KeyMaterial::DerivedSecret(_))
             && !matches!(&self.material, KeyMaterial::SoftwarePrivate(_))
+            && !matches!(&self.material, KeyMaterial::SoftwareSecret(_))
             && !matches!(
                 &self.material,
                 KeyMaterial::YubiHsm { capabilities, .. }
@@ -1909,6 +1925,14 @@ impl TokenObjectTemplate {
                 self.derive = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_WRAP as CK_ATTRIBUTE_TYPE => {
+                self.wrap = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE => {
+                self.unwrap = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
             x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
                 self.sensitive = Some(read_bool_template_attribute(attribute)?);
                 Ok(())
@@ -1946,6 +1970,8 @@ impl TokenObjectTemplate {
             sign: self.sign,
             verify: self.verify,
             derive: self.derive,
+            wrap: self.wrap,
+            unwrap: self.unwrap,
             sensitive,
             extractable,
             always_sensitive: sensitive,

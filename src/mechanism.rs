@@ -291,6 +291,13 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
     mechanisms
 }
 
+pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
+    // The capability boundary exists before the implementation is advertised.
+    // Add AES, HMAC, generation, wrapping, and derivation mechanisms here as
+    // those operation paths become complete.
+    Vec::new()
+}
+
 pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [
     MechanismDetails {
         type_: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
