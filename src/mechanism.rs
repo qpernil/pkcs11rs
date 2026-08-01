@@ -323,6 +323,12 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             max_key_size: 4096,
             flags: (CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
         },
+        MechanismDetails {
+            type_: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+            min_key_size: 1024,
+            max_key_size: 4096,
+            flags: (CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
+        },
     ];
     for type_ in [
         CKM_AES_ECB,

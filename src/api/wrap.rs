@@ -15,10 +15,8 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RsaAesWrapParameters {
-    aes_algorithm: u8,
-    hash_algorithm: u8,
-    mgf1_algorithm: u8,
-    label_digest: Vec<u8>,
+    aes_key_length: usize,
+    oaep: RsaOaepParameters,
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +68,7 @@ fn rsa_wrap_hash_algorithm(mechanism: CK_MECHANISM_TYPE) -> Result<(u8, MessageD
     }
 }
 
-fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParameters, Error> {
+fn parse_rsa_aes_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParameters, Error> {
     if mechanism.pParameter.is_null()
         || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>()
     {
@@ -78,10 +76,10 @@ fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParam
     }
     let parameters = unsafe { _as_ref(mechanism.pParameter as CK_RSA_AES_KEY_WRAP_PARAMS_PTR) }
         .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
-    let aes_algorithm = match parameters.ulAESKeyBits {
-        128 => YUBIHSM_ALGO_AES128,
-        192 => YUBIHSM_ALGO_AES192,
-        256 => YUBIHSM_ALGO_AES256,
+    let aes_key_length = match parameters.ulAESKeyBits {
+        128 => 16,
+        192 => 24,
+        256 => 32,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
     let oaep_mechanism = CK_MECHANISM {
@@ -89,21 +87,31 @@ fn parse_rsa_wrap_parameters(mechanism: &CK_MECHANISM) -> Result<RsaAesWrapParam
         pParameter: parameters.pOAEPParams.cast(),
         ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_OAEP_PARAMS>() as CK_ULONG,
     };
-    let (mgf, hash_mechanism, label_digest) = parse_rsa_oaep_parameters(&oaep_mechanism)?;
-    let (hash_algorithm, _) = rsa_wrap_hash_algorithm(hash_mechanism)?;
-    let mgf1_algorithm = match mgf {
+    Ok(RsaAesWrapParameters {
+        aes_key_length,
+        oaep: parse_rsa_oaep_parameters(&oaep_mechanism)?,
+    })
+}
+
+fn yubihsm_rsa_aes_parameters(
+    parameters: &RsaAesWrapParameters,
+) -> Result<(u8, u8, u8, &[u8]), Error> {
+    let aes_algorithm = match parameters.aes_key_length {
+        16 => YUBIHSM_ALGO_AES128,
+        24 => YUBIHSM_ALGO_AES192,
+        32 => YUBIHSM_ALGO_AES256,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    let (mgf, hash_mechanism, label_digest) = &parameters.oaep;
+    let (hash_algorithm, _) = rsa_wrap_hash_algorithm(*hash_mechanism)?;
+    let mgf1_algorithm = match *mgf {
         32 => YUBIHSM_ALGO_MGF1_SHA1,
         33 => YUBIHSM_ALGO_MGF1_SHA256,
         34 => YUBIHSM_ALGO_MGF1_SHA384,
         35 => YUBIHSM_ALGO_MGF1_SHA512,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
-    Ok(RsaAesWrapParameters {
-        aes_algorithm,
-        hash_algorithm,
-        mgf1_algorithm,
-        label_digest,
-    })
+    Ok((aes_algorithm, hash_algorithm, mgf1_algorithm, label_digest))
 }
 
 pub(crate) fn parse_yubihsm_wrap_mechanism(
@@ -138,9 +146,11 @@ pub(crate) fn parse_yubihsm_wrap_mechanism(
             Ok(YubiHsmWrapMechanism::AesCcm { format })
         }
         x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE || x == CKM_YUBICO_RSA_WRAP => {
+            let parameters = parse_rsa_aes_wrap_parameters(mechanism)?;
+            yubihsm_rsa_aes_parameters(&parameters)?;
             Ok(YubiHsmWrapMechanism::Rsa {
                 full_object: x == CKM_YUBICO_RSA_WRAP,
-                parameters: parse_rsa_wrap_parameters(mechanism)?,
+                parameters,
             })
         }
         _ => Err(CKR_MECHANISM_INVALID.into()),
@@ -205,6 +215,7 @@ enum SoftwareWrapMechanism {
     Aes(SoftwareAesWrapMechanism),
     RsaPkcs,
     RsaOaep(RsaOaepParameters),
+    RsaAes(RsaAesWrapParameters),
 }
 
 enum SoftwareWrappingKey<'a> {
@@ -243,6 +254,9 @@ fn parse_software_wrap_mechanism(mechanism: &CK_MECHANISM) -> Result<SoftwareWra
         }
         x if x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE => Ok(SoftwareWrapMechanism::RsaOaep(
             parse_rsa_oaep_parameters(mechanism)?,
+        )),
+        x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE => Ok(SoftwareWrapMechanism::RsaAes(
+            parse_rsa_aes_wrap_parameters(mechanism)?,
         )),
         _ => Err(CKR_MECHANISM_INVALID.into()),
     }
@@ -285,7 +299,9 @@ fn software_rsa_wrap(
             )?);
             rsa_public_operation(wrapping_key, &encoded)
         }
-        SoftwareWrapMechanism::Aes(_) => Err(CKR_MECHANISM_INVALID.into()),
+        SoftwareWrapMechanism::Aes(_) | SoftwareWrapMechanism::RsaAes(_) => {
+            Err(CKR_MECHANISM_INVALID.into())
+        }
     }
 }
 
@@ -329,6 +345,26 @@ fn software_wrapped_key_length(
             }
             Ok(key.size())
         }
+        (SoftwareWrapMechanism::RsaAes(parameters), SoftwareWrappingKey::Rsa(key)) => {
+            if input_length == 0 || input_length > u32::MAX as usize {
+                return Err(CKR_KEY_SIZE_RANGE.into());
+            }
+            let (_, hash_mechanism, label_digest) = &parameters.oaep;
+            let digest = digest_for_hash_mechanism(*hash_mechanism)?;
+            if parameters.aes_key_length > key.size().saturating_sub(2 * digest.size() + 2)
+                || label_digest.len() != digest.size()
+            {
+                return Err(CKR_WRAPPING_KEY_SIZE_RANGE.into());
+            }
+            let wrapped_target_length = input_length
+                .div_ceil(8)
+                .checked_add(1)
+                .and_then(|semiblocks| semiblocks.checked_mul(8))
+                .ok_or(CKR_KEY_SIZE_RANGE)?;
+            key.size()
+                .checked_add(wrapped_target_length)
+                .ok_or(CKR_KEY_SIZE_RANGE.into())
+        }
         _ => Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into()),
     }
 }
@@ -352,8 +388,51 @@ fn software_rsa_unwrap(
             rsa_oaep_unpad(&decoded, *mgf, *hash_mechanism, label_digest)
                 .map_err(software_unwrap_error)
         }
-        SoftwareWrapMechanism::Aes(_) => Err(CKR_MECHANISM_INVALID.into()),
+        SoftwareWrapMechanism::Aes(_) | SoftwareWrapMechanism::RsaAes(_) => {
+            Err(CKR_MECHANISM_INVALID.into())
+        }
     }
+}
+
+fn software_rsa_aes_wrap(
+    parameters: &RsaAesWrapParameters,
+    wrapping_key: &RsaPublicKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut temporary_key = Zeroizing::new(vec![0; parameters.aes_key_length]);
+    getrandom::fill(&mut temporary_key).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    let rsa_mechanism = SoftwareWrapMechanism::RsaOaep(parameters.oaep.clone());
+    let wrapped_temporary_key = software_rsa_wrap(&rsa_mechanism, wrapping_key, &temporary_key)?;
+    let kwp = SoftwareAesWrapMechanism::Kwp(vec![0xa6, 0x59, 0x59, 0xa6]);
+    let wrapped_target = transform_software_wrapped_key(&kwp, &temporary_key, input, true)?;
+    let mut output = Vec::with_capacity(wrapped_temporary_key.len() + wrapped_target.len());
+    output.extend_from_slice(&wrapped_temporary_key);
+    output.extend_from_slice(&wrapped_target);
+    Ok(output)
+}
+
+fn software_rsa_aes_unwrap(
+    parameters: &RsaAesWrapParameters,
+    unwrapping_key: &RsaPrivateKey,
+    input: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let rsa_length = unwrapping_key.size();
+    if input.len() < rsa_length.saturating_add(16) {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE.into());
+    }
+    let (wrapped_temporary_key, wrapped_target) = input.split_at(rsa_length);
+    let rsa_mechanism = SoftwareWrapMechanism::RsaOaep(parameters.oaep.clone());
+    let temporary_key = Zeroizing::new(software_rsa_unwrap(
+        &rsa_mechanism,
+        unwrapping_key,
+        wrapped_temporary_key,
+    )?);
+    if temporary_key.len() != parameters.aes_key_length {
+        return Err(CKR_WRAPPED_KEY_INVALID.into());
+    }
+    let kwp = SoftwareAesWrapMechanism::Kwp(vec![0xa6, 0x59, 0x59, 0xa6]);
+    transform_software_wrapped_key(&kwp, &temporary_key, wrapped_target, false)
+        .map_err(software_unwrap_error)
 }
 
 fn software_unwrap_template(template: &[CK_ATTRIBUTE]) -> Result<TokenObject, Error> {
@@ -472,7 +551,9 @@ fn wrap_key(
                     }
                     SoftwareWrappingKey::Aes(wrapping_value)
                 }
-                SoftwareWrapMechanism::RsaPkcs | SoftwareWrapMechanism::RsaOaep(_) => {
+                SoftwareWrapMechanism::RsaPkcs
+                | SoftwareWrapMechanism::RsaOaep(_)
+                | SoftwareWrapMechanism::RsaAes(_) => {
                     if wrapper.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
                         || wrapper.key_type != CKK_RSA as CK_KEY_TYPE
                     {
@@ -510,6 +591,10 @@ fn wrap_key(
                     SoftwareWrappingKey::Rsa(key),
                 ) => software_rsa_wrap(&parsed_mechanism, key, target_value)
                     .map_err(software_wrap_error)?,
+                (SoftwareWrapMechanism::RsaAes(parameters), SoftwareWrappingKey::Rsa(key)) => {
+                    software_rsa_aes_wrap(parameters, key, target_value)
+                        .map_err(software_wrap_error)?
+                }
                 _ => return Err(CKR_WRAPPING_KEY_TYPE_INCONSISTENT.into()),
             };
             if response.len() != required {
@@ -555,22 +640,26 @@ fn wrap_key(
             YubiHsmWrapMechanism::Rsa {
                 full_object,
                 parameters,
-            } => YubiHsmCommand::rsa_wrap(
-                if *full_object {
-                    YubiHsmCommandCode::ExportRsaWrapped
-                } else {
-                    YubiHsmCommandCode::GetRsaWrappedKey
-                },
-                &YubiHsmRsaWrapParameters {
-                    wrapping_key_id,
-                    object_type: target_type,
-                    object_id: target_id,
-                    aes_algorithm: parameters.aes_algorithm,
-                    hash_algorithm: parameters.hash_algorithm,
-                    mgf1_algorithm: parameters.mgf1_algorithm,
-                    label_digest: &parameters.label_digest,
-                },
-            )?,
+            } => {
+                let (aes_algorithm, hash_algorithm, mgf1_algorithm, label_digest) =
+                    yubihsm_rsa_aes_parameters(parameters)?;
+                YubiHsmCommand::rsa_wrap(
+                    if *full_object {
+                        YubiHsmCommandCode::ExportRsaWrapped
+                    } else {
+                        YubiHsmCommandCode::GetRsaWrappedKey
+                    },
+                    &YubiHsmRsaWrapParameters {
+                        wrapping_key_id,
+                        object_type: target_type,
+                        object_id: target_id,
+                        aes_algorithm,
+                        hash_algorithm,
+                        mgf1_algorithm,
+                        label_digest,
+                    },
+                )?
+            }
         };
         let response = ctx
             ._get_session(session_handle)?
@@ -659,7 +748,9 @@ fn unwrap_key(
                     transform_software_wrapped_key(aes, unwrapping_value, wrapped, false)
                         .map_err(software_unwrap_error)?
                 }
-                SoftwareWrapMechanism::RsaPkcs | SoftwareWrapMechanism::RsaOaep(_) => {
+                SoftwareWrapMechanism::RsaPkcs
+                | SoftwareWrapMechanism::RsaOaep(_)
+                | SoftwareWrapMechanism::RsaAes(_) => {
                     if wrapper.class != CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                         || wrapper.key_type != CKK_RSA as CK_KEY_TYPE
                     {
@@ -670,7 +761,12 @@ fn unwrap_key(
                     else {
                         return Err(CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into());
                     };
-                    software_rsa_unwrap(&parsed_mechanism, private_key, wrapped)?
+                    match &parsed_mechanism {
+                        SoftwareWrapMechanism::RsaAes(parameters) => {
+                            software_rsa_aes_unwrap(parameters, private_key, wrapped)?
+                        }
+                        _ => software_rsa_unwrap(&parsed_mechanism, private_key, wrapped)?,
+                    }
                 }
             });
             validate_software_secret_length(object.key_type, value.len())?;
@@ -706,13 +802,17 @@ fn unwrap_key(
             YubiHsmWrapMechanism::Rsa {
                 full_object: true,
                 parameters,
-            } => YubiHsmCommand::import_rsa_wrapped(
-                unwrapping_key_id,
-                parameters.hash_algorithm,
-                parameters.mgf1_algorithm,
-                wrapped,
-                &parameters.label_digest,
-            )?,
+            } => {
+                let (_, hash_algorithm, mgf1_algorithm, label_digest) =
+                    yubihsm_rsa_aes_parameters(parameters)?;
+                YubiHsmCommand::import_rsa_wrapped(
+                    unwrapping_key_id,
+                    hash_algorithm,
+                    mgf1_algorithm,
+                    wrapped,
+                    label_digest,
+                )?
+            }
             YubiHsmWrapMechanism::Rsa {
                 full_object: false,
                 parameters,
@@ -724,14 +824,16 @@ fn unwrap_key(
                     x if x == CKO_SECRET_KEY as CK_OBJECT_CLASS => YUBIHSM_SYMMETRIC_KEY,
                     _ => return Err(CKR_TEMPLATE_INCONSISTENT.into()),
                 };
+                let (_, hash_algorithm, mgf1_algorithm, label_digest) =
+                    yubihsm_rsa_aes_parameters(parameters)?;
                 let command = YubiHsmCommand::put_rsa_wrapped_key(
                     unwrapping_key_id,
                     target_type,
                     &parsed.parameters(),
-                    parameters.hash_algorithm,
-                    parameters.mgf1_algorithm,
+                    hash_algorithm,
+                    mgf1_algorithm,
                     wrapped,
-                    &parameters.label_digest,
+                    label_digest,
                 )?;
                 requested_attributes = Some(parsed.object);
                 expected_target_type = Some(target_type);

@@ -454,7 +454,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.supports_software_secret_operations());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 67);
+        assert_eq!(mechanisms.len(), 68);
         assert_eq!(
             mechanisms
                 .iter()
@@ -490,6 +490,9 @@ mod tests {
                     4096,
                     CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP,
                 ),
+                x if x == CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE => {
+                    (1024, 4096, CKF_WRAP | CKF_UNWRAP)
+                }
                 x if x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE
                     || [
                         CKM_SHA1_RSA_PKCS,

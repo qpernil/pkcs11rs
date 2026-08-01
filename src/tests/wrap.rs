@@ -352,6 +352,7 @@ fn software_rsa_wrap_round_trip(
     private: CK_OBJECT_HANDLE,
     target: CK_OBJECT_HANDLE,
     target_value: &[u8],
+    expected_wrapped_length: CK_ULONG,
 ) {
     let mut wrapped_length = 0;
     assert_eq!(
@@ -365,7 +366,7 @@ fn software_rsa_wrap_round_trip(
         ),
         CKR_OK as CK_RV
     );
-    assert_eq!(wrapped_length, 128);
+    assert_eq!(wrapped_length, expected_wrapped_length);
     let mut short = vec![0; wrapped_length as usize - 1];
     let mut short_length = short.len() as CK_ULONG;
     assert_eq!(
@@ -419,6 +420,7 @@ fn software_rsa_wrap_round_trip(
         );
     });
 
+    let object_count = with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len());
     wrapped[0] ^= 1;
     assert_eq!(
         crate::api::C_UnwrapKey(
@@ -433,10 +435,35 @@ fn software_rsa_wrap_round_trip(
         ),
         CKR_WRAPPED_KEY_INVALID as CK_RV
     );
+    assert_eq!(
+        with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len()),
+        object_count
+    );
+    if expected_wrapped_length > 128 {
+        wrapped[0] ^= 1;
+        wrapped[128] ^= 1;
+        assert_eq!(
+            crate::api::C_UnwrapKey(
+                session,
+                mechanism,
+                private,
+                wrapped.as_mut_ptr(),
+                wrapped.len() as CK_ULONG,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut unwrapped,
+            ),
+            CKR_WRAPPED_KEY_INVALID as CK_RV
+        );
+        assert_eq!(
+            with_test_slot_context(TEST_SLOT_ID, |context| context.memory_objects.len()),
+            object_count
+        );
+    }
 }
 
 #[test]
-fn software_rsa_pkcs_and_oaep_wrap_and_unwrap_secret_keys() {
+fn software_rsa_wrap_mechanisms_wrap_and_unwrap_secret_keys() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -467,6 +494,7 @@ fn software_rsa_pkcs_and_oaep_wrap_and_unwrap_secret_keys() {
         private,
         target,
         &target_value,
+        128,
     );
 
     let mut oversized_value = [0x33; 118];
@@ -511,6 +539,77 @@ fn software_rsa_pkcs_and_oaep_wrap_and_unwrap_secret_keys() {
         private,
         target,
         &target_value,
+        128,
+    );
+
+    for aes_key_bits in [128, 192, 256] {
+        let mut rsa_aes_parameters = CK_RSA_AES_KEY_WRAP_PARAMS {
+            ulAESKeyBits: aes_key_bits,
+            pOAEPParams: &mut oaep_parameters,
+        };
+        let mut rsa_aes = CK_MECHANISM {
+            mechanism: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+            pParameter: (&mut rsa_aes_parameters as *mut CK_RSA_AES_KEY_WRAP_PARAMS).cast(),
+            ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as CK_ULONG,
+        };
+        software_rsa_wrap_round_trip(
+            TEST_SESSION_HANDLE,
+            &mut rsa_aes,
+            public,
+            private,
+            target,
+            &target_value,
+            168,
+        );
+    }
+    let mut invalid_parameters = CK_RSA_AES_KEY_WRAP_PARAMS {
+        ulAESKeyBits: 64,
+        pOAEPParams: &mut oaep_parameters,
+    };
+    let mut invalid = CK_MECHANISM {
+        mechanism: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        pParameter: (&mut invalid_parameters as *mut CK_RSA_AES_KEY_WRAP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as CK_ULONG,
+    };
+    let mut invalid_length = 0;
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut invalid,
+            public,
+            target,
+            std::ptr::null_mut(),
+            &mut invalid_length,
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+
+    let mut large_hash_oaep = CK_RSA_PKCS_OAEP_PARAMS {
+        hashAlg: CKM_SHA512 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA512 as CK_RSA_PKCS_MGF_TYPE,
+        source: CKZ_DATA_SPECIFIED as CK_RSA_PKCS_OAEP_SOURCE_TYPE,
+        pSourceData: std::ptr::null_mut(),
+        ulSourceDataLen: 0,
+    };
+    let mut large_hash_parameters = CK_RSA_AES_KEY_WRAP_PARAMS {
+        ulAESKeyBits: 256,
+        pOAEPParams: &mut large_hash_oaep,
+    };
+    let mut large_hash = CK_MECHANISM {
+        mechanism: CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+        pParameter: (&mut large_hash_parameters as *mut CK_RSA_AES_KEY_WRAP_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_AES_KEY_WRAP_PARAMS>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut large_hash,
+            public,
+            target,
+            std::ptr::null_mut(),
+            &mut invalid_length,
+        ),
+        CKR_WRAPPING_KEY_SIZE_RANGE as CK_RV
     );
     finalize_for_test();
 }
