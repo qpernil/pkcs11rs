@@ -32,8 +32,14 @@ CBC, CBC-PAD, CTR, CCM, GCM, key wrap, KWP, CMAC, CMAC-GENERAL, and GMAC;
 HMAC supports one-shot and multipart SHA-1, SHA-256, SHA-384, and SHA-512
 signing and verification. All corresponding mechanisms are advertised without
 `CKF_HW`. Local cipher and MAC key schedules and intermediate plaintext copies
-are zeroized. Requests for token secret objects still fail with
-`CKR_TOKEN_WRITE_PROTECTED`; secret-key persistence remains Phase 3 work.
+are zeroized.
+
+Phase 3 persistence is also implemented. Private token AES and HMAC keys use a
+distinct canonical secret record encrypted under the USER-only private master
+key. Generation, import, copy, restoration, logout unloading, and durable
+destruction share the asymmetric private-object storage boundary. Token secret
+keys require `CKA_PRIVATE=CK_TRUE`; without configured storage their creation
+fails with `CKR_TOKEN_WRITE_PROTECTED` and never falls back to session memory.
 
 ## Future master-key cycling
 
@@ -251,6 +257,9 @@ No new Cargo dependency is expected for this phase.
 
 ## Phase 3: encrypted token persistence
 
+Implemented for generated, imported, and copied AES and HMAC keys. Future
+derivation and unwrapping paths must enter the same publication boundary.
+
 Generalize the software-store backend operations conceptually from:
 
 ```text
@@ -261,8 +270,8 @@ destroy_software_private_key
 to:
 
 ```text
-store_software_sensitive_key
-destroy_software_sensitive_key
+store_software_private_object
+destroy_software_private_object
 ```
 
 Both asymmetric private keys and secret keys use this boundary.

@@ -1789,7 +1789,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             value_len = CK_ULONG(32)
             session_object = CK_BYTE(0)
             enabled = CK_BYTE(1)
-            template = (CK_ATTRIBUTE * 5)(
+            template = (CK_ATTRIBUTE * 6)(
                 CK_ATTRIBUTE(
                     CKA_KEY_TYPE,
                     ctypes.cast(ctypes.byref(key_type), CK_VOID_PTR),
@@ -1804,6 +1804,11 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKA_TOKEN,
                     ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
                     ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_PRIVATE,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
                 ),
                 CK_ATTRIBUTE(
                     CKA_SIGN,
@@ -2357,6 +2362,342 @@ class Pkcs11AbiTests(unittest.TestCase):
                 os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
             else:
                 os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous_hardware
+
+    def test_named_software_secret_token_lifecycle_is_persistent(self) -> None:
+        previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
+        previous_storage = os.environ.get("PKCS11RS_TOKEN_STORAGE")
+        previous_hardware = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "secret vault"
+            os.environ["PKCS11RS_TOKEN_STORAGE"] = directory
+            os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = "0"
+            try:
+                def named_slot() -> int:
+                    count = CK_ULONG()
+                    self.assertEqual(
+                        self.lib.C_GetSlotList(1, None, ctypes.byref(count)),
+                        CKR_OK,
+                    )
+                    slots = (CK_ULONG * count.value)()
+                    self.assertEqual(
+                        self.lib.C_GetSlotList(1, slots, ctypes.byref(count)),
+                        CKR_OK,
+                    )
+                    for slot_id in slots:
+                        info = CK_TOKEN_INFO()
+                        self.assertEqual(
+                            self.lib.C_GetTokenInfo(slot_id, ctypes.byref(info)),
+                            CKR_OK,
+                        )
+                        if bytes(info.label).rstrip(b" ") == b"secret vault":
+                            return slot_id
+                    self.fail("configured software slot was not discovered")
+
+                def find_label(session: int, label: bytes) -> list[int]:
+                    value = (CK_BYTE * len(label))(*label)
+                    attribute = CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(value, CK_VOID_PTR),
+                        len(value),
+                    )
+                    self.assertEqual(
+                        self.lib.C_FindObjectsInit(
+                            session, ctypes.byref(attribute), 1
+                        ),
+                        CKR_OK,
+                    )
+                    handles = (CK_ULONG * 8)()
+                    found = CK_ULONG()
+                    self.assertEqual(
+                        self.lib.C_FindObjects(
+                            session, handles, len(handles), ctypes.byref(found)
+                        ),
+                        CKR_OK,
+                    )
+                    self.assertEqual(self.lib.C_FindObjectsFinal(session), CKR_OK)
+                    return list(handles[: found.value])
+
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                slot_id = named_slot()
+                session = self.open_slot_session(
+                    slot_id, CKF_SERIAL_SESSION | CKF_RW_SESSION
+                )
+                session = self.initialize_software_token(
+                    session,
+                    b"secret vault officer password",
+                    b"secret vault user password",
+                    b"secret vault",
+                )
+                self.login_with_pin(session, b"secret vault user password")
+                enabled = CK_BYTE(1)
+                token_object = CK_BYTE(1)
+                value_len = CK_ULONG(16)
+                aes_label_bytes = b"persistent AES"
+                aes_label = (CK_BYTE * len(aes_label_bytes))(*aes_label_bytes)
+                aes_template = (CK_ATTRIBUTE * 6)(
+                    CK_ATTRIBUTE(
+                        CKA_VALUE_LEN,
+                        ctypes.cast(ctypes.byref(value_len), CK_VOID_PTR),
+                        ctypes.sizeof(value_len),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_ENCRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_DECRYPT,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(aes_label, CK_VOID_PTR),
+                        len(aes_label),
+                    ),
+                )
+                aes_generate = CK_MECHANISM(CKM_AES_KEY_GEN, None, 0)
+                aes_key = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_GenerateKey(
+                        session,
+                        ctypes.byref(aes_generate),
+                        aes_template,
+                        len(aes_template),
+                        ctypes.byref(aes_key),
+                    ),
+                    CKR_OK,
+                )
+
+                object_class = CK_ULONG(CKO_SECRET_KEY)
+                hmac_key_type = CK_ULONG(CKK_SHA256_HMAC)
+                hmac_value = (CK_BYTE * 20)(*[0x0B] * 20)
+                hmac_label_bytes = b"persistent HMAC"
+                hmac_label = (CK_BYTE * len(hmac_label_bytes))(*hmac_label_bytes)
+                hmac_template = (CK_ATTRIBUTE * 8)(
+                    CK_ATTRIBUTE(
+                        CKA_CLASS,
+                        ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                        ctypes.sizeof(object_class),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_KEY_TYPE,
+                        ctypes.cast(ctypes.byref(hmac_key_type), CK_VOID_PTR),
+                        ctypes.sizeof(hmac_key_type),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VALUE,
+                        ctypes.cast(hmac_value, CK_VOID_PTR),
+                        len(hmac_value),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_TOKEN,
+                        ctypes.cast(ctypes.byref(token_object), CK_VOID_PTR),
+                        ctypes.sizeof(token_object),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_PRIVATE,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_SIGN,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_VERIFY,
+                        ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                        ctypes.sizeof(enabled),
+                    ),
+                    CK_ATTRIBUTE(
+                        CKA_LABEL,
+                        ctypes.cast(hmac_label, CK_VOID_PTR),
+                        len(hmac_label),
+                    ),
+                )
+                hmac_key = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_CreateObject(
+                        session,
+                        hmac_template,
+                        len(hmac_template),
+                        ctypes.byref(hmac_key),
+                    ),
+                    CKR_OK,
+                )
+                copied_label_bytes = b"copied persistent HMAC"
+                copied_label = (CK_BYTE * len(copied_label_bytes))(
+                    *copied_label_bytes
+                )
+                copy_template = CK_ATTRIBUTE(
+                    CKA_LABEL,
+                    ctypes.cast(copied_label, CK_VOID_PTR),
+                    len(copied_label),
+                )
+                copied_hmac = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_CopyObject(
+                        session,
+                        hmac_key.value,
+                        ctypes.byref(copy_template),
+                        1,
+                        ctypes.byref(copied_hmac),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(self.lib.C_CloseSession(session), CKR_OK)
+                self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                restored = self.open_slot_session(
+                    named_slot(), CKF_SERIAL_SESSION | CKF_RW_SESSION
+                )
+                for label in (
+                    aes_label_bytes,
+                    hmac_label_bytes,
+                    copied_label_bytes,
+                ):
+                    self.assertEqual(find_label(restored, label), [])
+                self.login_with_pin(restored, b"secret vault user password")
+                restored_aes = find_label(restored, aes_label_bytes)
+                restored_hmac = find_label(restored, hmac_label_bytes)
+                restored_copy = find_label(restored, copied_label_bytes)
+                self.assertEqual(len(restored_aes), 1)
+                self.assertEqual(len(restored_hmac), 1)
+                self.assertEqual(len(restored_copy), 1)
+
+                iv = (CK_BYTE * 16)(*range(16))
+                cbc_pad = CK_MECHANISM(
+                    CKM_AES_CBC_PAD,
+                    ctypes.cast(iv, CK_VOID_PTR),
+                    len(iv),
+                )
+                aes_plaintext = (CK_BYTE * 19)(*range(19))
+                aes_ciphertext = (CK_BYTE * 32)()
+                aes_ciphertext_len = CK_ULONG(len(aes_ciphertext))
+                self.assertEqual(
+                    self.lib.C_EncryptInit(
+                        restored, ctypes.byref(cbc_pad), restored_aes[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Encrypt(
+                        restored,
+                        aes_plaintext,
+                        len(aes_plaintext),
+                        aes_ciphertext,
+                        ctypes.byref(aes_ciphertext_len),
+                    ),
+                    CKR_OK,
+                )
+                aes_recovered = (CK_BYTE * len(aes_plaintext))()
+                aes_recovered_len = CK_ULONG(len(aes_recovered))
+                self.assertEqual(
+                    self.lib.C_DecryptInit(
+                        restored, ctypes.byref(cbc_pad), restored_aes[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Decrypt(
+                        restored,
+                        aes_ciphertext,
+                        aes_ciphertext_len.value,
+                        aes_recovered,
+                        ctypes.byref(aes_recovered_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(bytes(aes_recovered), bytes(aes_plaintext))
+
+                message_bytes = b"persistent secret operation"
+                message = (CK_BYTE * len(message_bytes))(*message_bytes)
+                hmac = CK_MECHANISM(CKM_SHA256_HMAC, None, 0)
+                self.assertEqual(
+                    self.lib.C_SignInit(
+                        restored, ctypes.byref(hmac), restored_hmac[0]
+                    ),
+                    CKR_OK,
+                )
+                signature = (CK_BYTE * 32)()
+                signature_len = CK_ULONG(len(signature))
+                self.assertEqual(
+                    self.lib.C_Sign(
+                        restored,
+                        message,
+                        len(message),
+                        signature,
+                        ctypes.byref(signature_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_VerifyInit(
+                        restored, ctypes.byref(hmac), restored_copy[0]
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_Verify(
+                        restored,
+                        message,
+                        len(message),
+                        signature,
+                        signature_len.value,
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(self.lib.C_Logout(restored), CKR_OK)
+                for label in (
+                    aes_label_bytes,
+                    hmac_label_bytes,
+                    copied_label_bytes,
+                ):
+                    self.assertEqual(find_label(restored, label), [])
+                self.login_with_pin(restored, b"secret vault user password")
+                restored_hmac = find_label(restored, hmac_label_bytes)
+                self.assertEqual(len(restored_hmac), 1)
+                self.assertEqual(
+                    self.lib.C_DestroyObject(restored, restored_hmac[0]), CKR_OK
+                )
+                self.assertEqual(self.lib.C_CloseSession(restored), CKR_OK)
+                self.assertEqual(self.lib.C_Finalize(None), CKR_OK)
+
+                self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
+                final_session = self.open_slot_session(
+                    named_slot(), CKF_SERIAL_SESSION | CKF_RW_SESSION
+                )
+                self.login_with_pin(final_session, b"secret vault user password")
+                self.assertEqual(find_label(final_session, hmac_label_bytes), [])
+                self.assertEqual(len(find_label(final_session, aes_label_bytes)), 1)
+                self.assertEqual(len(find_label(final_session, copied_label_bytes)), 1)
+                self.assertEqual(self.lib.C_CloseSession(final_session), CKR_OK)
+            finally:
+                self.lib.C_Finalize(None)
+                if previous_slots is None:
+                    os.environ.pop("PKCS11RS_SOFTWARE_SLOTS", None)
+                else:
+                    os.environ["PKCS11RS_SOFTWARE_SLOTS"] = previous_slots
+                if previous_storage is None:
+                    os.environ.pop("PKCS11RS_TOKEN_STORAGE", None)
+                else:
+                    os.environ["PKCS11RS_TOKEN_STORAGE"] = previous_storage
+                if previous_hardware is None:
+                    os.environ.pop("PKCS11RS_HARDWARE_DISCOVERY", None)
+                else:
+                    os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous_hardware
 
     def test_named_software_slot_restores_public_but_not_private_token_state(
         self,

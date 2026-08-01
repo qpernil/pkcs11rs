@@ -335,10 +335,12 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
     );
 
     let mut token = CK_TRUE as CK_BBOOL;
+    let mut private = CK_TRUE as CK_BBOOL;
     let mut token_template = [
         scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
         scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
         bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut value),
     ];
     let mut rejected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;

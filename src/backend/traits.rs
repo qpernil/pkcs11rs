@@ -297,14 +297,14 @@ pub(crate) trait Slot {
     fn supports_software_secret_operations(&self) -> bool {
         false
     }
-    fn store_software_private_key(
+    fn store_software_private_object(
         &mut self,
         _slot_id: CK_SLOT_ID,
         _object: &TokenObject,
     ) -> Result<TokenObject, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
-    fn destroy_software_private_key(&mut self, _unique_id: &str) -> Result<(), Error> {
+    fn destroy_software_private_object(&mut self, _unique_id: &str) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn private_objects_require_login(&self) -> bool {

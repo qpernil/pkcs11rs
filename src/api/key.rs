@@ -1,8 +1,8 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    piv_key_object_handles, required_template_value, validate_software_secret_length,
-    validate_unique_template, yubihsm_hardware_import_object, yubihsm_id,
-    yubihsm_object_parameters,
+    persist_software_private_object, piv_key_object_handles, required_template_value,
+    validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
+    yubihsm_id, yubihsm_object_parameters,
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
@@ -78,7 +78,11 @@ fn generate_key(
         let mut key = generate_key_object(mechanism, templ, software_secret)?;
         validate_new_object_access(&key, flags, logged_in)?;
         if software_secret && key.token {
-            return Err(CKR_TOKEN_WRITE_PROTECTED.into());
+            if !key.private {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            *key_handle = persist_software_private_object(ctx, slot_id, &key)?;
+            return Ok(());
         }
         key.set_creator(session_handle, slot_id);
         let handle = ctx.insert_object(key)?;
@@ -323,12 +327,12 @@ fn generate_key_pair(
             if private_token {
                 let stored_private = ctx
                     ._get_slot_mut(slot_id)?
-                    .store_software_private_key(slot_id, &private_object)?;
+                    .store_software_private_object(slot_id, &private_object)?;
                 let private_unique_id = stored_private.unique_id.clone();
                 if let Err(error) = ctx.refresh_slot_token_objects(slot_id) {
                     let _ = ctx
                         ._get_slot_mut(slot_id)?
-                        .destroy_software_private_key(&private_unique_id);
+                        .destroy_software_private_object(&private_unique_id);
                     return Err(error);
                 }
                 let private =
@@ -342,7 +346,7 @@ fn generate_key_pair(
                         None => {
                             let _ = ctx
                                 ._get_slot_mut(slot_id)?
-                                .destroy_software_private_key(&private_unique_id);
+                                .destroy_software_private_object(&private_unique_id);
                             let _ = ctx.refresh_slot_token_objects(slot_id);
                             return Err(CKR_DEVICE_ERROR.into());
                         }
@@ -352,7 +356,7 @@ fn generate_key_pair(
                     Err(error) => {
                         let _ = ctx
                             ._get_slot_mut(slot_id)?
-                            .destroy_software_private_key(&private_unique_id);
+                            .destroy_software_private_object(&private_unique_id);
                         let _ = ctx.refresh_slot_token_objects(slot_id);
                         return Err(error);
                     }
