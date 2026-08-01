@@ -65,8 +65,7 @@ cannot unwrap that token's public master key; reinitialize the token to adopt
 the new credential. A missing or incorrect discovery credential never blocks
 SO or USER login.
 
-
-## Private-key lifecycle
+## Key lifecycle
 
 `C_GenerateKeyPair` and `C_CreateObject` accept session software private keys
 when `CKA_TOKEN=CK_FALSE`, which is the PKCS #11 default. Each session key
@@ -98,6 +97,13 @@ the USER role is logged in. `C_Logout`, closing the last session,
 that material and clear active private-key operations. PIN changes preserve
 the authenticated role and its already-unwrapped keys.
 
+AES, generic-secret, and SHA-1/SHA-256/SHA-384/SHA-512 HMAC keys follow the
+same session or encrypted-token lifecycle. Persistent secret keys must set
+both `CKA_TOKEN=CK_TRUE` and `CKA_PRIVATE=CK_TRUE`; they are stored only in the
+USER realm. Generation, import, copy, derivation, unwrapping, destruction, and
+restart restoration share the same publication and rollback boundary as
+asymmetric private keys.
+
 ## Encrypted storage format
 
 Persistent private records use envelope encryption. A PIN is not applied
@@ -117,7 +123,7 @@ Headers and record envelopes are strict canonical CBOR with explicit schema,
 version, KDF, AEAD, and parameter identifiers. Development-era formats have no
 migration or compatibility path.
 
-The complete plaintext of each record is DER-encoded PKCS #8
+Asymmetric private-record plaintext is DER-encoded PKCS #8
 `OneAsymmetricKey` version 0:
 
 - the algorithm-specific private key is the normal PKCS #8 private-key value;
@@ -131,6 +137,10 @@ The complete plaintext of each record is DER-encoded PKCS #8
 The private attribute preserves labels outside PKCS #9's BMPString range.
 Conflicting, duplicate, unknown, noncanonical, or malformed attributes are
 rejected.
+
+Secret records instead use a distinct canonical CBOR schema containing the
+raw secret and its authoritative PKCS #11 attributes. Both record kinds are
+encrypted and authenticated under the private master key before publication.
 
 ## Password-encrypted PKCS #8 export
 
@@ -219,14 +229,25 @@ backend does not duplicate cryptography.
   brainpoolP256r1, brainpoolP384r1, and brainpoolP512r1; ECDSA and ECDH.
 - Edwards: Ed25519 signing.
 - Montgomery: X25519 key agreement.
+- AES: 128, 192, and 256-bit keys with ECB, CBC, CBC-PAD, CTR, CCM, GCM,
+  AES-KW, AES-KWP, CMAC, CMAC-GENERAL, and GMAC.
+- HMAC: generic or hash-specific keys with SHA-1, SHA-256, SHA-384, and
+  SHA-512 one-shot and multipart signing and verification.
+- Derivation: ECDH with `CKD_NULL` or SHA-1/SHA-2/SHA-3 X9.63 KDFs, and HKDF
+  extract, expand, or extract-and-expand with SHA-1, SHA-256, SHA-384, or
+  SHA-512.
+- Wrapping: AES-KW, AES-KWP, RSA PKCS #1 v1.5, RSA-OAEP, and hybrid
+  RSA-AES. Secret keys and, where the representation permits it, canonical
+  bare-PKCS #8 asymmetric private keys can be wrapped and unwrapped.
 
 The slot advertises these exact mechanism groups:
 
 | Mechanisms | Key-size range | Flags |
 | --- | ---: | --- |
 | `CKM_RSA_PKCS_KEY_PAIR_GEN` | 1024–4096 | `CKF_GENERATE_KEY_PAIR` |
-| `CKM_RSA_X_509`, `CKM_RSA_PKCS` | 1024–4096 | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_SIGN \| CKF_VERIFY` |
-| `CKM_RSA_PKCS_OAEP` | 1024–4096 | `CKF_ENCRYPT \| CKF_DECRYPT` |
+| `CKM_RSA_X_509` | 1024–4096 | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_SIGN \| CKF_VERIFY` |
+| `CKM_RSA_PKCS` | 1024–4096 | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_SIGN \| CKF_VERIFY \| CKF_WRAP \| CKF_UNWRAP` |
+| `CKM_RSA_PKCS_OAEP` | 1024–4096 | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_WRAP \| CKF_UNWRAP` |
 | `CKM_RSA_PKCS_PSS`, hashed RSA PKCS and PSS variants for SHA-1, SHA-2, and SHA-3 | 1024–4096 | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_EC_KEY_PAIR_GEN` | 224–521 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_F_P \| CKF_EC_NAMEDCURVE` |
 | `CKM_ECDSA` and hashed ECDSA variants for SHA-1, SHA-2, and SHA-3 | 224–521 | `CKF_SIGN \| CKF_VERIFY \| CKF_EC_F_P \| CKF_EC_NAMEDCURVE` |
@@ -234,7 +255,28 @@ The slot advertises these exact mechanism groups:
 | `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | 255 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_NAMEDCURVE \| CKF_EC_CURVENAME` |
 | `CKM_EDDSA` | 255 | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
+| `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
+| `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
+| `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD`, `CKM_AES_CTR`, `CKM_AES_CCM`, `CKM_AES_GCM` | 16–32 bytes | `CKF_ENCRYPT \| CKF_DECRYPT` |
+| `CKM_AES_KEY_WRAP`, `CKM_AES_KEY_WRAP_KWP` | 16–32 bytes | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_WRAP \| CKF_UNWRAP` |
+| `CKM_AES_CMAC`, `CKM_AES_CMAC_GENERAL`, `CKM_AES_GMAC` | 16–32 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| SHA-1, SHA-256, SHA-384, and SHA-512 HMAC | 1–1024 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_HKDF_DERIVE` | 20–64 bytes | `CKF_DERIVE` |
+| `CKM_RSA_AES_KEY_WRAP` | 1024–4096 | `CKF_WRAP \| CKF_UNWRAP` |
 | SHA-1, SHA-2, and SHA-3 digest mechanisms | 0 | `CKF_DIGEST` |
 
 The numeric range is the envelope representable by `C_GetMechanismInfo`;
 `CKA_EC_PARAMS` selects and validates the exact named curve.
+
+## Key policy
+
+Software keys persist and enforce `CKA_ALLOWED_MECHANISMS`,
+`CKA_WRAP_TEMPLATE`, `CKA_UNWRAP_TEMPLATE`, `CKA_DERIVE_TEMPLATE`, and
+`CKA_WRAP_WITH_TRUSTED`. An absent allowed-mechanisms list is unrestricted; an
+explicit empty list permits no mechanism. Nested policy templates are merged
+or matched according to their PKCS #11 roles and are returned through the
+nested `C_GetAttributeValue` buffer protocol.
+
+Software-token SO administration does not yet create trusted wrapping keys.
+Consequently `CKA_TRUSTED=CK_TRUE` is unsupported and a target with
+`CKA_WRAP_WITH_TRUSTED=CK_TRUE` fails closed.

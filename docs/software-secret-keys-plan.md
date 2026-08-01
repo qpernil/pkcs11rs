@@ -1,7 +1,7 @@
 # Software AES, HMAC, derivation, and wrapping plan
 
-Status: implementation roadmap. Completed work is called out below; later
-phases still describe planned behavior.
+Status: complete. The historical phases below record the implemented design;
+master-key cycling remains a separate future maintenance feature.
 
 This work is also the first design probe for the
 [pure Rust provider abstraction](provider-abstraction-plan.md). New AES, HMAC,
@@ -84,7 +84,7 @@ epoch/generation so interruption leaves a complete old or new realm. SO and
 discovery must never participate in private cycling; `C_SetPIN` remains a
 wrapper-only operation.
 
-## Objective
+## Original objective
 
 Extend named software slots so AES and HMAC keys have the same lifecycle as
 the existing software asymmetric keys:
@@ -97,10 +97,10 @@ the existing software asymmetric keys:
   restart; and
 - no fallback from a requested token object to session memory.
 
-Once that foundation exists, use it for typed key derivation and standard key
-wrapping and unwrapping.
+The completed work then uses that foundation for typed key derivation and
+standard key wrapping and unwrapping.
 
-## Existing foundation
+## Starting foundation
 
 The repository already contains most of the required primitives:
 
@@ -118,7 +118,7 @@ The repository already contains most of the required primitives:
   master keys, per-record AES-256-GCM encryption, canonical encoding, atomic
   publication, durable deletion, and login/logout loading boundaries.
 
-The main gaps are object typing, capability advertisement, local operation
+The main gaps were object typing, capability advertisement, local operation
 dispatch, and routing secrets through the encrypted software-token store.
 
 ## Design principles
@@ -652,9 +652,9 @@ exists.
 - Asymmetric PKCS #8 wrapping after that phase is enabled.
 - No residual object after unwrap or storage failure.
 
-Add both Rust coverage and Python ABI-level lifecycle tests. Mechanism-list
-tests must verify exact flags and the absence of `CKF_HW` on software
-mechanisms.
+Rust coverage and Python ABI-level lifecycle tests exercise these paths.
+Mechanism-list tests verify exact flags and the absence of `CKF_HW` on
+software mechanisms.
 
 ## Suggested commit sequence
 
@@ -687,3 +687,11 @@ The roadmap is complete when a named software slot can:
 7. enforce sensitivity, extractability, usage, and mechanism policies; and
 8. pass the Rust, Python, platform, persistence, corruption, and published
    cryptographic-vector test suites.
+
+All eight criteria are implemented. Qualification includes Rust unit and
+PKCS #11 entry-point tests, Python tests against the built shared library,
+native shared-library loading on Windows, Linux, and macOS CI, restart and
+durability tests, malformed and unauthentic storage tests, and published AES,
+HMAC, ECDH/X9.63, HKDF, AES-KW, and AES-KWP vectors. The remaining trusted-key
+SO administration and master-key cycling work are explicitly outside this
+roadmap.

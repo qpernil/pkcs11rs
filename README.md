@@ -204,9 +204,10 @@ entry, duplicate name, overlong name, or non-UTF-8 value makes `C_Initialize`
 return `CKR_ARGUMENTS_BAD`.
 
 Software slots never advertise `CKF_HW` or `CKF_HW_SLOT`. `C_Login(CKU_USER)`
-unlocks private-key operations. Session keys are removed with their creating
-session. With `PKCS11RS_TOKEN_STORAGE` configured, `CKA_TOKEN=CK_TRUE` private
-keys are encrypted below a name-scoped root and survive restart; without that
+unlocks private and secret-key operations. Session keys are removed with their
+creating session. With `PKCS11RS_TOKEN_STORAGE` configured, supported
+`CKA_TOKEN=CK_TRUE` public, private, AES, HMAC, and generic-secret keys are
+encrypted below a name-scoped root and survive restart; without that
 configuration the request returns `CKR_TOKEN_WRITE_PROTECTED` and never falls
 back to session storage. Extractable software private keys can be exported
 through `PKCS11RS_SoftwareExportPrivateKey` as password-encrypted,
@@ -340,18 +341,21 @@ option when `PKCS11RS_TOKEN_STORAGE` is unset.
 `CKA_TOKEN=CK_FALSE` remains session-only; `CKA_TOKEN=CK_TRUE` selects the slot
 provider. Tokens without a stable identity continue to return
 `CKR_TOKEN_WRITE_PROTECTED` for provider-backed token-object creation.
-Software private keys are always session objects. A private-key request with
-`CKA_TOKEN=CK_TRUE` must be fulfilled by the applet or HSM as a real hardware
-object, otherwise it fails. Named software slots always reject that request;
-the generic storage setting persists only their supported non-private token
-objects.
+Named software slots use the configured root for their encrypted public and
+private realms. Their supported asymmetric, AES, HMAC, and generic-secret keys
+can be persistent token objects. Secret keys must be private. Other applet and
+hardware slots still require a private-key token request to be fulfilled as a
+real device object; generic local storage never turns such a request into a
+software key.
 
-The files contain unencrypted private previewSign protocol metadata. On Unix,
-new object files use mode `0600`, but the caller remains responsible for
-protecting and backing up the configured directory. Storage corruption is
-reported instead of silently ignored. The serial binding and positive
-previewSign interoperability still require qualification with compatible
-hardware. See [Content-addressed CBOR storage](docs/storage.md).
+Named software-slot key material and attributes are envelope-encrypted. Other
+providers may store only public objects or unencrypted private previewSign
+protocol metadata. On Unix, new object files use mode `0600`, but the caller
+remains responsible for protecting and backing up the configured directory.
+Storage corruption is reported instead of silently ignored. The serial
+binding and positive previewSign interoperability still require qualification
+with compatible hardware. See [Named software slots](docs/software.md) and
+[Content-addressed CBOR storage](docs/storage.md).
 
 ## CCID Configuration
 
