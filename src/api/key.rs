@@ -1406,6 +1406,16 @@ fn derive_key(
 ) -> Result<(), Error> {
     let key_handle = unsafe { as_mut(key) }?;
     let mechanism = unsafe { _as_ref(mechanism) }?;
+    if mechanism.mechanism == CKM_HKDF_DERIVE as CK_MECHANISM_TYPE {
+        return derive_hkdf_key(
+            session_handle,
+            mechanism,
+            base_key,
+            templ,
+            attribute_count,
+            key_handle,
+        );
+    }
     if mechanism.mechanism == CKM_PKCS11RS_PROJECT_PUBLIC_KEY {
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return Err(CKR_MECHANISM_PARAM_INVALID.into());
@@ -1805,6 +1815,191 @@ fn derive_key(
         *key_handle = ctx.insert_object(derived_object)?;
         Ok(())
     })
+}
+
+fn derive_hkdf_key(
+    session_handle: CK_SESSION_HANDLE,
+    mechanism: &CK_MECHANISM,
+    base_key: CK_OBJECT_HANDLE,
+    templ: CK_ATTRIBUTE_PTR,
+    attribute_count: CK_ULONG,
+    key_handle: &mut CK_OBJECT_HANDLE,
+) -> Result<(), Error> {
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_HKDF_PARAMS>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = unsafe { _as_ref(mechanism.pParameter as CK_HKDF_PARAMS_PTR) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let extract = parameters.bExtract != CK_FALSE as CK_BBOOL;
+    let expand = parameters.bExpand != CK_FALSE as CK_BBOOL;
+    if !extract && !expand {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let digest = match parameters.prfHashMechanism {
+        x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => MessageDigest::Sha1,
+        x if x == CKM_SHA256 as CK_MECHANISM_TYPE => MessageDigest::Sha256,
+        x if x == CKM_SHA384 as CK_MECHANISM_TYPE => MessageDigest::Sha384,
+        x if x == CKM_SHA512 as CK_MECHANISM_TYPE => MessageDigest::Sha512,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    let salt_data = if extract && parameters.ulSaltType == CKF_HKDF_SALT_DATA as CK_ULONG {
+        if parameters.pSalt.is_null() || parameters.ulSaltLen == 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        Some(
+            unsafe { from_raw_parts(parameters.pSalt.cast_const(), parameters.ulSaltLen as usize) }
+                .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?,
+        )
+    } else {
+        None
+    };
+    if extract
+        && !matches!(
+            parameters.ulSaltType,
+            x if x == CKF_HKDF_SALT_NULL as CK_ULONG
+                || x == CKF_HKDF_SALT_DATA as CK_ULONG
+                || x == CKF_HKDF_SALT_KEY as CK_ULONG
+        )
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let info = if expand {
+        unsafe { from_raw_parts(parameters.pInfo.cast_const(), parameters.ulInfoLen as usize) }
+            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
+    } else {
+        &[]
+    };
+    let templ = unsafe { from_raw_parts(templ, attribute_count as usize) }?;
+    validate_unique_template(templ)?;
+    let requested_length = templ
+        .iter()
+        .find(|attribute| attribute.type_ == CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE)
+        .map(|attribute| read_ulong_template_attribute(attribute).map(|value| value as usize))
+        .transpose()
+        .map_err(Error::from)?;
+    let output_length = if expand {
+        requested_length.ok_or(CKR_TEMPLATE_INCOMPLETE)?
+    } else {
+        if requested_length.is_some_and(|length| length != digest.size()) {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        digest.size()
+    };
+    if output_length == 0 || output_length > 1024 || output_length > digest.size() * 255 {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+
+    with_session_context_mut(session_handle, |ctx| {
+        let (slot_id, flags, logged_in) = ctx.session_details(session_handle)?;
+        if !ctx.get_slot(slot_id)?.supports_software_secret_operations() {
+            return Err(CKR_MECHANISM_INVALID.into());
+        }
+        require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_DERIVE as CK_FLAGS)?;
+        let (mut object, material_length) =
+            derived_secret_object(templ, output_length, output_length, true)?;
+        if material_length != output_length {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        validate_new_object_access(&object, flags, logged_in)?;
+        let base = ctx
+            .resolve_object(base_key)?
+            .filter(|object| object.is_visible_to(logged_in))
+            .ok_or(CKR_KEY_HANDLE_INVALID)?;
+        if base.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
+            || base.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
+        {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        }
+        if !base.derive {
+            return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
+        }
+        let KeyMaterial::SoftwareSecret(base_value) = &base.material else {
+            return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+        };
+        if base_value.len() != digest.size() {
+            return Err(CKR_KEY_SIZE_RANGE.into());
+        }
+        let salt_key = if extract && parameters.ulSaltType == CKF_HKDF_SALT_KEY as CK_ULONG {
+            let salt = ctx
+                .resolve_object(parameters.hSaltKey)?
+                .filter(|object| object.is_visible_to(logged_in))
+                .ok_or(CKR_KEY_HANDLE_INVALID)?;
+            let KeyMaterial::SoftwareSecret(value) = salt.material else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            Some(value)
+        } else {
+            None
+        };
+        let salt = salt_key
+            .as_ref()
+            .map(|value| value.as_slice())
+            .or(salt_data);
+        let value = hkdf_key_material(
+            digest,
+            extract,
+            expand,
+            base_value,
+            salt,
+            info,
+            output_length,
+        )?;
+        if material_length != value.len() {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        object.material = KeyMaterial::SoftwareSecret(value);
+        object.always_sensitive = base.always_sensitive && object.sensitive;
+        object.never_extractable = base.never_extractable && !object.extractable;
+        object.local = false;
+        object.key_gen_mechanism = Some(mechanism.mechanism);
+        *key_handle = publish_software_secret_object(ctx, session_handle, slot_id, object)?;
+        Ok(())
+    })
+}
+
+pub(crate) fn hkdf_key_material(
+    digest: MessageDigest,
+    extract: bool,
+    expand: bool,
+    base_key: &[u8],
+    salt: Option<&[u8]>,
+    info: &[u8],
+    output_length: usize,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
+    macro_rules! derive {
+        ($hash:ty) => {{
+            if extract {
+                let (mut prk, hkdf) = hkdf::Hkdf::<$hash>::extract(salt, base_key);
+                if expand {
+                    prk.zeroize();
+                    let mut output = Zeroizing::new(vec![0; output_length]);
+                    hkdf.expand(info, &mut output)
+                        .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                    Ok(output)
+                } else {
+                    let output = Zeroizing::new(prk.to_vec());
+                    prk.zeroize();
+                    Ok(output)
+                }
+            } else {
+                let hkdf = hkdf::Hkdf::<$hash>::from_prk(base_key)
+                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                let mut output = Zeroizing::new(vec![0; output_length]);
+                hkdf.expand(info, &mut output)
+                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                Ok(output)
+            }
+        }};
+    }
+    match digest {
+        MessageDigest::Sha1 => derive!(sha1::Sha1),
+        MessageDigest::Sha256 => derive!(sha2::Sha256),
+        MessageDigest::Sha384 => derive!(sha2::Sha384),
+        MessageDigest::Sha512 => derive!(sha2::Sha512),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
 }
 
 #[derive(Clone, Copy)]

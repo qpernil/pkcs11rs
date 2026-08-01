@@ -51,6 +51,13 @@ the base key, while `CKA_LOCAL` is false and `CKA_KEY_GEN_MECHANISM` records the
 derive mechanism. Legacy hardware and applet slots retain their generic
 session-secret behavior and do not gain a host-software AES or HMAC fallback.
 
+Phase 6 HKDF derivation is implemented for SHA-1, SHA-256, SHA-384, and
+SHA-512. Named software slots support extract-only, expand-only, and combined
+extract-and-expand operation, with null, byte-string, or key-object salts and
+caller-supplied `info`. Generic base secrets can derive generic, AES, or HMAC
+session keys and private persistent token keys through the same typed
+publication and policy-inheritance boundary as ECDH.
+
 Phase 7 AES wrapping and unwrapping is implemented for software secret keys.
 `CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_KWP` support length queries,
 short-buffer handling, caller-supplied IVs, extraction and usage policy,
@@ -411,7 +418,7 @@ than round trips alone.
 
 ## Phase 6: HKDF
 
-Implement `CKM_HKDF_DERIVE` using the existing `hkdf` dependency:
+Implemented for `CKM_HKDF_DERIVE` using the `hkdf` dependency:
 
 - SHA-1, SHA-256, SHA-384, and SHA-512;
 - extract-only;
