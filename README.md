@@ -476,13 +476,14 @@ test:
 
 ```sh
 cargo build --locked
-cargo test --locked --test shared_library -- --ignored
+cargo xtask load-shared-library
 ```
 
 The smoke test resolves the exported PKCS #11 entry points, initializes the
 module with local hardware discovery disabled, queries its slots, finalizes
-it, and unloads it. It is ignored by the ordinary Rust suite so that
-`cargo test` does not also build the production shared library.
+it, and unloads it. It lives outside Cargo's integration-test discovery, so
+ordinary and all-features `cargo test` runs do not compile a second library
+test target.
 
 Run the hardware-independent Python ABI tests:
 
