@@ -130,6 +130,16 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
             ),
         )?;
     }
+    if matches!(
+        object.class,
+        x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS || x == CKO_SECRET_KEY as CK_OBJECT_CLASS
+    ) {
+        insert(
+            &mut attributes,
+            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+            KeyAttributeValue::Boolean(object.wrap_with_trusted),
+        )?;
+    }
     if let Some(public_key_info) = object.public_key_info() {
         insert(
             &mut attributes,
@@ -333,6 +343,17 @@ fn optional_unsigned(
     }
 }
 
+fn optional_bool(
+    attributes: &KeyAttributes,
+    attribute: CK_ATTRIBUTE_TYPE,
+) -> Result<Option<bool>, Error> {
+    match attributes.get(cryptoki_ulong_to_u64(attribute)) {
+        Some(KeyAttributeValue::Boolean(value)) => Ok(Some(*value)),
+        None => Ok(None),
+        _ => Err(CKR_DATA_INVALID.into()),
+    }
+}
+
 fn optional_mechanisms(
     attributes: &KeyAttributes,
     attribute: CK_ATTRIBUTE_TYPE,
@@ -496,6 +517,8 @@ fn materialize_object(
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
     let allowed_mechanisms =
         optional_mechanisms(attributes, CKA_ALLOWED_MECHANISMS as CK_ATTRIBUTE_TYPE)?;
+    let wrap_with_trusted =
+        optional_bool(attributes, CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE)?.unwrap_or(false);
     let object = TokenObject {
         slot_id: token.then_some(slot_id),
         unique_id: backed_object_unique_id(reference),
@@ -519,6 +542,7 @@ fn materialize_object(
         local: required_bool(attributes, CKA_LOCAL as CK_ATTRIBUTE_TYPE)?,
         key_gen_mechanism,
         allowed_mechanisms,
+        wrap_with_trusted,
         creator_session: None,
         public_key: None,
         rp_id,
@@ -778,6 +802,7 @@ mod tests {
                 CKM_RSA_PKCS as CK_MECHANISM_TYPE,
                 CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
             ]),
+            wrap_with_trusted: false,
             creator_session: None,
             public_key: None,
             rp_id: None,

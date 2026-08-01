@@ -31,6 +31,7 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         local: true,
         key_gen_mechanism: None,
         allowed_mechanisms: None,
+        wrap_with_trusted: false,
         creator_session: None,
         public_key: None,
         rp_id: None,

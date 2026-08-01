@@ -35,6 +35,37 @@ fn create_software_wrap_test_key(
     handle
 }
 
+fn create_software_trusted_wrap_target(
+    session: CK_SESSION_HANDLE,
+    value: &mut [u8],
+) -> CK_OBJECT_HANDLE {
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
+    let mut extractable = CK_TRUE as CK_BBOOL;
+    let mut wrap_with_trusted = CK_TRUE as CK_BBOOL;
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, value),
+        scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+        scalar_attribute(
+            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+            &mut wrap_with_trusted,
+        ),
+    ];
+    let mut handle = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut handle,
+        ),
+        CKR_OK as CK_RV
+    );
+    handle
+}
+
 fn software_unwrap_test_template(
     key_type: &mut CK_KEY_TYPE,
     sign: &mut CK_BBOOL,
@@ -139,6 +170,26 @@ fn software_aes_wrap_and_unwrap_secret_keys() {
             &mut denied_length,
         ),
         CKR_KEY_UNEXTRACTABLE as CK_RV
+    );
+    let mut trusted_only_value = [0x44; 16];
+    let trusted_only =
+        create_software_trusted_wrap_target(TEST_SESSION_HANDLE, &mut trusted_only_value);
+    assert!(checked_bool_attribute(
+        TEST_SESSION_HANDLE,
+        trusted_only,
+        CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+    )
+    .unwrap());
+    assert_eq!(
+        crate::api::C_WrapKey(
+            TEST_SESSION_HANDLE,
+            &mut kw,
+            wrapper,
+            trusted_only,
+            std::ptr::null_mut(),
+            &mut denied_length,
+        ),
+        CKR_KEY_NOT_WRAPPABLE as CK_RV
     );
     assert_eq!(wrapped_length, 24);
     let mut short = [0; 23];

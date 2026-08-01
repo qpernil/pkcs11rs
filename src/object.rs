@@ -44,6 +44,7 @@ pub(crate) struct TokenObject {
     pub(crate) local: bool,
     pub(crate) key_gen_mechanism: Option<CK_MECHANISM_TYPE>,
     pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
+    pub(crate) wrap_with_trusted: bool,
     pub(crate) creator_session: Option<CK_SESSION_HANDLE>,
     pub(crate) public_key: Option<PublicKeyMaterial>,
     pub(crate) rp_id: Option<String>,
@@ -467,6 +468,7 @@ pub(crate) struct TokenObjectTemplate {
     pub(crate) sensitive: Option<bool>,
     pub(crate) extractable: Option<bool>,
     pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
+    pub(crate) wrap_with_trusted: bool,
 }
 
 #[derive(Debug)]
@@ -1298,11 +1300,19 @@ impl TokenObject {
             x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.can_unwrap()))
             }
+            x if x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
+                && matches!(
+                    self.class,
+                    x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                        || x == CKO_SECRET_KEY as CK_OBJECT_CLASS
+                ) =>
+            {
+                Some(bool_attribute(self.wrap_with_trusted))
+            }
             x if x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE
                 || x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE
                 || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
-                || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE
-                || x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE =>
+                || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE =>
             {
                 Some(bool_attribute(false))
             }
@@ -1955,6 +1965,10 @@ impl TokenObjectTemplate {
                 self.unwrap = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE => {
+                self.wrap_with_trusted = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
             x if x == CKA_SENSITIVE as CK_ATTRIBUTE_TYPE => {
                 self.sensitive = Some(read_bool_template_attribute(attribute)?);
                 Ok(())
@@ -2004,6 +2018,15 @@ impl TokenObjectTemplate {
         let class = self.class.ok_or(CKR_TEMPLATE_INCOMPLETE as CK_RV)?;
         let nonextractable_key = class == CKO_SECRET_KEY as CK_OBJECT_CLASS;
         let private_key = class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+        if self.wrap_with_trusted
+            && !matches!(
+                class,
+                x if x == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                    || x == CKO_SECRET_KEY as CK_OBJECT_CLASS
+            )
+        {
+            return Err(CKR_TEMPLATE_INCONSISTENT as CK_RV);
+        }
         let extractable = self
             .extractable
             .unwrap_or(!(private_key || (nonextractable_key && !software_secret)));
@@ -2033,6 +2056,7 @@ impl TokenObjectTemplate {
             local: false,
             key_gen_mechanism: None,
             allowed_mechanisms: self.allowed_mechanisms,
+            wrap_with_trusted: self.wrap_with_trusted,
             creator_session: None,
             public_key: None,
             rp_id: None,
