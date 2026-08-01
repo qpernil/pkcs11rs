@@ -51,12 +51,13 @@ ambiguously addressed store.
 Named software slots use the configured token name as their stable storage
 identity. When `PKCS11RS_TOKEN_STORAGE` is set, each name receives a distinct
 `software-name-<hex-encoded-name>` directory below `tokens-v1`. The provider
-stores supported non-private backed token objects such as public projections.
-It also supplies that named token's isolated root to the encrypted
-private-key store. Private keys are stored separately below
-`private-keys-v1`: a login-PIN-wrapped random master key protects attributed
-PKCS #8 records with AES-256-GCM. No hardware or applet slot installs this
-software-private store. See [Named software slots](software.md) for its format,
+stores encrypted backed public objects below `public-objects-v1`. It also
+supplies that named token's isolated root to the private realm below
+`private-keys-v1`, where the USER-PIN-wrapped private master key protects
+attributed PKCS #8 asymmetric records and canonical secret-key records with
+AES-256-GCM. Independent public and private master keys keep SO and discovery
+access out of the private realm. No hardware or applet slot installs this
+software-token store. See [Named software slots](software.md) for its format,
 PIN, permissions, corruption, durability, and concurrency semantics.
 
 ## Backed-key metadata

@@ -193,7 +193,7 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
     }
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
-    let mut key_type = CKK_SHA256_HMAC as CK_KEY_TYPE;
+    let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut verify = CK_TRUE as CK_BBOOL;
     let mut sensitive = CK_FALSE as CK_BBOOL;
@@ -228,6 +228,57 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
         CKR_OK as CK_RV
     );
     assert_eq!(value_attribute.ulValueLen, value.len() as CK_ULONG);
+
+    // RFC 2202 test case 1 for SHA-1 and RFC 4231 test case 1 for SHA-2.
+    for (mechanism_type, expected) in [
+        (
+            CKM_SHA_1_HMAC as CK_MECHANISM_TYPE,
+            "b617318655057264e28bc0b6fb378c8ef146be00",
+        ),
+        (
+            CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        ),
+        (
+            CKM_SHA384_HMAC as CK_MECHANISM_TYPE,
+            concat!(
+                "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec6",
+                "82aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6"
+            ),
+        ),
+        (
+            CKM_SHA512_HMAC as CK_MECHANISM_TYPE,
+            concat!(
+                "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec278",
+                "7ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4",
+                "be9d914eeb61f1702e696c203a126854"
+            ),
+        ),
+    ] {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+            CKR_OK as CK_RV
+        );
+        let expected = crate::parse_hex(expected).unwrap();
+        let mut signature = vec![0; expected.len()];
+        let mut signature_length = signature.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_Sign(
+                TEST_SESSION_HANDLE,
+                b"Hi There".as_ptr().cast_mut(),
+                8,
+                signature.as_mut_ptr(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(signature, expected);
+    }
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_SHA256_HMAC as CK_MECHANISM_TYPE,

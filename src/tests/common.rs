@@ -3715,22 +3715,45 @@ fn test_aes_ecb(key: &[u8], input: &[u8]) -> Result<Vec<u8>, crate::error::Error
 }
 
 #[test]
-fn software_aes_blocks_match_nist_vector() {
-    let key = test_hex("2b7e151628aed2a6abf7158809cf4f3c");
+fn software_aes_blocks_match_nist_vectors_for_every_key_size() {
     let plaintext = test_hex(concat!(
         "6bc1bee22e409f96e93d7e117393172a",
         "ae2d8a571e03ac9c9eb76fac45af8e51"
     ));
-    let expected = test_hex(concat!(
-        "3ad77bb40d7a3660a89ecaf32466ef97",
-        "f5d3d58503b9699de785895a96fdbaaf"
-    ));
-    let encrypted = crate::api::software_crypt_ecb_blocks(&key, &plaintext, true).unwrap();
-    assert_eq!(encrypted, expected);
-    assert_eq!(
-        crate::api::software_crypt_ecb_blocks(&key, &encrypted, false).unwrap(),
-        plaintext
-    );
+    // NIST SP 800-38A, Appendix F.1, first two blocks for AES-128,
+    // AES-192, and AES-256.
+    for (key, expected) in [
+        (
+            "2b7e151628aed2a6abf7158809cf4f3c",
+            concat!(
+                "3ad77bb40d7a3660a89ecaf32466ef97",
+                "f5d3d58503b9699de785895a96fdbaaf"
+            ),
+        ),
+        (
+            "8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b",
+            concat!(
+                "bd334f1d6e45f25ff712a214571fa5cc",
+                "974104846d0ad3ad7734ecb3ecee4eef"
+            ),
+        ),
+        (
+            "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+            concat!(
+                "f3eed1bdb5d2a03c064b5a7e3db181f8",
+                "591ccb10d410ed26dc5ba74a31362870"
+            ),
+        ),
+    ] {
+        let key = test_hex(key);
+        let expected = test_hex(expected);
+        let encrypted = crate::api::software_crypt_ecb_blocks(&key, &plaintext, true).unwrap();
+        assert_eq!(encrypted, expected);
+        assert_eq!(
+            crate::api::software_crypt_ecb_blocks(&key, &encrypted, false).unwrap(),
+            plaintext
+        );
+    }
 }
 
 fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT_HANDLE {
