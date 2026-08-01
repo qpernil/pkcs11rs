@@ -292,12 +292,45 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
 }
 
 pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
-    let mut mechanisms = vec![MechanismDetails {
-        type_: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
-        min_key_size: 1,
-        max_key_size: 1024,
-        flags: CKF_GENERATE as CK_FLAGS,
-    }];
+    let mut mechanisms = vec![
+        MechanismDetails {
+            type_: CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
+            flags: CKF_GENERATE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_AES_KEY_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 16,
+            max_key_size: 32,
+            flags: CKF_GENERATE as CK_FLAGS,
+        },
+    ];
+    for type_ in [
+        CKM_AES_ECB,
+        CKM_AES_CBC,
+        CKM_AES_CBC_PAD,
+        CKM_AES_CTR,
+        CKM_AES_CCM,
+        CKM_AES_GCM,
+        CKM_AES_KEY_WRAP,
+        CKM_AES_KEY_WRAP_KWP,
+    ] {
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 16,
+            max_key_size: 32,
+            flags: (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+        });
+    }
+    for type_ in [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC] {
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 16,
+            max_key_size: 32,
+            flags: (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        });
+    }
     for type_ in [
         CKM_SHA_1_HMAC,
         CKM_SHA256_HMAC,

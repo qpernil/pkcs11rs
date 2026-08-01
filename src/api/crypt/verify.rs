@@ -1,6 +1,6 @@
 use super::sign::{
-    aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, software_hmac,
-    yubihsm_aes_cmac, yubihsm_aes_gmac,
+    aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, software_aes_cmac,
+    software_aes_gmac, software_hmac, yubihsm_aes_cmac, yubihsm_aes_gmac,
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
@@ -138,7 +138,7 @@ fn verify_init(
                     KeyMaterial::YubiHsm {
                         algorithm: YUBIHSM_ALGO_AES128 | YUBIHSM_ALGO_AES192 | YUBIHSM_ALGO_AES256,
                         ..
-                    }
+                    } | KeyMaterial::SoftwareSecret(_)
                 )))
             || hmac_key_is_invalid
             || (!cmac_mechanism
@@ -237,12 +237,18 @@ fn verify(
             if signature.len() != mac_length {
                 return Err(CKR_SIGNATURE_LEN_RANGE.into());
             }
-            let KeyMaterial::YubiHsm { id, .. } = &operation.key else {
-                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-            };
-            let mut expected = match &operation.gmac {
-                Some(parameters) => yubihsm_aes_gmac(ctx, session_handle, *id, parameters, data)?,
-                None => yubihsm_aes_cmac(ctx, session_handle, *id, data)?,
+            let mut expected = match &operation.key {
+                KeyMaterial::YubiHsm { id, .. } => match &operation.gmac {
+                    Some(parameters) => {
+                        yubihsm_aes_gmac(ctx, session_handle, *id, parameters, data)?
+                    }
+                    None => yubihsm_aes_cmac(ctx, session_handle, *id, data)?,
+                },
+                KeyMaterial::SoftwareSecret(key) => match &operation.gmac {
+                    Some(parameters) => software_aes_gmac(key, parameters, data)?,
+                    None => software_aes_cmac(key, data)?,
+                },
+                _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
             };
             expected.truncate(mac_length);
             if !bool::from(subtle::ConstantTimeEq::ct_eq(

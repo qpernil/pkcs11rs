@@ -79,6 +79,8 @@ CKF_PROTECTED_AUTHENTICATION_PATH = 0x00000100
 CKF_SIGN = 0x00000800
 CKF_VERIFY = 0x00002000
 CKF_GENERATE = 0x00008000
+CKF_ENCRYPT = 0x00000100
+CKF_DECRYPT = 0x00000200
 CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000
 CKM_RSA_PKCS = 0x00000001
 CKM_SHA224_RSA_PKCS = 0x00000046
@@ -96,6 +98,7 @@ CKM_SHA3_512 = 0x000002D0
 CKM_GENERIC_SECRET_KEY_GEN = 0x00000350
 CKM_EC_KEY_PAIR_GEN = 0x00001040
 CKM_ECDSA = 0x00001041
+CKM_AES_KEY_GEN = 0x00001080
 CKM_AES_ECB = 0x00001081
 CKM_AES_CBC = 0x00001082
 CKM_AES_CBC_PAD = 0x00001085
@@ -1726,7 +1729,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             else:
                 os.environ["PKCS11RS_HARDWARE_DISCOVERY"] = previous_hardware
 
-    def test_named_software_slot_hmac_session_key(self) -> None:
+    def test_named_software_slot_secret_session_keys(self) -> None:
         previous_slots = os.environ.get("PKCS11RS_SOFTWARE_SLOTS")
         previous_hardware = os.environ.get("PKCS11RS_HARDWARE_DISCOVERY")
         os.environ["PKCS11RS_SOFTWARE_SLOTS"] = "hmac session"
@@ -1762,6 +1765,10 @@ class Pkcs11AbiTests(unittest.TestCase):
             for mechanism_type, flags in (
                 (CKM_GENERIC_SECRET_KEY_GEN, CKF_GENERATE),
                 (CKM_SHA256_HMAC, CKF_SIGN | CKF_VERIFY),
+                (CKM_AES_KEY_GEN, CKF_GENERATE),
+                (CKM_AES_ECB, CKF_ENCRYPT | CKF_DECRYPT),
+                (CKM_AES_GCM, CKF_ENCRYPT | CKF_DECRYPT),
+                (CKM_AES_CMAC, CKF_SIGN | CKF_VERIFY),
             ):
                 self.assertEqual(
                     self.lib.C_GetMechanismInfo(
@@ -1875,6 +1882,451 @@ class Pkcs11AbiTests(unittest.TestCase):
                 ),
                 CKR_OK,
             )
+
+            object_class = CK_ULONG(CKO_SECRET_KEY)
+            aes_key_type = CK_ULONG(CKK_AES)
+            aes_value = (CK_BYTE * 16).from_buffer_copy(
+                bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+            )
+            aes_template = (CK_ATTRIBUTE * 8)(
+                CK_ATTRIBUTE(
+                    CKA_CLASS,
+                    ctypes.cast(ctypes.byref(object_class), CK_VOID_PTR),
+                    ctypes.sizeof(object_class),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_KEY_TYPE,
+                    ctypes.cast(ctypes.byref(aes_key_type), CK_VOID_PTR),
+                    ctypes.sizeof(aes_key_type),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_VALUE,
+                    ctypes.cast(aes_value, CK_VOID_PTR),
+                    len(aes_value),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                    ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ENCRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_DECRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_SIGN,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_VERIFY,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+            )
+            aes_key = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_CreateObject(
+                    session,
+                    aes_template,
+                    len(aes_template),
+                    ctypes.byref(aes_key),
+                ),
+                CKR_OK,
+            )
+
+            plaintext_bytes = bytes.fromhex(
+                "6bc1bee22e409f96e93d7e117393172a"
+                "ae2d8a571e03ac9c9eb76fac45af8e51"
+                "30c81c46a35ce411e5fbc1191a0a52ef"
+                "f69f2445df4f9b17ad2b417be66c3710"
+            )
+            expected_ecb = bytes.fromhex(
+                "3ad77bb40d7a3660a89ecaf32466ef97"
+                "f5d3d58503b9699de785895a96fdbaaf"
+                "43b1cd7f598ece23881b00e3ed030688"
+                "7b0c785e27e8ad3f8223207104725dd4"
+            )
+            plaintext = (CK_BYTE * len(plaintext_bytes)).from_buffer_copy(
+                plaintext_bytes
+            )
+            encrypted = (CK_BYTE * len(expected_ecb))()
+            encrypted_len = CK_ULONG(len(encrypted))
+            ecb = CK_MECHANISM(CKM_AES_ECB, None, 0)
+            self.assertEqual(
+                self.lib.C_EncryptInit(session, ctypes.byref(ecb), aes_key.value),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Encrypt(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    encrypted,
+                    ctypes.byref(encrypted_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(bytes(encrypted), expected_ecb)
+            decrypted = (CK_BYTE * len(plaintext_bytes))()
+            decrypted_len = CK_ULONG(len(decrypted))
+            self.assertEqual(
+                self.lib.C_DecryptInit(session, ctypes.byref(ecb), aes_key.value),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Decrypt(
+                    session,
+                    encrypted,
+                    encrypted_len.value,
+                    decrypted,
+                    ctypes.byref(decrypted_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(bytes(decrypted), plaintext_bytes)
+
+            def assert_aes_round_trip(
+                mechanism: CK_MECHANISM, payload_bytes: bytes
+            ) -> None:
+                payload = (CK_BYTE * len(payload_bytes)).from_buffer_copy(
+                    payload_bytes
+                )
+                self.assertEqual(
+                    self.lib.C_EncryptInit(
+                        session, ctypes.byref(mechanism), aes_key.value
+                    ),
+                    CKR_OK,
+                )
+                ciphertext_len = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_Encrypt(
+                        session,
+                        payload,
+                        len(payload),
+                        None,
+                        ctypes.byref(ciphertext_len),
+                    ),
+                    CKR_OK,
+                )
+                ciphertext = (CK_BYTE * ciphertext_len.value)()
+                self.assertEqual(
+                    self.lib.C_Encrypt(
+                        session,
+                        payload,
+                        len(payload),
+                        ciphertext,
+                        ctypes.byref(ciphertext_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    self.lib.C_DecryptInit(
+                        session, ctypes.byref(mechanism), aes_key.value
+                    ),
+                    CKR_OK,
+                )
+                recovered_len = CK_ULONG()
+                self.assertEqual(
+                    self.lib.C_Decrypt(
+                        session,
+                        ciphertext,
+                        ciphertext_len.value,
+                        None,
+                        ctypes.byref(recovered_len),
+                    ),
+                    CKR_OK,
+                )
+                recovered = (CK_BYTE * recovered_len.value)()
+                self.assertEqual(
+                    self.lib.C_Decrypt(
+                        session,
+                        ciphertext,
+                        ciphertext_len.value,
+                        recovered,
+                        ctypes.byref(recovered_len),
+                    ),
+                    CKR_OK,
+                )
+                self.assertEqual(
+                    bytes(recovered[: recovered_len.value]), payload_bytes
+                )
+
+            cbc_iv = (CK_BYTE * 16)(*range(16))
+            assert_aes_round_trip(
+                CK_MECHANISM(
+                    CKM_AES_CBC,
+                    ctypes.cast(cbc_iv, CK_VOID_PTR),
+                    len(cbc_iv),
+                ),
+                plaintext_bytes,
+            )
+            ctr_parameters = CK_AES_CTR_PARAMS(
+                128,
+                (CK_BYTE * 16).from_buffer_copy(
+                    bytes.fromhex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
+                ),
+            )
+            assert_aes_round_trip(
+                CK_MECHANISM(
+                    CKM_AES_CTR,
+                    ctypes.cast(ctypes.pointer(ctr_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(ctr_parameters),
+                ),
+                plaintext_bytes[:37],
+            )
+            gcm_iv = (CK_BYTE * 12)(*range(12))
+            gcm_aad = (CK_BYTE * 7)(*range(7))
+            gcm_parameters = CK_GCM_PARAMS(
+                gcm_iv,
+                len(gcm_iv),
+                len(gcm_iv) * 8,
+                gcm_aad,
+                len(gcm_aad),
+                128,
+            )
+            assert_aes_round_trip(
+                CK_MECHANISM(
+                    CKM_AES_GCM,
+                    ctypes.cast(ctypes.pointer(gcm_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(gcm_parameters),
+                ),
+                plaintext_bytes[:37],
+            )
+            ccm_nonce = (CK_BYTE * 13)(*range(13))
+            ccm_aad = (CK_BYTE * 8)(*range(8))
+            ccm_payload = plaintext_bytes[:23]
+            ccm_parameters = CK_CCM_PARAMS(
+                len(ccm_payload),
+                ccm_nonce,
+                len(ccm_nonce),
+                ccm_aad,
+                len(ccm_aad),
+                8,
+            )
+            assert_aes_round_trip(
+                CK_MECHANISM(
+                    CKM_AES_CCM,
+                    ctypes.cast(ctypes.pointer(ccm_parameters), CK_VOID_PTR),
+                    ctypes.sizeof(ccm_parameters),
+                ),
+                ccm_payload,
+            )
+            assert_aes_round_trip(
+                CK_MECHANISM(CKM_AES_KEY_WRAP, None, 0),
+                plaintext_bytes[:16],
+            )
+            assert_aes_round_trip(
+                CK_MECHANISM(CKM_AES_KEY_WRAP_KWP, None, 0),
+                plaintext_bytes[:7],
+            )
+
+            cmac = CK_MECHANISM(CKM_AES_CMAC, None, 0)
+            self.assertEqual(
+                self.lib.C_SignInit(session, ctypes.byref(cmac), aes_key.value),
+                CKR_OK,
+            )
+            mac = (CK_BYTE * 16)()
+            mac_len = CK_ULONG(len(mac))
+            self.assertEqual(
+                self.lib.C_Sign(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    mac,
+                    ctypes.byref(mac_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                bytes(mac), bytes.fromhex("51f0bebf7e3b9d92fc49741779363cfe")
+            )
+            self.assertEqual(
+                self.lib.C_VerifyInit(session, ctypes.byref(cmac), aes_key.value),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Verify(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    mac,
+                    mac_len.value,
+                ),
+                CKR_OK,
+            )
+
+            general_length = CK_ULONG(8)
+            cmac_general = CK_MECHANISM(
+                CKM_AES_CMAC_GENERAL,
+                ctypes.cast(ctypes.byref(general_length), CK_VOID_PTR),
+                ctypes.sizeof(general_length),
+            )
+            self.assertEqual(
+                self.lib.C_SignInit(
+                    session, ctypes.byref(cmac_general), aes_key.value
+                ),
+                CKR_OK,
+            )
+            truncated = (CK_BYTE * general_length.value)()
+            truncated_len = CK_ULONG(len(truncated))
+            self.assertEqual(
+                self.lib.C_Sign(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    truncated,
+                    ctypes.byref(truncated_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(bytes(truncated), bytes(mac[:8]))
+            self.assertEqual(
+                self.lib.C_VerifyInit(
+                    session, ctypes.byref(cmac_general), aes_key.value
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Verify(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    truncated,
+                    truncated_len.value,
+                ),
+                CKR_OK,
+            )
+
+            gmac_parameters = CK_GCM_PARAMS(
+                gcm_iv,
+                len(gcm_iv),
+                len(gcm_iv) * 8,
+                None,
+                0,
+                128,
+            )
+            gmac = CK_MECHANISM(
+                CKM_AES_GMAC,
+                ctypes.cast(ctypes.pointer(gmac_parameters), CK_VOID_PTR),
+                ctypes.sizeof(gmac_parameters),
+            )
+            self.assertEqual(
+                self.lib.C_SignInit(session, ctypes.byref(gmac), aes_key.value),
+                CKR_OK,
+            )
+            gmac_value = (CK_BYTE * 16)()
+            gmac_len = CK_ULONG(len(gmac_value))
+            self.assertEqual(
+                self.lib.C_Sign(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    gmac_value,
+                    ctypes.byref(gmac_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_VerifyInit(session, ctypes.byref(gmac), aes_key.value),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Verify(
+                    session,
+                    plaintext,
+                    len(plaintext),
+                    gmac_value,
+                    gmac_len.value,
+                ),
+                CKR_OK,
+            )
+
+            aes_value_len = CK_ULONG(16)
+            aes_generate_template = (CK_ATTRIBUTE * 4)(
+                CK_ATTRIBUTE(
+                    CKA_VALUE_LEN,
+                    ctypes.cast(ctypes.byref(aes_value_len), CK_VOID_PTR),
+                    ctypes.sizeof(aes_value_len),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_TOKEN,
+                    ctypes.cast(ctypes.byref(session_object), CK_VOID_PTR),
+                    ctypes.sizeof(session_object),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_ENCRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+                CK_ATTRIBUTE(
+                    CKA_DECRYPT,
+                    ctypes.cast(ctypes.byref(enabled), CK_VOID_PTR),
+                    ctypes.sizeof(enabled),
+                ),
+            )
+            aes_generate = CK_MECHANISM(CKM_AES_KEY_GEN, None, 0)
+            generated_aes = CK_ULONG()
+            self.assertEqual(
+                self.lib.C_GenerateKey(
+                    session,
+                    ctypes.byref(aes_generate),
+                    aes_generate_template,
+                    len(aes_generate_template),
+                    ctypes.byref(generated_aes),
+                ),
+                CKR_OK,
+            )
+            iv = (CK_BYTE * 16)(*range(16))
+            cbc_pad = CK_MECHANISM(
+                CKM_AES_CBC_PAD,
+                ctypes.cast(iv, CK_VOID_PTR),
+                len(iv),
+            )
+            short_plaintext = (CK_BYTE * 23)(*range(23))
+            padded = (CK_BYTE * 32)()
+            padded_len = CK_ULONG(len(padded))
+            self.assertEqual(
+                self.lib.C_EncryptInit(
+                    session, ctypes.byref(cbc_pad), generated_aes.value
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Encrypt(
+                    session,
+                    short_plaintext,
+                    len(short_plaintext),
+                    padded,
+                    ctypes.byref(padded_len),
+                ),
+                CKR_OK,
+            )
+            unpadded = (CK_BYTE * len(short_plaintext))()
+            unpadded_len = CK_ULONG(len(unpadded))
+            self.assertEqual(
+                self.lib.C_DecryptInit(
+                    session, ctypes.byref(cbc_pad), generated_aes.value
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(
+                self.lib.C_Decrypt(
+                    session,
+                    padded,
+                    padded_len.value,
+                    unpadded,
+                    ctypes.byref(unpadded_len),
+                ),
+                CKR_OK,
+            )
+            self.assertEqual(bytes(unpadded), bytes(short_plaintext))
 
             token_object = CK_BYTE(1)
             template[2] = CK_ATTRIBUTE(

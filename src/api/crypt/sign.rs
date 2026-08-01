@@ -1,5 +1,7 @@
 use super::{
-    encrypt::{aes_gcm, parse_gcm_parameters, yubihsm_encrypt_ecb_blocks},
+    encrypt::{
+        aes_gcm, parse_gcm_parameters, software_crypt_ecb_blocks, yubihsm_encrypt_ecb_blocks,
+    },
     shared::{
         encode_pkcs1_v1_5_signature_input, yubihsm_ec_coordinate_length, yubihsm_ecdsa_signature,
     },
@@ -290,6 +292,22 @@ pub(crate) fn yubihsm_aes_gmac(
     })
 }
 
+pub(crate) fn software_aes_cmac(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
+    aes_cmac_with_encryptor(data, |block| software_crypt_ecb_blocks(key, block, true))
+}
+
+pub(crate) fn software_aes_gmac(
+    key: &[u8],
+    parameters: &GcmParameters,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let mut parameters = parameters.clone();
+    parameters.aad = data.to_vec();
+    aes_gcm(&parameters, &[], true, |blocks| {
+        software_crypt_ecb_blocks(key, blocks, true)
+    })
+}
+
 ffi_entry_point! {
     pub fn C_SignInit(
         session_handle: CK_SESSION_HANDLE,
@@ -483,11 +501,13 @@ fn sign_init(
                 key.key_type() == expected_key_type
                     && software_sign_mechanism_supported(key, mechanism.mechanism)
             }
-            KeyMaterial::SoftwareSecret(_) => hmac_key_type_and_length(mechanism.mechanism)
-                .is_some_and(|(key_type, _)| {
-                    key_type == object.key_type
-                        || object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
-                }),
+            KeyMaterial::SoftwareSecret(_) => {
+                (object.key_type == CKK_AES as CK_KEY_TYPE && mac_length.is_some())
+                    || hmac_key_type_and_length(mechanism.mechanism).is_some_and(|(key_type, _)| {
+                        key_type == object.key_type
+                            || object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
+                    })
+            }
             _ => false,
         };
         let yubihsm_mechanism_supported = matches!(object.material, KeyMaterial::YubiHsm { .. })
@@ -674,8 +694,9 @@ fn sign(
         let data = buffered_data.as_slice();
         let required = match &operation.key {
             KeyMaterial::SoftwarePrivate(key) => software_signature_length(key)?,
-            KeyMaterial::SoftwareSecret(_) => hmac_key_type_and_length(operation.mechanism)
-                .map(|(_, length)| length)
+            KeyMaterial::SoftwareSecret(_) => operation
+                .mac_length
+                .or_else(|| hmac_key_type_and_length(operation.mechanism).map(|(_, length)| length))
                 .ok_or(CKR_KEY_TYPE_INCONSISTENT)?,
             KeyMaterial::PivPrivate { algorithm, .. } => match algorithm {
                 piv::Algorithm::Rsa1024
@@ -765,7 +786,17 @@ fn sign(
                 KeyMaterial::SoftwarePrivate(key) => {
                     software_sign(key, operation.mechanism, operation.pss, data)
                 }
-                KeyMaterial::SoftwareSecret(key) => software_hmac(key, operation.mechanism, data),
+                KeyMaterial::SoftwareSecret(key) => {
+                    if let Some(parameters) = &operation.gmac {
+                        return software_aes_gmac(key, parameters, data);
+                    }
+                    if operation.mac_length.is_some() {
+                        let mut mac = software_aes_cmac(key, data)?;
+                        mac.truncate(required);
+                        return Ok(mac);
+                    }
+                    software_hmac(key, operation.mechanism, data)
+                }
                 KeyMaterial::PivPrivate {
                     slot, algorithm, ..
                 } => {
