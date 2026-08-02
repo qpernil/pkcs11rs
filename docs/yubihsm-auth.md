@@ -18,34 +18,37 @@ snapshot embedded through the locked `webpki-roots` dependency. It does not
 use the operating-system trust store. Configure mutual TLS with:
 
 ```sh
-export PKCS11RS_YUBIHSM_TLS_CLIENT_CERT=/etc/pkcs11rs/client-chain.pem
-export PKCS11RS_YUBIHSM_TLS_CLIENT_KEY=/etc/pkcs11rs/client-key.pem
+export PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE=/etc/pkcs11rs/client-chain.cbor
+export PKCS11RS_YUBIHSM_TLS_CLIENT_PRIVATE_KEY=/etc/pkcs11rs/client-key.der
 ```
 
-The certificate path may contain a PEM chain in leaf-first order. The private
-key must be an unencrypted PEM PKCS#8, SEC1, or PKCS#1 key matching the leaf
-certificate. The two variables form one module-wide client identity and must
-either both be absent or both be present. Files are read and validated during
-`C_Initialize`; changing them requires module reinitialization. Invalid,
-unreadable, or mismatched material fails initialization instead of falling
-back to unauthenticated TLS. The identity is offered only to configured
-`https://` URLs, and redirects are disabled while it is configured. Plain HTTP
-URLs remain unauthenticated. Client authentication does not disable server
-verification or extend its embedded root set; private server CAs are not
-trusted unless explicitly configured.
+The certificate bundle uses the canonical CBOR format documented below and
+orders certificates leaf first. The private key is a password-encrypted PKCS
+#8 DER object matching the leaf certificate. `PKCS11RS_PINENTRY` must be
+configured so the key can be unlocked during `C_Initialize`. The two variables
+form one module-wide client identity and must either both be absent or both be
+present. Invalid, unreadable, noncanonical, or mismatched material fails
+initialization instead of falling back to unauthenticated TLS. The identity is
+offered only to configured `https://` URLs, and redirects are disabled while it
+is configured. Client authentication does not alter server verification.
 
 For HTTPS servers issued by a private CA, set:
 
 ```sh
-export PKCS11RS_YUBIHSM_TLS_CA_BUNDLE=/etc/pkcs11rs/connector-ca.pem
+export PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE=/etc/pkcs11rs/connector-ca.cbor
 ```
 
-This PEM bundle replaces, rather than extends, the embedded Mozilla roots for
-every configured HTTPS connector. All certificates in the bundle are parsed
-as trust anchors during `C_Initialize`; an empty, malformed, or unreadable
-bundle fails initialization. It may be configured independently of the client
-identity. Server certificate-chain and hostname or IP-address verification
-remain mandatory.
+This canonical CBOR certificate bundle replaces, rather than extends, the
+embedded Mozilla roots for every configured HTTPS connector. An empty,
+malformed, noncanonical, or unreadable bundle fails initialization. It may be
+configured independently of the client identity. Server certificate-chain and
+hostname or IP-address verification remain mandatory.
+
+A certificate bundle is encoded as the canonical CBOR array
+`["pkcs11rs.x509-certificate-bundle", 1, [certificate_der, ...]]`. Every
+certificate is a byte string containing one canonical X.509 DER object. The
+array order is preserved, indefinite arrays and trailing data are rejected,
+and a bundle must contain at least one certificate.
 
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP

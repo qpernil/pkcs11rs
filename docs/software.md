@@ -185,8 +185,8 @@ can inspect the envelope and import the key:
 ```sh
 openssl asn1parse -inform DER -in exported-key.der -i
 openssl pkey -inform DER -in exported-key.der -passin pass:'export password' \
-  -out imported-key.pem
-openssl pkey -in imported-key.pem -check -text -noout
+  -outform DER -out imported-key.der
+openssl pkey -inform DER -in imported-key.der -check -text -noout
 ```
 
 An incorrect login PIN, or corruption that prevents authentication of the

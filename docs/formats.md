@@ -1,0 +1,34 @@
+# Binary object formats
+
+pkcs11rs assigns one serialization to each object type and never detects a
+format by trying multiple decoders:
+
+| Object | Serialization | File suffix |
+| --- | --- | --- |
+| X.509 certificate | canonical DER | `.der` |
+| SubjectPublicKeyInfo | canonical DER | `.der` when stored alone |
+| private key at rest | password-encrypted PKCS #8 DER | `.der` |
+| certificate bundle | canonical CBOR containing X.509 DER byte strings | `.cbor` |
+| pkcs11rs-owned record | its versioned canonical CBOR schema | `.cbor` |
+
+A certificate bundle is the array
+`["pkcs11rs.x509-certificate-bundle", 1, [certificate_der, ...]]`. It must
+contain at least one certificate. Each byte string must be one canonical X.509
+DER object. Indefinite arrays, noncanonical integers, extra fields, and
+trailing data are rejected. Order is preserved; identity
+certificate bundles put the leaf first.
+
+Standard DER objects remain DER when nested in CBOR. The CBOR layer supplies
+project ownership, versioning, aggregation, and unambiguous type information;
+it does not replace the standard cryptographic encoding.
+
+Protocol and PKCS #11 attribute fields retain the representation mandated by
+their protocol, such as an uncompressed SEC1 public point or RSA components.
+Those fields are not alternate file or persistence formats.
+
+Configured TLS and SCP11 OCE private keys are encrypted PKCS #8 DER and are
+unlocked through `PKCS11RS_PINENTRY` into zeroizing memory. Persistent software
+private keys are envelope-encrypted by their storage provider, and exported
+software private keys are encrypted PKCS #8 DER. Transient provisioning inputs
+use canonical PKCS #8 DER, travel over an authenticated secure channel, and are
+zeroized after use.

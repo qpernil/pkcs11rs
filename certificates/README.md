@@ -1,18 +1,20 @@
 # Yubico public certificates
 
-These unmodified public certificates are runtime trust anchors and test
-fixtures used by the module. The directory contains public CA certificates
-only; it does not contain private keys or device credentials.
+These public certificates are runtime trust anchors and test fixtures used by
+the module. Individual certificates are stored as their canonical X.509 DER.
+The published intermediate collection is stored in the project's canonical
+CBOR certificate-bundle format. The directory contains no private keys or
+device credentials.
 
 ## YubiKey
 
 | File | Published source | File SHA-256 |
 | --- | --- | --- |
-| `yubikey/yubico-attestation-root-1.pem` | https://developers.yubico.com/PKI/yubico-ca-1.pem | `9271d914d48d05487666703586aea27d9a69ad0c8ddf8c2fc4c8734a04285887` |
-| `yubikey/yubico-fido-ca-1.pem` | https://developers.yubico.com/PKI/yubico-fido-ca-1.pem | `bb479d380ef940c5469e008b12a2f35137b884696963dc845c0ddce37f2f9bbf` |
-| `yubikey/yubico-fido-ca-2.pem` | https://developers.yubico.com/PKI/yubico-fido-ca-2.pem | `c3429d7a5d990ec702a1f74e1ab713651c65e5678f05db4162bebcf34e33d0cd` |
-| `yubikey/yubico-piv-ca-1.pem` | https://developers.yubico.com/PKI/yubico-piv-ca-1.pem | `6234f33d5f652109d265b391f2898b8ba92f62df406b684db18363f50d7c9129` |
-| `yubikey/yubico-intermediate.pem` | https://developers.yubico.com/PKI/yubico-intermediate.pem | `ec0172fe38838e3de174aae4e058bb44920be47cebd8d658a0fba1634b82aee1` |
+| `yubikey/yubico-attestation-root-1.der` | https://developers.yubico.com/PKI/yubico-ca-1.pem | `62760c6a6ef91679f454c8902b80fd009825b3f25da90f1fbace2ec6586cd5a8` |
+| `yubikey/yubico-fido-ca-1.der` | https://developers.yubico.com/PKI/yubico-fido-ca-1.pem | `0fa1386f80eb8713263ae5c1d84deb455bdf08aea50ab05503cefee82b092d42` |
+| `yubikey/yubico-fido-ca-2.der` | https://developers.yubico.com/PKI/yubico-fido-ca-2.pem | `35f1a54b353bfb711e6d42adbeb76c0e9dead095018e6a94783ba2192fd6faad` |
+| `yubikey/yubico-piv-ca-1.der` | https://developers.yubico.com/PKI/yubico-piv-ca-1.pem | `63ece914e54dd87915f34033c85af4c0696ba1512f8add66ced738331207b546` |
+| `yubikey/yubico-intermediate.cbor` | https://developers.yubico.com/PKI/yubico-intermediate.pem | `66adbf87a3538250f75d7ce640bb20455d340acabb81e3a84572ca6b8ceb20a1` |
 
 Attestation Root 1 is embedded as the factory trust anchor for YubiKey SCP11b.
 The current root, the two published FIDO roots, and the published
@@ -29,8 +31,8 @@ The current and legacy YubiKey root certificate SHA-256 fingerprints are:
 
 ## YubiHSM
 
-`yubihsm/yubihsm2-attestation-root.pem` and
-`yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem` are the YubiHSM 2
+`yubihsm/yubihsm2-attestation-root.der` and
+`yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.der` are the YubiHSM 2
 attestation root and intermediate downloaded from:
 
 - <https://developers.yubico.com/YubiHSM2/Concepts/yubihsm2-attest-ca-crt.pem>
