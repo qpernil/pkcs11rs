@@ -23,7 +23,7 @@ one of:
 
 - `PKCS11RS_SCP11_SD_PUBLIC_KEY`: the 65-byte uncompressed SEC1 public point,
   encoded as hexadecimal;
-- `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to the PEM or DER X.509 CA
+- `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to one canonical DER X.509 CA
   certificate that authenticates the SD certificate chain.
 
 In factory or configured CA-certificate mode, the module temporarily selects
@@ -40,9 +40,10 @@ Optional configuration:
 
 SCP11a and SCP11c additionally require:
 
-- `PKCS11RS_SCP11_OCE_PRIVATE_KEY`: path to a PEM or DER P-256 private key;
-- `PKCS11RS_SCP11_OCE_CERTIFICATES`: one or more certificate paths separated by
-  the platform path separator, ordered from issuer to leaf;
+- `PKCS11RS_SCP11_OCE_PRIVATE_KEY`: path to a password-encrypted PKCS #8 DER
+  P-256 private key, unlocked through `PKCS11RS_PINENTRY`;
+- `PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE`: path to a canonical CBOR certificate
+  bundle ordered from leaf to issuer;
 - `PKCS11RS_SCP11_OCE_KEY_VERSION`: OCE key version, default `0`;
 - `PKCS11RS_SCP11_OCE_KEY_ID`: OCE key identifier, default `0`.
 
@@ -71,11 +72,12 @@ device and returns its uncompressed SEC1 public point. A null output pointer
 queries the required point length without generating a key. The curve values
 declared in `pkcs11rs.h` match Yubico's Security Domain curve IDs.
 
-`PKCS11RS_SecurityDomainPutScp11PrivateKey` accepts an unencrypted DER PKCS#8
-or traditional EC private key. The private scalar is wrapped using the current
-static DEK, so the function returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
-authenticated channel has no DEK. `PKCS11RS_SecurityDomainPutScp11PublicKey`
-accepts a DER SubjectPublicKeyInfo EC public key and does not require a DEK.
+`PKCS11RS_SecurityDomainPutScp11PrivateKey` accepts one transient canonical
+PKCS #8 DER EC private key. The authenticated secure channel protects it in
+transit, and the private scalar is wrapped using the current static DEK before
+device storage. The function returns `CKR_KEY_FUNCTION_NOT_PERMITTED` when the
+channel has no DEK. `PKCS11RS_SecurityDomainPutScp11PublicKey` accepts a
+canonical DER SubjectPublicKeyInfo EC public key and does not require a DEK.
 Temporary private-key material is zeroized.
 
 `PKCS11RS_SecurityDomainStoreScp11CertificateChain` accepts DER X.509

@@ -229,23 +229,22 @@ both paths:
 
 ```sh
 export PKCS11RS_YUBIHSM_URLS=https://hsm-a.example:12345
-export PKCS11RS_YUBIHSM_TLS_CLIENT_CERT=/etc/pkcs11rs/client-chain.pem
-export PKCS11RS_YUBIHSM_TLS_CLIENT_KEY=/etc/pkcs11rs/client-key.pem
+export PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE=/etc/pkcs11rs/client-chain.cbor
+export PKCS11RS_YUBIHSM_TLS_CLIENT_PRIVATE_KEY=/etc/pkcs11rs/client-key.der
 ```
 
-The certificate file may contain a PEM chain, with the client certificate
-first. The key must be an unencrypted PEM PKCS#8, SEC1, or PKCS#1 private key
-matching that certificate. Both settings are required together; unreadable,
-malformed, or mismatched material makes `C_Initialize` fail. The identity is
-offered only to `https://` connector URLs. Redirects are disabled whenever a
-client identity is configured so it cannot be offered to a redirected host.
-The client identity does not change server verification.
+The certificate file is a canonical CBOR certificate bundle ordered leaf
+first. The key is password-encrypted PKCS #8 DER and is unlocked through the
+configured `PKCS11RS_PINENTRY`. Both settings are required together;
+unreadable, malformed, noncanonical, or mismatched material makes
+`C_Initialize` fail. The identity is offered only to `https://` connector URLs.
+Redirects are disabled whenever a client identity is configured.
 
 For a connector whose server certificate is issued by a private CA, configure
-a PEM CA bundle:
+a canonical CBOR certificate bundle:
 
 ```sh
-export PKCS11RS_YUBIHSM_TLS_CA_BUNDLE=/etc/pkcs11rs/connector-ca.pem
+export PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE=/etc/pkcs11rs/connector-ca.cbor
 ```
 
 The bundle replaces the embedded Mozilla roots for every configured HTTPS
@@ -410,6 +409,7 @@ Detailed configuration:
 - [SCP03](docs/scp03.md)
 - [SCP11a, SCP11b, and SCP11c](docs/scp11.md)
 - [Internal architecture and object graph](docs/architecture.md)
+- [Binary object formats](docs/formats.md)
 - [Content-addressed CBOR storage boundary](docs/storage.md)
 
 ## Diagnostics
