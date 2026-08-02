@@ -4,7 +4,7 @@ use crate::{
     CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
 };
 use const_oid::ObjectIdentifier;
-use der::Decode;
+use der::{Decode, Encode};
 use zeroize::Zeroizing;
 
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
@@ -586,35 +586,32 @@ fn put_ec_key_data(
 }
 
 fn parse_private_key(encoded: &[u8]) -> Result<(Scp11Curve, Zeroizing<Vec<u8>>), Error> {
-    let (curve, scalar) = if let Ok(key) = pkcs8::PrivateKeyInfoRef::from_der(encoded) {
-        if key.algorithm.oid != EC_PUBLIC_KEY {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let oid = key
-            .algorithm
+    let info =
+        pkcs8::PrivateKeyInfoRef::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    if info.to_der().map_err(|_| CKR_ARGUMENTS_BAD)? != encoded
+        || info.algorithm.oid != EC_PUBLIC_KEY
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let oid = info
+        .algorithm
+        .parameters
+        .as_ref()
+        .ok_or(CKR_ARGUMENTS_BAD)?
+        .decode_as::<ObjectIdentifier>()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let curve = Scp11Curve::from_oid(oid)?;
+    let key = sec1::EcPrivateKey::from_der(info.private_key.as_bytes())
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    if key.to_der().map_err(|_| CKR_ARGUMENTS_BAD)? != info.private_key.as_bytes()
+        || key
             .parameters
             .as_ref()
-            .ok_or(CKR_ARGUMENTS_BAD)?
-            .decode_as::<ObjectIdentifier>()
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let curve = Scp11Curve::from_oid(oid)?;
-        let key = sec1::EcPrivateKey::from_der(key.private_key.as_bytes())
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        if let Some(parameters) = key.parameters {
-            if parameters.named_curve() != Some(oid) {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
-        }
-        (curve, key.private_key)
-    } else {
-        let key =
-            sec1::EcPrivateKey::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let oid = key
-            .parameters
-            .and_then(|parameters| parameters.named_curve())
-            .ok_or(CKR_ARGUMENTS_BAD)?;
-        (Scp11Curve::from_oid(oid)?, key.private_key)
-    };
+            .is_some_and(|parameters| parameters.named_curve() != Some(oid))
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let scalar = key.private_key;
     let parameters = crate::ec_parameters(curve.ec_curve())?;
     let scalar = rsa::BigUint::from_bytes_be(scalar);
     if scalar == rsa::BigUint::from(0u8) || scalar >= parameters.n {
@@ -1358,6 +1355,20 @@ mod tests {
         assert!(Client
             .prepare_scp11_administration(&oce, &operation)
             .is_ok());
+    }
+
+    #[test]
+    fn scp11_private_key_import_accepts_only_canonical_pkcs8() {
+        let key = crate::certificate_builder::p256_key();
+        let encoded = key.to_pkcs8_der().unwrap();
+        parse_private_key(encoded.as_bytes()).unwrap();
+
+        let mut trailing = encoded.as_bytes().to_vec();
+        trailing.push(0);
+        assert!(parse_private_key(&trailing).is_err());
+
+        let secret = p256::SecretKey::from_slice(&key.to_bytes()).unwrap();
+        assert!(parse_private_key(&secret.to_sec1_der().unwrap()).is_err());
     }
 
     #[test]

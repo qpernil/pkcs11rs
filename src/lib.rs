@@ -155,6 +155,7 @@ mod software_storage;
 pub(crate) use software_storage::SoftwareTokenStore;
 
 mod pinentry;
+mod private_key;
 
 mod yubico_kdf;
 use yubico_kdf::yubico_password_kdf;

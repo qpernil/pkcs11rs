@@ -32,8 +32,12 @@ pub(crate) fn p256_key() -> SigningKey {
 pub(crate) fn rsa_key() -> RsaPrivateKey {
     static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
     KEY.get_or_init(|| {
-        RsaPrivateKey::from_pkcs8_pem(include_str!("fixtures/test-rsa-private-key.pem"))
-            .expect("valid RSA test fixture")
+        let encoded = crate::private_key::decrypt(
+            include_bytes!("fixtures/test-rsa-private-key.der"),
+            b"test fixture",
+        )
+        .expect("decrypt RSA test fixture");
+        RsaPrivateKey::from_pkcs8_der(&encoded).expect("valid RSA test fixture")
     })
     .clone()
 }

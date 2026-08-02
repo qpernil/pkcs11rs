@@ -368,7 +368,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
- "pem-rfc7468 0.7.0",
  "zeroize",
 ]
 
@@ -381,7 +380,6 @@ dependencies = [
  "const-oid 0.10.2",
  "der_derive",
  "flagset",
- "pem-rfc7468 1.0.0",
  "zeroize",
 ]
 
@@ -481,7 +479,6 @@ dependencies = [
  "group",
  "hkdf",
  "hybrid-array",
- "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
  "sec1",
@@ -925,24 +922,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pem-rfc7468"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
-name = "pem-rfc7468"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,6 +943,7 @@ name = "pkcs11rs"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
+ "base64",
  "bp256",
  "bp384",
  "cmac",
