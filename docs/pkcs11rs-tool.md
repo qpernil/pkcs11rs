@@ -18,7 +18,11 @@ It can also be installed directly:
 cargo install --locked --path tools/pkcs11rs-tool
 ```
 
-## Creating a bundle
+Run `pkcs11rs-tool --help` for the complete command summary. The utility has no
+provider or hardware dependency at runtime; it operates only on the files
+named on its command line.
+
+## Inputs and output
 
 Supply canonical DER files, PEM files containing one or more `CERTIFICATE`
 blocks, or a mixture. Input-file order and PEM block order are preserved.
@@ -34,17 +38,18 @@ The tool rejects empty input, malformed or noncanonical certificates,
 duplicates, non-certificate PEM blocks, and text outside PEM blocks. It refuses
 to replace an existing output unless `--force` is specified. Before writing,
 it encodes and decodes the bundle again and requires an exact round trip.
+The only output format is the canonical `.cbor` certificate-bundle object.
 
 ## Purpose profiles
 
 Every creation and verification command requires one of these purposes:
 
-| Purpose | Validation |
-| --- | --- |
-| `certificate-collection` | Canonical, nonempty, duplicate-free certificate collection with no ordering or chain semantics. |
-| `yubihsm-tls-client` | Currently valid leaf-first client chain; issuer names, signatures, CA constraints, key usage, client-auth extended key usage when present, and matching encrypted private key. |
-| `yubihsm-tls-ca` | Every entry is currently valid and independently suitable as a TLS CA trust anchor. Multiple unrelated anchors are allowed. |
-| `scp11-oce` | Currently valid leaf-first issuer chain, P-256 OCE leaf with key-agreement usage when constrained, and matching encrypted P-256 private key. |
+| Purpose | Intended use | Validation |
+| --- | --- | --- |
+| `certificate-collection` | Project-owned reference or issuer collections | Canonical, nonempty, duplicate-free certificates with no ordering or chain semantics. |
+| `yubihsm-tls-client` | `PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE` | Currently valid leaf-first client chain; issuer names, signatures, CA constraints, key usage, client-auth extended key usage when present, and matching encrypted private key. |
+| `yubihsm-tls-ca` | `PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE` | Every entry is currently valid and independently suitable as a TLS CA trust anchor. Multiple unrelated anchors are allowed. |
+| `scp11-oce` | `PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE` | Currently valid leaf-first issuer chain, P-256 OCE leaf with key-agreement usage when constrained, and matching encrypted P-256 private key. |
 
 The identity purposes require `--key` naming a canonical password-encrypted
 PKCS #8 DER file. The tool obtains its password from the executable configured
@@ -71,7 +76,16 @@ A single-certificate identity can only be checked for leaf usage and key
 matching without external trust.
 
 To require a path to an explicitly trusted root, provide a canonical CBOR trust
-bundle:
+bundle. It can be created from the trusted CA certificates first:
+
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose yubihsm-tls-ca \
+  --output connector-client-roots.cbor \
+  connector-client-roots.pem
+```
+
+Then use it while checking the identity:
 
 ```sh
 pkcs11rs-tool certificate-bundle verify \
@@ -83,7 +97,8 @@ pkcs11rs-tool certificate-bundle verify \
 
 The explicit trust certificates must themselves satisfy the TLS CA profile.
 An included self-signed certificate never becomes trusted merely because it is
-included in the identity bundle.
+included in the identity bundle. `--trust` affects validation only; it is not
+embedded in or otherwise added to the generated identity bundle.
 
 ## Verifying an existing bundle
 

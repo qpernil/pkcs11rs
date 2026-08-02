@@ -6,6 +6,11 @@ The published intermediate collection is stored in the project's canonical
 CBOR certificate-bundle format. The directory contains no private keys or
 device credentials.
 
+The `.der` and `.cbor` files are project artifacts; `.pem` suffixes below occur
+only in the upstream source URLs. Multi-certificate sources are imported with
+the repository's [`pkcs11rs-tool`](../docs/pkcs11rs-tool.md), rather than read
+as PEM by the provider.
+
 ## YubiKey
 
 | File | Published source | File SHA-256 |

@@ -420,6 +420,7 @@ Detailed configuration:
 - [SCP03](docs/scp03.md)
 - [SCP11a, SCP11b, and SCP11c](docs/scp11.md)
 - [Internal architecture and object graph](docs/architecture.md)
+- [Certificate-bundle authoring and validation](docs/pkcs11rs-tool.md)
 - [Binary object formats](docs/formats.md)
 - [Content-addressed CBOR storage boundary](docs/storage.md)
 
@@ -484,6 +485,9 @@ Run the Rust test suite:
 cargo test --locked
 cargo test --locked --all-features
 ```
+
+These workspace commands test both the PKCS #11 provider and
+`pkcs11rs-tool`.
 
 To test the production shared library with the operating system's native
 dynamic loader, without Python, build it and run the explicit loader smoke

@@ -54,6 +54,14 @@ Use the `scp11-oce` purpose of
 these constraints, match the encrypted key, and write the canonical CBOR
 bundle.
 
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose scp11-oce \
+  --key /etc/pkcs11rs/oce-key.der \
+  --output /etc/pkcs11rs/oce-chain.cbor \
+  oce-leaf.der oce-issuers.pem
+```
+
 The SCP11b transport uses NIST P-256 ephemeral key agreement and KID `0x13`.
 The SCP11a and SCP11c transports upload the OCE certificate chain, use KID
 `0x11` and `0x15` respectively, and combine ephemeral and static ECDH. All use

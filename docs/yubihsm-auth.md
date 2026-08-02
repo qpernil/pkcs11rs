@@ -22,18 +22,28 @@ export PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE=/etc/pkcs11rs/client-chain
 export PKCS11RS_YUBIHSM_TLS_CLIENT_PRIVATE_KEY=/etc/pkcs11rs/client-key.der
 ```
 
-The certificate bundle uses the canonical CBOR format documented below and
-orders certificates leaf first. The private key is a password-encrypted PKCS
-#8 DER object matching the leaf certificate. `PKCS11RS_PINENTRY` must be
-configured so the key can be unlocked during `C_Initialize`. The two variables
-form one module-wide client identity and must either both be absent or both be
-present. Invalid, unreadable, noncanonical, or mismatched material fails
-initialization instead of falling back to unauthenticated TLS. The identity is
-offered only to configured `https://` URLs, and redirects are disabled while it
-is configured. Client authentication does not alter server verification.
+The certificate bundle uses the canonical CBOR format documented in
+[`formats.md`](formats.md) and orders certificates leaf first. The private key
+is a password-encrypted PKCS #8 DER object matching the leaf certificate.
+`PKCS11RS_PINENTRY` must be configured so the key can be unlocked during
+`C_Initialize`. The two variables form one module-wide client identity and must
+either both be absent or both be present. Invalid, unreadable, noncanonical, or
+mismatched material fails initialization instead of falling back to
+unauthenticated TLS. The identity is offered only to configured `https://`
+URLs, and redirects are disabled while it is configured. Client authentication
+does not alter server verification.
+
 Use the `yubihsm-tls-client` purpose of
 [`pkcs11rs-tool`](pkcs11rs-tool.md) to create the bundle and validate it with
 the encrypted private key.
+
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose yubihsm-tls-client \
+  --key /etc/pkcs11rs/client-key.der \
+  --output /etc/pkcs11rs/client-chain.cbor \
+  client.pem intermediates.pem
+```
 
 For HTTPS servers issued by a private CA, set:
 
@@ -49,11 +59,15 @@ hostname or IP-address verification remain mandatory.
 Use the tool's `yubihsm-tls-ca` purpose to require every imported certificate
 to be independently suitable as a TLS trust anchor.
 
-A certificate bundle is encoded as the canonical CBOR array
-`["pkcs11rs.x509-certificate-bundle", 1, [certificate_der, ...]]`. Every
-certificate is a byte string containing one canonical X.509 DER object. The
-array order is preserved, indefinite arrays and trailing data are rejected,
-and a bundle must contain at least one certificate.
+```sh
+pkcs11rs-tool certificate-bundle create \
+  --purpose yubihsm-tls-ca \
+  --output /etc/pkcs11rs/connector-ca.cbor \
+  connector-roots.pem
+```
+
+The exact bundle schema and the distinction between import and storage formats
+are documented in [`formats.md`](formats.md).
 
 Direct YubiHSM USB discovery is enabled by default. Set
 `PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -27,6 +27,8 @@ const USAGE: &str = "\
 usage:
   pkcs11rs-tool certificate-bundle create --purpose PURPOSE --output FILE [--key FILE] [--trust FILE] [--force] CERTIFICATE...
   pkcs11rs-tool certificate-bundle verify --purpose PURPOSE [--key FILE] [--trust FILE] FILE
+  pkcs11rs-tool --help
+  pkcs11rs-tool --version
 
 purposes:
   certificate-collection  canonical certificates with no chain semantics
@@ -40,10 +42,43 @@ PKCS11RS_PINENTRY to unlock password-encrypted PKCS #8 DER. --trust names a
 canonical CBOR certificate bundle containing explicit trust anchors.";
 
 fn main() {
-    if let Err(error) = run(env::args_os().skip(1).collect()) {
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if let Some(information) = information_response(&arguments) {
+        println!("{information}");
+        return;
+    }
+    if let Err(error) = run(arguments) {
+        if error == USAGE {
+            eprintln!("{error}");
+            process::exit(2);
+        }
         eprintln!("pkcs11rs-tool: {error}");
         process::exit(1);
     }
+}
+
+fn information_response(arguments: &[OsString]) -> Option<&'static str> {
+    match arguments {
+        [argument] if is_help(argument) => Some(USAGE),
+        [argument] if argument == OsStr::new("--version") => {
+            Some(concat!("pkcs11rs-tool ", env!("CARGO_PKG_VERSION")))
+        }
+        [object, argument] if object == OsStr::new("certificate-bundle") && is_help(argument) => {
+            Some(USAGE)
+        }
+        [object, operation, argument]
+            if object == OsStr::new("certificate-bundle")
+                && matches!(operation.to_str(), Some("create" | "verify"))
+                && is_help(argument) =>
+        {
+            Some(USAGE)
+        }
+        _ => None,
+    }
+}
+
+fn is_help(argument: &OsStr) -> bool {
+    argument == OsStr::new("--help") || argument == OsStr::new("-h")
 }
 
 enum Operation {
@@ -71,7 +106,7 @@ fn run(arguments: Vec<OsString>) -> Result<(), String> {
 
 fn parse_arguments(arguments: Vec<OsString>) -> Result<Options, String> {
     let mut arguments = arguments.into_iter();
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("certificate-bundle")) {
+    if arguments.next().as_deref() != Some(OsStr::new("certificate-bundle")) {
         return Err(USAGE.to_owned());
     }
     let operation = match arguments.next().and_then(|value| value.into_string().ok()) {
@@ -113,7 +148,8 @@ fn parse_arguments(arguments: Vec<OsString>) -> Result<Options, String> {
                 let value = PathBuf::from(option_value(&mut arguments, "--trust")?);
                 set_once(&mut trust, value, "--trust")?;
             }
-            Some("--force") => force = true,
+            Some("--force") if !force => force = true,
+            Some("--force") => return Err("--force may only be specified once".to_owned()),
             Some(value) if value.starts_with('-') => {
                 return Err(format!("unknown option {value:?}\n\n{USAGE}"));
             }
@@ -413,5 +449,31 @@ mod tests {
             "bundle.cbor".into(),
         ])
         .is_err());
+        assert!(parse_arguments(vec![
+            "certificate-bundle".into(),
+            "create".into(),
+            "--purpose".into(),
+            "certificate-collection".into(),
+            "--output".into(),
+            "bundle.cbor".into(),
+            "--force".into(),
+            "--force".into(),
+            "certificate.der".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn help_and_version_are_available_at_natural_boundaries() {
+        assert_eq!(information_response(&["--help".into()]), Some(USAGE));
+        assert_eq!(
+            information_response(&["certificate-bundle".into(), "create".into(), "-h".into()]),
+            Some(USAGE)
+        );
+        assert_eq!(
+            information_response(&["--version".into()]),
+            Some(concat!("pkcs11rs-tool ", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(information_response(&["unknown".into()]), None);
     }
 }
