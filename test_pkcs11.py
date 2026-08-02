@@ -6052,8 +6052,9 @@ class Pkcs11AbiTests(unittest.TestCase):
                     ),
                     CKR_OK,
                 )
-                entry = pathlib.Path(directory, bytes(fingerprint).hex() + ".pem")
-                self.assertTrue(entry.read_bytes().startswith(b"-----BEGIN CERTIFICATE-----"))
+                entry = pathlib.Path(directory, bytes(fingerprint).hex() + ".cbor")
+                attestation_record = entry.read_bytes()
+                self.assertTrue(attestation_record)
 
                 direct_fingerprint = (CK_BYTE * 32)()
                 direct_len = CK_ULONG(len(direct_fingerprint))
@@ -6066,7 +6067,7 @@ class Pkcs11AbiTests(unittest.TestCase):
                     CKR_OK,
                 )
                 self.assertEqual(bytes(direct_fingerprint), bytes(fingerprint))
-                self.assertTrue(entry.read_bytes().startswith(b"-----BEGIN CERTIFICATE-----"))
+                self.assertEqual(entry.read_bytes(), attestation_record)
 
                 factory_fingerprint = (CK_BYTE * 32)()
                 factory_len = CK_ULONG(len(factory_fingerprint))
