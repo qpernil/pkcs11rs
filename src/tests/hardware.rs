@@ -4,7 +4,6 @@ use super::*;
 #[cfg(not(feature = "abi-tests"))]
 mod hardware_provisioning {
     use super::*;
-    use p256::ecdsa::SigningKey;
     use std::rc::Rc;
 
     const ENABLE_ENV: &str = "PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH";
@@ -24,13 +23,6 @@ mod hardware_provisioning {
     const DEFAULT_ADMIN_ID: &str = "0001";
     const DEFAULT_ADMIN_PASSWORD: &str = "password";
     const AUTHENTICATION_KEY_DOMAINS: u16 = 0xffff;
-    const SCP11B_TEST_CA_KEY: &[u8] = br#"-----BEGIN EC PRIVATE KEY-----
-MHcCAQEEIL7CkZ7A1x1NWahBWRhsgefvFnA0fLI9OLgEJRyWsvSioAoGCCqGSM49
-AwEHoUQDQgAEwh/eTK7LFECBbeTnetWWBsUjiJt+wV8Bbvwa5Hguiee07eo2J3Eu
-ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
------END EC PRIVATE KEY-----
-"#;
-
     fn environment(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_owned())
     }
@@ -56,10 +48,7 @@ ViNXydALTwAmo9VlKYPGrLh/DGD6qrrzeA==
     }
 
     fn scp11b_certificate_chain(public_point: &[u8], kvn: u8) -> Vec<Vec<u8>> {
-        let ca_secret =
-            p256::SecretKey::from_sec1_pem(std::str::from_utf8(SCP11B_TEST_CA_KEY).unwrap())
-                .expect("invalid embedded SCP11B test CA key");
-        let ca_key = SigningKey::from(ca_secret);
+        let ca_key = crate::certificate_builder::p256_key();
         let ca_name = "CN=pkcs11rs SCP11 test CA";
         let ca = crate::certificate_builder::p256_certificate(
             ca_key.verifying_key(),

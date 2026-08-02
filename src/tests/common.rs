@@ -1,8 +1,7 @@
 #[cfg(test)]
 use crate::pkcs11::*;
-use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey};
+use rsa::Pkcs1v15Encrypt;
 
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static TEST_SLOT_LOGGED_IN: std::sync::atomic::AtomicBool =
@@ -147,22 +146,38 @@ fn yubihsm_connector_configuration_retains_order_and_duplicate_entries() {
 
 #[test]
 fn yubihsm_http_client_identity_requires_both_paths() {
-    assert!(!crate::configured_yubihsm_http_tls(None, None, None)
-        .unwrap()
-        .is_configured());
-    assert!(crate::configured_yubihsm_http_tls(Some("client.pem".into()), None, None).is_err());
-    assert!(crate::configured_yubihsm_http_tls(None, Some("client-key.pem".into()), None).is_err());
-    assert!(crate::configured_yubihsm_http_tls(
-        Some("".into()),
-        Some("client-key.pem".into()),
-        None
-    )
-    .is_err());
+    let pinentry = crate::pinentry::Pinentry::unconfigured();
     assert!(
-        crate::configured_yubihsm_http_tls(Some("client.pem".into()), Some("".into()), None)
+        !crate::configured_yubihsm_http_tls(None, None, None, &pinentry)
+            .unwrap()
+            .is_configured()
+    );
+    assert!(
+        crate::configured_yubihsm_http_tls(Some("client.cbor".into()), None, None, &pinentry)
             .is_err()
     );
-    assert!(crate::configured_yubihsm_http_tls(None, None, Some("".into())).is_err());
+    assert!(crate::configured_yubihsm_http_tls(
+        None,
+        Some("client-key.der".into()),
+        None,
+        &pinentry
+    )
+    .is_err());
+    assert!(crate::configured_yubihsm_http_tls(
+        Some("".into()),
+        Some("client-key.der".into()),
+        None,
+        &pinentry
+    )
+    .is_err());
+    assert!(crate::configured_yubihsm_http_tls(
+        Some("client.cbor".into()),
+        Some("".into()),
+        None,
+        &pinentry
+    )
+    .is_err());
+    assert!(crate::configured_yubihsm_http_tls(None, None, Some("".into()), &pinentry).is_err());
 }
 
 #[test]
@@ -3490,9 +3505,7 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
         CKR_OK as CK_RV
     );
 
-    let private_key =
-        RsaPrivateKey::from_pkcs8_pem(include_str!("../fixtures/test-rsa-private-key.pem"))
-            .unwrap();
+    let private_key = crate::certificate_builder::rsa_key();
     let mut class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_RSA as CK_KEY_TYPE;
     let mut token = CK_TRUE as CK_BBOOL;

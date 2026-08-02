@@ -22,11 +22,11 @@ const TRUST_RECORD_PUBLIC_KEY: u8 = 1;
 const TRUST_RECORD_ATTESTATION_CERTIFICATE: u8 = 2;
 const YUBICO_ROOT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/certificates/yubihsm/yubihsm2-attestation-root.pem"
+    "/certificates/yubihsm/yubihsm2-attestation-root.der"
 ));
 const YUBICO_INTERMEDIATE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem"
+    "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.der"
 ));
 pub(crate) struct TrustStore {
     next_temporary_file: AtomicU64,

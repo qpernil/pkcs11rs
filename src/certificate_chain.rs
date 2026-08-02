@@ -2,12 +2,13 @@ use crate::{Error, CKR_ARGUMENTS_BAD};
 use const_oid::ObjectIdentifier;
 use der::{
     asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
-    Decode, DecodePem, Encode,
+    Decode, Encode,
 };
+use minicbor::{Decoder, Encoder};
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, env, fs};
+use std::collections::HashSet;
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
     ext::pkix::{BasicConstraints, KeyUsage},
@@ -16,6 +17,8 @@ use x509_cert::{
 
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const P256_CURVE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+const CERTIFICATE_BUNDLE_SCHEMA: &str = "pkcs11rs.x509-certificate-bundle";
+const CERTIFICATE_BUNDLE_VERSION: u64 = 1;
 
 const SUBJECT_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.15");
@@ -78,9 +81,12 @@ impl ParsedCertificate {
             .get_extension::<KeyUsage>()
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
             .map(|(_, usage)| usage);
-        let encoded = certificate
+        let canonical = certificate
             .to_der()
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        if canonical != encoded {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
 
         Ok(Self {
             subject: certificate
@@ -93,7 +99,7 @@ impl ParsedCertificate {
                 .issuer()
                 .to_der()
                 .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
-            fingerprint: Sha256::digest(&encoded).into(),
+            fingerprint: Sha256::digest(&canonical).into(),
             not_before: certificate
                 .tbs_certificate()
                 .validity()
@@ -358,44 +364,62 @@ fn verify_certificate_signature(
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
-pub(crate) fn load(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
-    let mut certificates = Vec::new();
-    for path in env::split_paths(paths) {
-        let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let parsed = Certificate::load_pem_chain(&encoded)
-            .or_else(|_| Certificate::from_der(&encoded).map(|certificate| vec![certificate]))
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        for certificate in parsed {
-            certificates.push(
-                certificate
-                    .to_der()
-                    .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
-            );
-        }
+pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    let certificate = Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let canonical = certificate
+        .to_der()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    if canonical != encoded {
+        return Err(CKR_ARGUMENTS_BAD.into());
     }
+    Ok(canonical)
+}
+
+pub(crate) fn encode_bundle(certificates: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
     if certificates.is_empty() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
+    let mut encoded = Vec::new();
+    let mut encoder = Encoder::new(&mut encoded);
+    encoder
+        .array(3)
+        .and_then(|encoder| encoder.str(CERTIFICATE_BUNDLE_SCHEMA))
+        .and_then(|encoder| encoder.u64(CERTIFICATE_BUNDLE_VERSION))
+        .and_then(|encoder| encoder.array(certificates.len() as u64))
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    for certificate in certificates {
+        let certificate = decode(certificate)?;
+        encoder
+            .bytes(&certificate)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    }
+    Ok(encoded)
+}
+
+pub(crate) fn decode_bundle(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+    let mut decoder = Decoder::new(encoded);
+    if decoder.array().map_err(|_| CKR_ARGUMENTS_BAD)? != Some(3)
+        || decoder.str().map_err(|_| CKR_ARGUMENTS_BAD)? != CERTIFICATE_BUNDLE_SCHEMA
+        || decoder.u64().map_err(|_| CKR_ARGUMENTS_BAD)? != CERTIFICATE_BUNDLE_VERSION
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let count = decoder
+        .array()
+        .map_err(|_| CKR_ARGUMENTS_BAD)?
+        .ok_or(CKR_ARGUMENTS_BAD)?;
+    if count == 0 || count > encoded.len() as u64 {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let count = usize::try_from(count).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let mut certificates = Vec::with_capacity(count);
+    for _ in 0..count {
+        certificates.push(decode(decoder.bytes().map_err(|_| CKR_ARGUMENTS_BAD)?)?);
+    }
+    if decoder.position() != encoded.len() || encode_bundle(&certificates)? != encoded {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
     Ok(certificates)
-}
-
-pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
-    Certificate::from_der(encoded)
-        .or_else(|_| Certificate::from_pem(encoded))
-        .and_then(|certificate| certificate.to_der())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
-}
-
-pub(crate) fn decode_chain(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
-    Certificate::load_pem_chain(encoded)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
-        .into_iter()
-        .map(|certificate| {
-            certificate
-                .to_der()
-                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
-        })
-        .collect()
 }
 
 pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
@@ -505,35 +529,35 @@ mod tests {
 
     const YUBICO_ATTESTATION_ROOT: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubikey/yubico-attestation-root-1.pem"
+        "/certificates/yubikey/yubico-attestation-root-1.der"
     ));
     const YUBICO_FIDO_ROOT_ONE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubikey/yubico-fido-ca-1.pem"
+        "/certificates/yubikey/yubico-fido-ca-1.der"
     ));
     const YUBICO_FIDO_ROOT_TWO: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubikey/yubico-fido-ca-2.pem"
+        "/certificates/yubikey/yubico-fido-ca-2.der"
     ));
     const YUBICO_PIV_ROOT: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubikey/yubico-piv-ca-1.pem"
+        "/certificates/yubikey/yubico-piv-ca-1.der"
     ));
     const YUBICO_INTERMEDIATES: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubikey/yubico-intermediate.pem"
+        "/certificates/yubikey/yubico-intermediate.cbor"
     ));
     const YUBIHSM_ROOT: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubihsm/yubihsm2-attestation-root.pem"
+        "/certificates/yubihsm/yubihsm2-attestation-root.der"
     ));
     const YUBIHSM_INTERMEDIATE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.pem"
+        "/certificates/yubihsm/E45DA5F361B091B30D8F2C6FA040DB6FEF57918E.der"
     ));
 
-    fn pem_certificate(encoded: &[u8]) -> Certificate {
-        Certificate::from_pem(encoded).unwrap()
+    fn der_certificate(encoded: &[u8]) -> Certificate {
+        Certificate::from_der(encoded).unwrap()
     }
 
     fn sha256(certificate: &Certificate) -> Vec<u8> {
@@ -585,7 +609,7 @@ mod tests {
         ];
 
         for (encoded, expected_fingerprint) in fixtures {
-            let certificate = pem_certificate(encoded);
+            let certificate = der_certificate(encoded);
             assert_current(&certificate);
             assert_self_signed(&certificate);
             assert_eq!(encode_hex(&sha256(&certificate)), expected_fingerprint);
@@ -593,9 +617,47 @@ mod tests {
     }
 
     #[test]
+    fn certificate_bundle_is_canonical_and_strict() {
+        let certificates = vec![
+            YUBICO_ATTESTATION_ROOT.to_vec(),
+            YUBICO_FIDO_ROOT_ONE.to_vec(),
+        ];
+        let encoded = encode_bundle(&certificates).unwrap();
+        assert_eq!(decode_bundle(&encoded).unwrap(), certificates);
+
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_bundle(&trailing).is_err());
+
+        let mut decoder = Decoder::new(&encoded);
+        assert_eq!(decoder.array().unwrap(), Some(3));
+        assert_eq!(decoder.str().unwrap(), CERTIFICATE_BUNDLE_SCHEMA);
+        let version = decoder.position();
+        let mut noncanonical = encoded.clone();
+        noncanonical.splice(version..=version, [0x18, 0x01]);
+        assert!(decode_bundle(&noncanonical).is_err());
+        assert!(encode_bundle(&[]).is_err());
+
+        let mut invalid_certificate = certificates;
+        invalid_certificate[0].push(0);
+        assert!(encode_bundle(&invalid_certificate).is_err());
+    }
+
+    #[test]
+    fn embedded_intermediate_bundle_uses_the_shared_schema() {
+        let certificates = decode_bundle(YUBICO_INTERMEDIATES).unwrap();
+        assert_eq!(certificates.len(), 15);
+        assert_eq!(encode_bundle(&certificates).unwrap(), YUBICO_INTERMEDIATES);
+    }
+
+    #[test]
     fn every_published_yubico_intermediate_has_an_exact_der_path_to_the_root() {
-        let root = pem_certificate(YUBICO_ATTESTATION_ROOT);
-        let intermediates = Certificate::load_pem_chain(YUBICO_INTERMEDIATES).unwrap();
+        let root = der_certificate(YUBICO_ATTESTATION_ROOT);
+        let intermediate_der = decode_bundle(YUBICO_INTERMEDIATES).unwrap();
+        let intermediates = intermediate_der
+            .iter()
+            .map(|encoded| der_certificate(encoded))
+            .collect::<Vec<_>>();
         assert_eq!(intermediates.len(), 15);
 
         let expected_subjects = [
@@ -658,8 +720,8 @@ mod tests {
 
     #[test]
     fn published_yubihsm_intermediate_matches_its_public_root() {
-        let root = pem_certificate(YUBIHSM_ROOT);
-        let intermediate = pem_certificate(YUBIHSM_INTERMEDIATE);
+        let root = der_certificate(YUBIHSM_ROOT);
+        let intermediate = der_certificate(YUBIHSM_INTERMEDIATE);
         assert_current(&intermediate);
         assert_eq!(
             intermediate.tbs_certificate().issuer().to_der().unwrap(),
@@ -675,20 +737,16 @@ mod tests {
         );
     }
 
-    fn rustcrypto_der_chain(encoded: &[u8]) -> Vec<Vec<u8>> {
-        Certificate::load_pem_chain(encoded)
-            .unwrap()
-            .into_iter()
-            .map(|certificate| certificate.to_der().unwrap())
-            .collect()
+    fn der_chain(encoded: &[u8]) -> Vec<Vec<u8>> {
+        vec![decode(encoded).unwrap()]
     }
 
     #[test]
     fn webpki_trust_store_loads_every_published_yubico_ca() {
-        let mut certificates = rustcrypto_der_chain(YUBICO_ATTESTATION_ROOT);
-        certificates.extend(rustcrypto_der_chain(YUBICO_FIDO_ROOT_ONE));
-        certificates.extend(rustcrypto_der_chain(YUBICO_FIDO_ROOT_TWO));
-        certificates.extend(rustcrypto_der_chain(YUBICO_INTERMEDIATES));
+        let mut certificates = der_chain(YUBICO_ATTESTATION_ROOT);
+        certificates.extend(der_chain(YUBICO_FIDO_ROOT_ONE));
+        certificates.extend(der_chain(YUBICO_FIDO_ROOT_TWO));
+        certificates.extend(decode_bundle(YUBICO_INTERMEDIATES).unwrap());
         let trust = CertificateTrust::new(&certificates).unwrap();
 
         assert_eq!(trust.trust_anchors.len(), 3);
@@ -698,13 +756,13 @@ mod tests {
 
     #[test]
     fn webpki_trust_store_loads_yubico_legacy_and_yubihsm_roots() {
-        let legacy = rustcrypto_der_chain(YUBICO_PIV_ROOT);
+        let legacy = der_chain(YUBICO_PIV_ROOT);
         let legacy_trust = CertificateTrust::new(&legacy).unwrap();
         assert_eq!(legacy_trust.trust_anchors.len(), 1);
         assert!(legacy_trust.local_intermediates.is_empty());
 
-        let mut yubihsm = rustcrypto_der_chain(YUBIHSM_ROOT);
-        yubihsm.extend(rustcrypto_der_chain(YUBIHSM_INTERMEDIATE));
+        let mut yubihsm = der_chain(YUBIHSM_ROOT);
+        yubihsm.extend(der_chain(YUBIHSM_INTERMEDIATE));
         let yubihsm_trust = CertificateTrust::new(&yubihsm).unwrap();
         assert_eq!(yubihsm_trust.trust_anchors.len(), 1);
         assert_eq!(yubihsm_trust.local_intermediates.len(), 1);
@@ -712,8 +770,8 @@ mod tests {
 
     #[test]
     fn device_supplied_self_signed_certificate_never_becomes_a_root() {
-        let trusted = rustcrypto_der_chain(YUBICO_ATTESTATION_ROOT);
-        let untrusted = rustcrypto_der_chain(YUBICO_PIV_ROOT);
+        let trusted = der_chain(YUBICO_ATTESTATION_ROOT);
+        let untrusted = der_chain(YUBICO_PIV_ROOT);
         let forest = CertificateTrust::new(&trusted).unwrap();
 
         assert!(forest.validate(&untrusted).is_err());
@@ -721,7 +779,7 @@ mod tests {
 
     #[test]
     fn duplicate_configured_certificates_are_deduplicated() {
-        let mut roots = rustcrypto_der_chain(YUBICO_ATTESTATION_ROOT);
+        let mut roots = der_chain(YUBICO_ATTESTATION_ROOT);
         roots.push(roots[0].clone());
         let forest = CertificateTrust::new(&roots).unwrap();
 

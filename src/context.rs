@@ -36,9 +36,12 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-pub(crate) const YUBIHSM_TLS_CLIENT_CERT_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_CERT";
-pub(crate) const YUBIHSM_TLS_CLIENT_KEY_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CLIENT_KEY";
-pub(crate) const YUBIHSM_TLS_CA_BUNDLE_ENV: &str = "PKCS11RS_YUBIHSM_TLS_CA_BUNDLE";
+pub(crate) const YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE_ENV: &str =
+    "PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE";
+pub(crate) const YUBIHSM_TLS_CLIENT_PRIVATE_KEY_ENV: &str =
+    "PKCS11RS_YUBIHSM_TLS_CLIENT_PRIVATE_KEY";
+pub(crate) const YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE_ENV: &str =
+    "PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE";
 pub(crate) const TOKEN_STORAGE_ENV: &str = "PKCS11RS_TOKEN_STORAGE";
 pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
 pub(crate) const SOFTWARE_SLOTS_ENV: &str = "PKCS11RS_SOFTWARE_SLOTS";
@@ -260,27 +263,33 @@ pub(crate) fn configured_software_slots(
 }
 
 pub(crate) fn configured_yubihsm_http_tls(
-    certificate_path: Option<std::ffi::OsString>,
+    certificate_bundle_path: Option<std::ffi::OsString>,
     private_key_path: Option<std::ffi::OsString>,
-    ca_bundle_path: Option<std::ffi::OsString>,
+    ca_certificate_bundle_path: Option<std::ffi::OsString>,
+    pinentry: &pinentry::Pinentry,
 ) -> Result<HttpConnectorTlsConfig, Error> {
-    let mut tls = match (certificate_path, private_key_path) {
+    let mut tls = match (certificate_bundle_path, private_key_path) {
         (None, None) => HttpConnectorTlsConfig::default(),
-        (Some(certificate_path), Some(private_key_path))
-            if !certificate_path.is_empty() && !private_key_path.is_empty() =>
+        (Some(certificate_bundle_path), Some(private_key_path))
+            if !certificate_bundle_path.is_empty() && !private_key_path.is_empty() =>
         {
-            let certificate_chain_pem = std::fs::read(certificate_path)?;
-            let private_key_pem = Zeroizing::new(std::fs::read(private_key_path)?);
-            HttpConnectorTlsConfig::from_client_pem(&certificate_chain_pem, &private_key_pem)?
+            let certificate_bundle = std::fs::read(certificate_bundle_path)?;
+            let encrypted_private_key = std::fs::read(private_key_path)?;
+            let private_key = crate::private_key::decrypt_file(
+                &encrypted_private_key,
+                pinentry,
+                "Unlock the YubiHSM TLS client private key",
+            )?;
+            HttpConnectorTlsConfig::from_client_identity(&certificate_bundle, &private_key)?
         }
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
     };
-    if let Some(ca_bundle_path) = ca_bundle_path {
-        if ca_bundle_path.is_empty() {
+    if let Some(ca_certificate_bundle_path) = ca_certificate_bundle_path {
+        if ca_certificate_bundle_path.is_empty() {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        let ca_bundle_pem = std::fs::read(ca_bundle_path)?;
-        tls = tls.with_ca_bundle_pem(&ca_bundle_pem)?;
+        let certificate_bundle = std::fs::read(ca_certificate_bundle_path)?;
+        tls = tls.with_ca_bundle(&certificate_bundle)?;
     }
     Ok(tls)
 }
@@ -795,9 +804,10 @@ impl ModuleContext {
             None
         };
         let yubihsm_http_tls = configured_yubihsm_http_tls(
-            std::env::var_os(YUBIHSM_TLS_CLIENT_CERT_ENV),
-            std::env::var_os(YUBIHSM_TLS_CLIENT_KEY_ENV),
-            std::env::var_os(YUBIHSM_TLS_CA_BUNDLE_ENV),
+            std::env::var_os(YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE_ENV),
+            std::env::var_os(YUBIHSM_TLS_CLIENT_PRIVATE_KEY_ENV),
+            std::env::var_os(YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE_ENV),
+            pinentry.as_ref(),
         )?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_config =

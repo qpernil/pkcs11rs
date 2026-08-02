@@ -1140,13 +1140,20 @@ impl std::fmt::Debug for HttpConnectorTlsConfig {
 }
 
 impl HttpConnectorTlsConfig {
-    pub(crate) fn from_client_pem(
-        certificate_chain_pem: &[u8],
-        private_key_pem: &[u8],
+    pub(crate) fn from_client_identity(
+        certificate_bundle: &[u8],
+        private_key_der: &[u8],
     ) -> Result<Self, Error> {
-        let certificates = http_pem_certificates(certificate_chain_pem)?;
-        let private_key = ureq::tls::PrivateKey::from_pem(private_key_pem)
+        use der::{Decode, Encode};
+
+        let certificates = http_certificate_bundle(certificate_bundle)?;
+        let private_key = pkcs8::PrivateKeyInfoRef::from_der(private_key_der)
+            .and_then(|private_key| private_key.to_der())
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        if private_key != private_key_der {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let private_key = http_pkcs8_private_key(&private_key)?;
         validate_http_client_identity(&certificates, &private_key)?;
         Ok(Self {
             client_cert: Some(ureq::tls::ClientCert::new_with_certs(
@@ -1157,8 +1164,8 @@ impl HttpConnectorTlsConfig {
         })
     }
 
-    pub(crate) fn with_ca_bundle_pem(mut self, ca_bundle_pem: &[u8]) -> Result<Self, Error> {
-        let certificates = http_pem_certificates(ca_bundle_pem)?;
+    pub(crate) fn with_ca_bundle(mut self, certificate_bundle: &[u8]) -> Result<Self, Error> {
+        let certificates = http_certificate_bundle(certificate_bundle)?;
         let mut roots = rustls::RootCertStore::empty();
         for certificate in &certificates {
             roots
@@ -1192,19 +1199,28 @@ impl HttpConnectorTlsConfig {
     }
 }
 
-fn http_pem_certificates(pem: &[u8]) -> Result<Vec<ureq::tls::Certificate<'static>>, Error> {
-    let mut certificates = Vec::new();
-    for item in ureq::tls::parse_pem(pem) {
-        match item.map_err(|_| Error::from(CKR_ARGUMENTS_BAD))? {
-            ureq::tls::PemItem::Certificate(certificate) => certificates.push(certificate),
-            ureq::tls::PemItem::PrivateKey(_) => {}
-            _ => {}
-        }
+fn http_certificate_bundle(encoded: &[u8]) -> Result<Vec<ureq::tls::Certificate<'static>>, Error> {
+    crate::certificate_chain::decode_bundle(encoded).map(|certificates| {
+        certificates
+            .iter()
+            .map(|certificate| ureq::tls::Certificate::from_der(certificate).to_owned())
+            .collect()
+    })
+}
+
+// ureq 3.3 does not re-export the KeyKind argument required by PrivateKey::from_der.
+// Keep its PEM-only adapter internal; configured and persisted keys remain PKCS#8 DER.
+fn http_pkcs8_private_key(encoded: &[u8]) -> Result<ureq::tls::PrivateKey<'static>, Error> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let base64 = Zeroizing::new(STANDARD.encode(encoded));
+    let mut armored = Zeroizing::new(b"-----BEGIN PRIVATE KEY-----\n".to_vec());
+    for line in base64.as_bytes().chunks(64) {
+        armored.extend_from_slice(line);
+        armored.push(b'\n');
     }
-    if certificates.is_empty() {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(certificates)
+    armored.extend_from_slice(b"-----END PRIVATE KEY-----\n");
+    ureq::tls::PrivateKey::from_pem(&armored).map_err(|_| CKR_ARGUMENTS_BAD.into())
 }
 
 fn validate_http_client_identity(
@@ -1423,7 +1439,6 @@ impl HttpConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use der::{pem::LineEnding, Decode, EncodePem};
     use p256::pkcs8::EncodePrivateKey;
 
     fn test_http_client_identity() -> (Vec<u8>, zeroize::Zeroizing<Vec<u8>>) {
@@ -1436,36 +1451,25 @@ mod tests {
             1,
             false,
         );
-        let certificate = x509_cert::Certificate::from_der(&certificate)
-            .unwrap()
-            .to_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let private_key = key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let certificate = crate::certificate_chain::encode_bundle(&[certificate]).unwrap();
+        let private_key = key.to_pkcs8_der().unwrap();
         (
             certificate,
             zeroize::Zeroizing::new(private_key.as_bytes().to_vec()),
         )
     }
 
-    fn test_ca_certificate() -> Vec<u8> {
+    fn test_ca_certificate_bundle() -> Vec<u8> {
         let key = crate::certificate_builder::p256_key();
-        certificate_pem(&crate::certificate_builder::p256_certificate(
+        crate::certificate_chain::encode_bundle(&[crate::certificate_builder::p256_certificate(
             key.verifying_key(),
             &key,
             "CN=pkcs11rs test root",
             "CN=pkcs11rs test root",
             2,
             true,
-        ))
-    }
-
-    fn certificate_pem(certificate: &[u8]) -> Vec<u8> {
-        x509_cert::Certificate::from_der(certificate)
-            .unwrap()
-            .to_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes()
+        )])
+        .unwrap()
     }
 
     fn test_mutual_tls(
@@ -1492,15 +1496,18 @@ mod tests {
             11,
             false,
         );
-        let client_key_pem = client_key.to_pkcs8_pem(LineEnding::LF).unwrap();
-        let client_tls = HttpConnectorTlsConfig::from_client_pem(
-            &certificate_pem(&client_certificate),
-            client_key_pem.as_bytes(),
+        let client_key_der = client_key.to_pkcs8_der().unwrap();
+        let client_tls = HttpConnectorTlsConfig::from_client_identity(
+            &crate::certificate_chain::encode_bundle(&[client_certificate]).unwrap(),
+            client_key_der.as_bytes(),
         )
         .unwrap();
         let client_tls = if trust_server_ca {
             client_tls
-                .with_ca_bundle_pem(&certificate_pem(&ca_certificate))
+                .with_ca_bundle(
+                    &crate::certificate_chain::encode_bundle(std::slice::from_ref(&ca_certificate))
+                        .unwrap(),
+                )
                 .unwrap()
         } else {
             let other_ca_key = crate::certificate_builder::p256_key();
@@ -1513,7 +1520,7 @@ mod tests {
                 true,
             );
             client_tls
-                .with_ca_bundle_pem(&certificate_pem(&other_ca))
+                .with_ca_bundle(&crate::certificate_chain::encode_bundle(&[other_ca]).unwrap())
                 .unwrap()
         };
 
@@ -1707,7 +1714,7 @@ mod tests {
     #[test]
     fn http_connector_configures_client_auth_only_for_https() {
         let (certificate, private_key) = test_http_client_identity();
-        let tls = HttpConnectorTlsConfig::from_client_pem(&certificate, &private_key).unwrap();
+        let tls = HttpConnectorTlsConfig::from_client_identity(&certificate, &private_key).unwrap();
         let https =
             HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();
         assert!(https.agent.config().tls_config().client_cert().is_some());
@@ -1725,28 +1732,30 @@ mod tests {
     fn http_connector_rejects_malformed_or_mismatched_client_identity() {
         let (certificate, private_key) = test_http_client_identity();
         assert!(
-            HttpConnectorTlsConfig::from_client_pem(b"not a certificate", &private_key).is_err()
+            HttpConnectorTlsConfig::from_client_identity(b"not a certificate", &private_key)
+                .is_err()
         );
         assert!(
-            HttpConnectorTlsConfig::from_client_pem(&certificate, b"not a private key").is_err()
+            HttpConnectorTlsConfig::from_client_identity(&certificate, b"not a private key")
+                .is_err()
         );
 
         let other_key = crate::certificate_builder::p256_key();
-        let other_private_key = other_key.to_pkcs8_pem(LineEnding::LF).unwrap();
-        assert!(HttpConnectorTlsConfig::from_client_pem(
+        let other_private_key = other_key.to_pkcs8_der().unwrap();
+        assert!(HttpConnectorTlsConfig::from_client_identity(
             &certificate,
             other_private_key.as_bytes()
         )
         .is_err());
         assert!(HttpConnectorTlsConfig::default()
-            .with_ca_bundle_pem(b"not a CA bundle")
+            .with_ca_bundle(b"not a CA bundle")
             .is_err());
     }
 
     #[test]
     fn http_connector_custom_ca_does_not_require_a_client_identity() {
         let tls = HttpConnectorTlsConfig::default()
-            .with_ca_bundle_pem(&test_ca_certificate())
+            .with_ca_bundle(&test_ca_certificate_bundle())
             .unwrap();
         let https =
             HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();

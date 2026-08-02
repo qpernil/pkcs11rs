@@ -1671,27 +1671,29 @@ fn yubico_fido_certificate_trust() -> Option<&'static crate::certificate_chain::
             for encoded in [
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/certificates/yubikey/yubico-attestation-root-1.pem"
+                    "/certificates/yubikey/yubico-attestation-root-1.der"
                 ))
                 .as_slice(),
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/certificates/yubikey/yubico-fido-ca-1.pem"
+                    "/certificates/yubikey/yubico-fido-ca-1.der"
                 ))
                 .as_slice(),
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/certificates/yubikey/yubico-fido-ca-2.pem"
-                ))
-                .as_slice(),
-                include_bytes!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/certificates/yubikey/yubico-intermediate.pem"
+                    "/certificates/yubikey/yubico-fido-ca-2.der"
                 ))
                 .as_slice(),
             ] {
-                certificates.extend(crate::certificate_chain::decode_chain(encoded).ok()?);
+                certificates.push(crate::certificate_chain::decode(encoded).ok()?);
             }
+            certificates.extend(
+                crate::certificate_chain::decode_bundle(include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/certificates/yubikey/yubico-intermediate.cbor"
+                )))
+                .ok()?,
+            );
             crate::certificate_chain::CertificateTrust::new(&certificates).ok()
         })
         .as_ref()

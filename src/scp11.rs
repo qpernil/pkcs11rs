@@ -27,7 +27,7 @@ const SESSION_KEY_LENGTH: usize = 16;
 const DERIVED_KEY_COUNT: usize = 5;
 const YUBICO_ATTESTATION_ROOT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/certificates/yubikey/yubico-attestation-root-1.pem"
+    "/certificates/yubikey/yubico-attestation-root-1.der"
 ));
 
 pub(crate) type Scp11CertificateCacheKey = (u8, u8, [u8; 32]);
@@ -100,7 +100,8 @@ impl Scp11KeySet {
                 (Some(parse_public_point(&parse_hex(&point)?)?), None)
             }
             (Err(env::VarError::NotPresent), Ok(path)) => {
-                let anchors = load_certificates(&path)?;
+                let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+                let anchors = vec![crate::certificate_chain::decode(&encoded)?];
                 (
                     None,
                     Some(crate::certificate_chain::CertificateTrust::new(&anchors)?),
@@ -288,7 +289,7 @@ impl Scp11KeySet {
         let Some(host) = self.host.as_ref() else {
             return Ok(());
         };
-        for (index, certificate) in host.certificates.iter().enumerate() {
+        for (index, certificate) in host.certificates.iter().rev().enumerate() {
             let more = index + 1 < host.certificates.len();
             let upload = CommandApdu {
                 cla: 0x80,
@@ -309,27 +310,24 @@ impl Scp11aHostCredentials {
     fn from_environment() -> Result<Self, Error> {
         let key_path = env::var("PKCS11RS_SCP11_OCE_PRIVATE_KEY")
             .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
-        let encoded_key = fs::read(key_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let private_key = std::str::from_utf8(&encoded_key)
-            .ok()
-            .and_then(|pem| {
-                P256SecretKey::from_pkcs8_pem(pem)
-                    .or_else(|_| P256SecretKey::from_sec1_pem(pem))
-                    .ok()
-            })
-            .or_else(|| {
-                P256SecretKey::from_pkcs8_der(&encoded_key)
-                    .or_else(|_| P256SecretKey::from_sec1_der(&encoded_key))
-                    .ok()
-            })
-            .ok_or(CKR_ARGUMENTS_BAD)?;
+        let encrypted_key = fs::read(key_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let pinentry = crate::pinentry::Pinentry::from_environment()?;
+        let encoded_key = crate::private_key::decrypt_file(
+            &encrypted_key,
+            &pinentry,
+            "Unlock the SCP11 OCE private key",
+        )?;
+        let private_key = P256SecretKey::from_pkcs8_der(&encoded_key)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
 
-        let certificate_paths = env::var("PKCS11RS_SCP11_OCE_CERTIFICATES")
+        let certificate_bundle_path = env::var("PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE")
             .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
-        let certificates = load_certificates(&certificate_paths)?;
+        let certificate_bundle =
+            fs::read(certificate_bundle_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let certificates = crate::certificate_chain::decode_bundle(&certificate_bundle)?;
         let leaf_key =
             P256PublicKey::from_public_key_der(&crate::certificate_chain::public_key_info(
-                certificates.last().ok_or(CKR_ARGUMENTS_BAD)?,
+                certificates.first().ok_or(CKR_ARGUMENTS_BAD)?,
             )?)
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         if encode_private_public_point(&private_key) != encode_public_point(&leaf_key) {
@@ -348,10 +346,6 @@ impl Scp11aHostCredentials {
             certificates,
         })
     }
-}
-
-fn load_certificates(paths: &str) -> Result<Vec<Vec<u8>>, Error> {
-    crate::certificate_chain::load(paths)
 }
 
 fn parse_public_point(encoded: &[u8]) -> Result<P256PublicKey, Error> {
