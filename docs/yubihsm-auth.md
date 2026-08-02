@@ -31,6 +31,9 @@ present. Invalid, unreadable, noncanonical, or mismatched material fails
 initialization instead of falling back to unauthenticated TLS. The identity is
 offered only to configured `https://` URLs, and redirects are disabled while it
 is configured. Client authentication does not alter server verification.
+Use the `yubihsm-tls-client` purpose of
+[`pkcs11rs-tool`](pkcs11rs-tool.md) to create the bundle and validate it with
+the encrypted private key.
 
 For HTTPS servers issued by a private CA, set:
 
@@ -43,6 +46,8 @@ embedded Mozilla roots for every configured HTTPS connector. An empty,
 malformed, noncanonical, or unreadable bundle fails initialization. It may be
 configured independently of the client identity. Server certificate-chain and
 hostname or IP-address verification remain mandatory.
+Use the tool's `yubihsm-tls-ca` purpose to require every imported certificate
+to be independently suitable as a TLS trust anchor.
 
 A certificate bundle is encoded as the canonical CBOR array
 `["pkcs11rs.x509-certificate-bundle", 1, [certificate_der, ...]]`. Every

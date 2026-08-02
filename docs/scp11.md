@@ -49,6 +49,10 @@ SCP11a and SCP11c additionally require:
 
 The leaf certificate public key must match the configured OCE private key, and
 each certificate must verify the next certificate in the configured chain.
+Use the `scp11-oce` purpose of
+[`pkcs11rs-tool`](pkcs11rs-tool.md) to import DER or PEM certificates, enforce
+these constraints, match the encrypted key, and write the canonical CBOR
+bundle.
 
 The SCP11b transport uses NIST P-256 ephemeral key agreement and KID `0x13`.
 The SCP11a and SCP11c transports upload the OCE certificate chain, use KID

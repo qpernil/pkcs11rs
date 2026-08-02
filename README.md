@@ -155,13 +155,20 @@ libcurl.
 cargo build --locked
 ```
 
-The shared library is written to the Cargo target directory. Typical paths are:
+This builds the provider and the certificate-bundle authoring utility. Typical
+output paths are:
 
 ```text
 target/debug/libpkcs11rs.so       Linux
 target/debug/libpkcs11rs.dylib    macOS
 target/debug/pkcs11rs.dll         Windows
+target/debug/pkcs11rs-tool        Authoring utility (with .exe on Windows)
 ```
+
+`pkcs11rs-tool` imports canonical DER certificates or one or more PEM
+`CERTIFICATE` blocks into canonical CBOR bundles and verifies bundles according
+to their configured TLS, SCP11 OCE, or collection purpose. See
+[Certificate-bundle authoring](docs/pkcs11rs-tool.md).
 
 For example, using OpenSC `pkcs11-tool` on macOS:
 
@@ -239,6 +246,8 @@ configured `PKCS11RS_PINENTRY`. Both settings are required together;
 unreadable, malformed, noncanonical, or mismatched material makes
 `C_Initialize` fail. The identity is offered only to `https://` connector URLs.
 Redirects are disabled whenever a client identity is configured.
+Create and validate the pair with the `yubihsm-tls-client` purpose described in
+[Certificate-bundle authoring](docs/pkcs11rs-tool.md).
 
 For a connector whose server certificate is issued by a private CA, configure
 a canonical CBOR certificate bundle:
@@ -253,6 +262,8 @@ parsed and accepted as a trust anchor during `C_Initialize`; an empty,
 malformed, or unreadable bundle fails initialization. Certificate-chain,
 hostname, and IP-address verification occurs when the HTTPS connection is
 made. The setting can be used with or without a client identity.
+Create this bundle with the `yubihsm-tls-ca` purpose so every entry is checked
+as an independent TLS trust anchor.
 
 Remote connector slots are added alongside directly attached USB devices. Each
 configured URL always has a slot; an unreachable connector or a connector with
