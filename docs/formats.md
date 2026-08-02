@@ -7,8 +7,8 @@ format by trying multiple decoders:
 | --- | --- | --- |
 | X.509 certificate | canonical DER | `.der` |
 | SubjectPublicKeyInfo | canonical DER | `.der` when stored alone |
-| private key at rest | password-encrypted PKCS #8 DER | `.der` |
-| certificate bundle | canonical CBOR containing X.509 DER byte strings | `.cbor` |
+| Configured or exported private-key file | password-encrypted PKCS #8 DER | `.der` |
+| Certificate bundle | canonical CBOR containing X.509 DER byte strings | `.cbor` |
 | pkcs11rs-owned record | its versioned canonical CBOR schema | `.cbor` |
 
 A certificate bundle is the array
