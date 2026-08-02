@@ -10,6 +10,12 @@ license = "MIT OR Apache-2.0"
 keywords = ["pkcs11", "cryptoki", "yubikey", "yubihsm", "hsm"]
 categories = ["api-bindings", "cryptography", "hardware-support"]
 
+[workspace]
+members = [".", "tools/pkcs11rs-tool"]
+default-members = [".", "tools/pkcs11rs-tool"]
+exclude = ["xtask"]
+resolver = "2"
+
 [lib]
 crate-type = ["cdylib"]
 
