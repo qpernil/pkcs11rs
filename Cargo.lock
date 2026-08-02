@@ -991,6 +991,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "pkcs11rs-tool"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "const-oid 0.10.2",
+ "der 0.8.1",
+ "minicbor",
+ "p256",
+ "pkcs8 0.11.0",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "sha2 0.11.0",
+ "spki 0.8.0",
+ "x509-cert",
+ "zeroize",
+]
+
+[[package]]
 name = "pkcs5"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

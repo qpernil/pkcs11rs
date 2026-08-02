@@ -1,6 +1,4 @@
 use crate::{pinentry, Error, CKR_ARGUMENTS_BAD};
-use der::{Decode, Encode};
-use pkcs8::{EncryptedPrivateKeyInfoRef, PrivateKeyInfoRef};
 use zeroize::Zeroizing;
 
 pub(crate) fn decrypt_file(
@@ -17,33 +15,15 @@ pub(crate) fn decrypt_file(
 }
 
 pub(crate) fn decrypt(encoded: &[u8], password: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let encrypted = EncryptedPrivateKeyInfoRef::from_der(encoded)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    if encrypted
-        .to_der()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
-        != encoded
-    {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let decrypted = encrypted
-        .decrypt(password)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let private_key = PrivateKeyInfoRef::from_der(decrypted.as_bytes())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    if private_key
-        .to_der()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?
-        != decrypted.as_bytes()
-    {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(Zeroizing::new(decrypted.as_bytes().to_vec()))
+    crate::encrypted_private_key::decrypt(encoded, password)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use der::Decode;
+    use pkcs8::PrivateKeyInfoRef;
 
     #[test]
     fn decrypts_canonical_encrypted_pkcs8() {

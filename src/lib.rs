@@ -154,7 +154,9 @@ mod secure_channel_crypto;
 mod software_storage;
 pub(crate) use software_storage::SoftwareTokenStore;
 
+mod encrypted_private_key;
 mod pinentry;
+mod pinentry_client;
 mod private_key;
 
 mod yubico_kdf;
@@ -163,6 +165,7 @@ use yubico_kdf::yubico_password_kdf;
 #[cfg(any(test, feature = "abi-tests"))]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod certificate_builder;
+mod certificate_bundle;
 mod certificate_chain;
 
 mod iso7816;

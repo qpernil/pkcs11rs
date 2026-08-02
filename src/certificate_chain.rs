@@ -4,7 +4,6 @@ use der::{
     asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
     Decode, Encode,
 };
-use minicbor::{Decoder, Encoder};
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use sha2::{Digest, Sha256};
@@ -17,9 +16,6 @@ use x509_cert::{
 
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const P256_CURVE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
-const CERTIFICATE_BUNDLE_SCHEMA: &str = "pkcs11rs.x509-certificate-bundle";
-const CERTIFICATE_BUNDLE_VERSION: u64 = 1;
-
 const SUBJECT_KEY_IDENTIFIER: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.15");
 const SUBJECT_ALT_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
@@ -365,61 +361,17 @@ fn verify_certificate_signature(
 }
 
 pub(crate) fn decode(encoded: &[u8]) -> Result<Vec<u8>, Error> {
-    let certificate = Certificate::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let canonical = certificate
-        .to_der()
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    if canonical != encoded {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(canonical)
+    crate::certificate_bundle::decode_certificate(encoded)
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
+#[cfg(test)]
 pub(crate) fn encode_bundle(certificates: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
-    if certificates.is_empty() {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let mut encoded = Vec::new();
-    let mut encoder = Encoder::new(&mut encoded);
-    encoder
-        .array(3)
-        .and_then(|encoder| encoder.str(CERTIFICATE_BUNDLE_SCHEMA))
-        .and_then(|encoder| encoder.u64(CERTIFICATE_BUNDLE_VERSION))
-        .and_then(|encoder| encoder.array(certificates.len() as u64))
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    for certificate in certificates {
-        let certificate = decode(certificate)?;
-        encoder
-            .bytes(&certificate)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    }
-    Ok(encoded)
+    crate::certificate_bundle::encode(certificates).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 pub(crate) fn decode_bundle(encoded: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
-    let mut decoder = Decoder::new(encoded);
-    if decoder.array().map_err(|_| CKR_ARGUMENTS_BAD)? != Some(3)
-        || decoder.str().map_err(|_| CKR_ARGUMENTS_BAD)? != CERTIFICATE_BUNDLE_SCHEMA
-        || decoder.u64().map_err(|_| CKR_ARGUMENTS_BAD)? != CERTIFICATE_BUNDLE_VERSION
-    {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let count = decoder
-        .array()
-        .map_err(|_| CKR_ARGUMENTS_BAD)?
-        .ok_or(CKR_ARGUMENTS_BAD)?;
-    if count == 0 || count > encoded.len() as u64 {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let count = usize::try_from(count).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    let mut certificates = Vec::with_capacity(count);
-    for _ in 0..count {
-        certificates.push(decode(decoder.bytes().map_err(|_| CKR_ARGUMENTS_BAD)?)?);
-    }
-    if decoder.position() != encoded.len() || encode_bundle(&certificates)? != encoded {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(certificates)
+    crate::certificate_bundle::decode(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
 }
 
 pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
@@ -629,9 +581,9 @@ mod tests {
         trailing.push(0);
         assert!(decode_bundle(&trailing).is_err());
 
-        let mut decoder = Decoder::new(&encoded);
+        let mut decoder = minicbor::Decoder::new(&encoded);
         assert_eq!(decoder.array().unwrap(), Some(3));
-        assert_eq!(decoder.str().unwrap(), CERTIFICATE_BUNDLE_SCHEMA);
+        assert_eq!(decoder.str().unwrap(), "pkcs11rs.x509-certificate-bundle");
         let version = decoder.position();
         let mut noncanonical = encoded.clone();
         noncanonical.splice(version..=version, [0x18, 0x01]);
