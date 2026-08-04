@@ -235,9 +235,12 @@ the older-firmware 2,048-byte USB limit; restrict access to trusted clients
 until the shared firmware-aware validation is implemented.
 
 The existing single-device YubiHSM Connector protocol remains available at
-`/connector/status` and `/connector/api`. Without configuration it selects the
-only attached device. With multiple devices it refuses to choose implicitly;
-select the compatibility device explicitly:
+`/connector/status` and `/connector/api`. Without configuration it remembers
+the serial of the first successfully discovered device and behaves as though a
+client used that serial with the multi-device API. USB re-enumeration therefore
+does not change the selected HSM. If that serial is absent, the legacy endpoint
+reports no device instead of failing over. Select a different compatibility
+device explicitly:
 
 ```sh
 cargo run -p pkcs11rs-connector -- --legacy-serial 12345678

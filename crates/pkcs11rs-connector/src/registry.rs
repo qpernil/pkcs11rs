@@ -77,6 +77,7 @@ impl DeviceEntry {
 struct RegistryState {
     devices: HashMap<String, Arc<DeviceEntry>>,
     serial_by_id: HashMap<UsbDeviceId, String>,
+    legacy_serial: Option<String>,
 }
 
 #[derive(Clone)]
@@ -88,7 +89,6 @@ pub struct DeviceRegistry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacySelectionError {
     NoDevice,
-    Ambiguous,
 }
 
 impl DeviceRegistry {
@@ -128,16 +128,12 @@ impl DeviceRegistry {
                 .cloned()
                 .ok_or(LegacySelectionError::NoDevice);
         }
-        match state.devices.len() {
-            0 => Err(LegacySelectionError::NoDevice),
-            1 => state
-                .devices
-                .values()
-                .next()
-                .cloned()
-                .ok_or(LegacySelectionError::NoDevice),
-            _ => Err(LegacySelectionError::Ambiguous),
-        }
+        state
+            .legacy_serial
+            .as_deref()
+            .and_then(|serial| state.devices.get(serial))
+            .cloned()
+            .ok_or(LegacySelectionError::NoDevice)
     }
 
     async fn contains_id(&self, id: UsbDeviceId) -> bool {
@@ -191,6 +187,9 @@ impl DeviceRegistry {
             return;
         }
         state.serial_by_id.insert(id, serial.clone());
+        if state.legacy_serial.is_none() {
+            state.legacy_serial = Some(serial.clone());
+        }
         state.devices.insert(serial.clone(), entry);
         tracing::info!(%serial, ?id, "YubiHSM attached");
     }
@@ -225,12 +224,27 @@ impl DeviceRegistry {
             access: Mutex::new(()),
         });
         let mut state = self.state.write().await;
+        if state.legacy_serial.is_none() {
+            state.legacy_serial = Some(serial.to_owned());
+        }
         state.devices.insert(serial.to_owned(), entry);
+    }
+
+    #[cfg(test)]
+    async fn remove_test(&self, serial: &str) {
+        let mut state = self.state.write().await;
+        state.devices.remove(serial);
     }
 
     #[cfg(test)]
     pub(crate) async fn insert_test_echo(&self, serial: &str) {
         self.insert_test(serial, Box::new(EchoTransport)).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_response(&self, serial: &str, response: &'static [u8]) {
+        self.insert_test(serial, Box::new(FixedTransport(response)))
+            .await;
     }
 }
 
@@ -241,6 +255,16 @@ struct EchoTransport;
 impl CommandTransport for EchoTransport {
     fn command<'a>(&'a self, request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move { Ok(request.to_vec()) })
+    }
+}
+
+#[cfg(test)]
+struct FixedTransport(&'static [u8]);
+
+#[cfg(test)]
+impl CommandTransport for FixedTransport {
+    fn command<'a>(&'a self, _request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+        Box::pin(async move { Ok(self.0.to_vec()) })
     }
 }
 
@@ -272,7 +296,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn legacy_selection_requires_one_device_without_configuration() {
+    async fn legacy_selection_latches_the_first_serial_and_allows_an_override() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         assert!(matches!(
             registry.select_legacy(None).await,
@@ -284,10 +308,10 @@ mod tests {
         assert_eq!(selected.command(b"hello").await.unwrap(), b"hello");
 
         registry.insert_test_echo("11111111").await;
-        assert!(matches!(
-            registry.select_legacy(None).await,
-            Err(LegacySelectionError::Ambiguous)
-        ));
+        assert_eq!(
+            registry.select_legacy(None).await.unwrap().view().serial,
+            "22222222"
+        );
         assert_eq!(
             registry
                 .select_legacy(Some("11111111"))
@@ -305,6 +329,18 @@ mod tests {
                 .map(|device| device.serial)
                 .collect::<Vec<_>>(),
             vec![String::from("11111111"), String::from("22222222")]
+        );
+
+        registry.remove_test("22222222").await;
+        assert!(matches!(
+            registry.select_legacy(None).await,
+            Err(LegacySelectionError::NoDevice)
+        ));
+
+        registry.insert_test_echo("22222222").await;
+        assert_eq!(
+            registry.select_legacy(None).await.unwrap().view().serial,
+            "22222222"
         );
     }
 

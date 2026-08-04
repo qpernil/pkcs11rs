@@ -80,7 +80,6 @@ async fn legacy_status(State(state): State<AppState>) -> Response {
     {
         Ok(entry) => ("OK", entry.view().serial),
         Err(LegacySelectionError::NoDevice) => ("NO_DEVICE", String::from("*")),
-        Err(LegacySelectionError::Ambiguous) => ("MULTIPLE_DEVICES", String::from("*")),
     };
     (
         StatusCode::OK,
@@ -104,11 +103,6 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
             StatusCode::SERVICE_UNAVAILABLE,
             "no_device",
             String::from("the legacy YubiHSM is not attached"),
-        ),
-        Err(LegacySelectionError::Ambiguous) => problem(
-            StatusCode::CONFLICT,
-            "multiple_devices",
-            String::from("configure --legacy-serial when multiple YubiHSMs are attached"),
         ),
     }
 }
@@ -189,9 +183,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_routes_auto_select_only_one_device() {
+    async fn legacy_routes_latch_a_device_present_at_startup() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
-        registry.insert_test_echo("12345678").await;
+        registry
+            .insert_test_response("12345678", b"first device")
+            .await;
         let app = router(AppState {
             registry: registry.clone(),
             legacy_serial: None,
@@ -210,9 +206,11 @@ mod tests {
         assert!(response_body.contains("status=OK\n"));
         assert!(response_body.contains("serial=12345678\n"));
 
-        registry.insert_test_echo("87654321").await;
+        registry
+            .insert_test_response("87654321", b"second device")
+            .await;
         let response = router(AppState {
-            registry,
+            registry: registry.clone(),
             legacy_serial: None,
         })
         .oneshot(
@@ -224,7 +222,123 @@ mod tests {
         .await
         .unwrap();
         let response_body = String::from_utf8(body(response).await).unwrap();
-        assert!(response_body.contains("status=MULTIPLE_DEVICES\n"));
+        assert!(response_body.contains("status=OK\n"));
+        assert!(response_body.contains("serial=12345678\n"));
+
+        let legacy_response = router(AppState {
+            registry: registry.clone(),
+            legacy_serial: None,
+        })
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connector/api")
+                .body(Body::from("command"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body(legacy_response).await, b"first device");
+
+        let modern_response = router(AppState {
+            registry: registry.clone(),
+            legacy_serial: None,
+        })
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/devices/12345678/commands")
+                .body(Body::from("command"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(body(modern_response).await, b"first device");
+
+        let response = router(AppState {
+            registry,
+            legacy_serial: Some(String::from("87654321")),
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/connector/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let response_body = String::from_utf8(body(response).await).unwrap();
+        assert!(response_body.contains("status=OK\n"));
+        assert!(response_body.contains("serial=87654321\n"));
+    }
+
+    #[tokio::test]
+    async fn legacy_routes_latch_the_first_device_discovered_after_startup() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        let app = router(AppState {
+            registry: registry.clone(),
+            legacy_serial: None,
+        });
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/connector/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response_body = String::from_utf8(body(response).await).unwrap();
+        assert!(response_body.contains("status=NO_DEVICE\n"));
+        assert!(response_body.contains("serial=*\n"));
+
+        registry
+            .insert_test_response("12345678", b"first device")
+            .await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/connector/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response_body = String::from_utf8(body(response).await).unwrap();
+        assert!(response_body.contains("status=OK\n"));
+        assert!(response_body.contains("serial=12345678\n"));
+
+        registry
+            .insert_test_response("87654321", b"second device")
+            .await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/connector/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response_body = String::from_utf8(body(response).await).unwrap();
+        assert!(response_body.contains("status=OK\n"));
+        assert!(response_body.contains("serial=12345678\n"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/connector/api")
+                    .body(Body::from("command"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body(response).await, b"first device");
     }
 
     #[tokio::test]
