@@ -109,10 +109,18 @@ POST /connector/api
 Selection follows these rules:
 
 1. `--legacy-serial SERIAL` always selects that serial or reports it absent.
-2. Without configuration, exactly one attached device is selected.
-3. Zero devices report `NO_DEVICE`.
-4. Multiple devices report `MULTIPLE_DEVICES`; the connector never selects the
-   first enumerated device.
+2. Without configuration, the serial of the first successfully discovered
+   device is latched for the connector process lifetime.
+3. The legacy routes then behave as if a client addressed that serial through
+   `/v1/devices/{serial}` and `/v1/devices/{serial}/commands`.
+4. Later attachments and changes to the device's transient USB identifier do
+   not change the latched serial.
+5. While that serial is absent, the endpoint reports `NO_DEVICE`; it does not
+   fail over. If the same serial reappears after USB re-enumeration, it becomes
+   available through the legacy endpoint again.
+
+Restart the connector to choose a new implicit device, or use
+`--legacy-serial` when the intended compatibility device is known.
 
 The compatibility endpoint remains available to other legacy clients. Current
 PKCS11RS versions use the multi-device API above instead.
