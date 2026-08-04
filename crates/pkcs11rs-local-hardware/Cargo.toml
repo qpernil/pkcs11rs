@@ -1,0 +1,17 @@
+[package]
+name = "pkcs11rs-local-hardware"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["blocking"]
+blocking = []
+async-tokio = ["dep:futures-util", "dep:tokio", "nusb/tokio"]
+
+[dependencies]
+futures-util = { version = "0.3.31", optional = true }
+nusb = "0.2.5"
+tokio = { version = "1", optional = true, features = ["time"] }

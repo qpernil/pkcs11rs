@@ -1055,7 +1055,7 @@ mod tests {
             status: 0x63c7,
         }]);
         assert!(
-            matches!(Client.get_version(&connector), Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _)
+            matches!(Client.get_version(&connector), Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV)
         );
     }
 

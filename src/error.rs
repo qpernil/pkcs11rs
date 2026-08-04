@@ -7,32 +7,31 @@ use crate::{
 #[derive(Debug)]
 pub enum Error {
     Generic(CK_RV),
+    #[cfg(feature = "native-hardware")]
     Hid(hidapi::HidError),
-    Usb(nusb::Error),
-    UsbTransfer(nusb::transfer::TransferError),
+    #[cfg(feature = "native-hardware")]
+    LocalHardware(pkcs11rs_local_hardware::Error),
+    #[cfg(feature = "native-hardware")]
     Pcsc(pcsc::Error),
     Http(ureq::Error),
     Io(std::io::Error),
 }
 
+#[cfg(feature = "native-hardware")]
 impl From<hidapi::HidError> for Error {
     fn from(e: hidapi::HidError) -> Self {
         Self::Hid(e)
     }
 }
 
-impl From<nusb::Error> for Error {
-    fn from(e: nusb::Error) -> Self {
-        Self::Usb(e)
+#[cfg(feature = "native-hardware")]
+impl From<pkcs11rs_local_hardware::Error> for Error {
+    fn from(e: pkcs11rs_local_hardware::Error) -> Self {
+        Self::LocalHardware(e)
     }
 }
 
-impl From<nusb::transfer::TransferError> for Error {
-    fn from(e: nusb::transfer::TransferError) -> Self {
-        Self::UsbTransfer(e)
-    }
-}
-
+#[cfg(feature = "native-hardware")]
 impl From<pcsc::Error> for Error {
     fn from(e: pcsc::Error) -> Self {
         Self::Pcsc(e)
@@ -75,9 +74,23 @@ impl From<Error> for CK_RV {
         log!(2, "{:?}", error);
         match error {
             Error::Generic(rv) => rv,
+            #[cfg(feature = "native-hardware")]
             Error::Hid(_) => CKR_DEVICE_ERROR as CK_RV,
-            Error::Usb(_) => CKR_DEVICE_ERROR as CK_RV,
-            Error::UsbTransfer(_) => CKR_DEVICE_ERROR as CK_RV,
+            #[cfg(feature = "native-hardware")]
+            Error::LocalHardware(pkcs11rs_local_hardware::Error::DeviceRemoved) => {
+                CKR_DEVICE_REMOVED as CK_RV
+            }
+            #[cfg(feature = "native-hardware")]
+            Error::LocalHardware(pkcs11rs_local_hardware::Error::SendBufferTooLarge) => {
+                crate::CKR_DATA_LEN_RANGE as CK_RV
+            }
+            #[cfg(feature = "native-hardware")]
+            Error::LocalHardware(pkcs11rs_local_hardware::Error::ReceiveBufferTooLarge) => {
+                crate::CKR_DEVICE_MEMORY as CK_RV
+            }
+            #[cfg(feature = "native-hardware")]
+            Error::LocalHardware(_) => CKR_DEVICE_ERROR as CK_RV,
+            #[cfg(feature = "native-hardware")]
             Error::Pcsc(_) => CKR_DEVICE_ERROR as CK_RV,
             Error::Http(_) => CKR_DEVICE_REMOVED as CK_RV,
             Error::Io(_) => CKR_FUNCTION_FAILED as CK_RV,

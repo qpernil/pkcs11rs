@@ -198,7 +198,7 @@ fn selects_piv_and_reads_version_and_serial() {
 fn pads_pin_and_reports_retry_failures() {
     let connector = ScriptedConnector::new(vec![response(&[], 0x63c2)]);
     let error = Client.verify_pin(&connector, b"123456").unwrap_err();
-    assert!(matches!(error, Error::Generic(rv) if rv == CKR_PIN_INCORRECT as _));
+    assert!(matches!(error, Error::Generic(rv) if rv == CKR_PIN_INCORRECT as crate::CK_RV));
     assert_eq!(
         connector.commands.borrow()[0],
         [0, 0x20, 0, 0x80, 8, b'1', b'2', b'3', b'4', b'5', b'6', 0xff, 0xff, 0]

@@ -1,4 +1,5 @@
 use crate::ctap::{CredentialAuthorization, DiscoverableCredential};
+#[cfg(feature = "native-hardware")]
 use crate::ctap_hid::{CtapHidInit, CtapHidTransport, HidDeviceDescriptor};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::*;
@@ -216,6 +217,7 @@ impl FidoEndpoint for CcidFidoEndpoint {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "native-hardware")]
 pub(crate) struct HidFidoEndpoint {
     descriptor: HidDeviceDescriptor,
     transport: Rc<CtapHidTransport>,
@@ -225,6 +227,7 @@ pub(crate) struct HidFidoEndpoint {
     firmware_version: (u8, u8, u8),
 }
 
+#[cfg(feature = "native-hardware")]
 impl HidFidoEndpoint {
     pub(crate) fn new(
         descriptor: HidDeviceDescriptor,
@@ -251,6 +254,7 @@ impl HidFidoEndpoint {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl FidoEndpoint for HidFidoEndpoint {
     fn transport(&self) -> Rc<dyn CtapTransport> {
         self.transport.clone()

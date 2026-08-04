@@ -158,17 +158,44 @@ Object-type, ID, and sequence identify a native cache entry; sequence changes
 discard stale derived properties.
 
 USB and HTTP are connector implementations behind the same backend boundary.
-HTTP slots are created from configured URLs even when initially unavailable.
-After the first successful HTTP status request, transport recovery or a
-serial/version change advances a connection epoch. The YubiHSM slot observes
-that epoch and clears device-bound object, metadata, attestation, inferred
-authentication-algorithm, and public-discovery state.
+Each configured HTTP service URL is discovered through `/v1/devices`; every
+returned serial becomes its own slot and routes commands through that serial's
+endpoint. Transport recovery or a version change for that serial advances a
+connection epoch. The YubiHSM slot observes that epoch and clears device-bound
+object, metadata, attestation, inferred authentication-algorithm, and
+public-discovery state.
 
 YubiHSM Auth applet connectors are shared with YubiHSM slots through
 synchronized provider handles. Credential selectors identify the target
 YubiHSM authentication-key ID, optional applet credential and source, and
 password separately; public-discovery runtime state is held by the target
 YubiHSM slot, not globally.
+
+## Companion multi-device connector
+
+The `pkcs11rs-connector` executable is a separate Cargo package rather than a
+server embedded in the PKCS #11 provider. It owns the Tokio and Axum runtime,
+the server-side Rustls configuration, an nusb hot-plug registry, and one
+asynchronous command gate per attached YubiHSM. Different physical serials can
+execute concurrently; a single device processes one complete request at a
+time.
+
+The provider and daemon share `pkcs11rs-local-hardware`. Its default blocking
+frontend uses nusb's blocking waits and introduces no Tokio runtime into a
+process that loads the PKCS #11 library. The daemon enables the optional
+`async-tokio` frontend. Both frontends share device construction, connection
+state, endpoints, complete-write checks, dynamic zero-length-packet decisions,
+and response copying; only waiting for USB completion differs. Portable builds
+and the iOS XCFramework omit local hardware completely, while remote HTTP(S)
+connector slots remain available to the provider.
+
+The daemon is currently a private-network component, not a public security
+boundary. Its implemented TLS, body cap, command timeout, serial routing, and
+per-device serialization do not yet include firmware-aware frame validation,
+bounded admission, client-identity authorization, complete HTTP deadlines, or
+self-healing USB discovery. See the
+[connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
+for the authoritative status.
 
 ## Failure boundaries
 

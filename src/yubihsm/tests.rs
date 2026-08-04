@@ -4079,7 +4079,7 @@ fn yubihsm_user_login_requires_public_discovery_domains() {
     let closes_before_login = peer.closed_sessions.get();
     assert!(matches!(
         Slot::login(&mut slot, b"0002password"),
-        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as _
+        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_REJECTED as crate::CK_RV
     ));
     assert!(!session_is_active(&slot));
     assert_eq!(session_role(&slot), None);
@@ -4109,7 +4109,7 @@ fn yubihsm_logged_out_lazy_read_requires_public_discovery_credential() {
         .count();
     assert!(matches!(
         Slot::yubihsm_read_opaque(&slot, 2),
-        Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as _
+        Err(Error::Generic(rv)) if rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV
     ));
     assert_eq!(
         peer.commands
@@ -4160,7 +4160,7 @@ fn parses_device_information() {
     assert_eq!(info.part_number.as_deref(), Some("78CLUFX5000P"));
 
     let commands = peer.commands.borrow();
-    assert_eq!(Frame::parse(&commands[0]).unwrap().data, []);
+    assert_eq!(Frame::parse(&commands[0]).unwrap().data, Vec::<u8>::new());
     assert_eq!(Frame::parse(&commands[1]).unwrap().data, [1]);
 }
 
@@ -4180,7 +4180,7 @@ fn legacy_device_information_omits_the_page_byte() {
     assert_eq!(info.part_number, None);
     let commands = peer.commands.borrow();
     assert_eq!(commands.len(), 1);
-    assert_eq!(Frame::parse(&commands[0]).unwrap().data, []);
+    assert_eq!(Frame::parse(&commands[0]).unwrap().data, Vec::<u8>::new());
 }
 
 #[test]
@@ -4410,7 +4410,7 @@ fn device_secure_session_rejects_invalid_session_message_mac() {
             handled.set(true);
             Ok((command | RESPONSE_BIT, Vec::new()))
         }),
-        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as _
+        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV
     ));
     assert!(!handled.get());
     assert!(!session.is_valid());
@@ -4606,7 +4606,7 @@ fn hsmauth_algorithm_mismatches_fail_without_probing() {
     };
     assert!(matches!(
         symmetric_provider.authenticate(&asymmetric_target, 1, PASSWORD),
-        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
     ));
     assert_eq!(create_session_payload_lengths(&asymmetric_target), [10]);
 
@@ -4627,7 +4627,7 @@ fn hsmauth_algorithm_mismatches_fail_without_probing() {
     };
     assert!(matches!(
         asymmetric_provider.authenticate(&symmetric_target, 1, PASSWORD),
-        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
     ));
     assert_eq!(create_session_payload_lengths(&symmetric_target), [67]);
 }
@@ -4693,7 +4693,7 @@ fn direct_authentication_does_not_retry_after_password_failure() {
     let peer = ProtocolPeer::new();
     assert!(matches!(
         SecureSession::authenticate_direct(&peer, 1, b"wrong-password", None, None),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
     ));
     assert_eq!(create_session_payload_lengths(&peer), [10]);
 }
@@ -4811,7 +4811,7 @@ fn asymmetric_authentication_rejects_the_wrong_password() {
             Some(&trust.prefix),
             Some(DirectAuthenticationAlgorithm::Asymmetric),
         ),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
     ));
 }
 
@@ -4829,7 +4829,7 @@ fn asymmetric_authentication_rejects_an_untrusted_device_public_key() {
             Some(&trust.prefix),
             Some(DirectAuthenticationAlgorithm::Asymmetric),
         ),
-        Err(Error::Generic(rv)) if rv == crate::CKR_ARGUMENTS_BAD as _
+        Err(Error::Generic(rv)) if rv == crate::CKR_ARGUMENTS_BAD as crate::CK_RV
     ));
 }
 
@@ -4838,7 +4838,7 @@ fn rejects_card_cryptogram_after_cleaning_up_device_session() {
     let peer = ProtocolPeer::with_bad_card_cryptogram();
     assert!(matches!(
         SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE),
-        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as _
+        Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV
     ));
     assert_eq!(peer.commands.borrow().len(), 3);
     assert_eq!(peer.commands.borrow()[1][0], COMMAND_AUTHENTICATE_SESSION);
@@ -4853,7 +4853,7 @@ fn rejects_authentication_success_responses_with_payload() {
         let peer = ProtocolPeer::with_authenticate_payload(vec![0xaa; payload_length]);
         assert!(matches!(
             SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE),
-            Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as _
+            Err(Error::Generic(rv)) if rv == CKR_DEVICE_ERROR as crate::CK_RV
         ));
         assert_eq!(peer.commands.borrow().len(), 3);
         assert_eq!(peer.closed_sessions.get(), 1);
@@ -4870,7 +4870,7 @@ fn wrong_password_is_reported_as_pin_incorrect() {
             b"wrong-password",
             HOST_CHALLENGE,
         ),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
     ));
 }
 
@@ -4892,7 +4892,7 @@ fn oversized_commands_do_not_mutate_session_state() {
     let command = Command::raw(CommandCode::Echo, &[0; 3_117]).unwrap();
     assert!(matches!(
         session.send_command(&peer, &command),
-        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
     ));
     assert_eq!(session.counter, counter);
     assert_eq!(session.mac_chaining_value, chaining_value);
@@ -4902,7 +4902,7 @@ fn oversized_commands_do_not_mutate_session_state() {
     let random = Command::get_pseudo_random(3_117);
     assert!(matches!(
         session.send_command(&peer, &random),
-        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as _
+        Err(Error::Generic(rv)) if rv == CKR_DATA_LEN_RANGE as crate::CK_RV
     ));
     assert_eq!(session.counter, counter);
     assert_eq!(session.mac_chaining_value, chaining_value);
@@ -4923,7 +4923,7 @@ fn rejects_invalid_response_mac() {
     let command_count = peer.commands.borrow().len();
     assert!(matches!(
         session.send_command(&peer, &Command::get_storage_info()),
-        Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as _
+        Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as crate::CK_RV
     ));
     assert_eq!(peer.commands.borrow().len(), command_count);
 }
@@ -4981,7 +4981,7 @@ fn device_command_errors_advance_the_session_counter() {
     let failing = Command::raw(CommandCode::ResetDevice, &[0xde]).unwrap();
     assert!(matches!(
         session.send_command(&peer, &failing),
-        Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as _
+        Err(Error::Generic(rv)) if rv == CKR_OBJECT_HANDLE_INVALID as crate::CK_RV
     ));
     assert!(session.is_valid());
     let next = Command::raw(CommandCode::BlinkDevice, &[1]).unwrap();

@@ -11,17 +11,24 @@ keywords = ["pkcs11", "cryptoki", "yubikey", "yubihsm", "hsm"]
 categories = ["api-bindings", "cryptography", "hardware-support"]
 
 [workspace]
-members = [".", "tools/pkcs11rs-tool"]
-default-members = [".", "tools/pkcs11rs-tool"]
+members = [
+    ".",
+    "crates/pkcs11rs-connector",
+    "crates/pkcs11rs-local-hardware",
+    "tools/pkcs11rs-tool",
+]
+default-members = [".", "crates/pkcs11rs-connector", "tools/pkcs11rs-tool"]
 exclude = ["xtask"]
 resolver = "2"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "staticlib"]
 
 [features]
+default = ["native-hardware"]
 abi-tests = []
 mock-yubikey = []
+native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -34,11 +41,11 @@ getrandom = "0.4.3"
 ghash = "0.6.0"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 hkdf = "0.13.0"
-hidapi = { version = "2.6.6", default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
+hidapi = { version = "2.6.6", optional = true, default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
 minicbor = { version = "2.3.0", features = ["alloc"] }
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
-nusb = "0.2.5"
-pcsc = "2.9.0"
+pcsc = { version = "2.9.0", optional = true }
+pkcs11rs-local-hardware = { path = "crates/pkcs11rs-local-hardware", optional = true }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
@@ -62,6 +69,8 @@ primeorder = "0.14.0"
 rsa = { version = "0.9.10", default-features = false, features = ["sha2", "std", "u64_digit"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.15.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 sha1 = { version = "0.11.0", features = ["oid"] }
 sha2 = { version = "0.11.0", features = ["oid"] }
 sha3 = "0.12.0"

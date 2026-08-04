@@ -322,7 +322,7 @@ fn encodes_ecdh_cipher_do() {
     let point = vec![0x04, 1, 2, 3, 4, 5, 6, 7, 8];
     assert!(matches!(
         ecdh_cipher_do(Curve::P256, &point),
-        Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as _
+        Err(Error::Generic(rv)) if rv == CKR_DATA_INVALID as crate::CK_RV
     ));
 
     let point = vec![0x04; 65];
@@ -376,7 +376,7 @@ fn certificate_selection_handles_yubikey_firmware_variants() {
     );
     assert!(matches!(
         Client.certificate(&old, KeyRef::Signature),
-        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as _
+        Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as crate::CK_RV
     ));
     assert_eq!(old.commands.borrow()[0], [0, 0xca, 0x7f, 0x21, 0]);
 }
@@ -522,7 +522,7 @@ fn data_object_commands_cover_even_odd_and_repeated_objects() {
         .unwrap();
     assert!(matches!(
         Client.put_data_odd(&connector, 0x3f, 0xff, &[0x4d, 0x01, 0x00]),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     Client
         .select_data(&connector, 1, DataObject::CardholderCertificate)
@@ -609,20 +609,20 @@ fn yubikey_commands_refuse_key_destructive_lifecycle_operations() {
     assert_eq!(Client.firmware_version(&connector).unwrap(), (5, 7, 2));
     assert!(matches!(
         Client.set_pin_attempts(&connector, 3, 4, 5),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     Client.attest_key(&connector, KeyRef::Signature).unwrap();
     assert!(matches!(
         Client.terminate(&connector),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     assert!(matches!(
         Client.put_data(&connector, 0x00c1, &[1, 8, 0, 32, 0, 0]),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     assert!(matches!(
         Client.activate(&connector),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     assert_eq!(Client.challenge(&connector, 4).unwrap(), [1, 2, 3, 4]);
 
@@ -692,11 +692,11 @@ fn public_key_reads_work_but_key_generation_and_import_are_prohibited() {
             KeyRef::Attestation,
             Algorithm::Rsa { bits: 1024 },
         ),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     assert!(matches!(
         Client.import_private_key(&connector, &[0x4d, 0x01, 0x00]),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
 
     let commands = connector.commands.borrow();
@@ -746,7 +746,7 @@ fn guarded_key_generation_only_targets_an_empty_reference() {
             KeyRef::Signature,
             Algorithm::Rsa { bits: 2048 },
         ),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as _
+        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
     assert!(occupied
         .commands
@@ -830,6 +830,6 @@ fn command_statuses_map_to_specific_pkcs11_errors() {
         let error = Client
             .get_data(&connector, DataObject::Aid.tag())
             .unwrap_err();
-        assert!(matches!(error, Error::Generic(rv) if rv == expected as _));
+        assert!(matches!(error, Error::Generic(rv) if rv == expected as crate::CK_RV));
     }
 }

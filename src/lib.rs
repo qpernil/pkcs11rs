@@ -1,5 +1,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+// The portable build deliberately removes the native hardware discovery roots,
+// leaving their shared protocol implementation dormant but available to tests.
+#![cfg_attr(not(feature = "native-hardware"), allow(dead_code, unused_imports))]
 #![cfg_attr(
     not(test),
     deny(
@@ -1017,12 +1020,13 @@ mod abi_test_backend;
 use abi_test_backend::*;
 
 mod connector;
-pub(crate) use connector::{
-    bulk_out_packet_size, usb_bcd_version, Connector, HttpConnector, HttpConnectorTlsConfig,
-    PcscAppletConnector, PcscConnector, SharedConnector, UsbConnector,
-};
 #[cfg(test)]
-pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, PcscReaderState};
+pub(crate) use connector::{
+    ensure_complete_write, needs_zero_length_packet, usb_bcd_version, PcscReaderState,
+};
+pub(crate) use connector::{Connector, HttpConnector, HttpConnectorTlsConfig, SharedConnector};
+#[cfg(feature = "native-hardware")]
+pub(crate) use connector::{PcscAppletConnector, PcscConnector, UsbConnector};
 
 #[cfg(feature = "mock-yubikey")]
 mod mock_yubikey;
