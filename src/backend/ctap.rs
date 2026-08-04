@@ -1086,7 +1086,7 @@ impl Slot for Fido2Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO};
+    use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO, FIDO2_AID};
     use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Debug)]

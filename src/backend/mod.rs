@@ -8,9 +8,9 @@ mod traits;
 mod yubihsm;
 
 pub(crate) use ccid::{
-    ccid_application_aid, ccid_application_label, configured_ccid_configurations,
-    configured_issuer_security_domain_aid, CcidApplication, HsmAuthSlot, IssuerSecurityDomainSlot,
-    SecureChannelProtocol,
+    ccid_application_label, default_ccid_applications, parse_ccid_application,
+    parse_ccid_application_list, parse_secure_channel, CcidApplication, CcidConfiguration,
+    HsmAuthSlot, IssuerSecurityDomainSlot, SecureChannelProtocol,
 };
 pub(crate) use crypto::{
     digest_for_hash_mechanism, ec_curve_from_parameters, ec_curve_parameters, ec_parameters,
@@ -41,17 +41,14 @@ pub(crate) use yubihsm::{
 
 #[cfg(any(test, feature = "abi-tests"))]
 pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential;
-#[cfg(not(feature = "abi-tests"))]
-pub(crate) use yubihsm::{
-    configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV,
-};
+#[cfg(any(test, not(feature = "abi-tests")))]
+pub(crate) use yubihsm::configured_yubihsm_public_discovery_credential_with_pinentry;
 #[cfg(test)]
 pub(crate) use yubihsm::{YubiHsmDiscoveryCache, YubiHsmObjectKey};
 
 #[cfg(test)]
 pub(crate) use ccid::{
-    default_ccid_applications, hsmauth_token_objects, issuer_security_domain_token_objects,
-    parse_ccid_application, parse_ccid_application_list, parse_secure_channel, PcscAppletSession,
+    hsmauth_token_objects, issuer_security_domain_token_objects, PcscAppletSession,
 };
 #[cfg(test)]
 pub(crate) use crypto::{ec_multiply, EcPointValue};

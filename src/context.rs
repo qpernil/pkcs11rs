@@ -1,3 +1,5 @@
+#[cfg(not(feature = "abi-tests"))]
+use crate::configured_yubihsm_public_discovery_credential_with_pinentry;
 #[cfg(feature = "native-hardware")]
 use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
@@ -14,15 +16,13 @@ use crate::{
 };
 use crate::{
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
-    ccid_application_aid, ccid_application_label, configured_ccid_configurations, pinentry,
-    select_application, str_pad, BackendSession, CcidApplication, Connector, CryptOperation,
-    DigestOperation, Error, Fido2Slot, FindOperation, HsmAuthProviderRegistry, HsmAuthSlot,
-    HttpConnector, HttpConnectorTlsConfig, IssuerSecurityDomainSlot, OpenPgpSlot, PivSlot,
-    SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot, TokenObject,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    ccid_application_label, pinentry, select_application, str_pad, BackendSession, CcidApplication,
+    CcidConfiguration, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
+    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorTlsConfig,
+    IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PivSlot,
+    SecureChannelConfiguration, SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot,
+    TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
-#[cfg(not(feature = "abi-tests"))]
-use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
 #[cfg(feature = "native-hardware")]
 use crate::{HidFidoEndpoint, PcscAppletConnector, PcscConnector, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
@@ -36,18 +36,6 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 use zeroize::Zeroizing;
-
-pub(crate) const YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE_ENV: &str =
-    "PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE";
-pub(crate) const YUBIHSM_TLS_CLIENT_PRIVATE_KEY_ENV: &str =
-    "PKCS11RS_YUBIHSM_TLS_CLIENT_PRIVATE_KEY";
-pub(crate) const YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE_ENV: &str =
-    "PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE";
-pub(crate) const TOKEN_STORAGE_ENV: &str = "PKCS11RS_TOKEN_STORAGE";
-pub(crate) const FIDO2_STORAGE_ENV: &str = "PKCS11RS_FIDO2_STORAGE";
-pub(crate) const SOFTWARE_SLOTS_ENV: &str = "PKCS11RS_SOFTWARE_SLOTS";
-pub(crate) const SOFTWARE_DISCOVERY_ENV_PREFIX: &str = "PKCS11RS_SOFTWARE_DISCOVERY_";
-pub(crate) const HARDWARE_DISCOVERY_ENV: &str = "PKCS11RS_HARDWARE_DISCOVERY";
 
 const TOKEN_STORAGE_SCHEMA_DIRECTORY: &str = "tokens-v1";
 const FIDO2_STORAGE_SCHEMA_DIRECTORY: &str = "fido2-v1";
@@ -227,42 +215,6 @@ fn token_storage_for_slot(
     Ok(Box::new(provider))
 }
 
-pub(crate) fn configured_yubihsm_urls(
-    value: Option<std::ffi::OsString>,
-) -> Result<Vec<String>, Error> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let mut urls = Vec::new();
-    for url in value.split(',') {
-        let url = url.trim().trim_end_matches('/');
-        if url.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        urls.push(url.to_owned());
-    }
-    Ok(urls)
-}
-
-pub(crate) fn configured_software_slots(
-    value: Option<std::ffi::OsString>,
-) -> Result<Vec<String>, Error> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let mut names = Vec::new();
-    for name in value.split(',') {
-        let name = name.trim();
-        if name.is_empty() || name.len() > 32 || names.iter().any(|configured| configured == name) {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        names.push(name.to_owned());
-    }
-    Ok(names)
-}
-
 pub(crate) fn configured_yubihsm_http_tls(
     certificate_bundle_path: Option<std::ffi::OsString>,
     private_key_path: Option<std::ffi::OsString>,
@@ -295,35 +247,6 @@ pub(crate) fn configured_yubihsm_http_tls(
     Ok(tls)
 }
 
-#[cfg(any(not(feature = "abi-tests"), test))]
-pub(crate) fn configured_yubihsm_usb(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
-    configured_binary_switch(value)
-}
-
-#[cfg(any(not(feature = "abi-tests"), test))]
-pub(crate) fn configured_local_yubihsm_usb(
-    hardware_discovery: bool,
-    value: Option<std::ffi::OsString>,
-) -> Result<bool, Error> {
-    let yubihsm_usb = configured_yubihsm_usb(value)?;
-    Ok(hardware_discovery && yubihsm_usb)
-}
-
-pub(crate) fn configured_hardware_discovery(
-    value: Option<std::ffi::OsString>,
-) -> Result<bool, Error> {
-    configured_binary_switch(value)
-}
-
-fn configured_binary_switch(value: Option<std::ffi::OsString>) -> Result<bool, Error> {
-    match value {
-        None => Ok(true),
-        Some(value) if value == "0" => Ok(false),
-        Some(value) if value == "1" => Ok(true),
-        Some(_) => Err(CKR_ARGUMENTS_BAD.into()),
-    }
-}
-
 // Initialized module resources and the registry of independently locked slots.
 // The registry lock protects lazy discovery and session-handle routing; slot
 // operations release it before taking an individual SlotContext lock.
@@ -338,6 +261,10 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
+    pub(crate) yubihsm_device_trust_prefix: std::ffi::OsString,
+    pub(crate) ccid_configurations: Vec<CcidConfiguration>,
+    pub(crate) ccid_aids: crate::configuration::CcidAidConfiguration,
+    pub(crate) secure_channels: Arc<SecureChannelConfiguration>,
     pub(crate) token_storage: Option<TokenStorageConfig>,
     pub(crate) fido_storage: Option<FidoStorageConfig>,
     pub(crate) handles: Arc<HandleCounters>,
@@ -745,11 +672,22 @@ impl std::fmt::Debug for SessionContext {
 
 impl ModuleContext {
     #[allow(unused_mut)]
-    pub(crate) fn new() -> Result<ModuleContext, Error> {
-        let debug_level = crate::configured_debug_level()?;
-        let pinentry = Arc::new(pinentry::Pinentry::from_environment()?);
+    pub(crate) fn new_with_configuration(
+        configuration: ModuleConfiguration,
+    ) -> Result<ModuleContext, Error> {
+        #[cfg(feature = "abi-tests")]
+        let _ = (
+            configuration.yubihsm_usb,
+            configuration.yubihsm_public_discovery.as_ref(),
+        );
+        let debug_level = configuration.debug_level;
+        let pinentry = Arc::new(pinentry::Pinentry::from_configuration(
+            configuration.pinentry,
+        )?);
         let handles = Arc::new(HandleCounters::new());
-        let trust_store = Arc::new(crate::yubihsm::trust::TrustStore::new());
+        let trust_store = Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
+            configuration.yubihsm_device_trust_prefix.clone(),
+        ));
         #[cfg(feature = "abi-tests")]
         let mut slots = HashMap::from([
             (ABI_TEST_SLOT_ID, Box::new(AbiTestSlot) as Box<dyn Slot>),
@@ -769,52 +707,39 @@ impl ModuleContext {
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
         #[cfg(feature = "native-hardware")]
-        let hardware_discovery =
-            configured_hardware_discovery(std::env::var_os(HARDWARE_DISCOVERY_ENV))?;
+        let hardware_discovery = configuration.hardware_discovery;
         #[cfg(not(feature = "native-hardware"))]
         let hardware_discovery = false;
-        let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
-        let software_slots = configured_software_slots(std::env::var_os(SOFTWARE_SLOTS_ENV))?;
-        let token_storage = configured_token_storage(std::env::var_os(TOKEN_STORAGE_ENV))?;
-        let mut software_discovery_pins = HashMap::new();
-        if token_storage.is_some() {
-            for name in &software_slots {
-                let variable = format!(
-                    "{SOFTWARE_DISCOVERY_ENV_PREFIX}{}",
-                    encode_path_component(name.as_bytes()).to_ascii_uppercase()
-                );
-                let Some(value) = std::env::var_os(&variable) else {
-                    continue;
-                };
-                let value = value.into_string().map_err(|_| CKR_ARGUMENTS_BAD)?;
-                crate::software_storage::validate_software_pin(value.as_bytes())?;
-                software_discovery_pins.insert(name.clone(), Zeroizing::new(value.into_bytes()));
-            }
-        }
+        let yubihsm_urls = configuration.yubihsm_urls;
+        let software_slots = configuration.software_slots;
+        let token_storage = configured_token_storage(configuration.token_storage)?;
+        let software_discovery_pins = if token_storage.is_some() {
+            configuration.software_discovery_pins
+        } else {
+            HashMap::new()
+        };
         let fido_storage = if token_storage.is_none() {
-            configured_fido_storage(std::env::var_os(FIDO2_STORAGE_ENV))?
+            configured_fido_storage(configuration.fido2_storage)?
         } else {
             None
         };
         let yubihsm_http_tls = configured_yubihsm_http_tls(
-            std::env::var_os(YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE_ENV),
-            std::env::var_os(YUBIHSM_TLS_CLIENT_PRIVATE_KEY_ENV),
-            std::env::var_os(YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE_ENV),
+            configuration.yubihsm_tls_client_certificate_bundle,
+            configuration.yubihsm_tls_client_private_key,
+            configuration.yubihsm_tls_ca_certificate_bundle,
             pinentry.as_ref(),
         )?;
         #[cfg(not(feature = "abi-tests"))]
         let yubihsm_public_discovery_config =
             configured_yubihsm_public_discovery_credential_with_pinentry(
-                std::env::var_os(YUBIHSM_DISCOVERY_ENV),
+                configuration.yubihsm_public_discovery,
                 pinentry.as_ref(),
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_config = None;
         #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
-        let yubihsm_usb = configured_local_yubihsm_usb(
-            hardware_discovery,
-            std::env::var_os("PKCS11RS_YUBIHSM_USB"),
-        )?;
+        let yubihsm_usb = configuration.yubihsm_usb;
+        let secure_channels = Arc::new(configuration.secure_channels);
         let mut context = ModuleContext {
             debug_level,
             hardware_discovery,
@@ -841,6 +766,10 @@ impl ModuleContext {
             yubihsm_urls,
             yubihsm_http_tls,
             yubihsm_public_discovery_config,
+            yubihsm_device_trust_prefix: configuration.yubihsm_device_trust_prefix,
+            ccid_configurations: configuration.ccid_configurations,
+            ccid_aids: configuration.ccid_aids,
+            secure_channels,
             token_storage,
             fido_storage,
             handles: handles.clone(),
@@ -1755,6 +1684,7 @@ impl ModuleContext {
                     self.yubihsm_public_discovery_config.clone(),
                 );
                 yubihsm_slot.set_pinentry(self.pinentry.clone());
+                yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
                 let mut slot = Box::new(yubihsm_slot);
                 if let Err(error) = slot.init_slot() {
                     log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
@@ -1808,6 +1738,7 @@ impl ModuleContext {
                     self.yubihsm_public_discovery_config.clone(),
                 );
                 yubihsm_slot.set_pinentry(self.pinentry.clone());
+                yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
                 let mut slot = Box::new(yubihsm_slot);
                 if connected {
                     if let Err(error) = slot.init_slot() {
@@ -1877,13 +1808,7 @@ impl ModuleContext {
                             .entry(key)
                             .or_insert_with(|| connector.state.device.clone());
                     }
-                    let configurations = match configured_ccid_configurations() {
-                        Ok(configurations) => configurations,
-                        Err(error) => {
-                            log!(1, "CCID application configuration: {:?}", error);
-                            continue;
-                        }
-                    };
+                    let configurations = self.ccid_configurations.clone();
                     let reader_state = connector.state.clone();
                     let base_connector: SharedConnector = Arc::new(connector);
                     let mut reader_slots = Vec::new();
@@ -1900,16 +1825,10 @@ impl ModuleContext {
                             break;
                         };
                         next_reader_slot_id = next_slot_id;
-                        let application_aid = match ccid_application_aid(
-                            configuration.application,
-                            configuration.secure_channel,
-                        ) {
-                            Ok(aid) => aid,
-                            Err(error) => {
-                                log!(1, "CCID application AID configuration: {:?}", error);
-                                continue;
-                            }
-                        };
+                        let application_aid = self
+                            .ccid_aids
+                            .for_application(configuration.application)
+                            .to_vec();
                         if let Err(error) =
                             select_application(base_connector.as_ref(), &application_aid)
                         {
@@ -1931,11 +1850,13 @@ impl ModuleContext {
                             );
                             continue;
                         }
-                        let application_connector = PcscAppletConnector::new(
+                        let application_connector = PcscAppletConnector::new_configured(
                             base_connector.clone(),
                             &application_aid,
                             configuration.secure_channel,
                             reader_state.clone(),
+                            self.secure_channels.clone(),
+                            self.pinentry.clone(),
                         );
                         let shared_application_connector: SharedConnector =
                             Arc::new(application_connector.clone());
@@ -1960,7 +1881,11 @@ impl ModuleContext {
                                     reader_state.device.clone(),
                                 );
                                 match hsmauth_slot.providers() {
-                                    Ok(providers) => {
+                                    Ok(mut providers) => {
+                                        for provider in &mut providers {
+                                            provider.trust_prefix =
+                                                Some(self.yubihsm_device_trust_prefix.clone());
+                                        }
                                         if let Err(error) = hsmauth_providers.extend(providers) {
                                             log!(
                                                 1,
@@ -2354,6 +2279,7 @@ mod discovery_tests {
 
     #[test]
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
+        let configuration = ModuleConfiguration::resolve(None).unwrap();
         let context = ModuleContext {
             debug_level: 0,
             hardware_discovery: false,
@@ -2364,11 +2290,17 @@ mod discovery_tests {
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),
             yubihsm_public_discovery_config: None,
+            yubihsm_device_trust_prefix: std::ffi::OsString::new(),
+            ccid_configurations: configuration.ccid_configurations,
+            ccid_aids: configuration.ccid_aids,
+            secure_channels: Arc::new(configuration.secure_channels),
             token_storage: None,
             fido_storage: None,
             handles: Arc::new(HandleCounters::new()),
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
-            trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new()),
+            trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
+                std::ffi::OsString::new(),
+            )),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
 
@@ -2485,18 +2417,5 @@ mod discovery_tests {
                 .join(FIDO2_STORAGE_SCHEMA_DIRECTORY)
                 .join("yubico-serial-3837363534333231")
         );
-    }
-
-    #[test]
-    fn software_slot_configuration_is_disabled_by_default_and_names_each_slot() {
-        assert!(configured_software_slots(None).unwrap().is_empty());
-        assert_eq!(
-            configured_software_slots(Some("signing, test key exchange ".into())).unwrap(),
-            ["signing", "test key exchange"]
-        );
-        assert!(configured_software_slots(Some(std::ffi::OsString::new())).is_err());
-        assert!(configured_software_slots(Some("signing,".into())).is_err());
-        assert!(configured_software_slots(Some("signing, signing".into())).is_err());
-        assert!(configured_software_slots(Some("x".repeat(33).into())).is_err());
     }
 }

@@ -24,32 +24,6 @@ pub(crate) enum SecureChannelProtocol {
     Scp11c,
 }
 
-pub(crate) fn configured_ccid_configurations() -> Result<Vec<CcidConfiguration>, Error> {
-    let secure_channel = configured_secure_channel_optional()?;
-    let applications = match std::env::var("PKCS11RS_CCID_APPLICATIONS") {
-        Ok(value) => parse_ccid_application_list(&value)?,
-        Err(std::env::VarError::NotPresent) => default_ccid_applications(),
-        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
-    };
-
-    applications
-        .into_iter()
-        .map(|application| {
-            let secure_channel = match application {
-                CcidApplication::Piv
-                | CcidApplication::OpenPgp
-                | CcidApplication::HsmAuth
-                | CcidApplication::IssuerSecurityDomain
-                | CcidApplication::Fido2 => secure_channel,
-            };
-            Ok(CcidConfiguration {
-                application,
-                secure_channel,
-            })
-        })
-        .collect()
-}
-
 pub(crate) fn parse_ccid_application_list(value: &str) -> Result<Vec<CcidApplication>, Error> {
     let mut applications = Vec::new();
     for application in value
@@ -96,50 +70,6 @@ pub(crate) fn ccid_application_label(application: CcidApplication) -> &'static s
         CcidApplication::HsmAuth => "YubiHSM Auth",
         CcidApplication::IssuerSecurityDomain => "Issuer SD",
         CcidApplication::Fido2 => "FIDO2",
-    }
-}
-
-pub(crate) fn ccid_application_aid(
-    application: CcidApplication,
-    _secure_channel: Option<SecureChannelProtocol>,
-) -> Result<Vec<u8>, Error> {
-    let (name, default) = match application {
-        CcidApplication::Piv => ("PKCS11RS_PIV_AID", &piv::PIV_AID[..]),
-        CcidApplication::OpenPgp => ("PKCS11RS_OPENPGP_AID", &openpgp::OPENPGP_AID[..]),
-        CcidApplication::HsmAuth => ("PKCS11RS_HSMAUTH_AID", &hsmauth::AID[..]),
-        CcidApplication::IssuerSecurityDomain => (
-            "PKCS11RS_ISSUER_SD_AID",
-            &DEFAULT_ISSUER_SECURITY_DOMAIN_AID[..],
-        ),
-        CcidApplication::Fido2 => ("PKCS11RS_FIDO2_AID", &FIDO2_AID[..]),
-    };
-    configured_ccid_aid(name, default)
-}
-
-pub(crate) fn configured_issuer_security_domain_aid() -> Result<Vec<u8>, Error> {
-    configured_ccid_aid(
-        "PKCS11RS_ISSUER_SD_AID",
-        &DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
-    )
-}
-
-pub(crate) fn configured_ccid_aid(name: &str, default: &[u8]) -> Result<Vec<u8>, Error> {
-    let aid = match std::env::var(name) {
-        Ok(value) => parse_hex(&value)?,
-        Err(std::env::VarError::NotPresent) => default.to_vec(),
-        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
-    };
-    if !(5..=16).contains(&aid.len()) {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    Ok(aid)
-}
-
-pub(crate) fn configured_secure_channel_optional() -> Result<Option<SecureChannelProtocol>, Error> {
-    match std::env::var("PKCS11RS_CCID_SECURE_CHANNEL") {
-        Ok(value) => parse_secure_channel(&value).map(Some),
-        Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
-        Err(std::env::VarError::NotPresent) => Ok(None),
     }
 }
 

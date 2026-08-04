@@ -105,24 +105,6 @@ where
     divisor != T::from(0) && value % divisor == T::from(0)
 }
 
-fn parse_debug_level(value: Option<&str>) -> Result<u8, CK_RV> {
-    match value {
-        None | Some("0") => Ok(0),
-        Some("1") => Ok(1),
-        Some("2") => Ok(2),
-        Some(_) => Err(CKR_ARGUMENTS_BAD as CK_RV),
-    }
-}
-
-fn configured_debug_level() -> Result<u8, CK_RV> {
-    let value = match std::env::var("PKCS11RS_DEBUG") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(CKR_ARGUMENTS_BAD as CK_RV),
-    };
-    parse_debug_level(value.as_deref())
-}
-
 fn debug_enabled(level: u8) -> bool {
     MODULE_CONTEXT
         .try_read()
@@ -153,6 +135,12 @@ macro_rules! ffi_entry_point {
 pub mod error;
 use error::*;
 
+mod configuration;
+use configuration::{
+    JsonConfiguration, ModuleConfiguration, Scp03KeyMaterialConfiguration,
+    SecureChannelConfiguration,
+};
+
 mod secure_channel_crypto;
 mod software_storage;
 pub(crate) use software_storage::SoftwareTokenStore;
@@ -175,10 +163,7 @@ mod iso7816;
 use iso7816::ApduCapabilities;
 
 mod scp03;
-use scp03::{
-    configured_security_level, parse_hex, select_application, CommandApdu, ResponseApdu,
-    Scp03KeySet, Scp03Session, DEFAULT_ISSUER_SECURITY_DOMAIN_AID,
-};
+use scp03::{parse_hex, select_application, CommandApdu, ResponseApdu, Scp03KeySet, Scp03Session};
 
 mod scp11;
 use scp11::{Scp11CertificateCacheKey, Scp11KeySet, Scp11Variant};
@@ -197,7 +182,7 @@ use hsmauth::{
 mod ctap;
 mod ctap_hid;
 mod device;
-use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport, FIDO2_AID};
+use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport};
 
 mod backed_object;
 mod brainpool512;

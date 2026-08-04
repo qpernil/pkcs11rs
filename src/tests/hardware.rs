@@ -764,7 +764,7 @@ mod hardware_provisioning {
 
         let issuer_sd = crate::IssuerSecurityDomainSlot::new(
             connector(),
-            crate::DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
+            crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID.to_vec(),
         );
         assert!(crate::Slot::hsmauth_provisioning_connector(&issuer_sd).is_none());
         assert!(crate::Slot::security_domain_provisioning_connector(&issuer_sd).is_some());
@@ -800,7 +800,10 @@ mod hardware_provisioning {
             kvn,
         };
 
-        let context = crate::ModuleContext::new().expect("failed to create hardware context");
+        let configuration = crate::ModuleConfiguration::resolve(None)
+            .expect("failed to resolve hardware configuration");
+        let context = crate::ModuleContext::new_with_configuration(configuration)
+            .expect("failed to create hardware context");
         context.init().unwrap();
         let slot_contexts = context.slot_contexts.read().unwrap();
         let issuer_sd = select_connector(
@@ -818,7 +821,7 @@ mod hardware_provisioning {
             "Issuer SD applet",
         );
         issuer_sd
-            .establish_secure_channel(&crate::configured_issuer_security_domain_aid().unwrap())
+            .establish_secure_channel(&crate::scp03::DEFAULT_ISSUER_SECURITY_DOMAIN_AID)
             .expect("failed to establish the Issuer SD provisioning channel");
 
         let before = crate::SecurityDomainClient
@@ -972,7 +975,10 @@ mod hardware_provisioning {
             "YubiHSM admin password must be 8..=64 bytes"
         );
 
-        let context = crate::ModuleContext::new().expect("failed to create hardware context");
+        let configuration = crate::ModuleConfiguration::resolve(None)
+            .expect("failed to resolve hardware configuration");
+        let context = crate::ModuleContext::new_with_configuration(configuration)
+            .expect("failed to create hardware context");
         context.init().unwrap();
         let slot_contexts = context.slot_contexts.read().unwrap();
         let hsmauth = select_connector(
@@ -1382,7 +1388,7 @@ mod fido2_hardware {
     }
 
     fn fido_ccid_get_info(connector: &crate::PcscConnector) -> Result<(), crate::Error> {
-        crate::select_application(connector, &crate::FIDO2_AID)?;
+        crate::select_application(connector, &crate::ctap::FIDO2_AID)?;
         let command = crate::CommandApdu {
             cla: 0x80,
             ins: 0x10,

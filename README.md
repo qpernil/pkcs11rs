@@ -86,11 +86,16 @@ context containing its sessions, login state, and object-handle state.
 Searches and active cryptographic operations belong to their individual
 sessions.
 
-For compatibility with OpenSSL PKCS #11 integrations, a non-null
-`CK_C_INITIALIZE_ARGS.pReserved` is accepted as opaque caller configuration.
-pkcs11rs neither dereferences nor retains it; module configuration continues to
-come from the documented environment variables. `C_Finalize` still requires
-its reserved argument to be null.
+For integrations that can forward provider configuration, including iOS
+applications without a useful process-environment configuration model,
+`CK_C_INITIALIZE_ARGS.pReserved` may point to a NUL-terminated UTF-8 JSON
+configuration object. pkcs11rs reads it during `C_Initialize` and does not
+retain the pointer. Explicit JSON fields take precedence; omitted fields retain
+the documented environment-variable and built-in fallbacks. A null or empty
+string selects the legacy fallback behavior. See
+[Initialization configuration](docs/configuration.md) for the complete schema,
+validation rules, and C example. `C_Finalize` still requires its reserved
+argument to be null.
 
 Initialization and finalization are nonblocking lifecycle transitions. They
 return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary

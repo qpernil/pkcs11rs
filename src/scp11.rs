@@ -1,6 +1,6 @@
 use crate::{
     error::Error,
-    scp03::{environment_byte, parse_hex, CommandApdu, Scp03Session},
+    scp03::{CommandApdu, Scp03Session},
     secure_channel_crypto::aes_cmac,
     Connector, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
     CKR_USER_PIN_NOT_INITIALIZED,
@@ -12,9 +12,12 @@ use p256::{
     PublicKey as P256PublicKey, SecretKey as P256SecretKey,
 };
 use sha2::{Digest, Sha256};
-use std::{env, fs};
+use std::fs;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
+
+#[cfg(test)]
+use crate::scp03::parse_hex;
 
 const SCP11A_KEY_ID: u8 = 0x11;
 const SCP11B_KEY_ID: u8 = 0x13;
@@ -92,14 +95,16 @@ impl std::fmt::Debug for Scp11KeySet {
 }
 
 impl Scp11KeySet {
-    pub(crate) fn from_environment(variant: Scp11Variant) -> Result<Self, Error> {
-        let point = env::var("PKCS11RS_SCP11_SD_PUBLIC_KEY");
-        let ca_certificate = env::var("PKCS11RS_SCP11_SD_CA_CERTIFICATE");
-        let (card_public_key, certificate_trust) = match (point, ca_certificate) {
-            (Ok(point), Err(env::VarError::NotPresent)) => {
-                (Some(parse_public_point(&parse_hex(&point)?)?), None)
+    pub(crate) fn from_configuration(
+        variant: Scp11Variant,
+        configuration: &crate::configuration::Scp11Configuration,
+        pinentry: &crate::pinentry::Pinentry,
+    ) -> Result<Self, Error> {
+        let (card_public_key, certificate_trust) = match &configuration.trust {
+            crate::configuration::Scp11TrustConfiguration::PublicKey(point) => {
+                (Some(parse_public_point(point)?), None)
             }
-            (Err(env::VarError::NotPresent), Ok(path)) => {
+            crate::configuration::Scp11TrustConfiguration::CaCertificate(path) => {
                 let encoded = fs::read(path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
                 let anchors = vec![crate::certificate_chain::decode(&encoded)?];
                 (
@@ -107,27 +112,26 @@ impl Scp11KeySet {
                     Some(crate::certificate_chain::CertificateTrust::new(&anchors)?),
                 )
             }
-            (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => (
+            crate::configuration::Scp11TrustConfiguration::Yubico => (
                 None,
                 Some(crate::certificate_chain::CertificateTrust::new(&[
                     crate::certificate_chain::decode(YUBICO_ATTESTATION_ROOT)?,
                 ])?),
             ),
-            (Err(env::VarError::NotUnicode(_)), _)
-            | (_, Err(env::VarError::NotUnicode(_)))
-            | (Ok(_), Ok(_)) => return Err(CKR_ARGUMENTS_BAD.into()),
         };
-        let key_version = environment_byte("PKCS11RS_SCP11_KEY_VERSION", 1)?;
-        if key_version & 0x80 != 0 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
         let host = match variant {
-            Scp11Variant::A | Scp11Variant::C => Some(Scp11aHostCredentials::from_environment()?),
+            Scp11Variant::A | Scp11Variant::C => Some(Scp11aHostCredentials::from_configuration(
+                configuration
+                    .oce
+                    .as_ref()
+                    .ok_or(CKR_USER_PIN_NOT_INITIALIZED)?,
+                pinentry,
+            )?),
             Scp11Variant::B => None,
         };
         Ok(Self {
             variant,
-            key_version,
+            key_version: configuration.key_version,
             card_public_key,
             certificate_trust,
             host,
@@ -168,6 +172,7 @@ impl Scp11KeySet {
         &self,
         connector: &dyn Connector,
         application_aid: &[u8],
+        issuer_sd_aid: &[u8],
         cached_public_point: Option<&[u8]>,
     ) -> Result<(Scp03Session, Option<Vec<u8>>), Error> {
         if self.card_public_key.is_some() {
@@ -183,9 +188,8 @@ impl Scp11KeySet {
                 .map(|session| (session, None));
         }
 
-        let issuer_sd_aid = crate::configured_issuer_security_domain_aid()?;
         let certificates = (|| {
-            crate::scp03::select_application(connector, &issuer_sd_aid)?;
+            crate::scp03::select_application(connector, issuer_sd_aid)?;
             crate::SecurityDomainClient.get_certificate_bundle(
                 connector,
                 crate::security_domain::KeyRef {
@@ -307,23 +311,22 @@ impl Scp11KeySet {
 }
 
 impl Scp11aHostCredentials {
-    fn from_environment() -> Result<Self, Error> {
-        let key_path = env::var("PKCS11RS_SCP11_OCE_PRIVATE_KEY")
-            .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
-        let encrypted_key = fs::read(key_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let pinentry = crate::pinentry::Pinentry::from_environment()?;
+    fn from_configuration(
+        configuration: &crate::configuration::Scp11OceConfiguration,
+        pinentry: &crate::pinentry::Pinentry,
+    ) -> Result<Self, Error> {
+        let encrypted_key =
+            fs::read(&configuration.private_key).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         let encoded_key = crate::private_key::decrypt_file(
             &encrypted_key,
-            &pinentry,
+            pinentry,
             "Unlock the SCP11 OCE private key",
         )?;
         let private_key = P256SecretKey::from_pkcs8_der(&encoded_key)
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
 
-        let certificate_bundle_path = env::var("PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE")
-            .map_err(|_| Error::from(CKR_USER_PIN_NOT_INITIALIZED))?;
-        let certificate_bundle =
-            fs::read(certificate_bundle_path).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let certificate_bundle = fs::read(&configuration.certificate_bundle)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         let certificates = crate::certificate_chain::decode_bundle(&certificate_bundle)?;
         let leaf_key =
             P256PublicKey::from_public_key_der(&crate::certificate_chain::public_key_info(
@@ -334,14 +337,9 @@ impl Scp11aHostCredentials {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
 
-        let key_version = environment_byte("PKCS11RS_SCP11_OCE_KEY_VERSION", 0)?;
-        let key_id = environment_byte("PKCS11RS_SCP11_OCE_KEY_ID", 0)?;
-        if key_version & 0x80 != 0 || key_id & 0x80 != 0 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
         Ok(Self {
-            key_version,
-            key_id,
+            key_version: configuration.key_version,
+            key_id: configuration.key_id,
             private_key,
             certificates,
         })

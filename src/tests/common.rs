@@ -22,6 +22,20 @@ const PKCS11_3_2_FUNCTION_COUNT: usize = 12;
 const TEST_SLOT_ID: CK_SLOT_ID = 77;
 const TEST_SESSION_HANDLE: CK_SESSION_HANDLE = 88;
 
+pub(crate) fn initialize_with_configuration(configuration: serde_json::Value) -> CK_RV {
+    let mut encoded = configuration.to_string().into_bytes();
+    encoded.push(0);
+    let mut init_args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_OS_LOCKING_OK as CK_FLAGS,
+        pReserved: encoded.as_mut_ptr().cast(),
+    };
+    crate::api::C_Initialize((&mut init_args as *mut CK_C_INITIALIZE_ARGS).cast())
+}
+
 const fn align_offset(offset: usize, alignment: usize) -> usize {
     offset.div_ceil(alignment) * alignment
 }
@@ -108,43 +122,6 @@ fn yubihsm_objects_with_persisted_public(
 }
 
 #[test]
-fn debug_level_configuration_has_three_modes() {
-    assert_eq!(crate::parse_debug_level(None), Ok(0));
-    assert_eq!(crate::parse_debug_level(Some("0")), Ok(0));
-    assert_eq!(crate::parse_debug_level(Some("1")), Ok(1));
-    assert_eq!(crate::parse_debug_level(Some("2")), Ok(2));
-    assert_eq!(
-        crate::parse_debug_level(Some("enabled")),
-        Err(CKR_ARGUMENTS_BAD as CK_RV)
-    );
-    assert_eq!(
-        crate::parse_debug_level(Some("")),
-        Err(CKR_ARGUMENTS_BAD as CK_RV)
-    );
-}
-
-#[test]
-fn yubihsm_connector_configuration_retains_order_and_duplicate_entries() {
-    assert_eq!(
-        crate::configured_yubihsm_urls(None).unwrap(),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        crate::configured_yubihsm_urls(Some(
-            " http://first:12345/,https://second:8443,http://first:12345 ".into()
-        ))
-        .unwrap(),
-        [
-            "http://first:12345",
-            "https://second:8443",
-            "http://first:12345"
-        ]
-    );
-    assert!(crate::configured_yubihsm_urls(Some("".into())).is_err());
-    assert!(crate::configured_yubihsm_urls(Some("http://first,,http://second".into())).is_err());
-}
-
-#[test]
 fn yubihsm_http_client_identity_requires_both_paths() {
     let pinentry = crate::pinentry::Pinentry::unconfigured();
     assert!(
@@ -178,32 +155,6 @@ fn yubihsm_http_client_identity_requires_both_paths() {
     )
     .is_err());
     assert!(crate::configured_yubihsm_http_tls(None, None, Some("".into()), &pinentry).is_err());
-}
-
-#[test]
-fn yubihsm_usb_discovery_is_enabled_by_default_and_can_be_disabled() {
-    assert!(crate::configured_yubihsm_usb(None).unwrap());
-    assert!(crate::configured_yubihsm_usb(Some("1".into())).unwrap());
-    assert!(!crate::configured_yubihsm_usb(Some("0".into())).unwrap());
-    for invalid in ["", "false", "2"] {
-        assert!(crate::configured_yubihsm_usb(Some(invalid.into())).is_err());
-    }
-}
-
-#[test]
-fn local_hardware_discovery_is_enabled_by_default_and_strictly_configured() {
-    assert!(crate::configured_hardware_discovery(None).unwrap());
-    assert!(crate::configured_hardware_discovery(Some("1".into())).unwrap());
-    assert!(!crate::configured_hardware_discovery(Some("0".into())).unwrap());
-    assert!(!crate::context::configured_local_yubihsm_usb(false, Some("1".into())).unwrap());
-    assert!(crate::context::configured_local_yubihsm_usb(false, Some("false".into())).is_err());
-    assert_eq!(
-        crate::configured_yubihsm_urls(Some("http://127.0.0.1:12345".into())).unwrap(),
-        vec![String::from("http://127.0.0.1:12345")]
-    );
-    for invalid in ["", "false", "2"] {
-        assert!(crate::configured_hardware_discovery(Some(invalid.into())).is_err());
-    }
 }
 
 #[test]
@@ -766,7 +717,6 @@ fn install_hsmauth_admin_slot() -> (std::rc::Rc<HsmAuthAdminConnector>, CK_SESSI
 #[cfg(unix)]
 pub(crate) struct TestPinentry {
     path: std::path::PathBuf,
-    previous_program: Option<std::ffi::OsString>,
 }
 
 #[cfg(unix)]
@@ -804,13 +754,13 @@ done
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&path, permissions).unwrap();
-        let previous_program = std::env::var_os("PKCS11RS_PINENTRY");
-        std::env::set_var("PKCS11RS_PINENTRY", path.as_os_str());
         crate::pinentry::configure_for_test(Some(path.clone().into_os_string())).unwrap();
-        Self {
-            path,
-            previous_program,
-        }
+        Self { path }
+    }
+
+    pub(crate) fn pinentry(&self) -> crate::pinentry::Pinentry {
+        crate::pinentry::Pinentry::from_configuration(Some(self.path.clone().into_os_string()))
+            .unwrap()
     }
 }
 
@@ -818,10 +768,6 @@ done
 impl Drop for TestPinentry {
     fn drop(&mut self) {
         crate::pinentry::configure_for_test(None).unwrap();
-        match self.previous_program.as_ref() {
-            Some(program) => std::env::set_var("PKCS11RS_PINENTRY", program),
-            None => std::env::remove_var("PKCS11RS_PINENTRY"),
-        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -7082,8 +7028,10 @@ fn new_test_slot_context_with_handles(
         slot,
         Vec::new(),
         handles,
-        std::sync::Arc::new(crate::pinentry::Pinentry::from_environment().unwrap()),
-        std::sync::Arc::new(crate::yubihsm::trust::TrustStore::new()),
+        std::sync::Arc::new(crate::pinentry::Pinentry::unconfigured()),
+        std::sync::Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
+            std::ffi::OsString::new(),
+        )),
     )
     .unwrap();
     for (_, object) in crate::default_objects().unwrap() {
