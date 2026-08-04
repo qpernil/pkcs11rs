@@ -197,6 +197,10 @@ USB/HID/PCSC hardware transports are not available on iOS, so this experimental
 artifact is built without them; software slots and configured remote YubiHSM
 HTTP connectors remain available.
 
+The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
+linking the XCFramework from Swift and configuring a remote YubiHSM connector
+with versioned JSON passed through `CK_C_INITIALIZE_ARGS.pReserved`.
+
 ### Asynchronous multi-device connector
 
 The workspace also builds `pkcs11rs-connector`, a fully asynchronous HTTP(S)
