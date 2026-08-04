@@ -147,6 +147,18 @@ pub fn get_info_reports_cryptoki_3_2() {
     assert_eq!(info.cryptokiVersion.major, 3);
     assert_eq!(info.cryptokiVersion.minor, 2);
     assert_eq!(info.flags, 0);
+    assert_eq!(
+        std::str::from_utf8(&info.manufacturerID)
+            .unwrap()
+            .trim_end(),
+        "Nilsson Crypto Systems"
+    );
+    assert_eq!(
+        std::str::from_utf8(&info.libraryDescription)
+            .unwrap()
+            .trim_end(),
+        "pkcs11rs native PKCS#11 module"
+    );
 
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),

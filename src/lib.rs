@@ -31,6 +31,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+const MODULE_MANUFACTURER: &str = "Nilsson Crypto Systems";
+const MODULE_DESCRIPTION: &str = "pkcs11rs native PKCS#11 module";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageDigest {
     Sha1,
