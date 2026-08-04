@@ -38,22 +38,26 @@ pub(crate) trait HidReportIo: Debug {
     ) -> Result<(), Error>;
 }
 
+#[cfg(feature = "native-hardware")]
 pub(crate) struct HidApiReportIo {
     device: hidapi::HidDevice,
 }
 
+#[cfg(feature = "native-hardware")]
 impl HidApiReportIo {
     pub(crate) fn new(device: hidapi::HidDevice) -> Self {
         Self { device }
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl Debug for HidApiReportIo {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("HidApiReportIo").finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl HidReportIo for HidApiReportIo {
     fn write_packet(&mut self, packet: &[u8; HID_REPORT_SIZE]) -> Result<(), Error> {
         let mut report = [0u8; HID_REPORT_SIZE + 1];
@@ -265,6 +269,7 @@ impl CtapTransport for CtapHidTransport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(feature = "native-hardware")]
 pub(crate) struct HidDeviceDescriptor {
     path: CString,
     vendor_id: u16,
@@ -275,6 +280,7 @@ pub(crate) struct HidDeviceDescriptor {
     interface_number: i32,
 }
 
+#[cfg(feature = "native-hardware")]
 impl HidDeviceDescriptor {
     fn from_device(device: &hidapi::DeviceInfo) -> Self {
         Self {
@@ -370,6 +376,7 @@ impl HidDeviceDescriptor {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 pub(crate) fn enumerate_fido_devices() -> Result<Vec<HidDeviceDescriptor>, Error> {
     let api = hidapi::HidApi::new()?;
     Ok(api
@@ -379,6 +386,7 @@ pub(crate) fn enumerate_fido_devices() -> Result<Vec<HidDeviceDescriptor>, Error
         .collect())
 }
 
+#[cfg(feature = "native-hardware")]
 fn is_fido_device(device: &hidapi::DeviceInfo) -> bool {
     matches!(device.bus_type(), hidapi::BusType::Usb)
         && device.usage_page() == FIDO_USAGE_PAGE

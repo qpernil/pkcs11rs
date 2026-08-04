@@ -3,15 +3,25 @@
 ## Slot layout
 
 The module exposes one slot for every selectable CCID applet, one slot for
-every physical YubiHSM USB device, and one slot for each URL configured in
-`PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated YubiHSM Connector base URLs.
-For example: `http://hsm-a:12345,http://hsm-b:12345`.
-Each entry creates a separate slot; repeated URLs are retained so independent
-PKCS #11 logins can use separate YubiHSM secure sessions through the same
-connector service. Remote slots are additive; they do not disable direct USB
-discovery. An unreachable configured connector is retained as an empty slot
-until the module is reinitialized. The URL scheme selects plain HTTP or
-rustls-backed HTTPS.
+every physical YubiHSM USB device, and one slot for every device enumerated by
+each URL configured in `PKCS11RS_YUBIHSM_URLS`. URLs are comma-separated
+multi-device connector base URLs. For example:
+`http://hsm-a:12345,http://hsm-b:12345`.
+
+Plain HTTP is appropriate only for loopback or a separately protected private
+network. The companion `pkcs11rs-connector` daemon is not yet hardened for
+direct public-Internet exposure even when its current HTTPS or mTLS support is
+enabled. See the
+[connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
+before operating a remote connector service.
+
+Each returned serial creates a separate slot, so one connector host with two
+attached YubiHSMs produces two slots from one URL. Discovery is a snapshot when
+the PKCS #11 module is initialized; reinitialize the module to add a newly
+attached serial. Existing slots can reconnect to the same serial after a
+temporary detach. Remote slots are additive; they do not disable direct USB
+discovery. An unreachable connector yields no remote slots for that discovery
+cycle. The URL scheme selects plain HTTP or rustls-backed HTTPS.
 
 HTTPS verifies the server certificate and hostname against the Mozilla root
 snapshot embedded through the locked `webpki-roots` dependency. It does not

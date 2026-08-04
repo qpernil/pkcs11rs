@@ -118,12 +118,14 @@ impl SecureChannelState {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 struct PcscTransportState {
     card: Option<pcsc::Card>,
     apdu_capabilities: ApduCapabilities,
     connection_epoch: u64,
 }
 
+#[cfg(feature = "native-hardware")]
 impl std::fmt::Debug for PcscTransportState {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("PcscTransportState")
@@ -134,6 +136,7 @@ impl std::fmt::Debug for PcscTransportState {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl Default for PcscTransportState {
     fn default() -> Self {
         Self {
@@ -145,6 +148,7 @@ impl Default for PcscTransportState {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscReaderState {
     // This is the physical-reader gate. PKCS slot state is protected separately
     // by the applet's SlotContext.
@@ -154,6 +158,7 @@ pub(crate) struct PcscReaderState {
     pub(crate) device: Arc<DeviceContext>,
 }
 
+#[cfg(feature = "native-hardware")]
 impl Default for PcscReaderState {
     fn default() -> Self {
         Self {
@@ -167,6 +172,7 @@ impl Default for PcscReaderState {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl PcscReaderState {
     fn with_operation<T>(&self, operation: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
         let _guard = self.operation.lock().map_err(|_| CKR_MUTEX_BAD)?;
@@ -204,6 +210,7 @@ impl PcscReaderState {
 }
 
 #[derive(Debug, Default)]
+#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscAppletState {
     pub(crate) enabled: std::sync::atomic::AtomicBool,
     pub(crate) applet_present: std::sync::atomic::AtomicBool,
@@ -211,6 +218,7 @@ pub(crate) struct PcscAppletState {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscAppletConnector {
     pub(crate) base: SharedConnector,
     pub(crate) application_aid: Vec<u8>,
@@ -219,6 +227,7 @@ pub(crate) struct PcscAppletConnector {
     pub(crate) applet: Arc<PcscAppletState>,
 }
 
+#[cfg(feature = "native-hardware")]
 impl std::fmt::Debug for PcscAppletConnector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("PcscAppletConnector")
@@ -231,6 +240,7 @@ impl std::fmt::Debug for PcscAppletConnector {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl PcscAppletConnector {
     #[cfg(test)]
     pub(crate) fn discovery_error(&self) -> Option<String> {
@@ -412,6 +422,7 @@ impl PcscAppletConnector {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl Connector for PcscAppletConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -664,49 +675,45 @@ impl std::fmt::Debug for dyn Connector + '_ {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct UsbConnector {
-    pub(crate) device: nusb::Device,
-    pub(crate) interface: Option<nusb::Interface>,
-    pub(crate) version: (u8, u8),
-    pub(crate) manufacturer: String,
-    pub(crate) product: String,
-    pub(crate) serial: String,
-    pub(crate) packet_size: usize,
-    pub(crate) connection_epoch: u64,
-    pub(crate) connected_once: bool,
-}
+#[cfg(feature = "native-hardware")]
+pub(crate) type UsbConnector = pkcs11rs_local_hardware::YubiHsmUsbDevice;
 
+#[cfg(feature = "native-hardware")]
 impl Connector for UsbConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
     }
     fn manufacturer(&self) -> &str {
-        &self.manufacturer
+        self.manufacturer()
     }
     fn product(&self) -> &str {
-        &self.product
+        self.product()
     }
     fn name(&self) -> String {
-        format!("{} {} {}", self.manufacturer, self.product, self.serial)
+        format!(
+            "{} {} {}",
+            self.manufacturer(),
+            self.product(),
+            self.serial()
+        )
     }
     fn major(&self) -> u8 {
-        self.version.0
+        self.version().0
     }
     fn minor(&self) -> u8 {
-        self.version.1
+        self.version().1
     }
     fn hardware_version(&self) -> Option<(u8, u8)> {
-        Some(self.version)
+        Some(self.version())
     }
     fn connection_epoch(&self) -> u64 {
-        self.connection_epoch
+        self.connection_epoch()
     }
     fn is_present(&self) -> bool {
-        self.interface.is_some()
+        self.is_present()
     }
     fn buffer_size(&self) -> usize {
-        3136 + self.packet_size
+        self.buffer_size()
     }
     fn transmit<'a>(
         &self,
@@ -714,137 +721,34 @@ impl Connector for UsbConnector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
-        let interface = self.interface.as_ref().ok_or(CKR_DEVICE_REMOVED)?;
-        u32::try_from(send_buffer.len()).map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-        u32::try_from(receive_buffer.len()).map_err(|_| Error::from(CKR_DEVICE_MEMORY))?;
-
-        let mut bulk_out = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::Out>(0x01)?;
-        let completion = nusb_transfer(
-            &mut bulk_out,
-            nusb::transfer::Buffer::from(send_buffer),
-            timeout,
-        );
-        let len = completion.actual_len;
-        completion.status?;
-        log!(2, "nusb.bulk_out({:?}) -> {}", send_buffer, len);
-        ensure_complete_write(len, send_buffer.len())?;
-        if needs_zero_length_packet(len, self.packet_size) {
-            // Write a ZLP if last packet is full
-            let completion = nusb_transfer(&mut bulk_out, nusb::transfer::Buffer::new(0), timeout);
-            let zlp = completion.actual_len;
-            completion.status?;
-            log!(2, "nusb.bulk_out_zlp() -> {}", zlp);
-        }
-
-        let mut bulk_in = interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81)?;
-        let completion = nusb_transfer(
-            &mut bulk_in,
-            nusb::transfer::Buffer::new(receive_buffer.len()),
-            timeout,
-        );
-        let len = completion.actual_len;
-        completion.status?;
-        receive_buffer[..len].copy_from_slice(&completion.buffer[..len]);
-        log!(2, "nusb.bulk_in({:?}) -> {}", &receive_buffer[..len], len);
-        Ok(&receive_buffer[..len])
+        self.transmit_blocking(send_buffer, receive_buffer, timeout)
+            .map_err(Error::from)
     }
 }
 
-fn nusb_transfer<EpType, Direction>(
-    endpoint: &mut nusb::Endpoint<EpType, Direction>,
-    buffer: nusb::transfer::Buffer,
-    timeout: Duration,
-) -> nusb::transfer::Completion
-where
-    EpType: nusb::transfer::BulkOrInterrupt,
-    Direction: nusb::transfer::EndpointDirection,
-{
-    if !timeout.is_zero() {
-        return endpoint.transfer_blocking(buffer, timeout);
-    }
-
-    // The Connector contract follows libusb and the YubiHSM Connector:
-    // Duration::ZERO means no timeout. nusb treats zero as an immediate
-    // timeout, so retain the pending transfer and wait in bounded intervals.
-    endpoint.submit(buffer);
-    loop {
-        if let Some(completion) = endpoint.wait_next_complete(Duration::from_secs(60)) {
-            return completion;
-        }
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn ensure_complete_write(actual: usize, expected: usize) -> Result<(), Error> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(CKR_DEVICE_ERROR.into())
-    }
+    pkcs11rs_local_hardware::ensure_complete_write(actual, expected).map_err(Error::from)
 }
 
+#[cfg(test)]
 pub(crate) fn needs_zero_length_packet(length: usize, packet_size: usize) -> bool {
-    packet_size != 0 && crate::is_multiple_of(length, packet_size)
+    pkcs11rs_local_hardware::needs_zero_length_packet(length, packet_size)
 }
 
+#[cfg(test)]
 pub(crate) fn usb_bcd_version(raw: u16) -> (u8, u8) {
-    let major = (((raw >> 12) & 0x0f) * 10 + ((raw >> 8) & 0x0f)) as u8;
-    let minor = ((raw >> 4) & 0x0f) as u8;
-    (major, minor)
+    pkcs11rs_local_hardware::usb_bcd_version(raw)
 }
 
-pub(crate) fn bulk_out_packet_size(device: &nusb::Device) -> Result<usize, Error> {
-    let config = device.active_configuration().map_err(nusb::Error::from)?;
-    for interface in config.interfaces() {
-        for descriptor in interface.alt_settings() {
-            for endpoint in descriptor.endpoints() {
-                if endpoint.address() == 0x01
-                    && endpoint.transfer_type() == nusb::descriptors::TransferType::Bulk
-                {
-                    return Ok(endpoint.max_packet_size());
-                }
-            }
-        }
-    }
-    Err(CKR_DEVICE_ERROR.into())
-}
-
-impl UsbConnector {
-    pub(crate) fn connect(&mut self) -> Result<(), Error> {
-        use nusb::MaybeFuture;
-
-        let interface = self.device.claim_interface(0).wait()?;
-        let stale = vec![0; self.buffer_size()];
-        if let Ok(mut bulk_in) =
-            interface.endpoint::<nusb::transfer::Bulk, nusb::transfer::In>(0x81)
-        {
-            let completion = bulk_in.transfer_blocking(
-                nusb::transfer::Buffer::new(stale.len()),
-                Duration::from_millis(1),
-            );
-            if completion.status.is_ok() {
-                let length = completion.actual_len;
-                log!(2, "nusb drained {length} stale bytes");
-            }
-        }
-        if self.connected_once {
-            self.connection_epoch = self.connection_epoch.wrapping_add(1);
-        }
-        self.connected_once = true;
-        self.interface = Some(interface);
-        Ok(())
-    }
-    fn _disconnect(&mut self) -> Result<(), Error> {
-        self.interface = None;
-        Ok(())
-    }
-}
-
+#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscConnector {
     pub(crate) reader: std::ffi::CString,
     pub(crate) context: pcsc::Context,
     pub(crate) state: Arc<PcscReaderState>,
 }
 
+#[cfg(feature = "native-hardware")]
 impl std::fmt::Debug for PcscConnector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("PcscConnector")
@@ -862,6 +766,7 @@ impl std::fmt::Debug for PcscConnector {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 impl Connector for PcscConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -967,6 +872,7 @@ impl Connector for PcscConnector {
     }
 }
 
+#[cfg(feature = "native-hardware")]
 fn detect_pcsc_apdu_capabilities(card: &pcsc::Card) -> ApduCapabilities {
     let Ok(status) = card.status2_owned() else {
         return ApduCapabilities::SHORT_ONLY;
@@ -996,6 +902,7 @@ const PCSC_ICC_TYPE_14443_A: u8 = 5;
 const PCSC_ICC_TYPE_14443_B: u8 = 6;
 const PCSC_ICC_TYPE_15693: u8 = 7;
 
+#[cfg(feature = "native-hardware")]
 fn pcsc_transport_is_nfc(card: &pcsc::Card, atr: &[u8]) -> bool {
     let channel_is_nfc = card
         .get_attribute_owned(pcsc::Attribute::ChannelId)
@@ -1040,6 +947,7 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
     atr.get(1).is_some_and(|t0| t0 & 0xf0 != 0xf0)
 }
 
+#[cfg(feature = "native-hardware")]
 impl PcscConnector {
     pub(crate) fn set_yubikey_device_info(&self, info: YubiKeyDeviceInfo) -> Result<(), Error> {
         self.state.device.replace(
@@ -1082,6 +990,7 @@ impl PcscConnector {
 }
 
 const YUBIHSM_CONNECTOR_BUFFER_SIZE: usize = 3139;
+const YUBIHSM_CONNECTOR_DISCOVERY_LIMIT: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct YubiHsmConnectorStatus {
@@ -1089,39 +998,54 @@ struct YubiHsmConnectorStatus {
     version: (u8, u8, u8),
 }
 
-fn parse_yubihsm_connector_status(value: &[u8]) -> Result<YubiHsmConnectorStatus, Error> {
-    let value = std::str::from_utf8(value).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let mut status = None;
-    let mut serial = None;
-    let mut version = None;
-    for line in value.lines() {
-        let Some((name, value)) = line.split_once('=') else {
-            return Err(CKR_DEVICE_ERROR.into());
+#[derive(Clone, Debug, serde::Deserialize)]
+struct HttpConnectorDevice {
+    serial: String,
+    usb_version: String,
+    status: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HttpConnectorDeviceList {
+    devices: Vec<HttpConnectorDevice>,
+}
+
+impl HttpConnectorDevice {
+    fn identity(&self) -> Result<YubiHsmConnectorStatus, Error> {
+        if self.serial.is_empty() || self.status != "available" {
+            return Err(CKR_DEVICE_REMOVED.into());
+        }
+        let components = self
+            .usb_version
+            .split('.')
+            .map(str::parse::<u8>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let version = match components.as_slice() {
+            [major, minor] => (*major, *minor, 0),
+            [major, minor, patch] => (*major, *minor, *patch),
+            _ => return Err(CKR_DEVICE_ERROR.into()),
         };
-        match name {
-            "status" => status = Some(value),
-            "serial" => serial = Some(value.to_owned()),
-            "version" => {
-                let components = value
-                    .split('.')
-                    .map(str::parse::<u8>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-                let [major, minor, patch] = components.as_slice() else {
-                    return Err(CKR_DEVICE_ERROR.into());
-                };
-                version = Some((*major, *minor, *patch));
-            }
-            _ => {}
+        Ok(YubiHsmConnectorStatus {
+            serial: self.serial.clone(),
+            version,
+        })
+    }
+}
+
+fn encode_http_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
         }
     }
-    if status != Some("OK") {
-        return Err(CKR_DEVICE_REMOVED.into());
-    }
-    Ok(YubiHsmConnectorStatus {
-        serial: serial.ok_or(CKR_DEVICE_ERROR)?,
-        version: version.ok_or(CKR_DEVICE_ERROR)?,
-    })
+    encoded
 }
 
 #[derive(Clone, Default)]
@@ -1247,6 +1171,7 @@ fn validate_http_client_identity(
 #[derive(Debug)]
 pub(crate) struct HttpConnector {
     url: String,
+    serial_path: String,
     connected: Cell<bool>,
     reconnectable: Cell<bool>,
     connection_epoch: Cell<u64>,
@@ -1291,7 +1216,13 @@ impl Connector for HttpConnector {
         self.connected.get()
     }
     fn name(&self) -> String {
-        format!("Yubico YubiHSM Connector {}", self.url)
+        let serial = self
+            .status_identity
+            .try_borrow()
+            .ok()
+            .and_then(|identity| identity.as_ref().map(|identity| identity.serial.clone()))
+            .unwrap_or_else(|| self.serial_path.clone());
+        format!("YubiHSM Connector {} #{serial}", self.url)
     }
     fn buffer_size(&self) -> usize {
         YUBIHSM_CONNECTOR_BUFFER_SIZE
@@ -1304,7 +1235,10 @@ impl Connector for HttpConnector {
     ) -> Result<&'a [u8], Error> {
         let response = self
             .agent
-            .post(format!("{}/connector/api", self.url))
+            .post(format!(
+                "{}/v1/devices/{}/commands",
+                self.url, self.serial_path
+            ))
             .content_type("application/octet-stream")
             .config()
             .timeout_global((!timeout.is_zero()).then_some(timeout))
@@ -1375,22 +1309,22 @@ impl Connector for HttpConnector {
 impl HttpConnector {
     fn mark_disconnected(&self) {
         self.connected.set(false);
-        if let Ok(mut identity) = self.status_identity.try_borrow_mut() {
-            *identity = None;
-        }
     }
 
     #[cfg(test)]
-    pub(crate) fn new(url: String) -> Result<Self, Error> {
-        Self::new_with_tls(url, &HttpConnectorTlsConfig::default())
+    pub(crate) fn new(url: String, serial: &str) -> Result<Self, Error> {
+        Self::new_with_tls(
+            url,
+            YubiHsmConnectorStatus {
+                serial: serial.to_owned(),
+                version: (2, 5, 0),
+            },
+            &HttpConnectorTlsConfig::default(),
+        )
     }
 
-    pub(crate) fn new_with_tls(url: String, tls: &HttpConnectorTlsConfig) -> Result<Self, Error> {
-        let url = url.trim_end_matches('/').to_owned();
-        if url.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let url_tls = tls.for_url(&url);
+    fn agent(url: &str, tls: &HttpConnectorTlsConfig) -> ureq::Agent {
+        let url_tls = tls.for_url(url);
         let config = ureq::Agent::config_builder()
             .user_agent(concat!("pkcs11rs/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(5)))
@@ -1398,20 +1332,87 @@ impl HttpConnector {
             .https_only(tls.is_configured() && url_tls.is_some())
             .max_redirects(if tls.has_client_identity() { 0 } else { 10 })
             .build();
+        ureq::Agent::new_with_config(config)
+    }
+
+    fn new_with_agent(
+        url: String,
+        identity: YubiHsmConnectorStatus,
+        agent: ureq::Agent,
+    ) -> Result<Self, Error> {
+        let url = url.trim_end_matches('/').to_owned();
+        if url.is_empty() || identity.serial.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let serial_path = encode_http_path_segment(&identity.serial);
         Ok(Self {
             url,
+            serial_path,
             connected: Cell::new(false),
             reconnectable: Cell::new(false),
             connection_epoch: Cell::new(0),
-            status_identity: RefCell::new(None),
-            agent: ureq::Agent::new_with_config(config),
+            status_identity: RefCell::new(Some(identity)),
+            agent,
         })
+    }
+
+    #[cfg(test)]
+    fn new_with_tls(
+        url: String,
+        identity: YubiHsmConnectorStatus,
+        tls: &HttpConnectorTlsConfig,
+    ) -> Result<Self, Error> {
+        let normalized_url = url.trim_end_matches('/').to_owned();
+        if normalized_url.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let agent = Self::agent(&normalized_url, tls);
+        Self::new_with_agent(normalized_url, identity, agent)
+    }
+
+    pub(crate) fn discover_with_tls(
+        url: String,
+        tls: &HttpConnectorTlsConfig,
+    ) -> Result<Vec<Self>, Error> {
+        use std::collections::HashSet;
+
+        let url = url.trim_end_matches('/').to_owned();
+        if url.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let agent = Self::agent(&url, tls);
+        let mut response = agent.get(format!("{url}/v1/devices")).call()?;
+        let received = response
+            .body_mut()
+            .with_config()
+            .limit(YUBIHSM_CONNECTOR_DISCOVERY_LIMIT)
+            .read_to_vec()?;
+        log!(
+            2,
+            "http.get({url}/v1/devices) -> {:?}",
+            String::from_utf8_lossy(&received)
+        );
+        let mut devices: HttpConnectorDeviceList =
+            serde_json::from_slice(&received).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        devices
+            .devices
+            .sort_by(|left, right| left.serial.cmp(&right.serial));
+        let mut serials = HashSet::with_capacity(devices.devices.len());
+        let mut connectors = Vec::with_capacity(devices.devices.len());
+        for device in devices.devices {
+            let identity = device.identity()?;
+            if !serials.insert(identity.serial.clone()) {
+                return Err(CKR_DEVICE_ERROR.into());
+            }
+            connectors.push(Self::new_with_agent(url.clone(), identity, agent.clone())?);
+        }
+        Ok(connectors)
     }
 
     fn status(&self) -> Result<YubiHsmConnectorStatus, Error> {
         let mut response = self
             .agent
-            .get(format!("{}/connector/status", self.url))
+            .get(format!("{}/v1/devices/{}", self.url, self.serial_path))
             .call()?;
         let received = response
             .body_mut()
@@ -1419,7 +1420,20 @@ impl HttpConnector {
             .limit(YUBIHSM_CONNECTOR_BUFFER_SIZE as u64)
             .read_to_vec()?;
         log!(2, "http.get() -> {:?}", String::from_utf8_lossy(&received));
-        parse_yubihsm_connector_status(&received)
+        let device: HttpConnectorDevice =
+            serde_json::from_slice(&received).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        let identity = device.identity()?;
+        let expected_serial = self
+            .status_identity
+            .try_borrow()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .as_ref()
+            .map(|identity| identity.serial.clone())
+            .ok_or(CKR_DEVICE_ERROR)?;
+        if identity.serial != expected_serial {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(identity)
     }
 
     pub(crate) fn connect(&mut self) -> Result<(), Error> {
@@ -1669,32 +1683,73 @@ mod tests {
         stream.write_all(body).unwrap();
     }
 
+    fn http_identity(serial: &str, version: (u8, u8, u8)) -> YubiHsmConnectorStatus {
+        YubiHsmConnectorStatus {
+            serial: serial.to_owned(),
+            version,
+        }
+    }
+
     #[test]
-    fn parses_yubihsm_connector_status() {
+    fn parses_multi_device_connector_identity() {
+        let device: HttpConnectorDevice = serde_json::from_slice(
+            br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
+        )
+        .unwrap();
         assert_eq!(
-            parse_yubihsm_connector_status(b"status=OK\nserial=12345678\nversion=3.0.7\n").unwrap(),
-            YubiHsmConnectorStatus {
-                serial: "12345678".to_owned(),
-                version: (3, 0, 7),
-            }
+            device.identity().unwrap(),
+            http_identity("12345678", (2, 5, 0))
         );
     }
 
     #[test]
-    fn rejects_unavailable_or_malformed_yubihsm_connector_status() {
-        assert!(
-            parse_yubihsm_connector_status(b"status=NO_DEVICE\nserial=*\nversion=3.0.7\n").is_err()
-        );
-        assert!(parse_yubihsm_connector_status(b"status=OK\nserial=*\nversion=3.0\n").is_err());
-        assert!(parse_yubihsm_connector_status(b"status=OK\nserial=*\n").is_err());
+    fn rejects_unavailable_or_malformed_multi_device_identity() {
+        for encoded in [
+            br#"{"serial":"12345678","usb_version":"2.5","status":"busy"}"#.as_slice(),
+            br#"{"serial":"","usb_version":"2.5","status":"available"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2","status":"available"}"#.as_slice(),
+            br#"{"serial":"12345678","usb_version":"2.x","status":"available"}"#.as_slice(),
+        ] {
+            let device: HttpConnectorDevice = serde_json::from_slice(encoded).unwrap();
+            assert!(device.identity().is_err());
+        }
     }
 
     #[test]
-    fn unconnected_http_connector_has_a_stable_url_identity() {
-        let connector = HttpConnector::new("http://127.0.0.1:12345/".to_owned()).unwrap();
+    fn discovers_every_device_at_one_connector_url_in_serial_order() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
+            write_http_response(
+                &mut connection,
+                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"available"},{"serial":"12345678","usb_version":"2.4","status":"available"}]}"#,
+                true,
+            );
+        });
+
+        let connectors = HttpConnector::discover_with_tls(
+            format!("http://{address}"),
+            &HttpConnectorTlsConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(connectors.len(), 2);
+        assert_eq!(connectors[0].serial_path, "12345678");
+        assert_eq!((connectors[0].major(), connectors[0].minor()), (2, 4));
+        assert_eq!(connectors[1].serial_path, "87654321");
+        assert_eq!((connectors[1].major(), connectors[1].minor()), (2, 5));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn unconnected_http_connector_has_a_stable_device_identity() {
+        let connector =
+            HttpConnector::new("http://127.0.0.1:12345/".to_owned(), "12345678").unwrap();
         assert_eq!(
             connector.name(),
-            "Yubico YubiHSM Connector http://127.0.0.1:12345"
+            "YubiHSM Connector http://127.0.0.1:12345 #12345678"
         );
         assert!(!connector.is_present());
         assert!(connector.refresh().is_err());
@@ -1702,7 +1757,8 @@ mod tests {
 
     #[test]
     fn http_connector_uses_yubico_curl_timeout_model() {
-        let connector = HttpConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
+        let connector =
+            HttpConnector::new("http://127.0.0.1:12345".to_owned(), "12345678").unwrap();
         let timeouts = connector.agent.config().timeouts();
         assert_eq!(timeouts.connect, Some(Duration::from_secs(5)));
         assert_eq!(timeouts.global, None);
@@ -1715,14 +1771,22 @@ mod tests {
     fn http_connector_configures_client_auth_only_for_https() {
         let (certificate, private_key) = test_http_client_identity();
         let tls = HttpConnectorTlsConfig::from_client_identity(&certificate, &private_key).unwrap();
-        let https =
-            HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();
+        let https = HttpConnector::new_with_tls(
+            "https://connector.example".to_owned(),
+            http_identity("12345678", (2, 5, 0)),
+            &tls,
+        )
+        .unwrap();
         assert!(https.agent.config().tls_config().client_cert().is_some());
         assert!(https.agent.config().https_only());
         assert_eq!(https.agent.config().max_redirects(), 0);
 
-        let http =
-            HttpConnector::new_with_tls("http://connector.example".to_owned(), &tls).unwrap();
+        let http = HttpConnector::new_with_tls(
+            "http://connector.example".to_owned(),
+            http_identity("12345678", (2, 5, 0)),
+            &tls,
+        )
+        .unwrap();
         assert!(http.agent.config().tls_config().client_cert().is_none());
         assert!(!http.agent.config().https_only());
         assert_eq!(http.agent.config().max_redirects(), 0);
@@ -1757,8 +1821,12 @@ mod tests {
         let tls = HttpConnectorTlsConfig::default()
             .with_ca_bundle(&test_ca_certificate_bundle())
             .unwrap();
-        let https =
-            HttpConnector::new_with_tls("https://connector.example".to_owned(), &tls).unwrap();
+        let https = HttpConnector::new_with_tls(
+            "https://connector.example".to_owned(),
+            http_identity("12345678", (2, 5, 0)),
+            &tls,
+        )
+        .unwrap();
         assert!(https.agent.config().tls_config().client_cert().is_none());
         assert!(matches!(
             https.agent.config().tls_config().root_certs(),
@@ -1784,7 +1852,7 @@ mod tests {
             let session = rustls::ServerConnection::new(server_config).unwrap();
             let mut connection = rustls::StreamOwned::new(session, connection);
             let request = read_http_request(&mut connection);
-            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             assert_eq!(
                 connection
                     .conn
@@ -1794,16 +1862,15 @@ mod tests {
             );
             write_http_response(
                 &mut connection,
-                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
                 true,
             );
         });
 
-        let mut connector =
-            HttpConnector::new_with_tls(format!("https://127.0.0.1:{}", address.port()), &tls)
+        let connectors =
+            HttpConnector::discover_with_tls(format!("https://127.0.0.1:{}", address.port()), &tls)
                 .unwrap();
-        connector.connect().unwrap();
-        assert!(connector.is_present());
+        assert_eq!(connectors.len(), 1);
         server.join().unwrap();
     }
 
@@ -1828,11 +1895,11 @@ mod tests {
             let mut byte = [0];
             assert!(connection.read(&mut byte).is_err());
         });
-        let mut connector =
-            HttpConnector::new_with_tls(format!("https://127.0.0.1:{}", address.port()), tls)
-                .unwrap();
-        assert!(connector.connect().is_err());
-        assert!(!connector.is_present());
+        assert!(HttpConnector::discover_with_tls(
+            format!("https://127.0.0.1:{}", address.port()),
+            tls,
+        )
+        .is_err());
         server.join().unwrap();
     }
 
@@ -1849,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn http_connector_reuses_a_connection_for_status_and_binary_api_endpoints() {
+    fn http_connector_discovers_and_routes_a_device_by_serial() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
@@ -1858,23 +1925,31 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(6)))
                 .unwrap();
             let request = read_http_request(&mut connection);
-            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
                 false,
             );
 
             let request = read_http_request(&mut connection);
-            assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
+            assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                b"status=OK\nserial=12345678\nversion=3.0.7\n",
+                br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
                 false,
             );
 
             let request = read_http_request(&mut connection);
-            assert!(request.starts_with(b"POST /connector/api HTTP/1.1\r\n"));
+            assert!(request.starts_with(b"GET /v1/devices/12345678 HTTP/1.1\r\n"));
+            write_http_response(
+                &mut connection,
+                br#"{"serial":"12345678","usb_version":"2.5","status":"available"}"#,
+                false,
+            );
+
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"POST /v1/devices/12345678/commands HTTP/1.1\r\n"));
             let header_end = request
                 .windows(4)
                 .position(|value| value == b"\r\n\r\n")
@@ -1888,7 +1963,13 @@ mod tests {
             write_http_response(&mut connection, b"\x83\x00\x01\x42", true);
         });
 
-        let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
+        let mut connectors = HttpConnector::discover_with_tls(
+            format!("http://{address}"),
+            &HttpConnectorTlsConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(connectors.len(), 1);
+        let mut connector = connectors.pop().unwrap();
         connector.connect().unwrap();
         assert!(connector.is_present());
         assert_eq!(
@@ -1899,7 +1980,7 @@ mod tests {
                 .map(|status| status.serial.as_str()),
             Some("12345678")
         );
-        assert_eq!((connector.major(), connector.minor()), (3, 0));
+        assert_eq!((connector.major(), connector.minor()), (2, 5));
         connector.refresh().unwrap();
         let mut response = [0; 32];
         assert_eq!(
@@ -1920,22 +2001,43 @@ mod tests {
             connection
                 .set_read_timeout(Some(Duration::from_secs(6)))
                 .unwrap();
-            for (index, identity) in [
-                b"status=OK\nserial=11111111\nversion=3.0.7\n".as_slice(),
-                b"status=OK\nserial=11111111\nversion=3.0.7\n".as_slice(),
-                b"status=OK\nserial=22222222\nversion=3.1.0\n".as_slice(),
-                b"status=OK\nserial=22222222\nversion=3.1.0\n".as_slice(),
+            for (index, (path, identity)) in [
+                (
+                    b"GET /v1/devices HTTP/1.1\r\n".as_slice(),
+                    br#"{"devices":[{"serial":"11111111","usb_version":"2.5","status":"available"}]}"#.as_slice(),
+                ),
+                (
+                    b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.5","status":"available"}"#.as_slice(),
+                ),
+                (
+                    b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.5","status":"available"}"#.as_slice(),
+                ),
+                (
+                    b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.6","status":"available"}"#.as_slice(),
+                ),
+                (
+                    b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
+                    br#"{"serial":"11111111","usb_version":"2.6","status":"available"}"#.as_slice(),
+                ),
             ]
             .into_iter()
             .enumerate()
             {
                 let request = read_http_request(&mut connection);
-                assert!(request.starts_with(b"GET /connector/status HTTP/1.1\r\n"));
-                write_http_response(&mut connection, identity, index == 3);
+                assert!(request.starts_with(path));
+                write_http_response(&mut connection, identity, index == 4);
             }
         });
 
-        let mut connector = HttpConnector::new(format!("http://{address}")).unwrap();
+        let mut connectors = HttpConnector::discover_with_tls(
+            format!("http://{address}"),
+            &HttpConnectorTlsConfig::default(),
+        )
+        .unwrap();
+        let mut connector = connectors.pop().unwrap();
         connector.connect().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
         assert_eq!(
@@ -1955,8 +2057,8 @@ mod tests {
         {
             let status = connector.status_identity.borrow();
             let status = status.as_ref().unwrap();
-            assert_eq!(status.serial, "22222222");
-            assert_eq!(status.version, (3, 1, 0));
+            assert_eq!(status.serial, "11111111");
+            assert_eq!(status.version, (2, 6, 0));
         }
 
         connector.mark_disconnected();
@@ -1970,7 +2072,7 @@ mod tests {
                 .borrow()
                 .as_ref()
                 .map(|status| status.serial.as_str()),
-            Some("22222222")
+            Some("11111111")
         );
         server.join().unwrap();
     }

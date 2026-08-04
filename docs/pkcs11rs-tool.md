@@ -51,6 +51,15 @@ Every creation and verification command requires one of these purposes:
 | `yubihsm-tls-ca` | `PKCS11RS_YUBIHSM_TLS_CA_CERTIFICATE_BUNDLE` | Every entry is currently valid and independently suitable as a TLS CA trust anchor. Multiple unrelated anchors are allowed. |
 | `scp11-oce` | `PKCS11RS_SCP11_OCE_CERTIFICATE_BUNDLE` | Currently valid leaf-first issuer chain, P-256 OCE leaf with key-agreement usage when constrained, and matching encrypted P-256 private key. |
 
+These profiles author the canonical CBOR files consumed by the PKCS #11
+provider. The companion connector server currently reads ordinary PEM files
+for `--tls-certificate`, `--tls-key`, and `--tls-client-ca`; this tool neither
+generates those PEM files nor converts its CBOR output into server
+configuration. In particular, a `yubihsm-tls-ca` CBOR bundle configures the
+provider's trust in an HTTPS server, while the server's mTLS client trust is
+the PEM CA file supplied directly to `pkcs11rs-connector`. See
+[HTTP and HTTPS](connector.md#http-and-https).
+
 The identity purposes require `--key` naming a canonical password-encrypted
 PKCS #8 DER file. The tool obtains its password from the executable configured
 by `PKCS11RS_PINENTRY`, exactly as the provider does:

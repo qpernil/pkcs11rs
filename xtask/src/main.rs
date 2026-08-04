@@ -4,8 +4,35 @@ use std::{
     ffi::{c_ulong, c_void, OsString},
     fs,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
 };
+
+const IOS_DEVICE_TARGET: &str = "aarch64-apple-ios";
+const IOS_SIMULATOR_TARGET: &str = "aarch64-apple-ios-sim";
+const IOS_DEFAULT_DEPLOYMENT_TARGET: &str = "18.0";
+const IOS_LIBRARY_NAME: &str = "libpkcs11rs.a";
+const IOS_HEADERS: [&str; 4] = ["pkcs11.h", "pkcs11f.h", "pkcs11t.h", "pkcs11rs.h"];
+const IOS_UMBRELLA_HEADER_NAME: &str = "pkcs11rs_ios.h";
+const IOS_UMBRELLA_HEADER: &str = r#"#ifndef PKCS11RS_IOS_H
+#define PKCS11RS_IOS_H 1
+
+#define CK_PTR *
+#define CK_DECLARE_FUNCTION(returnType, name) returnType name
+#define CK_DECLARE_FUNCTION_POINTER(returnType, name) returnType (* name)
+#define CK_CALLBACK_FUNCTION(returnType, name) returnType (* name)
+#ifndef NULL_PTR
+#define NULL_PTR 0
+#endif
+
+#include "pkcs11rs.h"
+
+#endif
+"#;
+const IOS_MODULE_MAP: &str = r#"module PKCS11RS {
+    header "pkcs11rs_ios.h"
+    export *
+}
+"#;
 
 const WRAPPER: &str = r#"#define CK_PTR *
 #define CK_DECLARE_FUNCTION(returnType, name) returnType name
@@ -23,6 +50,7 @@ fn main() {
     let args = args.collect::<Vec<_>>();
     match command.as_deref() {
         Some("bindings") => bindings(&args),
+        Some("ios") => ios(&args),
         Some("load-shared-library") => load_shared_library(&args),
         _ => usage(),
     }
@@ -30,7 +58,7 @@ fn main() {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: cargo xtask bindings [--check]\n       cargo xtask load-shared-library [--release]"
+        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]"
     );
     process::exit(2);
 }
@@ -127,6 +155,156 @@ fn target_directory(root: &Path) -> PathBuf {
     env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"))
+}
+
+fn ios(args: &[String]) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask directory has a parent")
+        .to_path_buf();
+    let mut release = false;
+    let mut output = target_directory(&root)
+        .join("ios")
+        .join("PKCS11RS.xcframework");
+    let mut arguments = args.iter();
+
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--release" => release = true,
+            "--output" => {
+                let path = arguments.next().unwrap_or_else(|| usage());
+                output = absolute_path(&root, Path::new(path));
+            }
+            "--help" | "-h" => {
+                println!("usage: cargo xtask ios [--release] [--output PATH]");
+                return;
+            }
+            _ => usage(),
+        }
+    }
+
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let deployment_target = env::var_os("IPHONEOS_DEPLOYMENT_TARGET")
+        .unwrap_or_else(|| OsString::from(IOS_DEFAULT_DEPLOYMENT_TARGET));
+    build_ios_slice(
+        &cargo,
+        &root,
+        IOS_DEVICE_TARGET,
+        release,
+        &deployment_target,
+    );
+    build_ios_slice(
+        &cargo,
+        &root,
+        IOS_SIMULATOR_TARGET,
+        release,
+        &deployment_target,
+    );
+
+    let profile = if release { "release" } else { "debug" };
+    let target = target_directory(&root);
+    let device_library = target
+        .join(IOS_DEVICE_TARGET)
+        .join(profile)
+        .join(IOS_LIBRARY_NAME);
+    let simulator_library = target
+        .join(IOS_SIMULATOR_TARGET)
+        .join(profile)
+        .join(IOS_LIBRARY_NAME);
+    let headers = stage_ios_headers(&root);
+
+    if output.is_dir() {
+        fs::remove_dir_all(&output)
+            .unwrap_or_else(|error| panic!("replace {}: {error}", output.display()));
+    } else if output.exists() {
+        fs::remove_file(&output)
+            .unwrap_or_else(|error| panic!("replace {}: {error}", output.display()));
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|error| panic!("create {}: {error}", parent.display()));
+    }
+
+    run_command(
+        Command::new("xcodebuild")
+            .current_dir(&root)
+            .arg("-create-xcframework")
+            .arg("-library")
+            .arg(device_library)
+            .arg("-headers")
+            .arg(&headers)
+            .arg("-library")
+            .arg(simulator_library)
+            .arg("-headers")
+            .arg(&headers)
+            .arg("-output")
+            .arg(&output),
+    );
+
+    println!("created {}", output.display());
+}
+
+fn build_ios_slice(
+    cargo: &OsString,
+    root: &Path,
+    target: &str,
+    release: bool,
+    deployment_target: &OsString,
+) {
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(root)
+        .env("IPHONEOS_DEPLOYMENT_TARGET", deployment_target)
+        .arg("build")
+        .arg("--locked")
+        .arg("--package")
+        .arg("pkcs11rs")
+        .arg("--lib")
+        .arg("--no-default-features")
+        .arg("--target")
+        .arg(target);
+    if release {
+        command.arg("--release");
+    }
+    run_command(&mut command);
+}
+
+fn stage_ios_headers(root: &Path) -> PathBuf {
+    let destination = target_directory(root).join("ios").join("include");
+    if destination.exists() {
+        fs::remove_dir_all(&destination)
+            .unwrap_or_else(|error| panic!("replace {}: {error}", destination.display()));
+    }
+    fs::create_dir_all(&destination)
+        .unwrap_or_else(|error| panic!("create {}: {error}", destination.display()));
+    for name in IOS_HEADERS {
+        fs::copy(root.join(name), destination.join(name))
+            .unwrap_or_else(|error| panic!("stage {name}: {error}"));
+    }
+    fs::write(
+        destination.join(IOS_UMBRELLA_HEADER_NAME),
+        IOS_UMBRELLA_HEADER,
+    )
+    .expect("write iOS umbrella header");
+    fs::write(destination.join("module.modulemap"), IOS_MODULE_MAP)
+        .expect("write iOS Clang module map");
+    destination
+}
+
+fn run_command(command: &mut Command) {
+    eprintln!("running {command:?}");
+    let status = command
+        .status()
+        .unwrap_or_else(|error| panic!("start {command:?}: {error}"));
+    assert!(status.success(), "{command:?} exited with {status}");
+}
+
+fn absolute_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    }
 }
 
 fn load_shared_library(args: &[String]) {

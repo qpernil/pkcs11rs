@@ -1300,7 +1300,8 @@ impl BackendSession for PivSession {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.sign(self.connector.as_ref(), slot, algorithm, input);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
             self.authenticated.set(false);
         }
         result
@@ -1316,7 +1317,8 @@ impl BackendSession for PivSession {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = PivClient.decipher(self.connector.as_ref(), slot, algorithm, input);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
             self.authenticated.set(false);
         }
         result

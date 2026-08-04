@@ -972,7 +972,7 @@ fn increment_counter(counter: &mut [u8; AES_BLOCK_SIZE]) {
 fn is_wrong_length_error(error: &Error) -> bool {
     matches!(
         error,
-        Error::Generic(rv) if *rv == CKR_DATA_LEN_RANGE as _
+        Error::Generic(rv) if *rv == CKR_DATA_LEN_RANGE as crate::CK_RV
     )
 }
 
@@ -1013,7 +1013,9 @@ fn format_device_error(error: Option<u8>) -> String {
 
 fn map_authentication_error(error: Error) -> Error {
     match error {
-        Error::Generic(rv) if rv == CKR_OBJECT_HANDLE_INVALID as _ => CKR_PIN_INCORRECT.into(),
+        Error::Generic(rv) if rv == CKR_OBJECT_HANDLE_INVALID as crate::CK_RV => {
+            CKR_PIN_INCORRECT.into()
+        }
         other => other,
     }
 }

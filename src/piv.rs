@@ -781,7 +781,7 @@ impl Client {
                 serial.try_into().map_err(|_| CKR_DEVICE_ERROR)?,
             )),
             Ok(_) => return Err(CKR_DEVICE_ERROR.into()),
-            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as _ => None,
+            Err(Error::Generic(rv)) if rv == CKR_FUNCTION_NOT_SUPPORTED as crate::CK_RV => None,
             Err(error) => return Err(error),
         };
         Ok(DeviceInfo { version, serial })

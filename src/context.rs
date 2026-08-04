@@ -1,3 +1,4 @@
+#[cfg(feature = "native-hardware")]
 use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::pkcs11::*;
@@ -13,19 +14,19 @@ use crate::{
 };
 use crate::{
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
-    bulk_out_packet_size, ccid_application_aid, ccid_application_label,
-    configured_ccid_configurations, pinentry, select_application, str_pad, usb_bcd_version,
-    BackendSession, CcidApplication, Connector, CryptOperation, DigestOperation, Error, Fido2Slot,
-    FindOperation, HidFidoEndpoint, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
-    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, OpenPgpSlot, PcscAppletConnector,
-    PcscConnector, PivSlot, SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot,
-    TokenObject, UsbConnector, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    ccid_application_aid, ccid_application_label, configured_ccid_configurations, pinentry,
+    select_application, str_pad, BackendSession, CcidApplication, Connector, CryptOperation,
+    DigestOperation, Error, Fido2Slot, FindOperation, HsmAuthProviderRegistry, HsmAuthSlot,
+    HttpConnector, HttpConnectorTlsConfig, IssuerSecurityDomainSlot, OpenPgpSlot, PivSlot,
+    SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot, TokenObject,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(not(feature = "abi-tests"))]
 use crate::{configured_yubihsm_public_discovery_credential_with_pinentry, YUBIHSM_DISCOVERY_ENV};
+#[cfg(feature = "native-hardware")]
+use crate::{HidFidoEndpoint, PcscAppletConnector, PcscConnector, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial, ABI_TEST_SLOT_ID};
-use nusb::MaybeFuture;
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::RsaPublicKey;
 use std::{
@@ -323,22 +324,6 @@ fn configured_binary_switch(value: Option<std::ffi::OsString>) -> Result<bool, E
     }
 }
 
-fn read_nusb_string(device: &nusb::Device, index: Option<std::num::NonZeroU8>) -> Option<String> {
-    let index = index?;
-    let timeout = std::time::Duration::from_millis(100);
-    let mut languages = device
-        .get_string_descriptor_supported_languages(timeout)
-        .wait()
-        .ok()?;
-    let language = languages
-        .next()
-        .unwrap_or(nusb::descriptors::language_id::US_ENGLISH);
-    device
-        .get_string_descriptor(index, language, timeout)
-        .wait()
-        .ok()
-}
-
 // Initialized module resources and the registry of independently locked slots.
 // The registry lock protects lazy discovery and session-handle routing; slot
 // operations release it before taking an individual SlotContext lock.
@@ -348,6 +333,7 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_usb: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
+    #[cfg(feature = "native-hardware")]
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
@@ -634,6 +620,10 @@ impl std::fmt::Debug for ModuleContext {
             .try_read()
             .ok()
             .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
+        #[cfg(feature = "native-hardware")]
+        let pcsc = self.pcsc.as_ref().map(|_| "Context { .. }");
+        #[cfg(not(feature = "native-hardware"))]
+        let pcsc: Option<&str> = None;
         fmt.debug_struct("ModuleContext")
             .field("hardware_discovery", &self.hardware_discovery)
             .field("yubihsm_usb", &self.yubihsm_usb)
@@ -642,7 +632,7 @@ impl std::fmt::Debug for ModuleContext {
                 "software_public_discovery",
                 &self.software_discovery_pins.keys().collect::<Vec<_>>(),
             )
-            .field("pcsc", &self.pcsc.as_ref().map(|_| "Context { .. }"))
+            .field("pcsc", &pcsc)
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
             .field(
@@ -778,8 +768,11 @@ impl ModuleContext {
         ]);
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
+        #[cfg(feature = "native-hardware")]
         let hardware_discovery =
             configured_hardware_discovery(std::env::var_os(HARDWARE_DISCOVERY_ENV))?;
+        #[cfg(not(feature = "native-hardware"))]
+        let hardware_discovery = false;
         let yubihsm_urls = configured_yubihsm_urls(std::env::var_os("PKCS11RS_YUBIHSM_URLS"))?;
         let software_slots = configured_software_slots(std::env::var_os(SOFTWARE_SLOTS_ENV))?;
         let token_storage = configured_token_storage(std::env::var_os(TOKEN_STORAGE_ENV))?;
@@ -817,7 +810,7 @@ impl ModuleContext {
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_config = None;
-        #[cfg(not(feature = "abi-tests"))]
+        #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
         let yubihsm_usb = configured_local_yubihsm_usb(
             hardware_discovery,
             std::env::var_os("PKCS11RS_YUBIHSM_USB"),
@@ -825,15 +818,15 @@ impl ModuleContext {
         let mut context = ModuleContext {
             debug_level,
             hardware_discovery,
-            #[cfg(feature = "abi-tests")]
+            #[cfg(any(feature = "abi-tests", not(feature = "native-hardware")))]
             yubihsm_usb: false,
-            #[cfg(not(feature = "abi-tests"))]
+            #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
             yubihsm_usb,
             software_slots,
             software_discovery_pins,
-            #[cfg(feature = "abi-tests")]
+            #[cfg(all(feature = "native-hardware", feature = "abi-tests"))]
             pcsc: None,
-            #[cfg(not(feature = "abi-tests"))]
+            #[cfg(all(feature = "native-hardware", not(feature = "abi-tests")))]
             pcsc: if hardware_discovery {
                 match pcsc::Context::establish(pcsc::Scope::System) {
                     Ok(context) => Some(context),
@@ -1714,60 +1707,26 @@ impl ModuleContext {
             return Ok(());
         }
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
+        #[cfg(feature = "native-hardware")]
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
+        #[cfg(feature = "native-hardware")]
         let mut pcsc_devices: HashMap<PhysicalDeviceKey, Arc<DeviceContext>> = HashMap::new();
+        #[cfg(feature = "native-hardware")]
         if self.yubihsm_usb {
-            let devices = match nusb::list_devices().wait() {
-                Ok(devices) => Some(devices),
+            let candidates = match pkcs11rs_local_hardware::yubihsm_candidates_blocking() {
+                Ok(candidates) => Some(candidates),
                 Err(error) => {
-                    log!(1, "nusb::list_devices: {}", error);
+                    log!(1, "YubiHSM USB enumeration: {}", error);
                     None
                 }
             };
-            for device_info in devices.into_iter().flatten() {
-                if device_info.vendor_id() != 0x1050 || device_info.product_id() != 0x0030 {
-                    continue;
-                }
-                let device = match device_info.open().wait() {
-                    Ok(device) => device,
+            for candidate in candidates.into_iter().flatten() {
+                let mut connector: UsbConnector = match candidate.open_blocking() {
+                    Ok(connector) => connector,
                     Err(error) => {
-                        log!(1, "nusb.open: {}", error);
+                        log!(1, "YubiHSM USB open: {}", error);
                         continue;
                     }
-                };
-                let packet_size = match bulk_out_packet_size(&device) {
-                    Ok(packet_size) => packet_size,
-                    Err(error) => {
-                        log!(1, "nusb bulk OUT endpoint: {:?}", error);
-                        continue;
-                    }
-                };
-                let descriptor = device.device_descriptor();
-                let manufacturer = device_info
-                    .manufacturer_string()
-                    .map(str::to_owned)
-                    .or_else(|| read_nusb_string(&device, descriptor.manufacturer_string_index()))
-                    .unwrap_or_else(|| String::from("Yubico"));
-                let product = device_info
-                    .product_string()
-                    .map(str::to_owned)
-                    .or_else(|| read_nusb_string(&device, descriptor.product_string_index()))
-                    .unwrap_or_else(|| String::from("YubiHSM"));
-                let serial = device_info
-                    .serial_number()
-                    .map(str::to_owned)
-                    .or_else(|| read_nusb_string(&device, descriptor.serial_number_string_index()))
-                    .unwrap_or_default();
-                let mut connector = UsbConnector {
-                    device,
-                    interface: None,
-                    version: usb_bcd_version(device_info.device_version()),
-                    manufacturer,
-                    product,
-                    serial,
-                    packet_size,
-                    connection_epoch: 0,
-                    connected_once: false,
                 };
                 let name = connector.name();
                 log!(2, "{}", name);
@@ -1780,8 +1739,8 @@ impl ModuleContext {
                 }) {
                     continue;
                 }
-                if let Err(error) = connector.connect() {
-                    log!(1, "nusb.claim_interface: {:?}", error);
+                if let Err(error) = connector.connect_blocking() {
+                    log!(1, "YubiHSM USB claim interface: {}", error);
                     continue;
                 }
                 let Some(slot_id) = slot_contexts.next_slot_id() else {
@@ -1818,60 +1777,63 @@ impl ModuleContext {
         // Remote connector slots are explicitly configured and remain
         // independent of automatic local hardware discovery.
         for url in self.yubihsm_urls.clone() {
-            let mut connector =
-                match HttpConnector::new_with_tls(url.clone(), &self.yubihsm_http_tls) {
-                    Ok(connector) => connector,
+            let connectors =
+                match HttpConnector::discover_with_tls(url.clone(), &self.yubihsm_http_tls) {
+                    Ok(connectors) => connectors,
                     Err(error) => {
-                        log!(1, "YubiHSM connector configuration for {url}: {:?}", error);
+                        log!(1, "YubiHSM connector discovery at {url}: {:?}", error);
                         continue;
                     }
                 };
-            let connected = match connector.connect() {
-                Ok(()) => true,
-                Err(error) => {
-                    log!(1, "YubiHSM connector connection to {url}: {:?}", error);
-                    false
-                }
-            };
-            let name = connector.name();
-            log!(2, "{} at {}", name, url);
-            let Some(slot_id) = slot_contexts.next_slot_id() else {
-                log!(1, "YubiHSM connector slot ID space exhausted");
-                continue;
-            };
-            let connector = Rc::new(connector);
-            let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
-                connector.clone(),
-                (0, 0, 0),
-                Vec::new(),
-                hsmauth_providers.clone(),
-                self.yubihsm_public_discovery_config.clone(),
-            );
-            yubihsm_slot.set_pinentry(self.pinentry.clone());
-            let mut slot = Box::new(yubihsm_slot);
-            if connected {
-                if let Err(error) = slot.init_slot() {
-                    log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
-                    connector.set_unavailable();
-                }
-            }
-            if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
-                &mut slot_contexts,
-                slot_id,
-                slot,
-                true,
-                self.handles.clone(),
-                self.pinentry.clone(),
-                self.trust_store.clone(),
-            ) {
-                log!(
-                    1,
-                    "YubiHSM connector slot registration for {url}: {:?}",
-                    error
+            for mut connector in connectors {
+                let connected = match connector.connect() {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log!(1, "YubiHSM connector connection to {url}: {:?}", error);
+                        false
+                    }
+                };
+                let name = connector.name();
+                log!(2, "{} at {}", name, url);
+                let Some(slot_id) = slot_contexts.next_slot_id() else {
+                    log!(1, "YubiHSM connector slot ID space exhausted");
+                    break;
+                };
+                let connector = Rc::new(connector);
+                let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+                    connector.clone(),
+                    (0, 0, 0),
+                    Vec::new(),
+                    hsmauth_providers.clone(),
+                    self.yubihsm_public_discovery_config.clone(),
                 );
-                continue;
+                yubihsm_slot.set_pinentry(self.pinentry.clone());
+                let mut slot = Box::new(yubihsm_slot);
+                if connected {
+                    if let Err(error) = slot.init_slot() {
+                        log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
+                        connector.set_unavailable();
+                    }
+                }
+                if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
+                    &mut slot_contexts,
+                    slot_id,
+                    slot,
+                    true,
+                    self.handles.clone(),
+                    self.pinentry.clone(),
+                    self.trust_store.clone(),
+                ) {
+                    log!(
+                        1,
+                        "YubiHSM connector slot registration for {url}: {:?}",
+                        error
+                    );
+                    continue;
+                }
             }
         }
+        #[cfg(feature = "native-hardware")]
         if let Some(context) = self.pcsc.clone() {
             if let Ok(readers) = context.list_readers_owned() {
                 for reader in readers {
@@ -2089,6 +2051,7 @@ impl ModuleContext {
                 }
             }
         }
+        #[cfg(feature = "native-hardware")]
         let hid_descriptors = if self.hardware_discovery {
             match enumerate_fido_devices() {
                 Ok(descriptors) => descriptors,
@@ -2100,6 +2063,7 @@ impl ModuleContext {
         } else {
             Vec::new()
         };
+        #[cfg(feature = "native-hardware")]
         for descriptor in hid_descriptors {
             let io = match descriptor.open() {
                 Ok(io) => io,

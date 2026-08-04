@@ -191,7 +191,7 @@ fn authenticates_scp11b_against_fixed_p256_vector() {
     };
     assert!(matches!(
         keys.establish_with_ephemeral(&connector, private_key(1)),
-        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+        Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
     ));
 }
 

@@ -537,7 +537,8 @@ fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
 
 #[test]
 fn unavailable_yubihsm_connector_is_an_empty_slot() {
-    let connector = crate::HttpConnector::new("http://127.0.0.1:12345".to_owned()).unwrap();
+    let connector =
+        crate::HttpConnector::new("http://127.0.0.1:12345".to_owned(), "12345678").unwrap();
     let slot = crate::YubiHsmSlot::new(std::rc::Rc::new(connector), (0, 0, 0), Vec::new());
     let mut info: CK_SLOT_INFO = unsafe { std::mem::zeroed() };
 
@@ -6477,7 +6478,7 @@ impl crate::Connector for FailingConnector {
         _receive_buffer: &'a mut [u8],
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
-        Err(nusb::transfer::TransferError::Disconnected.into())
+        Err(pkcs11rs_local_hardware::Error::DeviceFailure.into())
     }
 }
 
@@ -6578,7 +6579,7 @@ impl crate::Connector for SelectableConnector {
         _timeout: std::time::Duration,
     ) -> Result<&'a [u8], crate::error::Error> {
         if !self.present.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(nusb::transfer::TransferError::Disconnected.into());
+            return Err(pkcs11rs_local_hardware::Error::DeviceFailure.into());
         }
         if send_buffer.get(1) == Some(&0xa4)
             && !self.select_ok.load(std::sync::atomic::Ordering::Relaxed)

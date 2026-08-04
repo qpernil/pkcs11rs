@@ -379,7 +379,7 @@ mod tests {
 
         assert!(matches!(
             validate_device_public_key(&point, Some(prefix.as_os_str())),
-            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as _
+            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as crate::CK_RV
         ));
 
         fs::remove_file(path).unwrap();
@@ -418,7 +418,7 @@ mod tests {
         let prefix = unused_prefix();
         assert!(matches!(
             validate_device_public_key(&point, Some(prefix.as_os_str())),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
     }
 
@@ -427,7 +427,7 @@ mod tests {
         let (_, point) = test_key();
         assert!(matches!(
             install_public_key(&point, Some(OsStr::new(""))),
-            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as _
+            Err(Error::Generic(rv)) if rv == CKR_ARGUMENTS_BAD as crate::CK_RV
         ));
     }
 
@@ -517,7 +517,7 @@ mod tests {
                 AttestationValidation::ExplicitSigner,
                 Some(unused_prefix().as_os_str()),
             ),
-            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as _
+            Err(Error::Generic(rv)) if rv == CKR_PIN_INCORRECT as crate::CK_RV
         ));
     }
 

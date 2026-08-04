@@ -170,6 +170,95 @@ target/debug/pkcs11rs-tool        Authoring utility (with .exe on Windows)
 to their configured TLS, SCP11 OCE, or collection purpose. See
 [Certificate-bundle authoring](docs/pkcs11rs-tool.md).
 
+### Experimental iOS XCFramework
+
+The PKCS #11 API is already a C ABI, so an iOS build can expose the existing
+entry points and headers directly without another Rust FFI adapter. Build
+static ARM64 libraries for an iPhone and Apple Silicon Simulator and package
+them with the standard and pkcs11rs extension headers by running:
+
+```sh
+cargo xtask ios
+```
+
+The default output is `target/ios/PKCS11RS.xcframework`. Pass `--release` for
+optimized libraries or `--output PATH` to select another XCFramework location.
+The default deployment target is iOS 18.0; set `IPHONEOS_DEPLOYMENT_TARGET`
+when invoking the command to override it.
+The command also includes an iOS umbrella header with the platform macros
+required by the standard PKCS #11 headers and a Clang module map, allowing a
+Swift target that links the XCFramework to use `import PKCS11RS`. Local
+USB/HID/PCSC hardware transports are not available on iOS, so this experimental
+artifact is built without them; software slots and configured remote YubiHSM
+HTTP connectors remain available.
+
+### Asynchronous multi-device connector
+
+The workspace also builds `pkcs11rs-connector`, a fully asynchronous HTTP(S)
+gateway for every YubiHSM attached to the connector host over USB. It uses
+Tokio and Axum for HTTP, Rustls for HTTPS and optional mutual TLS, and nusb's
+native asynchronous transfers from request to physical device. The connector
+hot-plug registry uses the verified USB serial as the stable remote identity.
+
+> **Deployment status:** this daemon is currently intended for loopback,
+> trusted private networks, or use behind a controlled VPN or reverse proxy.
+> It is not yet Internet-grade and must not be exposed directly on a public
+> interface. The remaining protocol validation, authorization, admission
+> control, recovery, and operational work is tracked in the
+> [connector Internet-readiness checklist](docs/connector.md#internet-readiness-work).
+
+Start a loopback HTTP connector with:
+
+```sh
+cargo run -p pkcs11rs-connector
+```
+
+The multi-device API enumerates and addresses each device explicitly:
+
+```text
+GET  /v1/devices
+GET  /v1/devices/{serial}
+POST /v1/devices/{serial}/commands
+```
+
+PKCS11RS uses this API directly. Each URL in `PKCS11RS_YUBIHSM_URLS`
+identifies one connector service, and each device returned by that service
+becomes an independent PKCS #11 slot. PKCS11RS does not use the legacy
+single-device endpoints.
+
+Command request and response bodies are native YubiHSM frames with
+`application/octet-stream`. Each device has an independent asynchronous access
+gate, so only one request at a time reaches a particular YubiHSM while requests
+for different serials can proceed concurrently. The current server applies an
+absolute HTTP body limit but does not yet validate the embedded frame length or
+the older-firmware 2,048-byte USB limit; restrict access to trusted clients
+until the shared firmware-aware validation is implemented.
+
+The existing single-device YubiHSM Connector protocol remains available at
+`/connector/status` and `/connector/api`. Without configuration it selects the
+only attached device. With multiple devices it refuses to choose implicitly;
+select the compatibility device explicitly:
+
+```sh
+cargo run -p pkcs11rs-connector -- --legacy-serial 12345678
+```
+
+Enable HTTPS, and optionally require client certificates, with PEM files:
+
+```sh
+cargo run -p pkcs11rs-connector -- \
+  --listen 0.0.0.0:12345 \
+  --tls-certificate /etc/pkcs11rs/server-chain.pem \
+  --tls-key /etc/pkcs11rs/server-key.pem \
+  --tls-client-ca /etc/pkcs11rs/client-ca.pem
+```
+
+Plain HTTP defaults to loopback. A non-loopback HTTP listener requires the
+explicit `--allow-insecure-http` switch. HTTPS without `--tls-client-ca`
+encrypts traffic but does not authenticate clients. See
+[Multi-device connector](docs/connector.md) for the API, security model, and
+deployment details.
+
 For example, using OpenSC `pkcs11-tool` on macOS:
 
 ```sh
@@ -223,11 +312,14 @@ not enabled on any hardware or applet slot. See
 [Named software slots](docs/software.md) for the exact PIN, export, storage,
 format, mechanism, metadata, and lifecycle semantics.
 
-Add remote YubiHSM Connector instances with a comma-separated URL list:
+Add remote multi-device connector services with a comma-separated URL list:
 
 ```sh
 export PKCS11RS_YUBIHSM_URLS=http://hsm-a:12345,http://hsm-b:12345
 ```
+
+Every attached YubiHSM enumerated by each service becomes a separate slot; a
+host with two attached devices therefore needs only one configured URL.
 
 HTTPS connectors verify the server certificate and hostname against the
 Mozilla roots embedded by the locked `webpki-roots` dependency. To

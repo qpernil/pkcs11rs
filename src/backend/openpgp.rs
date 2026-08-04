@@ -995,7 +995,8 @@ impl BackendSession for OpenPgpSession {
         if key_ref == OpenPgpKeyRef::Signature && pin_policy == openpgp::PW1_ONE_SIGNATURE {
             self.authenticated.set(false);
         }
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
             self.authenticated.set(false);
         }
         result
@@ -1005,7 +1006,8 @@ impl BackendSession for OpenPgpSession {
             return Err(CKR_USER_NOT_LOGGED_IN.into());
         }
         let result = OpenPgpClient.decipher(self.connector.as_ref(), input, raw);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
             self.authenticated.set(false);
         }
         result
@@ -1028,7 +1030,8 @@ impl BackendSession for OpenPgpSession {
             _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         };
         let result = OpenPgpClient.ecdh(self.connector.as_ref(), curve, public_key);
-        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as _) {
+        if matches!(&result, Err(Error::Generic(rv)) if *rv == CKR_USER_NOT_LOGGED_IN as crate::CK_RV)
+        {
             self.authenticated.set(false);
         }
         result
