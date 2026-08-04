@@ -295,6 +295,8 @@ fn secure_channel_connector_wraps_encoded_apdus() {
             applet_present: std::sync::atomic::AtomicBool::new(true),
             discovery_error: Mutex::new(None),
         }),
+        secure_channels: std::sync::Arc::new(crate::SecureChannelConfiguration::for_test()),
+        pinentry: std::sync::Arc::new(crate::pinentry::Pinentry::unconfigured()),
     };
     let command = CommandApdu {
         cla: 0,

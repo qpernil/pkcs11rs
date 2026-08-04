@@ -2,7 +2,6 @@ use crate::pkcs11::*;
 use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::{
-    ffi::OsString,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -11,7 +10,6 @@ static NEXT_STORAGE_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct TestFidoStorage {
     root: PathBuf,
-    previous: Option<OsString>,
 }
 
 impl TestFidoStorage {
@@ -22,9 +20,14 @@ impl TestFidoStorage {
             std::process::id()
         ));
         std::fs::create_dir(&root).unwrap();
-        let previous = std::env::var_os(crate::TOKEN_STORAGE_ENV);
-        std::env::set_var(crate::TOKEN_STORAGE_ENV, &root);
-        Self { root, previous }
+        Self { root }
+    }
+
+    fn initialize(&self) -> CK_RV {
+        super::initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "storage": {"tokens": self.root.to_string_lossy()}
+        }))
     }
 
     fn mock_objects(&self) -> PathBuf {
@@ -39,10 +42,6 @@ impl TestFidoStorage {
 impl Drop for TestFidoStorage {
     fn drop(&mut self) {
         let _ = crate::api::C_Finalize(std::ptr::null_mut());
-        match self.previous.as_ref() {
-            Some(previous) => std::env::set_var(crate::TOKEN_STORAGE_ENV, previous),
-            None => std::env::remove_var(crate::TOKEN_STORAGE_ENV),
-        }
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -94,11 +93,8 @@ fn read_attribute(
     value
 }
 
-fn open_logged_in_mock() -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
+fn open_logged_in_mock(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HANDLE) {
+    assert_eq!(storage.initialize(), CKR_OK as CK_RV);
     let mut count = 0;
     assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
@@ -580,7 +576,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
     let _guard = super::TEST_LOCK.lock().unwrap();
     super::finalize_for_test();
     let storage = TestFidoStorage::new();
-    let (_, session) = open_logged_in_mock();
+    let (_, session) = open_logged_in_mock(&storage);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
@@ -698,7 +694,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         .count();
     assert!(object_files >= 3);
 
-    let (_, session) = open_logged_in_mock();
+    let (_, session) = open_logged_in_mock(&storage);
     let mut registration_match = registration.clone();
     let mut registration_find = [
         ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
@@ -829,7 +825,7 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         CKR_OK as CK_RV
     );
 
-    let (_, session) = open_logged_in_mock();
+    let (_, session) = open_logged_in_mock(&storage);
     assert!(find_objects(session, &mut registration_find).is_empty());
     assert!(find_objects(session, &mut derived_find).is_empty());
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
@@ -852,10 +848,7 @@ fn corrupt_local_fido_storage_fails_discovery_closed() {
     )
     .unwrap();
 
-    assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
-        CKR_OK as CK_RV
-    );
+    assert_eq!(storage.initialize(), CKR_OK as CK_RV);
     let mut count = 0;
     assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count,),

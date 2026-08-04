@@ -6,7 +6,6 @@ use crate::{
     },
     Connector, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
     CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
-    CKR_USER_PIN_NOT_INITIALIZED,
 };
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -19,6 +18,7 @@ pub(crate) const YUBIKEY_FACTORY_KEY_ID: u8 = 0x00;
 pub(crate) const YUBIKEY_FACTORY_KEY: [u8; 16] = [
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
 ];
+#[cfg(test)]
 pub(crate) const YUBIKEY_SECURITY_LEVEL: u8 = 0x33;
 
 const MAC_LENGTH: usize = 8;
@@ -337,42 +337,30 @@ impl Scp03KeySet {
         Ok(keys)
     }
 
-    pub(crate) fn from_environment() -> Result<Self, Error> {
-        let diversification_bmk = environment_optional_key("PKCS11RS_SCP03_BMK")?;
-        let direct_keys_configured = [
-            "PKCS11RS_SCP03_ENC_KEY",
-            "PKCS11RS_SCP03_MAC_KEY",
-            "PKCS11RS_SCP03_DEK_KEY",
-        ]
-        .iter()
-        .any(|name| std::env::var_os(name).is_some());
-        if diversification_bmk.is_some() && direct_keys_configured {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-
-        let (enc, mac, dek) = if diversification_bmk.is_some() {
-            (Zeroizing::new(Vec::new()), Zeroizing::new(Vec::new()), None)
-        } else if direct_keys_configured {
-            (
-                environment_key("PKCS11RS_SCP03_ENC_KEY")?,
-                environment_key("PKCS11RS_SCP03_MAC_KEY")?,
-                environment_optional_key("PKCS11RS_SCP03_DEK_KEY")?,
-            )
-        } else {
-            let defaults = Self::yubikey_factory();
-            (defaults.enc, defaults.mac, defaults.dek)
+    pub(crate) fn from_configuration(
+        configuration: &crate::configuration::Scp03Configuration,
+    ) -> Result<Self, Error> {
+        let (enc, mac, dek, diversification_bmk) = match &configuration.key_material {
+            crate::Scp03KeyMaterialConfiguration::Factory => {
+                let defaults = Self::yubikey_factory();
+                (defaults.enc, defaults.mac, defaults.dek, None)
+            }
+            crate::Scp03KeyMaterialConfiguration::Direct { enc, mac, dek } => (
+                Zeroizing::new(enc.to_vec()),
+                Zeroizing::new(mac.to_vec()),
+                dek.as_deref().map(|key| Zeroizing::new(key.to_vec())),
+                None,
+            ),
+            crate::Scp03KeyMaterialConfiguration::YubicoBatchMasterKey(bmk) => (
+                Zeroizing::new(Vec::new()),
+                Zeroizing::new(Vec::new()),
+                None,
+                Some(Zeroizing::new(bmk.to_vec())),
+            ),
         };
-        let key_version =
-            environment_byte("PKCS11RS_SCP03_KEY_VERSION", YUBIKEY_FACTORY_KEY_VERSION)?;
-        let key_id = environment_byte("PKCS11RS_SCP03_KEY_ID", YUBIKEY_FACTORY_KEY_ID)?;
-        validate_factory_key_selector(
-            key_version,
-            key_id,
-            diversification_bmk.is_some() || direct_keys_configured,
-        )?;
         let keys = Self {
-            key_version,
-            key_id,
+            key_version: configuration.key_version,
+            key_id: configuration.key_id,
             enc,
             mac,
             dek,
@@ -445,6 +433,7 @@ fn valid_aes_key(key: &[u8]) -> bool {
     matches!(key.len(), 16 | 24 | 32)
 }
 
+#[cfg(test)]
 fn validate_factory_key_selector(
     key_version: u8,
     key_id: u8,
@@ -456,40 +445,6 @@ fn validate_factory_key_selector(
         Ok(())
     } else {
         Err(CKR_ARGUMENTS_BAD.into())
-    }
-}
-
-fn environment_key(name: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let value = Zeroizing::new(std::env::var(name).map_err(|error| match error {
-        std::env::VarError::NotPresent => Error::from(CKR_USER_PIN_NOT_INITIALIZED),
-        std::env::VarError::NotUnicode(_) => Error::from(CKR_ARGUMENTS_BAD),
-    })?);
-    parse_hex(&value).map(Zeroizing::new)
-}
-
-fn environment_optional_key(name: &str) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
-    match std::env::var(name) {
-        Ok(value) => {
-            let value = Zeroizing::new(value);
-            parse_hex(&value).map(Zeroizing::new).map(Some)
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(CKR_ARGUMENTS_BAD.into()),
-    }
-}
-
-pub(crate) fn environment_byte(name: &str, default: u8) -> Result<u8, Error> {
-    let Some(value) = std::env::var_os(name) else {
-        return Ok(default);
-    };
-    let value = value.to_str().ok_or(CKR_ARGUMENTS_BAD)?;
-    if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        u8::from_str_radix(hex, 16).map_err(|_| CKR_ARGUMENTS_BAD.into())
-    } else {
-        value.parse().map_err(|_| CKR_ARGUMENTS_BAD.into())
     }
 }
 
@@ -982,7 +937,7 @@ pub(crate) fn transmit<C: Connector + ?Sized>(
     ResponseApdu::parse(&connector.send(&command.encode()?, DEFAULT_TIMEOUT)?)
 }
 
-fn validate_security_level(security_level: u8) -> Result<(), Error> {
+pub(crate) fn validate_security_level(security_level: u8) -> Result<(), Error> {
     if matches!(security_level, 0x00 | 0x01 | 0x03 | 0x11 | 0x13 | 0x33) {
         Ok(())
     } else {
@@ -1012,12 +967,6 @@ fn validate_card_capabilities(implementation: u8, security_level: u8) -> Result<
         return Err(CKR_DEVICE_ERROR.into());
     }
     Ok(())
-}
-
-pub(crate) fn configured_security_level() -> Result<u8, Error> {
-    let security_level = environment_byte("PKCS11RS_SCP03_SECURITY_LEVEL", YUBIKEY_SECURITY_LEVEL)?;
-    validate_security_level(security_level)?;
-    Ok(security_level)
 }
 
 fn yubico_diversify_key(

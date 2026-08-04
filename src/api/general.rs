@@ -13,13 +13,18 @@ ffi_entry_point! {
         init_args: CK_VOID_PTR,
     ) -> CK_RV {
         log!(2, "C_Initialize called with {:?}", init_args);
-        if let Err(rv) = validate_initialize_args(init_args) {
-            return rv;
-        }
+        let explicit_configuration = match validate_initialize_args(init_args) {
+            Ok(configuration) => configuration,
+            Err(rv) => return rv,
+        };
+        let configuration = match ModuleConfiguration::resolve(explicit_configuration) {
+            Ok(configuration) => configuration,
+            Err(error) => return error.into(),
+        };
         match lock_context_write() {
             Ok(mut guard) => match guard.as_mut() {
                 Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
-                None => match ModuleContext::new() {
+                None => match ModuleContext::new_with_configuration(configuration) {
                     Ok(context) => {
                         *guard = Some(context);
                         CKR_OK as CK_RV
@@ -32,19 +37,14 @@ ffi_entry_point! {
     }
 }
 
-fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
+fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<Option<JsonConfiguration>, CK_RV> {
     if init_args.is_null() {
-        return Ok(());
+        return Ok(None);
     }
 
     let args = unsafe { _as_ref(init_args.cast::<CK_C_INITIALIZE_ARGS>()) }?;
-    // Some callers, including OpenSSL integrations, use pReserved to pass
-    // module-specific configuration. Treat it as opaque compatibility data:
-    // pkcs11rs configuration remains environment-based, and the pointer must
-    // never be dereferenced or retained.
-    if !args.pReserved.is_null() && crate::configured_debug_level().is_ok_and(|level| level >= 1) {
-        eprintln!("C_Initialize received opaque pReserved data");
-    }
+    let configuration =
+        unsafe { JsonConfiguration::from_reserved(args.pReserved) }.map_err(CK_RV::from)?;
 
     let callbacks = [
         args.CreateMutex.is_some(),
@@ -67,7 +67,7 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<(), CK_RV> {
         return Err(CKR_CANT_LOCK as CK_RV);
     }
 
-    Ok(())
+    Ok(configuration)
 }
 
 ffi_entry_point! {

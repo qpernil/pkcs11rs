@@ -225,6 +225,8 @@ pub(crate) struct PcscAppletConnector {
     pub(crate) protocol: Option<SecureChannelProtocol>,
     pub(crate) state: Arc<PcscReaderState>,
     pub(crate) applet: Arc<PcscAppletState>,
+    pub(crate) secure_channels: Arc<SecureChannelConfiguration>,
+    pub(crate) pinentry: Arc<pinentry::Pinentry>,
 }
 
 #[cfg(feature = "native-hardware")]
@@ -275,11 +277,30 @@ impl PcscAppletConnector {
             .store(present, std::sync::atomic::Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
         base: SharedConnector,
         application_aid: &[u8],
         protocol: Option<SecureChannelProtocol>,
         state: Arc<PcscReaderState>,
+    ) -> Self {
+        Self::new_configured(
+            base,
+            application_aid,
+            protocol,
+            state,
+            Arc::new(SecureChannelConfiguration::for_test()),
+            Arc::new(pinentry::Pinentry::unconfigured()),
+        )
+    }
+
+    pub(crate) fn new_configured(
+        base: SharedConnector,
+        application_aid: &[u8],
+        protocol: Option<SecureChannelProtocol>,
+        state: Arc<PcscReaderState>,
+        secure_channels: Arc<SecureChannelConfiguration>,
+        pinentry: Arc<pinentry::Pinentry>,
     ) -> Self {
         let applet_present = base.is_present();
         Self {
@@ -292,6 +313,8 @@ impl PcscAppletConnector {
                 applet_present: std::sync::atomic::AtomicBool::new(applet_present),
                 discovery_error: Mutex::new(None),
             }),
+            secure_channels,
+            pinentry,
         }
     }
 
@@ -312,12 +335,11 @@ impl PcscAppletConnector {
 
         let established = match self.protocol.ok_or(CKR_ARGUMENTS_BAD)? {
             SecureChannelProtocol::Scp03 => (|| {
-                let keys = Scp03KeySet::from_environment()?;
-                let security_level = configured_security_level()?;
+                let keys = Scp03KeySet::from_configuration(&self.secure_channels.scp03)?;
                 Scp03Session::authenticate_selected(
                     self.base.as_ref(),
                     &keys,
-                    security_level,
+                    self.secure_channels.scp03.security_level,
                     &self.application_aid,
                 )
             })(),
@@ -343,7 +365,11 @@ impl PcscAppletConnector {
         state: &mut SecureChannelState,
         variant: Scp11Variant,
     ) -> Result<Scp03Session, Error> {
-        let keys = Scp11KeySet::from_environment(variant)?;
+        let keys = Scp11KeySet::from_configuration(
+            variant,
+            &self.secure_channels.scp11,
+            self.pinentry.as_ref(),
+        )?;
         let cache_key = keys.certificate_cache_key();
         let cached = cache_key
             .as_ref()
@@ -352,6 +378,7 @@ impl PcscAppletConnector {
         let first = keys.authenticate_application(
             self.base.as_ref(),
             &self.application_aid,
+            &self.secure_channels.scp11.issuer_sd_aid,
             cached.as_deref(),
         );
         let (session, validated) = match first {
@@ -359,7 +386,12 @@ impl PcscAppletConnector {
                 if let Some(key) = cache_key.as_ref() {
                     state.validated_scp11_keys.remove(key);
                 }
-                keys.authenticate_application(self.base.as_ref(), &self.application_aid, None)?
+                keys.authenticate_application(
+                    self.base.as_ref(),
+                    &self.application_aid,
+                    &self.secure_channels.scp11.issuer_sd_aid,
+                    None,
+                )?
             }
             result => result?,
         };

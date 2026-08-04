@@ -3411,15 +3411,20 @@ fn yubihsm_public_discovery_supports_asymmetric_yubihsm_auth_credentials() {
 #[test]
 fn yubihsm_auth_public_discovery_does_not_retain_prompted_password() {
     let _guard = crate::test::TEST_LOCK.lock().unwrap();
-    let _pinentry = crate::test::TestPinentry::new("password");
-    let direct_config = configured_yubihsm_public_discovery_credential(Some("0001".into()))
-        .unwrap()
-        .unwrap();
+    let pinentry = crate::test::TestPinentry::new("password");
+    let direct_config = crate::configured_yubihsm_public_discovery_credential_with_pinentry(
+        Some("0001".into()),
+        &pinentry.pinentry(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(direct_config.configured_password.is_none());
-    let config =
-        configured_yubihsm_public_discovery_credential(Some(":0001default key@12345678".into()))
-            .unwrap()
-            .unwrap();
+    let config = crate::configured_yubihsm_public_discovery_credential_with_pinentry(
+        Some(":0001default key@12345678".into()),
+        &pinentry.pinentry(),
+    )
+    .unwrap()
+    .unwrap();
     assert!(config.configured_password.is_none());
     let peer = Rc::new(ProtocolPeer::new());
     peer.add_public_certificate_pair();
@@ -3433,9 +3438,7 @@ fn yubihsm_auth_public_discovery_does_not_retain_prompted_password() {
         providers,
         Some(config.clone()),
     );
-    slot.set_pinentry(Arc::new(
-        crate::pinentry::Pinentry::from_environment().unwrap(),
-    ));
+    slot.set_pinentry(Arc::new(pinentry.pinentry()));
 
     assert!(Slot::token_objects(&slot, 8).unwrap().iter().any(|object| {
         matches!(
@@ -3459,9 +3462,7 @@ fn yubihsm_auth_public_discovery_does_not_retain_prompted_password() {
         second_providers,
         Some(config.clone()),
     );
-    second_slot.set_pinentry(Arc::new(
-        crate::pinentry::Pinentry::from_environment().unwrap(),
-    ));
+    second_slot.set_pinentry(Arc::new(pinentry.pinentry()));
     assert!(Slot::token_objects(&second_slot, 9)
         .unwrap()
         .iter()
@@ -4432,7 +4433,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     #[cfg(unix)]
     let _guard = crate::test::TEST_LOCK.lock().unwrap();
     #[cfg(unix)]
-    let _pinentry = crate::test::TestPinentry::new("password");
+    let pinentry = crate::test::TestPinentry::new("password");
     let yubihsm = std::rc::Rc::new(ProtocolPeer::new());
     let provider = crate::HsmAuthProvider {
         connector: std::rc::Rc::new(SymmetricHsmAuthPeer).into(),
@@ -4469,7 +4470,7 @@ fn hsmauth_symmetric_credential_opens_a_real_yubihsm_secure_session() {
     crate::Slot::login_with_pinentry(
         &mut slot,
         b":0001default key@12345678",
-        &crate::pinentry::Pinentry::from_environment().unwrap(),
+        &pinentry.pinentry(),
     )
     .unwrap();
     #[cfg(not(unix))]

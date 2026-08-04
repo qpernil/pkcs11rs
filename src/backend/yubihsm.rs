@@ -421,9 +421,6 @@ impl YubiHsmSessionState {
     }
 }
 
-#[cfg_attr(feature = "abi-tests", allow(dead_code))]
-pub(crate) const YUBIHSM_DISCOVERY_ENV: &str = "PKCS11RS_YUBIHSM_DISCOVERY";
-
 pub(crate) struct YubiHsmPublicDiscoveryConfig {
     pub(crate) authkey_id: u16,
     pub(crate) hsmauth_credential: Option<HsmAuthCredentialSelector>,
@@ -498,10 +495,10 @@ pub(crate) fn configured_yubihsm_public_discovery_credential(
     #[cfg(test)]
     let pinentry = match pinentry {
         Some(pinentry) => pinentry,
-        None => Arc::new(pinentry::Pinentry::from_environment()?),
+        None => Arc::new(pinentry::Pinentry::unconfigured()),
     };
     #[cfg(not(test))]
-    let pinentry = Arc::new(pinentry::Pinentry::from_environment()?);
+    let pinentry = Arc::new(pinentry::Pinentry::unconfigured());
     configured_yubihsm_public_discovery_credential_with_pinentry(credential, pinentry.as_ref())
 }
 

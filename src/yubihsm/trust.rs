@@ -6,7 +6,6 @@ use p256::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    env,
     ffi::{OsStr, OsString},
     fs,
     io::Write,
@@ -15,7 +14,6 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 
-pub(crate) const TRUST_PREFIX_ENV: &str = "PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX";
 const TRUST_RECORD_SCHEMA: &str = "pkcs11rs.yubihsm-device-trust";
 const TRUST_RECORD_VERSION: u64 = 1;
 const TRUST_RECORD_PUBLIC_KEY: u8 = 1;
@@ -30,12 +28,14 @@ const YUBICO_INTERMEDIATE: &[u8] = include_bytes!(concat!(
 ));
 pub(crate) struct TrustStore {
     next_temporary_file: AtomicU64,
+    configured_prefix: OsString,
 }
 
 impl TrustStore {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new_with_prefix(configured_prefix: OsString) -> Self {
         Self {
             next_temporary_file: AtomicU64::new(1),
+            configured_prefix,
         }
     }
 
@@ -44,6 +44,7 @@ impl TrustStore {
         encoded_public_point: &[u8],
         prefix: Option<&OsStr>,
     ) -> Result<[u8; 32], Error> {
+        let prefix = prefix.or(Some(self.configured_prefix.as_os_str()));
         let spki = device_spki(encoded_public_point)?;
         self.install_record(
             encoded_public_point,
@@ -62,6 +63,7 @@ impl TrustStore {
         validation: AttestationValidation,
         prefix: Option<&OsStr>,
     ) -> Result<[u8; 32], Error> {
+        let prefix = prefix.or(Some(self.configured_prefix.as_os_str()));
         let attestation = crate::certificate_chain::decode(attestation)?;
         let device_certificate = crate::certificate_chain::decode(device_certificate)?;
         match validation {
@@ -147,10 +149,6 @@ pub(crate) enum AttestationValidation {
     Yubico,
 }
 
-pub(crate) fn configured_prefix() -> OsString {
-    env::var_os(TRUST_PREFIX_ENV).unwrap_or_default()
-}
-
 pub(crate) fn fingerprint(encoded_public_point: &[u8]) -> Result<String, Error> {
     Ok(fingerprint_bytes(encoded_public_point)?
         .iter()
@@ -166,9 +164,7 @@ pub(crate) fn entry_path(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<PathBuf, Error> {
-    let mut name = prefix
-        .map(OsStr::to_os_string)
-        .unwrap_or_else(configured_prefix);
+    let mut name = prefix.map(OsStr::to_os_string).unwrap_or_default();
     if name.is_empty() {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
@@ -245,9 +241,7 @@ pub(crate) fn validate_device_public_key(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<(), Error> {
-    let prefix = prefix
-        .map(OsStr::to_os_string)
-        .unwrap_or_else(configured_prefix);
+    let prefix = prefix.map(OsStr::to_os_string).unwrap_or_default();
     if prefix.is_empty() {
         log!(
             2,
@@ -271,7 +265,7 @@ pub(crate) fn install_public_key(
     encoded_public_point: &[u8],
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    TrustStore::new().install_public_key(encoded_public_point, prefix)
+    TrustStore::new_with_prefix(OsString::new()).install_public_key(encoded_public_point, prefix)
 }
 
 #[cfg(test)]
@@ -282,7 +276,7 @@ pub(crate) fn install_attestation(
     validation: AttestationValidation,
     prefix: Option<&OsStr>,
 ) -> Result<[u8; 32], Error> {
-    TrustStore::new().install_attestation(
+    TrustStore::new_with_prefix(OsString::new()).install_attestation(
         encoded_public_point,
         attestation,
         device_certificate,

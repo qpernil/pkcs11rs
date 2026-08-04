@@ -155,22 +155,30 @@ pub fn get_info_reports_cryptoki_3_2() {
 }
 
 #[test]
-pub fn initialize_accepts_opaque_reserved_arg_without_dereferencing_it() {
+pub fn initialize_accepts_json_reserved_configuration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
+    let mut configuration =
+        b"{\"version\":1,\"debug\":1,\"hardware\":{\"discovery\":false}}\0".to_vec();
     let mut init_args = CK_C_INITIALIZE_ARGS {
         CreateMutex: None,
         DestroyMutex: None,
         LockMutex: None,
         UnlockMutex: None,
         flags: 0,
-        pReserved: 1 as CK_VOID_PTR,
+        pReserved: configuration.as_mut_ptr().cast(),
     };
 
     assert_eq!(
         crate::api::C_Initialize(&mut init_args as *mut CK_C_INITIALIZE_ARGS as CK_VOID_PTR),
         CKR_OK as CK_RV
     );
+    {
+        let module = crate::lock_context_read().unwrap();
+        let context = module.as_ref().unwrap();
+        assert_eq!(context.debug_level, 1);
+        assert!(!context.hardware_discovery);
+    }
     assert_eq!(
         crate::api::C_Finalize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
@@ -2963,16 +2971,11 @@ fn pcsc_sessions_on_one_slot_share_a_slot_context() {
 fn corrupt_fido_storage_does_not_suppress_sibling_pcsc_applets() {
     struct StorageEnvironment {
         root: std::path::PathBuf,
-        previous: Option<std::ffi::OsString>,
     }
 
     impl Drop for StorageEnvironment {
         fn drop(&mut self) {
             let _ = crate::api::C_Finalize(std::ptr::null_mut());
-            match self.previous.as_ref() {
-                Some(previous) => std::env::set_var(crate::FIDO2_STORAGE_ENV, previous),
-                None => std::env::remove_var(crate::FIDO2_STORAGE_ENV),
-            }
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
@@ -2995,14 +2998,13 @@ fn corrupt_fido_storage_does_not_suppress_sibling_pcsc_applets() {
         [0xf6],
     )
     .unwrap();
-    let environment = StorageEnvironment {
-        previous: std::env::var_os(crate::FIDO2_STORAGE_ENV),
-        root,
-    };
-    std::env::set_var(crate::FIDO2_STORAGE_ENV, &environment.root);
+    let environment = StorageEnvironment { root };
 
     assert_eq!(
-        crate::api::C_Initialize(std::ptr::null_mut()),
+        super::initialize_with_configuration(serde_json::json!({
+            "version": 1,
+            "storage": {"fido2_compatibility": environment.root.to_string_lossy()}
+        })),
         CKR_OK as CK_RV
     );
     const FIDO_SLOT_ID: CK_SLOT_ID = 224;

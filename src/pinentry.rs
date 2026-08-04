@@ -4,8 +4,6 @@ use crate::{
 use std::{ffi::OsString, sync::Mutex};
 use zeroize::Zeroizing;
 
-const CONFIGURATION_ENV: &str = "PKCS11RS_PINENTRY";
-
 pub(crate) use crate::pinentry_client::Prompt;
 
 pub(crate) struct Pinentry {
@@ -29,9 +27,9 @@ impl Pinentry {
         }
     }
 
-    pub(crate) fn from_environment() -> Result<Self, Error> {
+    pub(crate) fn from_configuration(value: Option<OsString>) -> Result<Self, Error> {
         let pinentry = Self::unconfigured();
-        pinentry.configure(std::env::var_os(CONFIGURATION_ENV))?;
+        pinentry.configure(value)?;
         Ok(pinentry)
     }
 
