@@ -915,11 +915,8 @@ impl ModuleContext {
         info.libraryVersion.major = 1;
         info.libraryVersion.minor = 0;
         info.flags = 0;
-        str_pad(
-            "YubiHSM & YubiKey PKCS#11 module",
-            &mut info.libraryDescription,
-        );
-        str_pad("Yubico", &mut info.manufacturerID);
+        str_pad(crate::MODULE_DESCRIPTION, &mut info.libraryDescription);
+        str_pad(crate::MODULE_MANUFACTURER, &mut info.manufacturerID);
         Ok(())
     }
 }
