@@ -28,23 +28,27 @@ impl std::fmt::Display for TransportError {
 
 impl std::error::Error for TransportError {}
 
-trait CommandTransport: Send + Sync {
-    fn command<'a>(&'a self, request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>>;
+trait CommandTransport: Send {
+    fn command<'a>(
+        &'a mut self,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>>;
 }
 
 struct UsbTransport {
-    device: Mutex<YubiHsmUsbDevice>,
+    device: YubiHsmUsbDevice,
     timeout: Duration,
 }
 
 impl CommandTransport for UsbTransport {
-    fn command<'a>(&'a self, request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+    fn command<'a>(
+        &'a mut self,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move {
-            // The transport mutex owns the non-Sync USB handle. The registry
-            // entry's access gate has already serialized commands for this HSM.
-            let device = self.device.lock().await;
-            let mut response = vec![0; device.buffer_size()];
-            let received = device
+            let mut response = vec![0; self.device.buffer_size()];
+            let received = self
+                .device
                 .transmit(request, &mut response, self.timeout)
                 .await
                 .map_err(|error| TransportError(error.to_string()))?;
@@ -58,8 +62,7 @@ impl CommandTransport for UsbTransport {
 pub struct DeviceEntry {
     id: Option<UsbDeviceId>,
     view: DeviceView,
-    transport: Box<dyn CommandTransport>,
-    access: Mutex<()>,
+    transport: Mutex<Box<dyn CommandTransport>>,
 }
 
 impl DeviceEntry {
@@ -68,8 +71,8 @@ impl DeviceEntry {
     }
 
     pub async fn command(&self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
-        let _access = self.access.lock().await;
-        self.transport.command(request).await
+        let mut transport = self.transport.lock().await;
+        transport.command(request).await
     }
 }
 
@@ -172,11 +175,10 @@ impl DeviceRegistry {
         let entry = Arc::new(DeviceEntry {
             id: Some(id),
             view,
-            transport: Box::new(UsbTransport {
-                device: Mutex::new(device),
+            transport: Mutex::new(Box::new(UsbTransport {
+                device,
                 timeout: self.command_timeout,
-            }),
-            access: Mutex::new(()),
+            })),
         });
 
         let mut state = self.state.write().await;
@@ -220,8 +222,7 @@ impl DeviceRegistry {
                 usb_version: String::from("2.0"),
                 status: "available",
             },
-            transport,
-            access: Mutex::new(()),
+            transport: Mutex::new(transport),
         });
         let mut state = self.state.write().await;
         if state.legacy_serial.is_none() {
@@ -253,7 +254,10 @@ struct EchoTransport;
 
 #[cfg(test)]
 impl CommandTransport for EchoTransport {
-    fn command<'a>(&'a self, request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+    fn command<'a>(
+        &'a mut self,
+        request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move { Ok(request.to_vec()) })
     }
 }
@@ -263,7 +267,10 @@ struct FixedTransport(&'static [u8]);
 
 #[cfg(test)]
 impl CommandTransport for FixedTransport {
-    fn command<'a>(&'a self, _request: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+    fn command<'a>(
+        &'a mut self,
+        _request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
         Box::pin(async move { Ok(self.0.to_vec()) })
     }
 }
@@ -351,7 +358,7 @@ mod tests {
 
     impl CommandTransport for ConcurrencyProbe {
         fn command<'a>(
-            &'a self,
+            &'a mut self,
             request: &'a [u8],
         ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
             Box::pin(async move {

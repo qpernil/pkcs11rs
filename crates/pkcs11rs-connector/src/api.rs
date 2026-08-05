@@ -1,6 +1,7 @@
 use crate::registry::{DeviceRegistry, LegacySelectionError};
 use axum::{
     body::Bytes,
+    error_handling::HandleErrorLayer,
     extract::{DefaultBodyLimit, Path, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::{IntoResponse, Response},
@@ -8,9 +9,15 @@ use axum::{
     Json, Router,
 };
 use serde::Serialize;
+use std::time::Duration;
+use tower::{
+    limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer, BoxError, ServiceBuilder,
+};
+use tower_http::timeout::RequestBodyTimeoutLayer;
 
 const MAX_COMMAND_BODY: usize = 3139;
 const OCTET_STREAM: &str = "application/octet-stream";
+const HTTP_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,15 +36,42 @@ struct Problem {
     message: String,
 }
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
+pub fn router(state: AppState, max_in_flight_requests: usize) -> Router {
+    router_with_request_body_timeout(state, HTTP_REQUEST_BODY_TIMEOUT, max_in_flight_requests)
+}
+
+fn router_with_request_body_timeout(
+    state: AppState,
+    request_body_timeout: Duration,
+    max_in_flight_requests: usize,
+) -> Router {
+    let router = Router::new()
         .route("/v1/devices", get(list_devices))
         .route("/v1/devices/{serial}", get(get_device))
         .route("/v1/devices/{serial}/commands", post(device_command))
         .route("/connector/status", get(legacy_status))
         .route("/connector/api", post(legacy_command))
         .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY))
-        .with_state(state)
+        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
+        .with_state(state);
+    with_global_request_limit(router, max_in_flight_requests)
+}
+
+fn with_global_request_limit(router: Router, max_in_flight_requests: usize) -> Router {
+    router.layer(
+        ServiceBuilder::new()
+            .layer(HandleErrorLayer::new(handle_overload))
+            .layer(LoadShedLayer::new())
+            .layer(GlobalConcurrencyLimitLayer::new(max_in_flight_requests)),
+    )
+}
+
+async fn handle_overload(_error: BoxError) -> Response {
+    problem(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "server_overloaded",
+        String::from("the connector is at its in-flight HTTP request limit"),
+    )
 }
 
 async fn list_devices(State(state): State<AppState>) -> Json<DeviceList> {
@@ -129,8 +163,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
-    use http_body_util::BodyExt;
+    use http_body_util::{BodyExt, Full};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
     use std::time::Duration;
+    use tokio::net::{TcpListener, TcpStream};
     use tower::ServiceExt;
 
     async fn body(response: Response) -> Vec<u8> {
@@ -147,10 +183,13 @@ mod tests {
     async fn modern_routes_enumerate_and_address_devices_by_serial() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("12345678").await;
-        let app = router(AppState {
-            registry,
-            legacy_serial: None,
-        });
+        let app = router(
+            AppState {
+                registry,
+                legacy_serial: None,
+            },
+            64,
+        );
 
         let response = app
             .clone()
@@ -188,10 +227,13 @@ mod tests {
         registry
             .insert_test_response("12345678", b"first device")
             .await;
-        let app = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        });
+        let app = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        );
         let response = app
             .oneshot(
                 Request::builder()
@@ -209,10 +251,13 @@ mod tests {
         registry
             .insert_test_response("87654321", b"second device")
             .await;
-        let response = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        })
+        let response = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        )
         .oneshot(
             Request::builder()
                 .uri("/connector/status")
@@ -225,10 +270,13 @@ mod tests {
         assert!(response_body.contains("status=OK\n"));
         assert!(response_body.contains("serial=12345678\n"));
 
-        let legacy_response = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        })
+        let legacy_response = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -240,10 +288,13 @@ mod tests {
         .unwrap();
         assert_eq!(body(legacy_response).await, b"first device");
 
-        let modern_response = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        })
+        let modern_response = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -255,10 +306,13 @@ mod tests {
         .unwrap();
         assert_eq!(body(modern_response).await, b"first device");
 
-        let response = router(AppState {
-            registry,
-            legacy_serial: Some(String::from("87654321")),
-        })
+        let response = router(
+            AppState {
+                registry,
+                legacy_serial: Some(String::from("87654321")),
+            },
+            64,
+        )
         .oneshot(
             Request::builder()
                 .uri("/connector/status")
@@ -275,10 +329,13 @@ mod tests {
     #[tokio::test]
     async fn legacy_routes_latch_the_first_device_discovered_after_startup() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
-        let app = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        });
+        let app = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        );
 
         let response = app
             .clone()
@@ -345,10 +402,13 @@ mod tests {
     async fn oversized_commands_are_rejected_before_transport() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("12345678").await;
-        let response = router(AppState {
-            registry,
-            legacy_serial: None,
-        })
+        let response = router(
+            AppState {
+                registry,
+                legacy_serial: None,
+            },
+            64,
+        )
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -359,5 +419,123 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn stalled_http_request_body_times_out_before_command_processing() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        registry.insert_test_echo("12345678").await;
+        let response = router_with_request_body_timeout(
+            registry_state(registry),
+            Duration::from_millis(20),
+            64,
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/devices/12345678/commands")
+                .body(Body::from_stream(futures_util::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[derive(Clone)]
+    struct BlockingRequest {
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    async fn block_request(State(state): State<BlockingRequest>) {
+        state.entered.notify_one();
+        state.release.notified().await;
+    }
+
+    async fn fast_request() {}
+
+    #[tokio::test]
+    async fn global_request_limit_sheds_load_and_keeps_the_http2_connection_usable() {
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let app = Router::new()
+            .route("/block", get(block_request))
+            .route("/fast", get(fast_request))
+            .with_state(BlockingRequest {
+                entered: entered.clone(),
+                release: release.clone(),
+            });
+        let app = with_global_request_limit(app, 1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut sender, connection) = hyper::client::conn::http2::handshake::<_, _, Full<Bytes>>(
+            TokioExecutor::new(),
+            TokioIo::new(TcpStream::connect(address).await.unwrap()),
+        )
+        .await
+        .unwrap();
+        let connection = tokio::spawn(connection);
+
+        let mut first_sender = sender.clone();
+        let first = tokio::spawn(async move {
+            first_sender
+                .send_request(
+                    Request::builder()
+                        .uri(format!("http://{address}/block"))
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+        entered.notified().await;
+
+        let overloaded = tokio::time::timeout(
+            Duration::from_millis(50),
+            sender.send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/fast"))
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("an overloaded request must not wait")
+        .unwrap();
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let overloaded_body = overloaded.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8(overloaded_body.to_vec())
+            .unwrap()
+            .contains("server_overloaded"));
+
+        release.notify_one();
+        assert_eq!(first.await.unwrap().status(), StatusCode::OK);
+
+        let recovered = sender
+            .send_request(
+                Request::builder()
+                    .uri(format!("http://{address}/fast"))
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+
+        drop(sender);
+        connection.abort();
+        server.abort();
+    }
+
+    fn registry_state(registry: DeviceRegistry) -> AppState {
+        AppState {
+            registry,
+            legacy_serial: None,
+        }
     }
 }

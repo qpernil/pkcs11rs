@@ -1,13 +1,31 @@
 mod api;
+mod http_timeout;
 mod registry;
 mod tls;
 
 use api::{router, AppState};
 use clap::Parser;
+use http_timeout::WriteTimeoutAcceptor;
+use hyper_util::rt::TokioTimer;
 use registry::{spawn_discovery, DeviceRegistry};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    io,
+    net::SocketAddr,
+    path::PathBuf,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type ServerFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
+
+const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+const RESUME_GAP_THRESHOLD: Duration = Duration::from_secs(10);
+const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
+const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -36,9 +54,13 @@ struct Args {
     #[arg(long)]
     legacy_serial: Option<String>,
 
-    /// Maximum time for one USB command exchange.
-    #[arg(long, default_value_t = 30)]
+    /// Maximum time waiting for a YubiHSM USB command response.
+    #[arg(long, default_value_t = 60)]
     command_timeout_seconds: u64,
+
+    /// Maximum number of HTTP requests processed concurrently across all connections.
+    #[arg(long, default_value_t = 64)]
+    http_max_in_flight_requests: usize,
 }
 
 #[tokio::main]
@@ -54,49 +76,154 @@ async fn main() -> Result<(), BoxError> {
     validate_args(&args)?;
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    loop {
+        match serve_until_restart(&args).await {
+            Ok(ServeOutcome::Shutdown) => return Ok(()),
+            Ok(ServeOutcome::Resume { gap }) => {
+                tracing::warn!(
+                    ?gap,
+                    "system suspend detected; restarting connector services"
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "connector service stopped; retrying");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                    _ = tokio::time::sleep(SERVER_RESTART_DELAY) => {}
+                }
+            }
+        }
+    }
+}
+
+enum ServeOutcome {
+    Shutdown,
+    Resume { gap: Duration },
+}
+
+async fn serve_until_restart(args: &Args) -> Result<ServeOutcome, BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
     let discovery = spawn_discovery(registry.clone()).await?;
-    let app = router(AppState {
-        registry,
-        legacy_serial: args.legacy_serial,
-    });
+    let app = router(
+        AppState {
+            registry,
+            legacy_serial: args.legacy_serial.clone(),
+        },
+        args.http_max_in_flight_requests,
+    );
 
     let handle = axum_server::Handle::new();
-    let shutdown_handle = handle.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
+    let mut server = match connector_server(args, app, handle.clone()) {
+        Ok(server) => server,
+        Err(error) => {
+            discovery.abort();
+            return Err(error);
         }
-    });
+    };
+    let outcome = tokio::select! {
+        result = &mut server => {
+            discovery.abort();
+            return result.map(|()| ServeOutcome::Shutdown).map_err(Into::into);
+        }
+        _ = tokio::signal::ctrl_c() => {
+            handle.graceful_shutdown(Some(Duration::from_secs(10)));
+            let result = server.await;
+            discovery.abort();
+            result?;
+            ServeOutcome::Shutdown
+        }
+        gap = wait_for_resume() => {
+            // Connections which survived suspend can retain unusable network and
+            // USB state. Stop them promptly, then let the outer loop rebuild the
+            // listener, registry, discovery watcher, and device handles.
+            handle.shutdown();
+            match tokio::time::timeout(SERVER_STOP_TIMEOUT, &mut server).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "HTTP server failed while stopping after resume");
+                }
+                Err(_) => {
+                    tracing::warn!("HTTP server did not stop promptly after resume; dropping it");
+                }
+            }
+            discovery.abort();
+            ServeOutcome::Resume { gap }
+        }
+    };
+    Ok(outcome)
+}
 
-    let result = match (&args.tls_certificate, &args.tls_key) {
+fn connector_server(
+    args: &Args,
+    app: axum::Router,
+    handle: axum_server::Handle<SocketAddr>,
+) -> Result<ServerFuture, BoxError> {
+    let server: ServerFuture = match (&args.tls_certificate, &args.tls_key) {
         (Some(certificate), Some(key)) => {
             let config = tls::server_config(certificate, key, args.tls_client_ca.as_deref())?;
             tracing::info!(address = %args.listen, mtls = args.tls_client_ca.is_some(), "listening with HTTPS");
-            axum_server::bind_rustls(
+            let mut server = axum_server::bind_rustls(
                 args.listen,
                 axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)),
             )
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
+            .map(|acceptor| {
+                WriteTimeoutAcceptor::new(
+                    acceptor.handshake_timeout(HTTP_STAGE_TIMEOUT),
+                    HTTP_STAGE_TIMEOUT,
+                )
+            })
+            .handle(handle);
+            configure_http(&mut server);
+            Box::pin(server.serve(app.into_make_service()))
         }
         (None, None) => {
             tracing::info!(address = %args.listen, "listening with HTTP");
-            axum_server::bind(args.listen)
-                .handle(handle)
-                .serve(app.into_make_service())
-                .await
+            let mut server = axum_server::bind(args.listen)
+                .map(|acceptor| WriteTimeoutAcceptor::new(acceptor, HTTP_STAGE_TIMEOUT))
+                .handle(handle);
+            configure_http(&mut server);
+            Box::pin(server.serve(app.into_make_service()))
         }
         _ => unreachable!("clap requires the TLS certificate and key together"),
     };
-    discovery.abort();
-    result.map_err(Into::into)
+    Ok(server)
+}
+
+fn configure_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
+    server
+        .http_builder()
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(Some(HTTP_STAGE_TIMEOUT));
+}
+
+async fn wait_for_resume() -> Duration {
+    let mut last_check = SystemTime::now();
+    loop {
+        tokio::time::sleep(RESUME_CHECK_INTERVAL).await;
+        let now = SystemTime::now();
+        if let Ok(gap) = now.duration_since(last_check) {
+            if is_resume_gap(gap) {
+                return gap;
+            }
+        }
+        last_check = now;
+    }
+}
+
+fn is_resume_gap(gap: Duration) -> bool {
+    gap > RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD
 }
 
 fn validate_args(args: &Args) -> Result<(), BoxError> {
     if args.command_timeout_seconds == 0 {
         return Err("--command-timeout-seconds must be greater than zero".into());
+    }
+    if args.http_max_in_flight_requests == 0 {
+        return Err("--http-max-in-flight-requests must be greater than zero".into());
+    }
+    if args.http_max_in_flight_requests > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err("--http-max-in-flight-requests is too large".into());
     }
     if args.tls_certificate.is_none()
         && !args.listen.ip().is_loopback()
@@ -292,8 +419,25 @@ mod tests {
             tls_client_ca: None,
             legacy_serial: None,
             command_timeout_seconds: 30,
+            http_max_in_flight_requests: 64,
         };
         assert!(validate_args(&args).is_err());
+    }
+
+    #[test]
+    fn usb_command_response_timeout_defaults_to_one_minute() {
+        let args = Args::try_parse_from(["pkcs11rs-connector"]).unwrap();
+        assert_eq!(args.command_timeout_seconds, 60);
+        assert_eq!(args.http_max_in_flight_requests, 64);
+    }
+
+    #[test]
+    fn delayed_timer_tick_detects_a_system_resume() {
+        assert!(!is_resume_gap(RESUME_CHECK_INTERVAL));
+        assert!(!is_resume_gap(RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD));
+        assert!(is_resume_gap(
+            RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD + Duration::from_millis(1)
+        ));
     }
 
     #[tokio::test]
@@ -302,10 +446,13 @@ mod tests {
         registry
             .insert_test_response("11111111", b"other device")
             .await;
-        let app = router(AppState {
-            registry: registry.clone(),
-            legacy_serial: None,
-        });
+        let app = router(
+            AppState {
+                registry: registry.clone(),
+                legacy_serial: None,
+            },
+            64,
+        );
         let (address, handle, server) = spawn_http_server(app);
 
         registry
@@ -338,6 +485,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_server_can_drop_stale_connections_and_rebind_the_same_address() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        registry.insert_test_echo("12345678").await;
+        let app = router(
+            AppState {
+                registry,
+                legacy_serial: None,
+            },
+            64,
+        );
+        let (address, first_handle, first_server) = spawn_http_server(app.clone());
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (_, body) = send_http2(
+            stream,
+            Method::GET,
+            format!("http://{address}/v1/devices"),
+            b"",
+        )
+        .await;
+        assert!(String::from_utf8(body).unwrap().contains("12345678"));
+
+        first_handle.shutdown();
+        first_server.await.unwrap().unwrap();
+
+        let second_handle = axum_server::Handle::new();
+        let server_handle = second_handle.clone();
+        let second_server = tokio::spawn(async move {
+            axum_server::bind(address)
+                .handle(server_handle)
+                .serve(app.into_make_service())
+                .await
+        });
+        assert_eq!(second_handle.listening().await, Some(address));
+
+        let stream = TcpStream::connect(address).await.unwrap();
+        let (_, body) = send_http2(
+            stream,
+            Method::GET,
+            format!("http://{address}/v1/devices"),
+            b"",
+        )
+        .await;
+        assert!(String::from_utf8(body).unwrap().contains("12345678"));
+
+        second_handle.shutdown();
+        second_server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn multi_device_api_works_over_https2_at_startup() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let registry = DeviceRegistry::new(Duration::from_secs(1));
@@ -347,10 +544,13 @@ mod tests {
         registry
             .insert_test_response("22222222", b"second device")
             .await;
-        let app = router(AppState {
-            registry,
-            legacy_serial: None,
-        });
+        let app = router(
+            AppState {
+                registry,
+                legacy_serial: None,
+            },
+            64,
+        );
         let (pem, certificate) = PemFiles::self_signed_localhost();
         let config = tls::server_config(&pem.certificate, &pem.key, None).unwrap();
         let connector = https_client(certificate);
