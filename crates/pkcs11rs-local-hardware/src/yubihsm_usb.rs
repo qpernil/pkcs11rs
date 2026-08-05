@@ -11,6 +11,7 @@ const YUBIHSM_INTERFACE: u8 = 0;
 const YUBIHSM_BULK_OUT_ENDPOINT: u8 = 0x01;
 const YUBIHSM_BULK_IN_ENDPOINT: u8 = 0x81;
 const YUBIHSM_MAX_MESSAGE_SIZE: usize = 3136;
+const YUBIHSM_USB_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub enum Error {
@@ -309,25 +310,28 @@ impl YubiHsmUsbDevice {
         &self,
         send_buffer: &[u8],
         receive_buffer: &'a mut [u8],
-        timeout: Duration,
+        response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let (mut bulk_out, mut bulk_in) =
             self.transfer_endpoints(send_buffer.len(), receive_buffer.len())?;
         let completion = nusb_transfer_blocking(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
-            timeout,
+            YUBIHSM_USB_SEND_TIMEOUT,
         );
         if self.write_needs_zero_length_packet(completion, send_buffer.len())? {
-            let completion =
-                nusb_transfer_blocking(&mut bulk_out, nusb::transfer::Buffer::new(0), timeout);
+            let completion = nusb_transfer_blocking(
+                &mut bulk_out,
+                nusb::transfer::Buffer::new(0),
+                YUBIHSM_USB_SEND_TIMEOUT,
+            );
             completion.status?;
         }
 
         let completion = nusb_transfer_blocking(
             &mut bulk_in,
             nusb::transfer::Buffer::new(receive_buffer.len()),
-            timeout,
+            response_timeout,
         );
         copy_received(completion, receive_buffer)
     }
@@ -337,26 +341,30 @@ impl YubiHsmUsbDevice {
         &self,
         send_buffer: &[u8],
         receive_buffer: &'a mut [u8],
-        timeout: Duration,
+        response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let (mut bulk_out, mut bulk_in) =
             self.transfer_endpoints(send_buffer.len(), receive_buffer.len())?;
         let completion = nusb_transfer(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
-            timeout,
+            YUBIHSM_USB_SEND_TIMEOUT,
         )
         .await;
         if self.write_needs_zero_length_packet(completion, send_buffer.len())? {
-            let completion =
-                nusb_transfer(&mut bulk_out, nusb::transfer::Buffer::new(0), timeout).await;
+            let completion = nusb_transfer(
+                &mut bulk_out,
+                nusb::transfer::Buffer::new(0),
+                YUBIHSM_USB_SEND_TIMEOUT,
+            )
+            .await;
             completion.status?;
         }
 
         let completion = nusb_transfer(
             &mut bulk_in,
             nusb::transfer::Buffer::new(receive_buffer.len()),
-            timeout,
+            response_timeout,
         )
         .await;
         copy_received(completion, receive_buffer)
