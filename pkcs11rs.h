@@ -62,6 +62,23 @@ CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetMechanismName)(
   CK_MECHANISM_TYPE type
 );
 
+/*
+ * Return canonical names for other enum-like PKCS #11 values. These functions
+ * use the same ownership, lifetime, and unknown-value contract as
+ * PKCS11RS_GetMechanismName.
+ */
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetReturnValueName)(CK_RV value);
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetObjectClassName)(
+  CK_OBJECT_CLASS value
+);
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetKeyTypeName)(CK_KEY_TYPE value);
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetAttributeTypeName)(
+  CK_ATTRIBUTE_TYPE value
+);
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetProfileIdName)(
+  CK_PROFILE_ID value
+);
+
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
   CK_ULONG format;
 } CKM_YUBICO_AES_CCM_WRAP_PARAMS;

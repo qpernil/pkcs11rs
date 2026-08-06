@@ -1028,6 +1028,7 @@ mod object;
 pub(crate) use object::*;
 
 mod mechanism;
+mod names;
 pub(crate) use mechanism::*;
 #[cfg(test)]
 use mechanism::{C_GetMechanismInfo, C_GetMechanismList};
