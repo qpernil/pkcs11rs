@@ -110,11 +110,13 @@ while all facades share:
 - a connection-epoch-scoped physical `DeviceContext`;
 - the active secure-channel state and relevant certificate caches.
 
-Logical work on different applet slots may proceed concurrently, but a
-physical reader performs only one complete applet selection or APDU exchange
-at a time. Selecting an applet invalidates a secure channel belonging to
-another AID; the next protected operation reselects its AID and establishes
-the appropriate channel.
+Calls on different applet slots may overlap while using their independent slot
+and session state, but their interactions with one physical reader are
+serialized. Each applet selection or complete APDU exchange holds the shared
+reader gate. A multi-APDU call may yield the gate between exchanges and
+reselect its applet when it next accesses the card. Selecting an applet
+invalidates a secure channel belonging to another AID; the next protected
+exchange reselects its AID and establishes the appropriate channel.
 
 PC/SC topology is currently a snapshot. Only applets selected during the first
 `C_GetSlotList` after initialization become slots. Subsequent slot-list calls
