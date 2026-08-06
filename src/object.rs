@@ -538,6 +538,7 @@ pub(crate) struct CryptOperation {
     pub(crate) context_specific_extended: bool,
     pub(crate) mechanism: CK_MECHANISM_TYPE,
     pub(crate) iv: Option<[u8; 16]>,
+    pub(crate) des3_iv: Option<[u8; 8]>,
     pub(crate) ctr: Option<CtrParameters>,
     pub(crate) ccm: Option<CcmParameters>,
     pub(crate) gcm: Option<GcmParameters>,
@@ -559,6 +560,7 @@ impl std::fmt::Debug for CryptOperation {
             .field("context_specific_extended", &self.context_specific_extended)
             .field("mechanism", &self.mechanism)
             .field("iv", &self.iv)
+            .field("des3_iv", &self.des3_iv)
             .field("ctr", &self.ctr)
             .field("ccm", &self.ccm)
             .field("gcm", &self.gcm)

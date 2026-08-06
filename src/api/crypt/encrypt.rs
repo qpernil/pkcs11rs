@@ -235,14 +235,34 @@ fn crypt_init(
                 CKF_DECRYPT as CK_FLAGS
             },
         )?;
+        let des3_iv = if matches!(
+            mechanism.mechanism,
+            x if x == CKM_DES3_CBC as CK_MECHANISM_TYPE
+                || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE
+        ) {
+            if mechanism.ulParameterLen != 8 || mechanism.pParameter.is_null() {
+                return Err(CKR_MECHANISM_PARAM_INVALID.into());
+            }
+            let bytes = unsafe { from_raw_parts(mechanism.pParameter.cast::<u8>(), 8) }?;
+            Some(bytes.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?)
+        } else {
+            None
+        };
         let (iv, ctr, ccm, gcm, key_wrap_iv, oaep) = match mechanism.mechanism {
             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
                 || x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                || x == CKM_AES_ECB as CK_MECHANISM_TYPE =>
+                || x == CKM_AES_ECB as CK_MECHANISM_TYPE
+                || x == CKM_DES3_ECB as CK_MECHANISM_TYPE
+                || x == CKM_YUBICO_AES_CCM_WRAP =>
             {
                 if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
                     return Err(CKR_MECHANISM_PARAM_INVALID.into());
                 }
+                (None, None, None, None, None, None)
+            }
+            x if x == CKM_DES3_CBC as CK_MECHANISM_TYPE
+                || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE =>
+            {
                 (None, None, None, None, None, None)
             }
             x if x == CKM_AES_KEY_WRAP as CK_MECHANISM_TYPE => (
@@ -351,6 +371,28 @@ fn crypt_init(
                         )
                     }
             }
+            x if x == CKM_YUBICO_AES_CCM_WRAP => {
+                matches!(
+                    object.key_type,
+                    CKK_YUBICO_AES128_CCM_WRAP
+                        | CKK_YUBICO_AES192_CCM_WRAP
+                        | CKK_YUBICO_AES256_CCM_WRAP
+                ) && matches!(
+                    &object.material,
+                    KeyMaterial::YubiHsm {
+                        object_type: YUBIHSM_WRAP_KEY,
+                        algorithm,
+                        ..
+                    } if is_yubihsm_ccm_wrap(*algorithm)
+                )
+            }
+            x if x == CKM_DES3_ECB as CK_MECHANISM_TYPE
+                || x == CKM_DES3_CBC as CK_MECHANISM_TYPE
+                || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE =>
+            {
+                object.key_type == CKK_DES3 as CK_KEY_TYPE
+                    && matches!(object.material, KeyMaterial::SoftwareSecret(_))
+            }
             _ => {
                 object.key_type == CKK_AES as CK_KEY_TYPE
                     && matches!(
@@ -374,6 +416,7 @@ fn crypt_init(
             ),
             mechanism: mechanism.mechanism,
             iv,
+            des3_iv,
             ctr,
             ccm,
             gcm,
@@ -403,8 +446,10 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
 }
 
 pub(crate) const AES_BLOCK_LENGTH: usize = 16;
+const TDES_BLOCK_LENGTH: usize = 8;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 const YUBIHSM_CBC_CHUNK_LENGTH: usize = 2000;
+const YUBIHSM_CCM_WRAP_OVERHEAD: usize = 1 + 13 + 16;
 
 pub(crate) fn software_crypt_ecb_blocks(
     key: &[u8],
@@ -438,6 +483,89 @@ pub(crate) fn software_crypt_ecb_blocks(
         _ => return Err(CKR_KEY_SIZE_RANGE.into()),
     }
     Ok(output)
+}
+
+fn software_tdes_ecb_blocks(key: &[u8], blocks: &[u8], encrypting: bool) -> Result<Vec<u8>, Error> {
+    use des::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+
+    if key.len() != 24 {
+        return Err(CKR_KEY_SIZE_RANGE.into());
+    }
+    if !crate::is_multiple_of(blocks.len(), TDES_BLOCK_LENGTH) {
+        return Err(CKR_DATA_LEN_RANGE.into());
+    }
+    let cipher = des::TdesEde3::new_from_slice(key).map_err(|_| CKR_KEY_SIZE_RANGE)?;
+    let mut output = blocks.to_vec();
+    for chunk in output.chunks_exact_mut(TDES_BLOCK_LENGTH) {
+        let block = des::cipher::Block::<des::TdesEde3>::from_mut_slice(chunk);
+        if encrypting {
+            cipher.encrypt_block(block);
+        } else {
+            cipher.decrypt_block(block);
+        }
+    }
+    Ok(output)
+}
+
+fn software_tdes_cbc(
+    key: &[u8],
+    iv: &[u8; TDES_BLOCK_LENGTH],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    if !crate::is_multiple_of(input.len(), TDES_BLOCK_LENGTH) {
+        return Err(if encrypting {
+            CKR_DATA_LEN_RANGE.into()
+        } else {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+        });
+    }
+    let mut previous = *iv;
+    let mut output = Vec::with_capacity(input.len());
+    for chunk in input.chunks_exact(TDES_BLOCK_LENGTH) {
+        let block: [u8; TDES_BLOCK_LENGTH] = chunk.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
+        if encrypting {
+            let mixed: [u8; TDES_BLOCK_LENGTH] =
+                std::array::from_fn(|index| block[index] ^ previous[index]);
+            let encrypted = software_tdes_ecb_blocks(key, &mixed, true)?;
+            previous.copy_from_slice(&encrypted);
+            output.extend_from_slice(&encrypted);
+        } else {
+            let decrypted = software_tdes_ecb_blocks(key, &block, false)?;
+            output.extend(
+                decrypted
+                    .iter()
+                    .zip(previous)
+                    .map(|(value, previous)| value ^ previous),
+            );
+            previous = block;
+        }
+    }
+    Ok(output)
+}
+
+fn software_tdes_cbc_pad(
+    key: &[u8],
+    iv: &[u8; TDES_BLOCK_LENGTH],
+    input: &[u8],
+    encrypting: bool,
+) -> Result<Vec<u8>, Error> {
+    if encrypting {
+        let padding_length = TDES_BLOCK_LENGTH - input.len() % TDES_BLOCK_LENGTH;
+        let padded_length = input
+            .len()
+            .checked_add(padding_length)
+            .ok_or(CKR_DATA_LEN_RANGE)?;
+        let mut padded = Vec::with_capacity(padded_length);
+        padded.extend_from_slice(input);
+        padded.resize(padded_length, padding_length as u8);
+        software_tdes_cbc(key, iv, &padded, true)
+    } else {
+        if input.is_empty() || !crate::is_multiple_of(input.len(), TDES_BLOCK_LENGTH) {
+            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+        }
+        remove_pkcs7_padding(software_tdes_cbc(key, iv, input, false)?, TDES_BLOCK_LENGTH)
+    }
 }
 
 fn software_aes_cbc(
@@ -501,7 +629,7 @@ fn software_aes_cbc_pad(
         if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
             return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
         }
-        remove_pkcs7_padding(software_aes_cbc(key, iv, input, false)?)
+        remove_pkcs7_padding(software_aes_cbc(key, iv, input, false)?, AES_BLOCK_LENGTH)
     }
 }
 
@@ -1060,10 +1188,10 @@ where
     Ok(r)
 }
 
-fn remove_pkcs7_padding(mut plaintext: Vec<u8>) -> Result<Vec<u8>, Error> {
+fn remove_pkcs7_padding(mut plaintext: Vec<u8>, block_length: usize) -> Result<Vec<u8>, Error> {
     let padding = plaintext.last().copied().unwrap_or_default();
-    let mut invalid = padding.ct_eq(&0) | padding.ct_gt(&(AES_BLOCK_LENGTH as u8));
-    for (index, byte) in plaintext.iter().rev().take(AES_BLOCK_LENGTH).enumerate() {
+    let mut invalid = padding.ct_eq(&0) | padding.ct_gt(&(block_length as u8));
+    for (index, byte) in plaintext.iter().rev().take(block_length).enumerate() {
         invalid |= (index as u8).ct_lt(&padding) & !byte.ct_eq(&padding);
     }
     if bool::from(invalid) {
@@ -1118,7 +1246,7 @@ pub(crate) fn yubihsm_aes_cbc_pad(
     if encrypting {
         Ok(output)
     } else {
-        remove_pkcs7_padding(output)
+        remove_pkcs7_padding(output, AES_BLOCK_LENGTH)
     }
 }
 
@@ -1166,7 +1294,26 @@ fn crypt(
         let mut buffered_input = operation.buffer.clone();
         buffered_input.extend_from_slice(input);
         let input = buffered_input.as_slice();
-        let required = if operation.mechanism == CKM_AES_CCM as CK_MECHANISM_TYPE {
+        let required = if operation.mechanism == CKM_YUBICO_AES_CCM_WRAP {
+            if encrypting {
+                if input.is_empty() {
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(true);
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                }
+                input
+                    .len()
+                    .checked_add(YUBIHSM_CCM_WRAP_OVERHEAD)
+                    .ok_or(CKR_DATA_LEN_RANGE)?
+            } else {
+                if input.len() <= YUBIHSM_CCM_WRAP_OVERHEAD {
+                    ctx.get_session_context_mut(session_handle)?
+                        .take_crypt_operation(false);
+                    return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+                }
+                input.len() - YUBIHSM_CCM_WRAP_OVERHEAD
+            }
+        } else if operation.mechanism == CKM_AES_CCM as CK_MECHANISM_TYPE {
             let Some(parameters) = operation.ccm.as_ref() else {
                 ctx.get_session_context_mut(session_handle)?
                     .clear_crypt_operations();
@@ -1218,11 +1365,20 @@ fn crypt(
                 });
             };
             required
-        } else if operation.mechanism == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE {
+        } else if matches!(
+            operation.mechanism,
+            x if x == CKM_AES_CBC_PAD as CK_MECHANISM_TYPE
+                || x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE
+        ) {
+            let block_length = if operation.mechanism == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE {
+                TDES_BLOCK_LENGTH
+            } else {
+                AES_BLOCK_LENGTH
+            };
             if encrypting {
                 let Some(required) = input
                     .len()
-                    .checked_add(AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH)
+                    .checked_add(block_length - input.len() % block_length)
                 else {
                     ctx.get_session_context_mut(session_handle)?
                         .clear_crypt_operations();
@@ -1230,7 +1386,7 @@ fn crypt(
                 };
                 required
             } else {
-                if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
+                if input.is_empty() || !crate::is_multiple_of(input.len(), block_length) {
                     ctx.get_session_context_mut(session_handle)?
                         .clear_crypt_operations();
                     return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
@@ -1397,6 +1553,15 @@ fn crypt(
                     }
                     KeyMaterial::YubiHsm { id, .. } => {
                         let command = match operation.mechanism {
+                            x if x == CKM_YUBICO_AES_CCM_WRAP => YubiHsmCommand::key_data(
+                                if encrypting {
+                                    YubiHsmCommandCode::WrapData
+                                } else {
+                                    YubiHsmCommandCode::UnwrapData
+                                },
+                                *id,
+                                input,
+                            )?,
                             x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE && !encrypting => {
                                 YubiHsmCommand::key_data(
                                     YubiHsmCommandCode::DecryptPkcs1,
@@ -1518,11 +1683,46 @@ fn crypt(
                             }
                             _ => return Err(CKR_MECHANISM_INVALID.into()),
                         };
-                        ctx._get_session(session_handle)?
+                        let response = ctx
+                            ._get_session(session_handle)?
                             .1
-                            .yubihsm_command(&command)
+                            .yubihsm_command(&command)?;
+                        if operation.mechanism == CKM_YUBICO_AES_CCM_WRAP
+                            && response.len() != required
+                        {
+                            return Err(CKR_DEVICE_ERROR.into());
+                        }
+                        Ok(response)
                     }
                     KeyMaterial::SoftwareSecret(key) => match operation.mechanism {
+                        x if x == CKM_DES3_ECB as CK_MECHANISM_TYPE => {
+                            if !crate::is_multiple_of(input.len(), TDES_BLOCK_LENGTH) {
+                                return Err(if encrypting {
+                                    CKR_DATA_LEN_RANGE.into()
+                                } else {
+                                    CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+                                });
+                            }
+                            software_tdes_ecb_blocks(key, input, encrypting)
+                        }
+                        x if x == CKM_DES3_CBC as CK_MECHANISM_TYPE => software_tdes_cbc(
+                            key,
+                            operation
+                                .des3_iv
+                                .as_ref()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                        ),
+                        x if x == CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE => software_tdes_cbc_pad(
+                            key,
+                            operation
+                                .des3_iv
+                                .as_ref()
+                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                            input,
+                            encrypting,
+                        ),
                         x if x == CKM_AES_ECB as CK_MECHANISM_TYPE => {
                             if !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
                                 return Err(if encrypting {

@@ -20,6 +20,11 @@ The app defaults to `http://192.168.1.169:12345`. Override that URL with the
 variable is only an input to this smoke-test UI; the module itself receives the
 URL through the JSON passed to `C_Initialize`.
 
+The JSON also configures an in-memory software slot named
+`iPhone smoke software`. It appears beside the remote YubiHSM slots and lets the
+same UI compare the complete software mechanism set with each hardware-backed
+set.
+
 The smoke app calls `C_Initialize` once, refreshes the connector inventory with
 `C_GetSlotList` whenever it becomes active, and calls `C_Finalize` only when the
 app terminates. The client initially supplies room for ten slots and retries

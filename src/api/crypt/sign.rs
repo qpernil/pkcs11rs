@@ -10,6 +10,55 @@ use crate::*;
 
 const AES_CMAC_LENGTH: usize = 16;
 
+fn yubihsm_mgf1_algorithm(hash: CK_MECHANISM_TYPE) -> Result<u8, Error> {
+    match hash {
+        x if x == CKM_SHA_1 as CK_MECHANISM_TYPE => Ok(YUBIHSM_ALGO_MGF1_SHA1),
+        x if x == CKM_SHA256 as CK_MECHANISM_TYPE => Ok(YUBIHSM_ALGO_MGF1_SHA256),
+        x if x == CKM_SHA384 as CK_MECHANISM_TYPE => Ok(YUBIHSM_ALGO_MGF1_SHA384),
+        x if x == CKM_SHA512 as CK_MECHANISM_TYPE => Ok(YUBIHSM_ALGO_MGF1_SHA512),
+        _ => Err(CKR_MECHANISM_INVALID.into()),
+    }
+}
+
+fn yubihsm_asymmetric_signature_command(
+    mechanism: CK_MECHANISM_TYPE,
+    pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    key_id: u16,
+    data: &[u8],
+) -> Result<YubiHsmCommand, Error> {
+    let digest = piv_hash_mechanism(mechanism)
+        .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+        .transpose()?;
+    if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE || piv_is_hashed_rsa_pkcs(mechanism) {
+        let input = if piv_is_hashed_rsa_pkcs(mechanism) {
+            piv_digest_info(
+                mechanism,
+                digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+            )
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?
+        } else {
+            data.to_vec()
+        };
+        YubiHsmCommand::key_data(YubiHsmCommandCode::SignPkcs1, key_id, &input)
+    } else if piv_is_pss_mechanism(mechanism) {
+        let (mgf, salt_length, hash_mechanism) = pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        let mgf = if mgf == 0 {
+            yubihsm_mgf1_algorithm(hash_mechanism)?
+        } else {
+            mgf
+        };
+        YubiHsmCommand::sign_pss(key_id, mgf, salt_length, digest.as_deref().unwrap_or(data))
+    } else if mechanism == CKM_EDDSA as CK_MECHANISM_TYPE {
+        YubiHsmCommand::key_data(YubiHsmCommandCode::SignEddsa, key_id, data)
+    } else {
+        YubiHsmCommand::key_data(
+            YubiHsmCommandCode::SignEcdsa,
+            key_id,
+            digest.as_deref().unwrap_or(data),
+        )
+    }
+}
+
 fn software_sign_mechanism_supported(
     key: &SoftwarePrivateKeyMaterial,
     mechanism: CK_MECHANISM_TYPE,
@@ -141,18 +190,62 @@ pub(crate) fn hmac_key_type_and_length(
     mechanism: CK_MECHANISM_TYPE,
 ) -> Option<(CK_KEY_TYPE, usize)> {
     match mechanism {
-        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, 20)),
-        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => {
+        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            Some((CKK_SHA_1_HMAC as CK_KEY_TYPE, 20))
+        }
+        x if x == CKM_SHA224_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            Some((CKK_SHA224_HMAC as CK_KEY_TYPE, 28))
+        }
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
             Some((CKK_SHA256_HMAC as CK_KEY_TYPE, 32))
         }
-        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => {
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
             Some((CKK_SHA384_HMAC as CK_KEY_TYPE, 48))
         }
-        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => {
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
             Some((CKK_SHA512_HMAC as CK_KEY_TYPE, 64))
         }
         _ => None,
     }
+}
+
+pub(crate) fn hmac_output_length(mechanism: &CK_MECHANISM) -> Result<Option<usize>, Error> {
+    let Some((_, full_length)) = hmac_key_type_and_length(mechanism.mechanism) else {
+        return Ok(None);
+    };
+    let general = matches!(
+        mechanism.mechanism,
+        x if x == CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE
+    );
+    if !general {
+        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID.into());
+        }
+        return Ok(Some(full_length));
+    }
+    if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_ULONG>() {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let length = *unsafe { _as_ref(mechanism.pParameter.cast::<CK_ULONG>()) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))? as usize;
+    if length > full_length {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    Ok(Some(length))
 }
 
 pub(crate) fn software_hmac(
@@ -170,10 +263,31 @@ pub(crate) fn software_hmac(
         }};
     }
     match mechanism {
-        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => calculate!(sha1::Sha1),
-        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha256),
-        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha384),
-        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => calculate!(sha2::Sha512),
+        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            calculate!(sha1::Sha1)
+        }
+        x if x == CKM_SHA224_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            calculate!(sha2::Sha224)
+        }
+        x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            calculate!(sha2::Sha256)
+        }
+        x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            calculate!(sha2::Sha384)
+        }
+        x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE =>
+        {
+            calculate!(sha2::Sha512)
+        }
         _ => Err(CKR_MECHANISM_INVALID.into()),
     }
 }
@@ -342,10 +456,12 @@ fn sign_init(
         let mechanism = unsafe { _as_ref(mechanism) }?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_SIGN as CK_FLAGS)?;
         let gmac = aes_gmac_parameters(mechanism)?;
-        let mac_length = match &gmac {
+        let aes_mac_length = match &gmac {
             Some(parameters) => Some(parameters.tag_bits.div_ceil(8)),
             None => aes_cmac_length(mechanism)?,
         };
+        let hmac_length = hmac_output_length(mechanism)?;
+        let mac_length = hmac_length.or(aes_mac_length);
         let pss = if mac_length.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
@@ -438,10 +554,6 @@ fn sign_init(
             x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
             x if x == CKM_PKCS11RS_FIDO_ASSERTION => 0,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
-            x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE => CKK_SHA_1_HMAC as CK_KEY_TYPE,
-            x if x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE => CKK_SHA256_HMAC as CK_KEY_TYPE,
-            x if x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE => CKK_SHA384_HMAC as CK_KEY_TYPE,
-            x if x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE => CKK_SHA512_HMAC as CK_KEY_TYPE,
             x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                 || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
@@ -450,6 +562,9 @@ fn sign_init(
             }
             _ => CKK_RSA as CK_KEY_TYPE,
         };
+        let expected_key_type = hmac_key_type_and_length(mechanism.mechanism)
+            .map(|(key_type, _)| key_type)
+            .unwrap_or(expected_key_type);
         let secret_key_material = (is_hmac_key_type(expected_key_type)
             || expected_key_type == CKK_AES as CK_KEY_TYPE)
             && matches!(
@@ -503,7 +618,7 @@ fn sign_init(
                     && software_sign_mechanism_supported(key, mechanism.mechanism)
             }
             KeyMaterial::SoftwareSecret(_) => {
-                (object.key_type == CKK_AES as CK_KEY_TYPE && mac_length.is_some())
+                (object.key_type == CKK_AES as CK_KEY_TYPE && aes_mac_length.is_some())
                     || hmac_key_type_and_length(mechanism.mechanism).is_some_and(|(key_type, _)| {
                         key_type == object.key_type
                             || object.key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE
@@ -534,14 +649,6 @@ fn sign_init(
         {
             return Err(CKR_MECHANISM_INVALID.into());
         }
-        if matches!(object.material, KeyMaterial::YubiHsm { .. })
-            && (piv_is_hashed_ecdsa(mechanism.mechanism)
-                || (piv_is_pss_mechanism(mechanism.mechanism)
-                    && mechanism.mechanism != CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE))
-        {
-            return Err(CKR_MECHANISM_INVALID.into());
-        }
-
         let context_specific_rp_id =
             matches!(object.material, KeyMaterial::FidoResidentPrivate { .. })
                 .then(|| object.rp_id.clone())
@@ -788,6 +895,11 @@ fn sign(
                     software_sign(key, operation.mechanism, operation.pss, data)
                 }
                 KeyMaterial::SoftwareSecret(key) => {
+                    if hmac_key_type_and_length(operation.mechanism).is_some() {
+                        let mut mac = software_hmac(key, operation.mechanism, data)?;
+                        mac.truncate(required);
+                        return Ok(mac);
+                    }
                     if let Some(parameters) = &operation.gmac {
                         return software_aes_gmac(key, parameters, data);
                     }
@@ -881,6 +993,16 @@ fn sign(
                     }
                 }
                 KeyMaterial::YubiHsm { id, algorithm, .. } => {
+                    if hmac_key_type_and_length(operation.mechanism).is_some() {
+                        let command =
+                            YubiHsmCommand::key_data(YubiHsmCommandCode::SignHmac, *id, data)?;
+                        let mut response = ctx
+                            ._get_session(session_handle)?
+                            .1
+                            .yubihsm_command(&command)?;
+                        response.truncate(required);
+                        return Ok(response);
+                    }
                     if let Some(parameters) = &operation.gmac {
                         return yubihsm_aes_gmac(ctx, session_handle, *id, parameters, data);
                     }
@@ -889,44 +1011,19 @@ fn sign(
                         mac.truncate(required);
                         return Ok(mac);
                     }
-                    let digest_info = if piv_is_hashed_rsa_pkcs(operation.mechanism) {
-                        let digest = piv_hash_mechanism(operation.mechanism)
-                            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                        let digest = hash(digest, data)?;
-                        Some(
-                            piv_digest_info(operation.mechanism, &digest)
-                                .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
-                        )
-                    } else {
-                        None
-                    };
-                    let command = if operation.mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-                        || piv_is_hashed_rsa_pkcs(operation.mechanism)
-                    {
-                        let input = digest_info.as_deref().unwrap_or(data);
-                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignPkcs1, *id, input)?
-                    } else if operation.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
-                        let (mgf, salt_length, _) =
-                            operation.pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                        YubiHsmCommand::sign_pss(*id, mgf, salt_length, data)?
-                    } else if matches!(
+                    let command = yubihsm_asymmetric_signature_command(
                         operation.mechanism,
-                        x if x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
-                            || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
-                            || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
-                            || x == CKM_SHA512_HMAC as CK_MECHANISM_TYPE
-                    ) {
-                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignHmac, *id, data)?
-                    } else if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE {
-                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignEddsa, *id, data)?
-                    } else {
-                        YubiHsmCommand::key_data(YubiHsmCommandCode::SignEcdsa, *id, data)?
-                    };
+                        operation.pss,
+                        *id,
+                        data,
+                    )?;
                     let response = ctx
                         ._get_session(session_handle)?
                         .1
                         .yubihsm_command(&command)?;
-                    if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE {
+                    if operation.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
+                        || piv_is_hashed_ecdsa(operation.mechanism)
+                    {
                         yubihsm_ecdsa_signature(
                             &response,
                             yubihsm_ec_coordinate_length(*algorithm)?,
@@ -1023,3 +1120,93 @@ session_unsupported_stub!(C_SignRecover(
     _signature: *mut ::std::os::raw::c_uchar,
     _signature_len: *mut ::std::os::raw::c_ulong,
 ));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MESSAGE: &[u8] = b"software-assisted hardware signature";
+    const KEY_ID: u16 = 0x1234;
+
+    fn digest(mechanism: CK_MECHANISM_TYPE) -> Vec<u8> {
+        hash(piv_hash_mechanism(mechanism).unwrap(), MESSAGE)
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn yubihsm_hashes_every_advertised_rsa_pkcs_composite_before_transport() {
+        for mechanism in [
+            CKM_SHA1_RSA_PKCS,
+            CKM_SHA256_RSA_PKCS,
+            CKM_SHA384_RSA_PKCS,
+            CKM_SHA512_RSA_PKCS,
+        ] {
+            let mechanism = mechanism as CK_MECHANISM_TYPE;
+            let command =
+                yubihsm_asymmetric_signature_command(mechanism, None, KEY_ID, MESSAGE).unwrap();
+            assert_eq!(command.code(), YubiHsmCommandCode::SignPkcs1);
+            let expected = piv_digest_info(mechanism, &digest(mechanism)).unwrap();
+            assert_eq!(&command.data()[..2], &KEY_ID.to_be_bytes());
+            assert_eq!(&command.data()[2..], expected);
+        }
+    }
+
+    #[test]
+    fn yubihsm_hashes_every_advertised_rsa_pss_composite_before_transport() {
+        for (mechanism, hash_mechanism, mgf) in [
+            (CKM_SHA1_RSA_PKCS_PSS, CKM_SHA_1, YUBIHSM_ALGO_MGF1_SHA1),
+            (
+                CKM_SHA256_RSA_PKCS_PSS,
+                CKM_SHA256,
+                YUBIHSM_ALGO_MGF1_SHA256,
+            ),
+            (
+                CKM_SHA384_RSA_PKCS_PSS,
+                CKM_SHA384,
+                YUBIHSM_ALGO_MGF1_SHA384,
+            ),
+            (
+                CKM_SHA512_RSA_PKCS_PSS,
+                CKM_SHA512,
+                YUBIHSM_ALGO_MGF1_SHA512,
+            ),
+        ] {
+            let mechanism = mechanism as CK_MECHANISM_TYPE;
+            let hash_mechanism = hash_mechanism as CK_MECHANISM_TYPE;
+            let expected = digest(mechanism);
+            let command = yubihsm_asymmetric_signature_command(
+                mechanism,
+                Some((0, expected.len() as u16, hash_mechanism)),
+                KEY_ID,
+                MESSAGE,
+            )
+            .unwrap();
+            assert_eq!(command.code(), YubiHsmCommandCode::SignPss);
+            assert_eq!(&command.data()[..2], &KEY_ID.to_be_bytes());
+            assert_eq!(command.data()[2], mgf);
+            assert_eq!(
+                &command.data()[3..5],
+                &(expected.len() as u16).to_be_bytes()
+            );
+            assert_eq!(&command.data()[5..], expected);
+        }
+    }
+
+    #[test]
+    fn yubihsm_hashes_every_advertised_ecdsa_composite_before_transport() {
+        for mechanism in [
+            CKM_ECDSA_SHA1,
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA384,
+            CKM_ECDSA_SHA512,
+        ] {
+            let mechanism = mechanism as CK_MECHANISM_TYPE;
+            let command =
+                yubihsm_asymmetric_signature_command(mechanism, None, KEY_ID, MESSAGE).unwrap();
+            assert_eq!(command.code(), YubiHsmCommandCode::SignEcdsa);
+            assert_eq!(&command.data()[..2], &KEY_ID.to_be_bytes());
+            assert_eq!(&command.data()[2..], digest(mechanism));
+        }
+    }
+}

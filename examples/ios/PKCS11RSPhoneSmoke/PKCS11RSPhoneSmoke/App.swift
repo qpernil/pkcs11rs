@@ -24,6 +24,11 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "hardware": [
             "discovery": false,
         ],
+        "software": [
+            "slots": [
+                ["name": "iPhone smoke software"],
+            ],
+        ],
         "yubihsm": [
             "urls": [url],
             "usb": false,

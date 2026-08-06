@@ -1,6 +1,6 @@
 use super::sign::{
-    aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, software_aes_cmac,
-    software_aes_gmac, software_hmac, yubihsm_aes_cmac, yubihsm_aes_gmac,
+    aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, hmac_output_length,
+    software_aes_cmac, software_aes_gmac, software_hmac, yubihsm_aes_cmac, yubihsm_aes_gmac,
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
@@ -39,10 +39,12 @@ fn verify_init(
         let mechanism = unsafe { _as_ref(mechanism) }?;
         require_slot_mechanism(ctx, slot_id, mechanism.mechanism, CKF_VERIFY as CK_FLAGS)?;
         let gmac = aes_gmac_parameters(mechanism)?;
-        let mac_length = match &gmac {
+        let aes_mac_length = match &gmac {
             Some(parameters) => Some(parameters.tag_bits.div_ceil(8)),
             None => aes_cmac_length(mechanism)?,
         };
+        let hmac_length = hmac_output_length(mechanism)?;
+        let mac_length = hmac_length.or(aes_mac_length);
         let pss = if mac_length.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
@@ -90,12 +92,12 @@ fn verify_init(
         let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
-        let cmac_mechanism = mac_length.is_some();
+        let aes_mac_mechanism = aes_mac_length.is_some();
         let hmac_mechanism = hmac_key_type_and_length(mechanism.mechanism);
         if !rsa_mechanism
             && !ecdsa_mechanism
             && !eddsa_mechanism
-            && !cmac_mechanism
+            && !aes_mac_mechanism
             && hmac_mechanism.is_none()
         {
             return Err(CKR_MECHANISM_INVALID.into());
@@ -112,7 +114,7 @@ fn verify_init(
         if !object.verify {
             return Err(CKR_KEY_FUNCTION_NOT_PERMITTED.into());
         }
-        let asymmetric_key = if !cmac_mechanism && hmac_mechanism.is_none() {
+        let asymmetric_key = if !aes_mac_mechanism && hmac_mechanism.is_none() {
             Some(projected_public_key_material(&object)?)
         } else {
             None
@@ -131,7 +133,7 @@ fn verify_init(
             };
             object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS || !material_is_valid
         });
-        if (cmac_mechanism
+        if (aes_mac_mechanism
             && (object.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
                 || object.key_type != CKK_AES as CK_KEY_TYPE
                 || !matches!(
@@ -142,7 +144,7 @@ fn verify_init(
                     } | KeyMaterial::SoftwareSecret(_)
                 )))
             || hmac_key_is_invalid
-            || (!cmac_mechanism
+            || (!aes_mac_mechanism
                 && hmac_mechanism.is_none()
                 && object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
             || (rsa_mechanism
@@ -234,6 +236,41 @@ fn verify(
         buffered_data.extend_from_slice(data);
         let data = buffered_data.as_slice();
         let signature = unsafe { from_raw_parts(signature, signature_len as usize) }?;
+        if let Some((_, full_length)) = hmac_key_type_and_length(operation.mechanism) {
+            let expected_length = operation.mac_length.unwrap_or(full_length);
+            if signature.len() != expected_length {
+                return Err(CKR_SIGNATURE_LEN_RANGE.into());
+            }
+            if let KeyMaterial::SoftwareSecret(key) = &operation.key {
+                let mut expected = software_hmac(key, operation.mechanism, data)?;
+                expected.truncate(expected_length);
+                if bool::from(subtle::ConstantTimeEq::ct_eq(
+                    expected.as_slice(),
+                    signature,
+                )) {
+                    return Ok(());
+                }
+                return Err(CKR_SIGNATURE_INVALID.into());
+            }
+            let KeyMaterial::YubiHsm { id, algorithm, .. } = &operation.key else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            let (_, expected_algorithm, _) =
+                yubihsm_hmac_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?;
+            if *algorithm != expected_algorithm || expected_length != full_length {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            }
+            let command = YubiHsmCommand::verify_hmac(*id, signature, data)?;
+            let response = ctx
+                ._get_session(session_handle)?
+                .1
+                .yubihsm_command(&command)?;
+            return match response.as_slice() {
+                [1] => Ok(()),
+                [0] => Err(CKR_SIGNATURE_INVALID.into()),
+                _ => Err(CKR_DEVICE_ERROR.into()),
+            };
+        }
         if let Some(mac_length) = operation.mac_length {
             if signature.len() != mac_length {
                 return Err(CKR_SIGNATURE_LEN_RANGE.into());
@@ -259,39 +296,6 @@ fn verify(
                 return Err(CKR_SIGNATURE_INVALID.into());
             }
             return Ok(());
-        }
-        if let Some((_, expected_length)) = hmac_key_type_and_length(operation.mechanism) {
-            if signature.len() != expected_length {
-                return Err(CKR_SIGNATURE_LEN_RANGE.into());
-            }
-            if let KeyMaterial::SoftwareSecret(key) = &operation.key {
-                let expected = software_hmac(key, operation.mechanism, data)?;
-                if bool::from(subtle::ConstantTimeEq::ct_eq(
-                    expected.as_slice(),
-                    signature,
-                )) {
-                    return Ok(());
-                }
-                return Err(CKR_SIGNATURE_INVALID.into());
-            }
-            let KeyMaterial::YubiHsm { id, algorithm, .. } = &operation.key else {
-                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-            };
-            let (_, expected_algorithm, _) =
-                yubihsm_hmac_mechanism(operation.mechanism).ok_or(CKR_MECHANISM_INVALID)?;
-            if *algorithm != expected_algorithm {
-                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-            }
-            let command = YubiHsmCommand::verify_hmac(*id, signature, data)?;
-            let response = ctx
-                ._get_session(session_handle)?
-                .1
-                .yubihsm_command(&command)?;
-            return match response.as_slice() {
-                [1] => Ok(()),
-                [0] => Err(CKR_SIGNATURE_INVALID.into()),
-                _ => Err(CKR_DEVICE_ERROR.into()),
-            };
         }
         if let Some(public_key) = rsa_public_key_material(&operation.key)? {
             return verify_rsa_signature(

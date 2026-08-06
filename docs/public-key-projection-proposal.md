@@ -533,7 +533,8 @@ tests demonstrating:
 - correct session-object destruction;
 - independence of the result from the base object's lifetime;
 - logout behavior for both public and private projected objects;
-- standard public operations enabled by the result's template;
+- standard public operations enabled by the result's template where the slot
+  advertises the corresponding private-key mechanism;
 - no release of private attributes; and
 - correct failure when token lifetime is requested but unavailable.
 

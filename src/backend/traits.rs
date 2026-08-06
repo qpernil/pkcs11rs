@@ -300,6 +300,9 @@ pub(crate) trait Slot {
     fn supports_software_secret_operations(&self) -> bool {
         false
     }
+    fn supports_software_digest_operations(&self) -> bool {
+        false
+    }
     fn store_software_private_object(
         &mut self,
         _slot_id: CK_SLOT_ID,
@@ -316,9 +319,6 @@ pub(crate) trait Slot {
     fn mechanisms(&self) -> Vec<MechanismDetails> {
         let mut mechanisms = self.backend_mechanisms();
         let mut software_mechanisms = Vec::new();
-        if self.supports_software_public_operations() {
-            software_mechanisms.extend(software_public_mechanisms());
-        }
         if self.supports_software_private_operations() {
             software_mechanisms.extend(software_private_mechanisms());
         }
@@ -348,12 +348,37 @@ pub(crate) trait Slot {
                 mechanisms.push(software);
             }
         }
-        for software in SOFTWARE_DIGEST_MECHANISMS {
-            if !mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == software.type_)
-            {
-                mechanisms.push(software);
+        if self.supports_software_public_operations() {
+            for software in software_public_mechanisms() {
+                if let Some(existing) = mechanisms
+                    .iter_mut()
+                    .find(|mechanism| mechanism.type_ == software.type_)
+                {
+                    // Add a software public operation only when the backend
+                    // exposes its corresponding private operation.
+                    let mut flags = software.flags & !(CKF_ENCRYPT | CKF_VERIFY) as CK_FLAGS;
+                    if existing.flags & CKF_DECRYPT as CK_FLAGS != 0 {
+                        flags |= software.flags & CKF_ENCRYPT as CK_FLAGS;
+                    }
+                    if existing.flags & CKF_SIGN as CK_FLAGS != 0 {
+                        flags |= software.flags & CKF_VERIFY as CK_FLAGS;
+                    }
+                    existing.flags |= flags;
+                } else if software.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY {
+                    // Public projection is itself an operation on a private
+                    // key, rather than a public-key cryptographic mechanism.
+                    mechanisms.push(software);
+                }
+            }
+        }
+        if self.supports_software_digest_operations() {
+            for software in SOFTWARE_DIGEST_MECHANISMS {
+                if !mechanisms
+                    .iter()
+                    .any(|mechanism| mechanism.type_ == software.type_)
+                {
+                    mechanisms.push(software);
+                }
             }
         }
         mechanisms

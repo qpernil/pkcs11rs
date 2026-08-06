@@ -43,8 +43,18 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<Option<JsonConfigu
     }
 
     let args = unsafe { _as_ref(init_args.cast::<CK_C_INITIALIZE_ARGS>()) }?;
-    let configuration =
+    let reserved =
         unsafe { JsonConfiguration::from_reserved(args.pReserved) }.map_err(CK_RV::from)?;
+    let configuration = match reserved {
+        ReservedConfiguration::Empty => None,
+        ReservedConfiguration::Json(configuration) => Some(*configuration),
+        ReservedConfiguration::Opaque => {
+            if matches!(std::env::var("PKCS11RS_DEBUG").as_deref(), Ok("1" | "2")) {
+                eprintln!("C_Initialize received opaque pReserved data");
+            }
+            None
+        }
+    };
 
     let callbacks = [
         args.CreateMutex.is_some(),

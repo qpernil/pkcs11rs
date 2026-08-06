@@ -443,13 +443,18 @@ fn advertised_digest_mechanisms_match_standard_vectors() {
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    install_public_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(crate::SoftwareSlot::new(String::from("digest-test"), 0)),
+    );
+    let session = open_test_session(TEST_SLOT_ID);
 
     assert_eq!(
-        assert_advertised_digest_vectors(TEST_SLOT_ID, TEST_SESSION_HANDLE),
+        assert_advertised_digest_vectors(TEST_SLOT_ID, session),
         digest_vectors().len()
     );
-    assert_advertised_sha512_multipart(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    assert_advertised_sha512_multipart(TEST_SLOT_ID, session);
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     finalize_for_test();
 }
 
@@ -462,6 +467,10 @@ fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
         crate::api::C_Initialize(std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(crate::SoftwareSlot::new(String::from("ABI digest test"), 0)),
+    );
     let mut count = 0;
     assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
@@ -473,16 +482,32 @@ fn every_abi_slot_executes_its_advertised_digest_mechanisms() {
         CKR_OK as CK_RV
     );
 
+    let mut slots_with_digests = 0;
     for slot_id in slots {
+        let kind = {
+            let context = test_slot_context(slot_id);
+            let context = context.lock().unwrap();
+            context.slot.kind()
+        };
         let session = open_test_session(slot_id);
+        let tested = assert_advertised_digest_vectors(slot_id, session);
+        let expected = if kind == crate::SlotKind::Software {
+            digest_vectors().len()
+        } else {
+            0
+        };
         assert_eq!(
-            assert_advertised_digest_vectors(slot_id, session),
-            digest_vectors().len(),
-            "slot {slot_id} did not execute every published software digest"
+            tested, expected,
+            "slot {slot_id} ({kind:?}) advertised the wrong standalone digests"
         );
+        slots_with_digests += usize::from(tested != 0);
         assert_advertised_sha512_multipart(slot_id, session);
         assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     }
+    assert!(
+        slots_with_digests > 0,
+        "ABI configuration has no software slot"
+    );
     finalize_for_test();
 }
 
@@ -1257,6 +1282,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
     assert!(mechanisms.contains(&(CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE)));
     assert!(mechanisms.contains(&(CKM_AES_CBC as CK_MECHANISM_TYPE)));
     assert!(mechanisms.contains(&(CKM_AES_GCM as CK_MECHANISM_TYPE)));
+    assert!(!mechanisms.contains(&(CKM_RSA_X_509 as CK_MECHANISM_TYPE)));
     let mut mechanism_info = CK_MECHANISM_INFO {
         ulMinKeySize: 0,
         ulMaxKeySize: 0,
@@ -6057,11 +6083,9 @@ fn piv_key_metadata_controls_provenance_policy_and_firmware_mechanisms() {
         patch: 0,
     };
     let mechanisms = crate::Slot::mechanisms(&slot);
-    let eddsa = mechanisms
+    assert!(!mechanisms
         .iter()
-        .find(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE)
-        .unwrap();
-    assert_eq!(eddsa.flags, CKF_VERIFY as CK_FLAGS);
+        .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
     let rsa_generation = mechanisms
         .iter()
         .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE)
@@ -6098,10 +6122,7 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
             .find(|mechanism| mechanism.type_ == type_)
             .copied()
     };
-    let rsa = mechanism(CKM_RSA_PKCS as CK_MECHANISM_TYPE).unwrap();
-    assert_eq!((rsa.min_key_size, rsa.max_key_size), (2048, 2048));
-    assert_ne!(rsa.flags & CKF_ENCRYPT as CK_FLAGS, 0);
-    assert_eq!(rsa.flags & (CKF_SIGN | CKF_DECRYPT) as CK_FLAGS, 0);
+    assert!(mechanism(CKM_RSA_PKCS as CK_MECHANISM_TYPE).is_none());
     let aes = mechanism(CKM_AES_ECB as CK_MECHANISM_TYPE).unwrap();
     assert_eq!((aes.min_key_size, aes.max_key_size), (16, 16));
     let gcm = mechanism(CKM_AES_GCM as CK_MECHANISM_TYPE).unwrap();
@@ -6165,6 +6186,32 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert!(mechanism(crate::CKM_YUBICO_RSA_WRAP).is_none());
     assert!(mechanism(CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE).is_none());
 
+    let rsa_sign = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+    ]);
+    let rsa_sign = rsa_sign
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(
+        rsa_sign.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+    );
+
+    let rsa_decrypt = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_DECRYPT,
+    ]);
+    let rsa_decrypt = rsa_decrypt
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(
+        rsa_decrypt.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
+
     let wrapping = crate::yubihsm_mechanisms(&[
         crate::YUBIHSM_ALGO_RSA_2048,
         crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
@@ -6188,7 +6235,10 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         .find(|mechanism| mechanism.type_ == crate::CKM_YUBICO_AES_CCM_WRAP)
         .unwrap();
     assert_eq!((ccm.min_key_size, ccm.max_key_size), (16, 32));
-    assert_eq!(ccm.flags, (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS);
+    assert_eq!(
+        ccm.flags,
+        (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS
+    );
     assert!(!wrapping
         .iter()
         .any(|mechanism| mechanism.type_ == CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE));
@@ -6272,6 +6322,56 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
         0
     );
 
+    let software_assisted = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA512,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA512,
+        crate::YUBIHSM_ALGO_EC_P256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA1,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA384,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA512,
+    ]);
+    for mechanism_type in [
+        CKM_SHA1_RSA_PKCS,
+        CKM_SHA256_RSA_PKCS,
+        CKM_SHA384_RSA_PKCS,
+        CKM_SHA512_RSA_PKCS,
+        CKM_SHA1_RSA_PKCS_PSS,
+        CKM_SHA256_RSA_PKCS_PSS,
+        CKM_SHA384_RSA_PKCS_PSS,
+        CKM_SHA512_RSA_PKCS_PSS,
+        CKM_ECDSA_SHA1,
+        CKM_ECDSA_SHA256,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
+    ] {
+        let mechanism = software_assisted
+            .iter()
+            .find(|mechanism| mechanism.type_ == mechanism_type as CK_MECHANISM_TYPE)
+            .unwrap();
+        assert_eq!(
+            mechanism.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+        );
+    }
+    for unsupported in [
+        CKM_SHA224_RSA_PKCS_PSS,
+        CKM_SHA3_256_RSA_PKCS_PSS,
+        CKM_ECDSA_SHA224,
+        CKM_ECDSA_SHA3_256,
+    ] {
+        assert!(!software_assisted
+            .iter()
+            .any(|mechanism| mechanism.type_ == unsupported as CK_MECHANISM_TYPE));
+    }
+
     let without_ecb =
         crate::yubihsm_mechanisms(&[crate::YUBIHSM_ALGO_AES128, crate::YUBIHSM_ALGO_AES_CBC]);
     assert!(without_ecb
@@ -6296,6 +6396,105 @@ fn yubihsm_mechanisms_follow_enabled_device_algorithms() {
     assert!(!without_x25519
         .iter()
         .any(|mechanism| mechanism.type_ == CKM_EDDSA as CK_MECHANISM_TYPE));
+}
+
+#[test]
+fn yubihsm_mechanisms_cover_the_yubico_2_8_pkcs11_baseline() {
+    // Compatibility baseline from yubihsm-shell 2.8.0
+    // pkcs11/util_pkcs11.c:get_mechanism_list(). Standalone digest
+    // mechanisms are intentionally excluded because pkcs11rs assigns those
+    // software-only operations to software slots.
+    let mechanisms = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA512,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA512,
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_3072,
+        crate::YUBIHSM_ALGO_RSA_4096,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_DECRYPT,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA1,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA256,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA384,
+        crate::YUBIHSM_ALGO_RSA_OAEP_SHA512,
+        crate::YUBIHSM_ALGO_EC_P224,
+        crate::YUBIHSM_ALGO_EC_P256,
+        crate::YUBIHSM_ALGO_EC_P384,
+        crate::YUBIHSM_ALGO_EC_P521,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA1,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA384,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA512,
+        crate::YUBIHSM_ALGO_EC_ECDH,
+        crate::YUBIHSM_ALGO_ED25519,
+        crate::YUBIHSM_ALGO_HMAC_SHA1,
+        crate::YUBIHSM_ALGO_HMAC_SHA256,
+        crate::YUBIHSM_ALGO_HMAC_SHA384,
+        crate::YUBIHSM_ALGO_HMAC_SHA512,
+        crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+        crate::YUBIHSM_ALGO_AES192_CCM_WRAP,
+        crate::YUBIHSM_ALGO_AES256_CCM_WRAP,
+        crate::YUBIHSM_ALGO_AES128,
+        crate::YUBIHSM_ALGO_AES192,
+        crate::YUBIHSM_ALGO_AES256,
+        crate::YUBIHSM_ALGO_AES_ECB,
+        crate::YUBIHSM_ALGO_AES_CBC,
+        crate::YUBIHSM_ALGO_AES_KWP,
+    ]);
+    let advertised = mechanisms
+        .iter()
+        .map(|mechanism| mechanism.type_)
+        .collect::<std::collections::HashSet<_>>();
+    let baseline = [
+        CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE,
+        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        CKM_ECDSA as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+        CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,
+        CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        CKM_EDDSA as CK_MECHANISM_TYPE,
+        CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE,
+        CKM_SHA_1_HMAC as CK_MECHANISM_TYPE,
+        CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
+        CKM_SHA384_HMAC as CK_MECHANISM_TYPE,
+        CKM_SHA512_HMAC as CK_MECHANISM_TYPE,
+        CKM_AES_KEY_GEN as CK_MECHANISM_TYPE,
+        CKM_AES_ECB as CK_MECHANISM_TYPE,
+        CKM_AES_CBC as CK_MECHANISM_TYPE,
+        CKM_AES_CBC_PAD as CK_MECHANISM_TYPE,
+        CKM_AES_KEY_WRAP_KWP as CK_MECHANISM_TYPE,
+        crate::CKM_YUBICO_AES_CCM_WRAP,
+        crate::CKM_YUBICO_RSA_WRAP,
+        CKM_RSA_AES_KEY_WRAP as CK_MECHANISM_TYPE,
+    ];
+    for expected in baseline {
+        assert!(
+            advertised.contains(&expected),
+            "missing Yubico 2.8 mechanism {:?}",
+            crate::mechanism_name(expected)
+        );
+    }
+    for software_only in [CKM_SHA_1, CKM_SHA256, CKM_SHA384, CKM_SHA512] {
+        assert!(!advertised.contains(&(software_only as CK_MECHANISM_TYPE)));
+    }
 }
 
 #[derive(Debug)]
@@ -6384,6 +6583,13 @@ struct ConcurrentSession {
 struct PivSigningTestSession {
     slot_id: CK_SLOT_ID,
     captured: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+}
+
+#[derive(Debug)]
+struct CompositeHardwareSigningSession {
+    slot_id: CK_SLOT_ID,
+    rsa: rsa::RsaPrivateKey,
+    ec: p256::ecdsa::SigningKey,
 }
 
 #[derive(Debug)]
@@ -6775,6 +6981,104 @@ impl crate::BackendSession for PivSigningTestSession {
     }
 }
 
+impl crate::BackendSession for CompositeHardwareSigningSession {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn slotID(&self) -> CK_SLOT_ID {
+        self.slot_id
+    }
+
+    fn flags(&self) -> CK_FLAGS {
+        CKF_SERIAL_SESSION as CK_FLAGS
+    }
+
+    fn get_session_info(&self) -> Result<(), crate::error::Error> {
+        Ok(())
+    }
+
+    fn piv_sign(
+        &self,
+        _slot: crate::piv::Slot,
+        algorithm: crate::piv::Algorithm,
+        input: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, crate::error::Error> {
+        match algorithm {
+            crate::piv::Algorithm::Rsa2048 => crate::rsa_private_operation(&self.rsa, input),
+            crate::piv::Algorithm::EccP256 => {
+                let signature: p256::ecdsa::DerSignature =
+                    signature::hazmat::PrehashSigner::sign_prehash(&self.ec, input)
+                        .map_err(|_| crate::error::Error::from(CKR_DATA_LEN_RANGE))?;
+                Ok(signature.as_bytes().to_vec())
+            }
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        }
+    }
+
+    fn openpgp_sign(
+        &self,
+        key_ref: crate::OpenPgpKeyRef,
+        input: &[u8],
+        _pin_policy: u8,
+    ) -> Result<Vec<u8>, crate::error::Error> {
+        match key_ref {
+            crate::OpenPgpKeyRef::Signature => crate::rsa_pkcs1_sign(&self.rsa, input),
+            crate::OpenPgpKeyRef::Authentication => {
+                let signature: p256::ecdsa::DerSignature =
+                    signature::hazmat::PrehashSigner::sign_prehash(&self.ec, input)
+                        .map_err(|_| crate::error::Error::from(CKR_DATA_LEN_RANGE))?;
+                Ok(signature.as_bytes().to_vec())
+            }
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        }
+    }
+
+    fn yubihsm_command(
+        &self,
+        command: &crate::YubiHsmCommand,
+    ) -> Result<Vec<u8>, crate::error::Error> {
+        let data = command.data();
+        if data.len() < 2 {
+            return Err(CKR_DATA_LEN_RANGE.into());
+        }
+        match command.code() {
+            crate::YubiHsmCommandCode::SignPkcs1 => crate::rsa_pkcs1_sign(&self.rsa, &data[2..]),
+            crate::YubiHsmCommandCode::SignPss => {
+                if data.len() < 5 {
+                    return Err(CKR_DATA_LEN_RANGE.into());
+                }
+                let mgf = data[2];
+                let salt_length = u16::from_be_bytes([data[3], data[4]]) as usize;
+                let digest = &data[5..];
+                let hash_mechanism = match digest.len() {
+                    20 => CKM_SHA_1 as CK_MECHANISM_TYPE,
+                    32 => CKM_SHA256 as CK_MECHANISM_TYPE,
+                    48 => CKM_SHA384 as CK_MECHANISM_TYPE,
+                    64 => CKM_SHA512 as CK_MECHANISM_TYPE,
+                    _ => return Err(CKR_DATA_LEN_RANGE.into()),
+                };
+                let encoded = crate::encode_rsa_pss(
+                    digest,
+                    self.rsa.size(),
+                    hash_mechanism,
+                    mgf,
+                    salt_length,
+                )?;
+                crate::rsa_private_operation(&self.rsa, &encoded)
+            }
+            crate::YubiHsmCommandCode::SignEcdsa => {
+                let signature: p256::ecdsa::DerSignature =
+                    signature::hazmat::PrehashSigner::sign_prehash(&self.ec, &data[2..])
+                        .map_err(|_| crate::error::Error::from(CKR_DATA_LEN_RANGE))?;
+                Ok(signature.as_bytes().to_vec())
+            }
+            _ => Err(CKR_FUNCTION_NOT_SUPPORTED.into()),
+        }
+    }
+}
+
 impl crate::Slot for TestSlot {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -6994,6 +7298,363 @@ fn software_capabilities_preserve_native_hardware_range_and_flag() {
     assert_eq!(eddsa.flags & CKF_HW as CK_FLAGS, 0);
     assert_ne!(eddsa.flags & CKF_SIGN as CK_FLAGS, 0);
     assert_ne!(eddsa.flags & CKF_VERIFY as CK_FLAGS, 0);
+}
+
+#[test]
+fn software_public_operations_do_not_introduce_backend_unsupported_mechanisms() {
+    let mut slot = test_slot(true);
+    slot.mechanisms = vec![
+        crate::MechanismDetails {
+            type_: CKM_ECDSA as CK_MECHANISM_TYPE,
+            min_key_size: 256,
+            max_key_size: 384,
+            flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
+        },
+        crate::MechanismDetails {
+            type_: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+            min_key_size: 2048,
+            max_key_size: 4096,
+            flags: (CKF_HW | CKF_DECRYPT) as CK_FLAGS,
+        },
+    ];
+
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    let ecdsa = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_ECDSA as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!((ecdsa.min_key_size, ecdsa.max_key_size), (256, 384));
+    assert_eq!(
+        ecdsa.flags,
+        (CKF_HW | CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS
+    );
+    let rsa_pkcs = mechanisms
+        .iter()
+        .find(|mechanism| mechanism.type_ == CKM_RSA_PKCS as CK_MECHANISM_TYPE)
+        .unwrap();
+    assert_eq!(
+        rsa_pkcs.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
+    );
+    assert!(!mechanisms
+        .iter()
+        .any(|mechanism| mechanism.type_ == CKM_RSA_X_509 as CK_MECHANISM_TYPE));
+    assert!(mechanisms
+        .iter()
+        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
+}
+
+#[test]
+fn hardware_composite_signing_matches_advertisement_in_both_directions() {
+    #[derive(Clone, Copy)]
+    enum Backend {
+        Piv,
+        OpenPgp,
+        YubiHsm,
+    }
+
+    fn token_object(
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+        class: CK_OBJECT_CLASS,
+        key_type: CK_KEY_TYPE,
+        material: crate::KeyMaterial,
+        public_key: Option<crate::PublicKeyMaterial>,
+    ) -> crate::TokenObject {
+        crate::TokenObject {
+            slot_id: Some(slot_id),
+            unique_id: unique_id.to_owned(),
+            class,
+            key_type,
+            label: unique_id.to_owned(),
+            id: unique_id.as_bytes().to_vec(),
+            token: true,
+            private: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            encrypt: false,
+            decrypt: false,
+            sign: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            verify: class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            derive: false,
+            wrap: false,
+            unwrap: false,
+            sensitive: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            extractable: class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            always_sensitive: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            never_extractable: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+            local: true,
+            key_gen_mechanism: None,
+            allowed_mechanisms: None,
+            wrap_with_trusted: false,
+            policy_templates: crate::KeyPolicyTemplates::default(),
+            creator_session: None,
+            public_key,
+            rp_id: None,
+            material,
+        }
+    }
+
+    fn exercise_backend(
+        slot_id: CK_SLOT_ID,
+        session_handle: CK_SESSION_HANDLE,
+        backend: Backend,
+        expected: &[CK_MECHANISM_TYPE],
+    ) {
+        let rsa = crate::certificate_builder::rsa_key();
+        let rsa_public = rsa.to_public_key();
+        let ec = crate::certificate_builder::p256_key();
+        let ec_public = crate::PublicKeyMaterial::Ec {
+            parameters: crate::piv_ec_parameters(crate::piv::Algorithm::EccP256)
+                .unwrap()
+                .to_vec(),
+            public_key: crate::certificate_builder::p256_public_point(ec.verifying_key())[1..]
+                .to_vec(),
+        };
+        let additional = expected
+            .iter()
+            .map(|mechanism| (*mechanism, (CKF_SIGN | CKF_VERIFY) as CK_FLAGS))
+            .collect::<Vec<_>>();
+        install_test_slot_with_backend(
+            slot_id,
+            Box::new(test_slot_with_mechanisms(true, &additional)),
+        );
+
+        let (rsa_material, ec_material) = match backend {
+            Backend::Piv => (
+                crate::KeyMaterial::PivPrivate {
+                    slot: crate::piv::Slot::Signature,
+                    algorithm: crate::piv::Algorithm::Rsa2048,
+                    pin_policy: 0,
+                    touch_policy: 0,
+                },
+                crate::KeyMaterial::PivPrivate {
+                    slot: crate::piv::Slot::Authentication,
+                    algorithm: crate::piv::Algorithm::EccP256,
+                    pin_policy: 0,
+                    touch_policy: 0,
+                },
+            ),
+            Backend::OpenPgp => (
+                crate::KeyMaterial::OpenPgpPrivate {
+                    key_ref: crate::OpenPgpKeyRef::Signature,
+                    algorithm: crate::OpenPgpAlgorithm::Rsa { bits: 2048 },
+                    pin_policy: crate::openpgp::PW1_MULTIPLE_SIGNATURES,
+                    touch_policy: 0,
+                },
+                crate::KeyMaterial::OpenPgpPrivate {
+                    key_ref: crate::OpenPgpKeyRef::Authentication,
+                    algorithm: crate::OpenPgpAlgorithm::Ecdsa(crate::openpgp::Curve::P256),
+                    pin_policy: crate::openpgp::PW1_MULTIPLE_SIGNATURES,
+                    touch_policy: 0,
+                },
+            ),
+            Backend::YubiHsm => (
+                crate::KeyMaterial::YubiHsm {
+                    id: 1,
+                    object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+                    algorithm: crate::YUBIHSM_ALGO_RSA_2048,
+                    length: 256,
+                    domains: 0xffff,
+                    capabilities: crate::yubihsm_capabilities(&[0x06]),
+                    delegated_capabilities: [0; 8],
+                    public_key: rsa_public.n().to_bytes_be(),
+                    value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                },
+                crate::KeyMaterial::YubiHsm {
+                    id: 2,
+                    object_type: crate::YUBIHSM_ASYMMETRIC_KEY,
+                    algorithm: crate::YUBIHSM_ALGO_EC_P256,
+                    length: 32,
+                    domains: 0xffff,
+                    capabilities: crate::yubihsm_capabilities(&[0x06]),
+                    delegated_capabilities: [0; 8],
+                    public_key: match &ec_public {
+                        crate::PublicKeyMaterial::Ec { public_key, .. } => public_key.clone(),
+                        _ => unreachable!(),
+                    },
+                    value: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                },
+            ),
+        };
+
+        let rsa_public_material = crate::PublicKeyMaterial::Rsa(rsa_public);
+        let child = test_slot_context(slot_id);
+        {
+            let mut context = child.lock().unwrap();
+            context.sessions.insert(
+                session_handle,
+                crate::SessionContext::new(Box::new(CompositeHardwareSigningSession {
+                    slot_id,
+                    rsa,
+                    ec,
+                })),
+            );
+            context.login_role = Some(crate::LoginRole::User);
+            context.memory_objects.insert(
+                100,
+                token_object(
+                    slot_id,
+                    "rsa-private",
+                    CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                    CKK_RSA as CK_KEY_TYPE,
+                    rsa_material,
+                    Some(rsa_public_material.clone()),
+                ),
+            );
+            context.memory_objects.insert(
+                101,
+                token_object(
+                    slot_id,
+                    "rsa-public",
+                    CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                    CKK_RSA as CK_KEY_TYPE,
+                    crate::KeyMaterial::Public(rsa_public_material.clone()),
+                    None,
+                ),
+            );
+            context.memory_objects.insert(
+                102,
+                token_object(
+                    slot_id,
+                    "ec-private",
+                    CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                    CKK_EC as CK_KEY_TYPE,
+                    ec_material,
+                    Some(ec_public.clone()),
+                ),
+            );
+            context.memory_objects.insert(
+                103,
+                token_object(
+                    slot_id,
+                    "ec-public",
+                    CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                    CKK_EC as CK_KEY_TYPE,
+                    crate::KeyMaterial::Public(ec_public),
+                    None,
+                ),
+            );
+        }
+        crate::register_session_slot(session_handle, slot_id).unwrap();
+
+        let candidates = crate::HASHED_RSA_PKCS_MECHANISMS
+            .into_iter()
+            .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+            .chain(crate::HASHED_ECDSA_MECHANISMS);
+        for mechanism_type in candidates {
+            let (private, public) = if crate::HASHED_ECDSA_MECHANISMS.contains(&mechanism_type) {
+                (102, 103)
+            } else {
+                (100, 101)
+            };
+            let mut mechanism = CK_MECHANISM {
+                mechanism: mechanism_type,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            let init = crate::api::C_SignInit(session_handle, &mut mechanism, private);
+            if !expected.contains(&mechanism_type) {
+                assert_eq!(init, CKR_MECHANISM_INVALID as CK_RV);
+                continue;
+            }
+            assert_eq!(init, CKR_OK as CK_RV);
+            let mut message = b"hardware composite contract".to_vec();
+            let mut signature_length = 0;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session_handle,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            let mut signature = vec![0; signature_length as usize];
+            assert_eq!(
+                crate::api::C_Sign(
+                    session_handle,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_VerifyInit(session_handle, &mut mechanism, public),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_Verify(
+                    session_handle,
+                    message.as_mut_ptr(),
+                    message.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+        }
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let piv = crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+        .chain(crate::HASHED_ECDSA_MECHANISMS)
+        .collect::<Vec<_>>();
+    exercise_backend(91, 901, Backend::Piv, &piv);
+
+    let openpgp = [
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+    ];
+    exercise_backend(92, 902, Backend::OpenPgp, &openpgp);
+
+    let yubihsm = [
+        CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+    ];
+    exercise_backend(93, 903, Backend::YubiHsm, &yubihsm);
+
+    install_test_slot_with_backend(94, Box::new(test_slot_with_mechanisms(true, &[])));
+    install_test_session(94, 904);
+    for mechanism_type in crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+        .chain(crate::HASHED_ECDSA_MECHANISMS)
+    {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_SignInit(904, &mut mechanism, CK_INVALID_HANDLE as CK_OBJECT_HANDLE,),
+            CKR_MECHANISM_INVALID as CK_RV
+        );
+    }
+    finalize_for_test();
 }
 
 fn install_test_slot(slot_id: CK_SLOT_ID) {

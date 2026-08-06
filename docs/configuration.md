@@ -6,10 +6,18 @@ that does not depend on process environment variables and works with the same
 PKCS #11 C ABI on iOS, macOS, Linux, and Windows.
 
 The value must be a NUL-terminated UTF-8 string whose terminator occurs within
-the first 64 KiB. The object must contain `"version": 1`. Invalid UTF-8, JSON,
-unknown fields, an unsupported version, or a missing terminator makes
-`C_Initialize` return `CKR_ARGUMENTS_BAD`. pkcs11rs reads the string only during
-the call and does not retain the pointer.
+the first 64 KiB. pkcs11rs reads the string only during the call and does not
+retain the pointer. A nonempty value whose first non-whitespace character is
+`{` is treated as pkcs11rs JSON: the object must contain `"version": 1`, and
+invalid JSON, unknown fields, or an unsupported version makes `C_Initialize`
+return `CKR_ARGUMENTS_BAD`. Invalid UTF-8 or a missing terminator also returns
+`CKR_ARGUMENTS_BAD`.
+
+A nonempty value whose first non-whitespace character is not `{` is accepted
+as opaque provider initialization data and ignored. This preserves
+compatibility with applications such as OpenSSL that place their own text in
+`pReserved`; it is not interpreted as partial or permissive pkcs11rs
+configuration. JSON-looking input always receives strict validation.
 
 A null `pReserved`, an empty string, or a whitespace-only string means that no
 explicit configuration was supplied. Each missing JSON field falls back to its

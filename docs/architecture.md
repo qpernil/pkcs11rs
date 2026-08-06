@@ -76,11 +76,18 @@ ownership, login role, object handles, and dispatch. Its boxed `Slot`
 implementation supplies the device- or applet-specific token metadata,
 objects, login behavior, mechanisms, random generation, and backend sessions.
 
-Backend mechanism lists describe hardware operations. The default `Slot`
-implementation augments them with the module's software digest and public-key
-mechanisms, whose active state is still stored in the calling session. Generic
-software private-key support is an explicit slot capability and is disabled for
-all hardware and applet slots. The typed implementation covers RSA, every
+Backend mechanism lists describe complete slot operations. An operation may
+combine software preprocessing, such as hashing, with a hardware private-key
+command. Standalone software digest mechanisms belong only to software slots;
+hardware slots expose software-assisted composite mechanisms only when the
+operation uses a key in that slot. Software public-key processing adds a
+public-operation flag only to a mechanism already exposed with its paired private operation:
+`CKF_SIGN` enables `CKF_VERIFY`, and `CKF_DECRYPT` enables `CKF_ENCRYPT`. It does
+not introduce a mechanism that the backend's private keys cannot perform. The
+public-projection mechanism remains available because it is itself an operation
+on a private key. Generic software private-key support is an explicit slot
+capability and is disabled for all
+hardware and applet slots. The typed implementation covers RSA, every
 Weierstrass curve supported by the hardware backends (NIST
 P-224/P-256/P-384/P-521, secp256k1, and brainpoolP256r1/P384r1/P512r1),
 Ed25519, and X25519. `PKCS11RS_SOFTWARE_SLOTS` creates one independent
@@ -212,10 +219,13 @@ and the iOS XCFramework omit local hardware completely, while remote HTTP(S)
 connector slots remain available to the provider.
 
 The daemon is currently a private-network component, not a public security
-boundary. Its implemented TLS, body cap, command timeout, serial routing, and
-per-device serialization do not yet include firmware-aware frame validation,
-bounded admission, client-identity authorization, complete HTTP deadlines, or
-self-healing USB discovery. See the
+boundary. It implements TLS and optional mTLS, bounded request bodies and
+global in-flight admission, firmware-aware frame validation, serial routing,
+per-device serialization, hot-plug discovery, and service reconstruction after
+system suspend. It deliberately has no complete-handler deadline that could
+race an active USB command. Device-aware client authorization, accepted TCP
+connection limits, per-client fairness, and handle reopening after an uncertain
+USB failure remain future work. See the
 [connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
 for the authoritative status.
 

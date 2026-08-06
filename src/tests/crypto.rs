@@ -215,16 +215,22 @@ pub fn operations_are_owned_by_their_pkcs11_session() {
         crate::api::C_Initialize(::std::ptr::null_mut()),
         CKR_OK as CK_RV
     );
-    let second_session = TEST_SESSION_HANDLE + 1;
-    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
-    install_test_session(TEST_SLOT_ID, second_session);
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(crate::SoftwareSlot::new(
+            String::from("operation-owner-test"),
+            0,
+        )),
+    );
+    let first_session = open_test_session(TEST_SLOT_ID);
+    let second_session = open_test_session(TEST_SLOT_ID);
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
         pParameter: ::std::ptr::null_mut(),
         ulParameterLen: 0,
     };
-    for session in [TEST_SESSION_HANDLE, second_session] {
+    for session in [first_session, second_session] {
         assert_eq!(
             crate::api::C_DigestInit(session, &mut mechanism),
             CKR_OK as CK_RV
@@ -235,7 +241,7 @@ pub fn operations_are_owned_by_their_pkcs11_session() {
     let mut second_input = *b"second";
     assert_eq!(
         crate::api::C_DigestUpdate(
-            TEST_SESSION_HANDLE,
+            first_session,
             first_input.as_mut_ptr(),
             first_input.len() as CK_ULONG,
         ),
@@ -250,10 +256,7 @@ pub fn operations_are_owned_by_their_pkcs11_session() {
         CKR_OK as CK_RV
     );
 
-    assert_eq!(
-        crate::api::C_CloseSession(TEST_SESSION_HANDLE),
-        CKR_OK as CK_RV
-    );
+    assert_eq!(crate::api::C_CloseSession(first_session), CKR_OK as CK_RV);
     let expected = <sha2::Sha256 as sha2::Digest>::digest(second_input);
     let mut actual = [0u8; 32];
     let mut actual_len = actual.len() as CK_ULONG;

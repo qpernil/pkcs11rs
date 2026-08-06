@@ -2314,6 +2314,123 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
 }
 
 #[test]
+fn yubihsm_aes_ccm_wrap_data_encrypts_and_decrypts() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+    let session = open_test_session(SLOT_ID);
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let object = yubihsm_wrap_test_object(
+        SLOT_ID,
+        YubiHsmWrapTestObject {
+            id: 40,
+            object_type: crate::YUBIHSM_WRAP_KEY,
+            algorithm: crate::YUBIHSM_ALGO_AES128_CCM_WRAP,
+            capabilities: &[0x25, 0x26],
+            delegated_capabilities: &[],
+            label: "AES-CCM wrap data",
+            public_key: None,
+        },
+    )
+    .pop()
+    .unwrap();
+    let key = with_test_slot_context(SLOT_ID, |context| context.insert_object(object).unwrap());
+    assert!(checked_bool_attribute(session, key, CKA_ENCRYPT as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(checked_bool_attribute(session, key, CKA_DECRYPT as CK_ATTRIBUTE_TYPE).unwrap());
+
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_YUBICO_AES_CCM_WRAP,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut plaintext = b"wrap-data round trip".to_vec();
+    assert_eq!(
+        crate::api::C_EncryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let mut ciphertext_len = 0;
+    assert_eq!(
+        crate::api::C_Encrypt(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(ciphertext_len as usize, plaintext.len() + 1 + 13 + 16);
+    let mut ciphertext = vec![0; ciphertext_len as usize];
+    assert_eq!(
+        crate::api::C_Encrypt(
+            session,
+            plaintext.as_mut_ptr(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        commands.borrow().last().unwrap().0,
+        crate::YubiHsmCommandCode::WrapData as u8
+    );
+
+    assert_eq!(
+        crate::api::C_DecryptInit(session, &mut mechanism, key),
+        CKR_OK as CK_RV
+    );
+    let mut decrypted_len = 0;
+    assert_eq!(
+        crate::api::C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ciphertext.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut decrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(decrypted_len as usize, plaintext.len());
+    let mut decrypted = vec![0; decrypted_len as usize];
+    assert_eq!(
+        crate::api::C_Decrypt(
+            session,
+            ciphertext.as_mut_ptr(),
+            ciphertext.len() as CK_ULONG,
+            decrypted.as_mut_ptr(),
+            &mut decrypted_len,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(decrypted, plaintext);
+    assert_eq!(
+        commands.borrow().last().unwrap().0,
+        crate::YubiHsmCommandCode::UnwrapData as u8
+    );
+
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_wrap_rejects_incompatible_keys_and_parameters() {
     let mut mechanism = CK_MECHANISM {
         mechanism: crate::CKM_YUBICO_AES_CCM_WRAP,

@@ -1062,6 +1062,12 @@ impl Slot for Fido2Slot {
                     max_key_size: 256,
                     flags: (CKF_HW | CKF_SIGN) as CK_FLAGS,
                 },
+                MechanismDetails {
+                    type_: CKM_ECDSA as CK_MECHANISM_TYPE,
+                    min_key_size: 256,
+                    max_key_size: 256,
+                    flags: (CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
+                },
             ]);
         }
         mechanisms
@@ -1315,6 +1321,16 @@ mod tests {
         assert_eq!(mechanisms.len(), 1);
         assert_eq!(mechanisms[0].type_, CKM_PKCS11RS_FIDO_ASSERTION);
         assert_eq!(mechanisms[0].flags, (CKF_HW | CKF_SIGN) as CK_FLAGS);
+        let mechanisms = slot.mechanisms();
+        for unsupported in HASHED_RSA_PKCS_MECHANISMS
+            .into_iter()
+            .chain(HASHED_RSA_PSS_MECHANISMS)
+            .chain(HASHED_ECDSA_MECHANISMS)
+        {
+            assert!(!mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == unsupported));
+        }
     }
 
     #[test]

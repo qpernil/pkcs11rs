@@ -270,6 +270,10 @@ impl Slot for SoftwareSlot {
         true
     }
 
+    fn supports_software_digest_operations(&self) -> bool {
+        true
+    }
+
     fn private_objects_require_login(&self) -> bool {
         true
     }
@@ -454,7 +458,7 @@ mod tests {
         let slot = SoftwareSlot::new(String::from("mechanism-test"), 0);
         assert!(slot.supports_software_secret_operations());
         let mechanisms = Slot::mechanisms(&slot);
-        assert_eq!(mechanisms.len(), 68);
+        assert_eq!(mechanisms.len(), 79);
         assert_eq!(
             mechanisms
                 .iter()
@@ -567,6 +571,8 @@ mod tests {
                     (1, 1024, CKF_GENERATE)
                 }
                 x if x == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE => (16, 32, CKF_GENERATE),
+                x if x == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE => (24, 24, CKF_GENERATE),
+                x if x == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE => (1, 1024, CKF_GENERATE),
                 x if x == CKM_HKDF_DERIVE as CK_MECHANISM_TYPE => (20, 64, CKF_DERIVE),
                 x if [
                     CKM_AES_ECB,
@@ -589,6 +595,12 @@ mod tests {
                     }
                     (16, 32, flags)
                 }
+                x if [CKM_DES3_ECB, CKM_DES3_CBC, CKM_DES3_CBC_PAD]
+                    .map(|type_| type_ as CK_MECHANISM_TYPE)
+                    .contains(&x) =>
+                {
+                    (24, 24, CKF_ENCRYPT | CKF_DECRYPT)
+                }
                 x if [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC]
                     .map(|type_| type_ as CK_MECHANISM_TYPE)
                     .contains(&x) =>
@@ -597,9 +609,15 @@ mod tests {
                 }
                 x if [
                     CKM_SHA_1_HMAC,
+                    CKM_SHA_1_HMAC_GENERAL,
+                    CKM_SHA224_HMAC,
+                    CKM_SHA224_HMAC_GENERAL,
                     CKM_SHA256_HMAC,
+                    CKM_SHA256_HMAC_GENERAL,
                     CKM_SHA384_HMAC,
+                    CKM_SHA384_HMAC_GENERAL,
                     CKM_SHA512_HMAC,
+                    CKM_SHA512_HMAC_GENERAL,
                 ]
                 .map(|type_| type_ as CK_MECHANISM_TYPE)
                 .contains(&x) =>

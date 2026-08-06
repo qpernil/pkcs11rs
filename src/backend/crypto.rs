@@ -942,3 +942,53 @@ pub(crate) fn verify_rsa_pss(
     m_prime.extend_from_slice(&db[separator + 1..]);
     Ok(hash(hash_digest, &m_prime)?.as_slice() == h)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piv_and_openpgp_composite_sign_admission_is_exact() {
+        for mechanism in HASHED_RSA_PKCS_MECHANISMS
+            .into_iter()
+            .chain(HASHED_RSA_PSS_MECHANISMS)
+            .chain(HASHED_ECDSA_MECHANISMS)
+        {
+            let rsa = HASHED_RSA_PKCS_MECHANISMS.contains(&mechanism)
+                || HASHED_RSA_PSS_MECHANISMS.contains(&mechanism);
+            let ecdsa = HASHED_ECDSA_MECHANISMS.contains(&mechanism);
+            assert_eq!(
+                piv_sign_mechanism_supported(piv::Algorithm::Rsa2048, mechanism),
+                rsa
+            );
+            assert_eq!(
+                piv_sign_mechanism_supported(piv::Algorithm::EccP256, mechanism),
+                ecdsa
+            );
+
+            let openpgp_rsa = [
+                CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+                CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+                CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+            ]
+            .contains(&mechanism);
+            let openpgp_ecdsa = [
+                CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+                CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+                CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+            ]
+            .contains(&mechanism);
+            assert_eq!(
+                openpgp_sign_mechanism_supported(OpenPgpAlgorithm::Rsa { bits: 2048 }, mechanism,),
+                openpgp_rsa
+            );
+            assert_eq!(
+                openpgp_sign_mechanism_supported(
+                    OpenPgpAlgorithm::Ecdsa(openpgp::Curve::P256),
+                    mechanism,
+                ),
+                openpgp_ecdsa
+            );
+        }
+    }
+}

@@ -822,7 +822,7 @@ fn openpgp_generated_key_algorithms_report_key_pair_generation_mechanisms() {
 }
 
 #[test]
-fn openpgp_mechanisms_are_unique_and_add_only_software_public_flags() {
+fn openpgp_mechanisms_are_unique_and_add_only_paired_software_public_flags() {
     let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
     let slot = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
     let mechanisms = crate::Slot::mechanisms(&slot);
@@ -846,8 +846,25 @@ fn openpgp_mechanisms_are_unique_and_add_only_software_public_flags() {
         .unwrap();
     assert_eq!(
         raw_rsa.flags & (CKF_ENCRYPT | CKF_DECRYPT | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
-        (CKF_ENCRYPT | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS
+        (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS
     );
+    for mechanism_type in [
+        CKM_SHA256_RSA_PKCS,
+        CKM_SHA384_RSA_PKCS,
+        CKM_SHA512_RSA_PKCS,
+        CKM_ECDSA_SHA256,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
+    ] {
+        let mechanism = mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == mechanism_type as CK_MECHANISM_TYPE)
+            .unwrap();
+        assert_eq!(
+            mechanism.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+        );
+    }
     for mechanism_type in [
         CKM_RSA_PKCS_KEY_PAIR_GEN,
         CKM_EC_KEY_PAIR_GEN,
@@ -863,6 +880,112 @@ fn openpgp_mechanisms_are_unique_and_add_only_software_public_flags() {
             CKF_GENERATE_KEY_PAIR as CK_FLAGS
         );
     }
+}
+
+#[test]
+fn composite_signing_advertisement_is_exact_for_every_general_slot_family() {
+    fn assert_exact(mechanisms: Vec<crate::MechanismDetails>, expected: &[CK_MECHANISM_TYPE]) {
+        let candidates = crate::HASHED_RSA_PKCS_MECHANISMS
+            .into_iter()
+            .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+            .chain(crate::HASHED_ECDSA_MECHANISMS)
+            .collect::<Vec<_>>();
+        for candidate in candidates {
+            let mechanism = mechanisms
+                .iter()
+                .find(|mechanism| mechanism.type_ == candidate);
+            assert_eq!(
+                mechanism.is_some(),
+                expected.contains(&candidate),
+                "unexpected advertisement for {:?}",
+                crate::mechanism_name(candidate)
+            );
+            if let Some(mechanism) = mechanism {
+                assert_eq!(
+                    mechanism.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+                    (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+                );
+            }
+        }
+    }
+
+    let software = crate::SoftwareSlot::new(String::from("contract-test"), 0);
+    let all = crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+        .chain(crate::HASHED_ECDSA_MECHANISMS)
+        .collect::<Vec<_>>();
+    assert_exact(crate::Slot::mechanisms(&software), &all);
+
+    let connector: std::rc::Rc<dyn crate::Connector> = std::rc::Rc::new(FailingConnector);
+    let openpgp = crate::OpenPgpSlot::new(connector, crate::openpgp::OPENPGP_AID.to_vec());
+    let openpgp_expected = [
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+    ];
+    assert_exact(crate::Slot::mechanisms(&openpgp), &openpgp_expected);
+
+    let base = std::sync::Arc::new(SelectableConnector {
+        present: std::sync::atomic::AtomicBool::new(true),
+        select_ok: std::sync::atomic::AtomicBool::new(true),
+        serial: "12345678",
+    });
+    let aid = crate::piv::PIV_AID.to_vec();
+    let reader = std::sync::Arc::new(crate::PcscReaderState::default());
+    reader
+        .device
+        .replace(
+            0,
+            crate::device::DeviceIdentity {
+                manufacturer: String::from("Yubico"),
+                product: String::from("YubiKey"),
+                serial: String::from("12345678"),
+                hardware_version: None,
+                firmware_version: Some((5, 7, 0)),
+            },
+        )
+        .unwrap();
+    let device = reader.device.clone();
+    let connector: std::rc::Rc<dyn crate::Connector> =
+        std::rc::Rc::new(crate::PcscAppletConnector::new(base, &aid, None, reader));
+    let piv = crate::PivSlot::new_with_device(connector, aid, device);
+    assert_exact(crate::Slot::mechanisms(&piv), &all);
+
+    let yubihsm = crate::yubihsm_mechanisms(&[
+        crate::YUBIHSM_ALGO_RSA_2048,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PKCS1_SHA512,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA1,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA256,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA384,
+        crate::YUBIHSM_ALGO_RSA_PSS_SHA512,
+        crate::YUBIHSM_ALGO_EC_P256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA1,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA256,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA384,
+        crate::YUBIHSM_ALGO_EC_ECDSA_SHA512,
+    ]);
+    let yubihsm_expected = [
+        CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+        CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+    ];
+    assert_exact(yubihsm, &yubihsm_expected);
 }
 
 #[test]
@@ -1102,6 +1225,22 @@ fn piv_slot_uses_shared_metadata_before_piv_metadata_is_loaded() {
     crate::Slot::get_token_info(&slot, &mut token_info).unwrap();
     assert_eq!(token_info.ulMinPinLen, 6);
     assert_eq!(token_info.ulMaxPinLen, 64);
+
+    let mechanisms = crate::Slot::mechanisms(&slot);
+    for mechanism_type in crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+        .chain(crate::HASHED_ECDSA_MECHANISMS)
+    {
+        let mechanism = mechanisms
+            .iter()
+            .find(|mechanism| mechanism.type_ == mechanism_type)
+            .unwrap();
+        assert_eq!(
+            mechanism.flags & (CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            (CKF_SIGN | CKF_VERIFY) as CK_FLAGS
+        );
+    }
 }
 
 #[test]
@@ -1139,18 +1278,22 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert_eq!(token_info.ulMaxPinLen, 0);
     assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
     let mechanisms = crate::Slot::mechanisms(&slot);
-    for expected in crate::SOFTWARE_DIGEST_MECHANISMS {
-        let mechanism = mechanisms
+    for unsupported in crate::SOFTWARE_DIGEST_MECHANISMS {
+        assert!(!mechanisms
             .iter()
-            .find(|mechanism| mechanism.type_ == expected.type_)
-            .unwrap();
-        assert_eq!(mechanism.flags, CKF_DIGEST as CK_FLAGS);
+            .any(|mechanism| mechanism.type_ == unsupported.type_));
     }
-    for expected in crate::software_public_mechanisms() {
-        assert!(mechanisms
+    for unsupported in crate::software_public_mechanisms()
+        .into_iter()
+        .filter(|mechanism| mechanism.type_ != crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+    {
+        assert!(!mechanisms
             .iter()
-            .any(|mechanism| mechanism.type_ == expected.type_));
+            .any(|mechanism| mechanism.type_ == unsupported.type_));
     }
+    assert!(mechanisms
+        .iter()
+        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
     for private_only in [
         CKM_RSA_PKCS_KEY_PAIR_GEN,
         CKM_EC_KEY_PAIR_GEN,
