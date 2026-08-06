@@ -29,16 +29,17 @@ The minimum supported Rust version is 1.85.
   SCP11 certificate chains, and explicit SCP03/SCP11 administration APIs.
 - **FIDO2** discovery over native USB HID and the CTAP smart-card binding over
   NFC or USB CCID where available. This includes PIN provisioning and changes,
-  read-only resident-credential metadata, software public-key operations, and
-  an explicit one-shot GetAssertion mechanism after context-specific PIN
+  read-only resident-credential and public-key metadata, and an explicit
+  one-shot GetAssertion mechanism after context-specific PIN
   login, with an experimental opt-in previewSign registration, offline
   derivation, and hardware-signing lifecycle on devices advertising that
   extension.
 - **SCP03, SCP11a, SCP11b, and SCP11c** secure messaging for selected CCID
   applets.
 - **Named software slots** created only by explicit configuration, with
-  login-gated session RSA, EC, Ed25519, and X25519 private keys, plus encrypted
-  persistent private keys when local token storage is configured.
+  login-gated asymmetric and secret keys, plus encrypted persistent key
+  objects when local token storage is configured. This includes RSA, EC,
+  Ed25519, X25519, AES, HMAC, generic-secret, and legacy 3DES keys.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.
@@ -92,7 +93,10 @@ applications without a useful process-environment configuration model,
 configuration object. pkcs11rs reads it during `C_Initialize` and does not
 retain the pointer. Explicit JSON fields take precedence; omitted fields retain
 the documented environment-variable and built-in fallbacks. A null or empty
-string selects the legacy fallback behavior. See
+string selects the legacy fallback behavior. For compatibility with providers
+such as OpenSSL, a nonempty string whose first non-whitespace character is not
+`{` is accepted as opaque application data and ignored; JSON-looking input is
+validated strictly. See
 [Initialization configuration](docs/configuration.md) for the complete schema,
 validation rules, and C example. `C_Finalize` still requires its reserved
 argument to be null.
@@ -161,15 +165,23 @@ libcurl.
 cargo build --locked
 ```
 
-This builds the provider and the certificate-bundle authoring utility. Typical
-output paths are:
+The root workspace's default members are the provider, the connector, and the
+certificate-bundle authoring utility. Typical output paths are:
 
 ```text
 target/debug/libpkcs11rs.so       Linux
 target/debug/libpkcs11rs.dylib    macOS
 target/debug/pkcs11rs.dll         Windows
 target/debug/pkcs11rs-tool        Authoring utility (with .exe on Windows)
+target/debug/pkcs11rs-connector   Connector daemon (with .exe on Windows)
 ```
+
+`cargo build --workspace` additionally selects the internal
+`pkcs11rs-local-hardware` package as a top-level workspace member; an ordinary
+build already compiles it as a dependency with the features required by the
+provider and connector. The separate `xtask` utility intentionally has its own
+workspace and is invoked through the checked-in `cargo xtask` alias for builds
+such as the iOS XCFramework and generated-binding checks.
 
 `pkcs11rs-tool` imports canonical DER certificates or one or more PEM
 `CERTIFICATE` blocks into canonical CBOR bundles and verifies bundles according
@@ -247,10 +259,11 @@ client. PKCS11RS does not use the legacy single-device endpoints.
 Command request and response bodies are native YubiHSM frames with
 `application/octet-stream`. Each device has an independent asynchronous access
 gate, so only one request at a time reaches a particular YubiHSM while requests
-for different serials can proceed concurrently. The current server applies an
-absolute HTTP body limit but does not yet validate the embedded frame length or
-the older-firmware 2,048-byte USB limit; restrict access to trusted clients
-until the shared firmware-aware validation is implemented.
+for different serials can proceed concurrently. The HTTP edge rejects bodies
+above 8,192 bytes. After device selection, the shared local-hardware transport
+validates the native frame length and enforces the firmware-specific 2,048-byte
+or 3,136-byte USB limit before submission. The same hardware-boundary checks
+protect direct USB access by the PKCS #11 provider.
 
 The existing single-device YubiHSM Connector protocol remains available at
 `/connector/status` and `/connector/api`. Without configuration it remembers
@@ -323,8 +336,8 @@ return `CKR_ARGUMENTS_BAD`.
 Software slots never advertise `CKF_HW` or `CKF_HW_SLOT`. `C_Login(CKU_USER)`
 unlocks private and secret-key operations. Session keys are removed with their
 creating session. With `PKCS11RS_TOKEN_STORAGE` configured, supported
-`CKA_TOKEN=CK_TRUE` public, private, AES, HMAC, and generic-secret keys are
-encrypted below a name-scoped root and survive restart; without that
+`CKA_TOKEN=CK_TRUE` public, private, AES, HMAC, generic-secret, and legacy 3DES
+keys are encrypted below a name-scoped root and survive restart; without that
 configuration the request returns `CKR_TOKEN_WRITE_PROTECTED` and never falls
 back to session storage. Extractable software private keys can be exported
 through `PKCS11RS_SoftwareExportPrivateKey` as password-encrypted,
@@ -474,11 +487,11 @@ option when `PKCS11RS_TOKEN_STORAGE` is unset.
 provider. Tokens without a stable identity continue to return
 `CKR_TOKEN_WRITE_PROTECTED` for provider-backed token-object creation.
 Named software slots use the configured root for their encrypted public and
-private realms. Their supported asymmetric, AES, HMAC, and generic-secret keys
-can be persistent token objects. Secret keys must be private. Other applet and
-hardware slots still require a private-key token request to be fulfilled as a
-real device object; generic local storage never turns such a request into a
-software key.
+private realms. Their supported asymmetric, AES, HMAC, generic-secret, and
+legacy 3DES keys can be persistent token objects. Secret keys must be private.
+Other applet and hardware slots still require a private-key token request to be
+fulfilled as a real device object; generic local storage never turns such a
+request into a software key.
 
 Named software-slot key material and attributes are envelope-encrypted. Other
 providers may store only public objects or unencrypted private previewSign
@@ -533,9 +546,13 @@ export PKCS11RS_CCID_SECURE_CHANNEL=scp11c
 
 Detailed configuration:
 
+- [Initialization configuration](docs/configuration.md)
+- [Multi-device YubiHSM connector](docs/connector.md)
 - [Named software slots](docs/software.md)
-- [Planned software AES, HMAC, derivation, and wrapping support](docs/software-secret-keys-plan.md)
-- [Planned pure Rust provider abstraction](docs/provider-abstraction-plan.md)
+- [Vendor extension API index](docs/extensions.md)
+- [iPhone smoke test](examples/ios/PKCS11RSPhoneSmoke/README.md)
+- [Software secret-key design history](docs/software-secret-keys-plan.md)
+- [Provider abstraction roadmap](docs/provider-abstraction-plan.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
 - [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)
 - [PIV backend](docs/piv.md)
@@ -546,6 +563,9 @@ Detailed configuration:
 - [Certificate-bundle authoring and validation](docs/pkcs11rs-tool.md)
 - [Binary object formats](docs/formats.md)
 - [Content-addressed CBOR storage boundary](docs/storage.md)
+- [FIDO2 and previewSign](docs/fido2.md)
+- [previewSign persistence and wire format](docs/preview-sign.md)
+- [Public-key projection proposal and implementation boundary](docs/public-key-projection-proposal.md)
 
 ## Diagnostics
 
@@ -609,8 +629,9 @@ cargo test --locked
 cargo test --locked --all-features
 ```
 
-These workspace commands test both the PKCS #11 provider and
-`pkcs11rs-tool`.
+These default-workspace commands test the PKCS #11 provider, connector, and
+`pkcs11rs-tool`. Add `--workspace` to also run the internal local-hardware
+crate's package tests directly.
 
 To test the production shared library with the operating system's native
 dynamic loader, without Python, build it and run the explicit loader smoke
@@ -826,6 +847,11 @@ AES-256-CBC and retains the inner PKCS #9 label and ID attributes.
 3.2 Standard header artifacts and retain the OASIS notices. The generated Rust
 bindings are checked in at [`src/pkcs11.rs`](src/pkcs11.rs), so normal builds do
 not require Clang or libclang.
+
+[`pkcs11rs.h`](pkcs11rs.h) is the separately maintained public header for
+vendor mechanisms, attributes, constants, and extension functions. See the
+[vendor extension API index](docs/extensions.md) for ownership and usage
+contracts and links to each feature's detailed documentation.
 
 Maintainers can regenerate the bindings with `cargo xtask bindings`. This
 explicit command requires Clang/libclang. Run `cargo xtask bindings --check` to

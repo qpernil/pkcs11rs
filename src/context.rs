@@ -1773,6 +1773,7 @@ impl ModuleContext {
             // PC/SC hardware discovery.
             return Ok(());
         }
+        #[cfg(feature = "native-hardware")]
         let hsmauth_providers = self.hsmauth_providers.clone();
         #[cfg(feature = "native-hardware")]
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();

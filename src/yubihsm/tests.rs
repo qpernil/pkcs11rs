@@ -1025,6 +1025,27 @@ impl ProtocolPeer {
                 value if value == CommandCode::DecryptPkcs1 as u8 => {
                     (inner.command | RESPONSE_BIT, b"plaintext".to_vec())
                 }
+                value if value == CommandCode::WrapData as u8 => {
+                    if inner.data.len() <= 2 {
+                        return Err(CKR_DATA_LEN_RANGE.into());
+                    }
+                    let mut wrapped = vec![0xa5; 1 + 13 + 16];
+                    wrapped.extend_from_slice(&inner.data[2..]);
+                    (inner.command | RESPONSE_BIT, wrapped)
+                }
+                value if value == CommandCode::UnwrapData as u8 => {
+                    if inner.data.len() <= 2 + 1 + 13 + 16
+                        || inner.data[2..2 + 1 + 13 + 16]
+                            .iter()
+                            .any(|byte| *byte != 0xa5)
+                    {
+                        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+                    }
+                    (
+                        inner.command | RESPONSE_BIT,
+                        inner.data[2 + 1 + 13 + 16..].to_vec(),
+                    )
+                }
                 value if value == CommandCode::DeriveEcdh as u8 => {
                     if inner.data.len() == 34 {
                         let id = u16::from_be_bytes(inner.data[..2].try_into().unwrap());
@@ -4957,6 +4978,8 @@ fn every_authenticated_command_crosses_the_secure_transport() {
                     | CommandCode::ImportRsaWrapped
                     | CommandCode::SignPkcs1
                     | CommandCode::DecryptPkcs1
+                    | CommandCode::WrapData
+                    | CommandCode::UnwrapData
                     | CommandCode::DecryptEcb
                     | CommandCode::EncryptEcb
                     | CommandCode::DecryptCbc

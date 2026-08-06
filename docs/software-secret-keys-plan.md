@@ -1,7 +1,9 @@
 # Software AES, HMAC, derivation, and wrapping plan
 
 Status: complete. The historical phases below record the implemented design;
-master-key cycling remains a separate future maintenance feature.
+master-key cycling remains a separate future maintenance feature. The current
+user-facing mechanism and lifecycle contract is authoritative in
+[`software.md`](software.md).
 
 This work is also the first design probe for the
 [pure Rust provider abstraction](provider-abstraction-plan.md). New AES, HMAC,
@@ -29,10 +31,16 @@ asymmetric storage records are unchanged.
 Phase 2 session keys are implemented. Named software slots can generate or
 import AES, generic, and hash-specific HMAC session keys. AES supports ECB,
 CBC, CBC-PAD, CTR, CCM, GCM, key wrap, KWP, CMAC, CMAC-GENERAL, and GMAC;
-HMAC supports one-shot and multipart SHA-1, SHA-256, SHA-384, and SHA-512
-signing and verification. All corresponding mechanisms are advertised without
-`CKF_HW`. Local cipher and MAC key schedules and intermediate plaintext copies
-are zeroized.
+HMAC supports one-shot and multipart SHA-1, SHA-224, SHA-256, SHA-384, and
+SHA-512 signing and verification, including every corresponding
+`*_HMAC_GENERAL` mechanism. All are advertised without `CKF_HW`. Local cipher
+and MAC key schedules and intermediate plaintext copies are zeroized.
+
+Later compatibility additions use the same software-secret object and
+persistence boundary: `CKM_PKCS5_PBKD2` derives generic, AES, 3DES, or HMAC
+secret keys with the five standard HMAC PRFs above, and legacy 24-byte 3DES
+keys support key generation, ECB, CBC, and CBC-PAD. These mechanisms remain
+software-slot-only and are not inferred as hardware capabilities.
 
 Phase 3 persistence is also implemented. Private token AES and HMAC keys use a
 distinct canonical secret record encrypted under the USER-only private master

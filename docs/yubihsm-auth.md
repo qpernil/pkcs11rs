@@ -393,6 +393,8 @@ those keys in zeroizing memory only for the life of the authenticated YubiHSM
 session. Credential passwords are not cached. The direct YubiHSM login forms
 remain available even when no YubiHSM Auth applet is connected.
 
+### Asymmetric device-key trust
+
 Asymmetric YubiHSM secure sessions may use locally pinned device keys. Set
 `PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX` to the path prefix for trusted-device
 files; its default is the empty string. An empty prefix disables device-key

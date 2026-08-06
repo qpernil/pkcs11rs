@@ -1155,6 +1155,8 @@ pub(crate) fn validate_software_secret_length(
 ) -> Result<(), Error> {
     let valid = if key_type == CKK_AES as CK_KEY_TYPE {
         matches!(length, 16 | 24 | 32)
+    } else if key_type == CKK_DES3 as CK_KEY_TYPE {
+        length == 24
     } else if key_type == CKK_GENERIC_SECRET as CK_KEY_TYPE || is_hmac_key_type(key_type) {
         (1..=1024).contains(&length)
     } else {
@@ -1223,7 +1225,9 @@ fn build_imported_key_material(
                     key_type,
                     x if x == CKK_GENERIC_SECRET as CK_KEY_TYPE
                         || x == CKK_AES as CK_KEY_TYPE
+                        || x == CKK_DES3 as CK_KEY_TYPE
                         || x == CKK_SHA_1_HMAC as CK_KEY_TYPE
+                        || x == CKK_SHA224_HMAC as CK_KEY_TYPE
                         || x == CKK_SHA256_HMAC as CK_KEY_TYPE
                         || x == CKK_SHA384_HMAC as CK_KEY_TYPE
                         || x == CKK_SHA512_HMAC as CK_KEY_TYPE

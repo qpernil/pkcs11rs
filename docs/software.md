@@ -97,12 +97,12 @@ the USER role is logged in. `C_Logout`, closing the last session,
 that material and clear active private-key operations. PIN changes preserve
 the authenticated role and its already-unwrapped keys.
 
-AES, generic-secret, and SHA-1/SHA-256/SHA-384/SHA-512 HMAC keys follow the
-same session or encrypted-token lifecycle. Persistent secret keys must set
-both `CKA_TOKEN=CK_TRUE` and `CKA_PRIVATE=CK_TRUE`; they are stored only in the
-USER realm. Generation, import, copy, derivation, unwrapping, destruction, and
-restart restoration share the same publication and rollback boundary as
-asymmetric private keys.
+AES, legacy 3DES, generic-secret, and SHA-1/SHA-224/SHA-256/SHA-384/SHA-512
+HMAC keys follow the same session or encrypted-token lifecycle. Persistent
+secret keys must set both `CKA_TOKEN=CK_TRUE` and `CKA_PRIVATE=CK_TRUE`; they
+are stored only in the USER realm. Generation, import, copy, derivation,
+unwrapping, destruction, and restart restoration share the same publication
+and rollback boundary as asymmetric private keys.
 
 ## Encrypted storage format
 
@@ -231,8 +231,14 @@ backend does not duplicate cryptography.
 - Montgomery: X25519 key agreement.
 - AES: 128, 192, and 256-bit keys with ECB, CBC, CBC-PAD, CTR, CCM, GCM,
   AES-KW, AES-KWP, CMAC, CMAC-GENERAL, and GMAC.
-- HMAC: generic or hash-specific keys with SHA-1, SHA-256, SHA-384, and
-  SHA-512 one-shot and multipart signing and verification.
+- Legacy 3DES: three-key 24-byte keys with ECB, CBC, and CBC-PAD. This is a
+  software-slot compatibility facility and is never advertised as a YubiKey or
+  YubiHSM capability.
+- HMAC: generic or hash-specific keys with SHA-1, SHA-224, SHA-256, SHA-384,
+  and SHA-512, including the fixed-length and `*_HMAC_GENERAL` one-shot and
+  multipart signing and verification mechanisms.
+- PBKDF2: generic-secret generation with HMAC-SHA-1, SHA-224, SHA-256,
+  SHA-384, or SHA-512.
 - Derivation: ECDH with `CKD_NULL` or SHA-1/SHA-2/SHA-3 X9.63 KDFs, and HKDF
   extract, expand, or extract-and-expand with SHA-1, SHA-256, SHA-384, or
   SHA-512.
@@ -257,16 +263,30 @@ The slot advertises these exact mechanism groups:
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
 | `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
+| `CKM_DES3_KEY_GEN` | 24 bytes | `CKF_GENERATE` |
+| `CKM_PKCS5_PBKD2` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_ECB`, `CKM_AES_CBC`, `CKM_AES_CBC_PAD`, `CKM_AES_CTR`, `CKM_AES_CCM`, `CKM_AES_GCM` | 16–32 bytes | `CKF_ENCRYPT \| CKF_DECRYPT` |
 | `CKM_AES_KEY_WRAP`, `CKM_AES_KEY_WRAP_KWP` | 16–32 bytes | `CKF_ENCRYPT \| CKF_DECRYPT \| CKF_WRAP \| CKF_UNWRAP` |
 | `CKM_AES_CMAC`, `CKM_AES_CMAC_GENERAL`, `CKM_AES_GMAC` | 16–32 bytes | `CKF_SIGN \| CKF_VERIFY` |
-| SHA-1, SHA-256, SHA-384, and SHA-512 HMAC | 1–1024 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_DES3_ECB`, `CKM_DES3_CBC`, `CKM_DES3_CBC_PAD` | 24 bytes | `CKF_ENCRYPT \| CKF_DECRYPT` |
+| SHA-1, SHA-224, SHA-256, SHA-384, and SHA-512 HMAC and `*_HMAC_GENERAL` | 1–1024 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_HKDF_DERIVE` | 20–64 bytes | `CKF_DERIVE` |
 | `CKM_RSA_AES_KEY_WRAP` | 1024–4096 | `CKF_WRAP \| CKF_UNWRAP` |
 | SHA-1, SHA-2, and SHA-3 digest mechanisms | 0 | `CKF_DIGEST` |
 
 The numeric range is the envelope representable by `C_GetMechanismInfo`;
 `CKA_EC_PARAMS` selects and validates the exact named curve.
+
+### PBKDF2 parameters
+
+`CKM_PKCS5_PBKD2` is accepted only by `C_GenerateKey` on a named software
+slot. It uses `CK_PKCS5_PBKD2_PARAMS2`, requires `CKZ_SALT_SPECIFIED`, a
+positive iteration count representable as `u32`, and no PRF data. Supported
+PRFs are `CKP_PKCS5_PBKD2_HMAC_SHA1`, `_SHA224`, `_SHA256`, `_SHA384`, and
+`_SHA512`. `CKA_VALUE_LEN` selects an output from 1 through 1024 bytes. The
+default output is `CKK_GENERIC_SECRET`; a template may instead select any
+supported software secret-key type whose length constraints the requested
+output satisfies. Invalid parameters return `CKR_MECHANISM_PARAM_INVALID`.
 
 ## Key policy
 

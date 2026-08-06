@@ -27,6 +27,42 @@ pub(crate) struct MechanismDetails {
     pub(crate) flags: CK_FLAGS,
 }
 
+pub(crate) const HASHED_RSA_PKCS_MECHANISMS: [CK_MECHANISM_TYPE; 9] = [
+    CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE,
+    CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE,
+];
+
+pub(crate) const HASHED_RSA_PSS_MECHANISMS: [CK_MECHANISM_TYPE; 9] = [
+    CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+];
+
+pub(crate) const HASHED_ECDSA_MECHANISMS: [CK_MECHANISM_TYPE; 9] = [
+    CKM_ECDSA_SHA1 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA224 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA256 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA384 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA512 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA3_224 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA3_256 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE,
+    CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE,
+];
+
 pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::ffi::CStr> {
     macro_rules! known_mechanisms {
         ($($mechanism:ident),+ $(,)?) => {
@@ -97,6 +133,11 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_AES_CMAC_GENERAL,
         CKM_AES_KEY_WRAP,
         CKM_AES_KEY_WRAP_KWP,
+        CKM_DES3_KEY_GEN,
+        CKM_DES3_ECB,
+        CKM_DES3_CBC,
+        CKM_DES3_CBC_PAD,
+        CKM_PKCS5_PBKD2,
         CKM_SHA_1,
         CKM_SHA224,
         CKM_SHA256,
@@ -107,9 +148,15 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_SHA3_384,
         CKM_SHA3_512,
         CKM_SHA_1_HMAC,
+        CKM_SHA_1_HMAC_GENERAL,
+        CKM_SHA224_HMAC,
+        CKM_SHA224_HMAC_GENERAL,
         CKM_SHA256_HMAC,
+        CKM_SHA256_HMAC_GENERAL,
         CKM_SHA384_HMAC,
+        CKM_SHA384_HMAC_GENERAL,
         CKM_SHA512_HMAC,
+        CKM_SHA512_HMAC_GENERAL,
         CKM_HKDF_DERIVE,
         CKM_YUBICO_AES_CCM_WRAP,
         CKM_YUBICO_RSA_WRAP,
@@ -219,49 +266,30 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         CKM_RSA_PKCS,
         CKM_RSA_PKCS_OAEP,
         CKM_RSA_PKCS_PSS,
-        CKM_SHA1_RSA_PKCS,
-        CKM_SHA224_RSA_PKCS,
-        CKM_SHA256_RSA_PKCS,
-        CKM_SHA384_RSA_PKCS,
-        CKM_SHA512_RSA_PKCS,
-        CKM_SHA3_224_RSA_PKCS,
-        CKM_SHA3_256_RSA_PKCS,
-        CKM_SHA3_384_RSA_PKCS,
-        CKM_SHA3_512_RSA_PKCS,
-        CKM_SHA1_RSA_PKCS_PSS,
-        CKM_SHA224_RSA_PKCS_PSS,
-        CKM_SHA256_RSA_PKCS_PSS,
-        CKM_SHA384_RSA_PKCS_PSS,
-        CKM_SHA512_RSA_PKCS_PSS,
-        CKM_SHA3_224_RSA_PKCS_PSS,
-        CKM_SHA3_256_RSA_PKCS_PSS,
-        CKM_SHA3_384_RSA_PKCS_PSS,
-        CKM_SHA3_512_RSA_PKCS_PSS,
-    ] {
-        let encrypt = matches!(type_, CKM_RSA_X_509 | CKM_RSA_PKCS | CKM_RSA_PKCS_OAEP);
-        let verify = type_ != CKM_RSA_PKCS_OAEP;
+    ]
+    .map(|type_| type_ as CK_MECHANISM_TYPE)
+    .into_iter()
+    .chain(HASHED_RSA_PKCS_MECHANISMS)
+    .chain(HASHED_RSA_PSS_MECHANISMS)
+    {
+        let encrypt = matches!(
+            type_,
+            x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE
+        );
+        let verify = type_ != CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE;
         mechanisms.push(MechanismDetails {
-            type_: type_ as CK_MECHANISM_TYPE,
+            type_,
             min_key_size: 1024,
             max_key_size: 4096,
             flags: ((if verify { CKF_VERIFY } else { 0 }) | if encrypt { CKF_ENCRYPT } else { 0 })
                 as CK_FLAGS,
         });
     }
-    for type_ in [
-        CKM_ECDSA,
-        CKM_ECDSA_SHA1,
-        CKM_ECDSA_SHA224,
-        CKM_ECDSA_SHA256,
-        CKM_ECDSA_SHA384,
-        CKM_ECDSA_SHA512,
-        CKM_ECDSA_SHA3_224,
-        CKM_ECDSA_SHA3_256,
-        CKM_ECDSA_SHA3_384,
-        CKM_ECDSA_SHA3_512,
-    ] {
+    for type_ in std::iter::once(CKM_ECDSA as CK_MECHANISM_TYPE).chain(HASHED_ECDSA_MECHANISMS) {
         mechanisms.push(MechanismDetails {
-            type_: type_ as CK_MECHANISM_TYPE,
+            type_,
             min_key_size: 224,
             max_key_size: 521,
             flags: (CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
@@ -336,49 +364,30 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
         CKM_RSA_PKCS,
         CKM_RSA_PKCS_OAEP,
         CKM_RSA_PKCS_PSS,
-        CKM_SHA1_RSA_PKCS,
-        CKM_SHA224_RSA_PKCS,
-        CKM_SHA256_RSA_PKCS,
-        CKM_SHA384_RSA_PKCS,
-        CKM_SHA512_RSA_PKCS,
-        CKM_SHA3_224_RSA_PKCS,
-        CKM_SHA3_256_RSA_PKCS,
-        CKM_SHA3_384_RSA_PKCS,
-        CKM_SHA3_512_RSA_PKCS,
-        CKM_SHA1_RSA_PKCS_PSS,
-        CKM_SHA224_RSA_PKCS_PSS,
-        CKM_SHA256_RSA_PKCS_PSS,
-        CKM_SHA384_RSA_PKCS_PSS,
-        CKM_SHA512_RSA_PKCS_PSS,
-        CKM_SHA3_224_RSA_PKCS_PSS,
-        CKM_SHA3_256_RSA_PKCS_PSS,
-        CKM_SHA3_384_RSA_PKCS_PSS,
-        CKM_SHA3_512_RSA_PKCS_PSS,
-    ] {
-        let decrypt = matches!(type_, CKM_RSA_X_509 | CKM_RSA_PKCS | CKM_RSA_PKCS_OAEP);
-        let sign = type_ != CKM_RSA_PKCS_OAEP;
+    ]
+    .map(|type_| type_ as CK_MECHANISM_TYPE)
+    .into_iter()
+    .chain(HASHED_RSA_PKCS_MECHANISMS)
+    .chain(HASHED_RSA_PSS_MECHANISMS)
+    {
+        let decrypt = matches!(
+            type_,
+            x if x == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                || x == CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE
+        );
+        let sign = type_ != CKM_RSA_PKCS_OAEP as CK_MECHANISM_TYPE;
         mechanisms.push(MechanismDetails {
-            type_: type_ as CK_MECHANISM_TYPE,
+            type_,
             min_key_size: 1024,
             max_key_size: 4096,
             flags: ((if sign { CKF_SIGN } else { 0 }) | if decrypt { CKF_DECRYPT } else { 0 })
                 as CK_FLAGS,
         });
     }
-    for type_ in [
-        CKM_ECDSA,
-        CKM_ECDSA_SHA1,
-        CKM_ECDSA_SHA224,
-        CKM_ECDSA_SHA256,
-        CKM_ECDSA_SHA384,
-        CKM_ECDSA_SHA512,
-        CKM_ECDSA_SHA3_224,
-        CKM_ECDSA_SHA3_256,
-        CKM_ECDSA_SHA3_384,
-        CKM_ECDSA_SHA3_512,
-    ] {
+    for type_ in std::iter::once(CKM_ECDSA as CK_MECHANISM_TYPE).chain(HASHED_ECDSA_MECHANISMS) {
         mechanisms.push(MechanismDetails {
-            type_: type_ as CK_MECHANISM_TYPE,
+            type_,
             min_key_size: 224,
             max_key_size: 521,
             flags: (CKF_SIGN | CKF_EC_F_P | CKF_EC_NAMEDCURVE) as CK_FLAGS,
@@ -399,6 +408,18 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             type_: CKM_AES_KEY_GEN as CK_MECHANISM_TYPE,
             min_key_size: 16,
             max_key_size: 32,
+            flags: CKF_GENERATE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 24,
+            max_key_size: 24,
+            flags: CKF_GENERATE as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE,
+            min_key_size: 1,
+            max_key_size: 1024,
             flags: CKF_GENERATE as CK_FLAGS,
         },
         MechanismDetails {
@@ -447,6 +468,14 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
             },
         });
     }
+    for type_ in [CKM_DES3_ECB, CKM_DES3_CBC, CKM_DES3_CBC_PAD] {
+        mechanisms.push(MechanismDetails {
+            type_: type_ as CK_MECHANISM_TYPE,
+            min_key_size: 24,
+            max_key_size: 24,
+            flags: (CKF_ENCRYPT | CKF_DECRYPT) as CK_FLAGS,
+        });
+    }
     for type_ in [CKM_AES_CMAC, CKM_AES_CMAC_GENERAL, CKM_AES_GMAC] {
         mechanisms.push(MechanismDetails {
             type_: type_ as CK_MECHANISM_TYPE,
@@ -457,9 +486,15 @@ pub(crate) fn software_secret_mechanisms() -> Vec<MechanismDetails> {
     }
     for type_ in [
         CKM_SHA_1_HMAC,
+        CKM_SHA_1_HMAC_GENERAL,
+        CKM_SHA224_HMAC,
+        CKM_SHA224_HMAC_GENERAL,
         CKM_SHA256_HMAC,
+        CKM_SHA256_HMAC_GENERAL,
         CKM_SHA384_HMAC,
+        CKM_SHA384_HMAC_GENERAL,
         CKM_SHA512_HMAC,
+        CKM_SHA512_HMAC_GENERAL,
     ] {
         mechanisms.push(MechanismDetails {
             type_: type_ as CK_MECHANISM_TYPE,
@@ -512,7 +547,7 @@ pub(crate) const YUBIHSM_MECHANISMS: [MechanismDetails; 30] = [
         type_: CKM_YUBICO_AES_CCM_WRAP,
         min_key_size: 16,
         max_key_size: 32,
-        flags: (CKF_HW | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
+        flags: (CKF_HW | CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP) as CK_FLAGS,
     },
     MechanismDetails {
         type_: CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
@@ -776,19 +811,21 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
             let supported = match details.type_ {
                 x if x == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => has_rsa,
                 x if x == CKM_RSA_PKCS as CK_MECHANISM_TYPE => {
-                    details.flags = (CKF_HW | CKF_ENCRYPT | CKF_VERIFY) as CK_FLAGS;
-                    if any(&[
+                    details.flags = CKF_HW as CK_FLAGS;
+                    let can_sign = any(&[
                         YUBIHSM_ALGO_RSA_PKCS1_SHA1,
                         YUBIHSM_ALGO_RSA_PKCS1_SHA256,
                         YUBIHSM_ALGO_RSA_PKCS1_SHA384,
                         YUBIHSM_ALGO_RSA_PKCS1_SHA512,
-                    ]) {
-                        details.flags |= CKF_SIGN as CK_FLAGS;
+                    ]);
+                    if can_sign {
+                        details.flags |= (CKF_SIGN | CKF_VERIFY) as CK_FLAGS;
                     }
-                    if algorithms.contains(&YUBIHSM_ALGO_RSA_PKCS1_DECRYPT) {
-                        details.flags |= CKF_DECRYPT as CK_FLAGS;
+                    let can_decrypt = algorithms.contains(&YUBIHSM_ALGO_RSA_PKCS1_DECRYPT);
+                    if can_decrypt {
+                        details.flags |= (CKF_DECRYPT | CKF_ENCRYPT) as CK_FLAGS;
                     }
-                    has_rsa
+                    has_rsa && (can_sign || can_decrypt)
                 }
                 x if x == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE => {
                     has_rsa
@@ -902,6 +939,45 @@ pub(crate) fn yubihsm_mechanisms(algorithms: &[u8]) -> Vec<MechanismDetails> {
                 min_key_size: *min_key_size,
                 max_key_size: *max_key_size,
                 flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            });
+        }
+    }
+    for (algorithm, type_) in [
+        (YUBIHSM_ALGO_RSA_PSS_SHA1, CKM_SHA1_RSA_PKCS_PSS),
+        (YUBIHSM_ALGO_RSA_PSS_SHA256, CKM_SHA256_RSA_PKCS_PSS),
+        (YUBIHSM_ALGO_RSA_PSS_SHA384, CKM_SHA384_RSA_PKCS_PSS),
+        (YUBIHSM_ALGO_RSA_PSS_SHA512, CKM_SHA512_RSA_PKCS_PSS),
+    ] {
+        if let (true, Some(min_key_size), Some(max_key_size)) = (
+            has_rsa && algorithms.contains(&algorithm),
+            rsa_sizes.iter().min(),
+            rsa_sizes.iter().max(),
+        ) {
+            mechanisms.push(MechanismDetails {
+                type_: type_ as CK_MECHANISM_TYPE,
+                min_key_size: *min_key_size,
+                max_key_size: *max_key_size,
+                flags: (CKF_HW | CKF_SIGN | CKF_VERIFY) as CK_FLAGS,
+            });
+        }
+    }
+    for (algorithm, type_) in [
+        (YUBIHSM_ALGO_EC_ECDSA_SHA1, CKM_ECDSA_SHA1),
+        (YUBIHSM_ALGO_EC_ECDSA_SHA256, CKM_ECDSA_SHA256),
+        (YUBIHSM_ALGO_EC_ECDSA_SHA384, CKM_ECDSA_SHA384),
+        (YUBIHSM_ALGO_EC_ECDSA_SHA512, CKM_ECDSA_SHA512),
+    ] {
+        if let (true, Some(min_key_size), Some(max_key_size)) = (
+            has_ec && algorithms.contains(&algorithm),
+            ec_sizes.iter().min(),
+            ec_sizes.iter().max(),
+        ) {
+            mechanisms.push(MechanismDetails {
+                type_: type_ as CK_MECHANISM_TYPE,
+                min_key_size: *min_key_size,
+                max_key_size: *max_key_size,
+                flags: (CKF_HW | CKF_SIGN | CKF_VERIFY | CKF_EC_F_P | CKF_EC_NAMEDCURVE)
+                    as CK_FLAGS,
             });
         }
     }

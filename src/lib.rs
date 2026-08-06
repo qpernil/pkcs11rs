@@ -140,7 +140,7 @@ use error::*;
 
 mod configuration;
 use configuration::{
-    JsonConfiguration, ModuleConfiguration, Scp03KeyMaterialConfiguration,
+    JsonConfiguration, ModuleConfiguration, ReservedConfiguration, Scp03KeyMaterialConfiguration,
     SecureChannelConfiguration,
 };
 
@@ -362,6 +362,7 @@ fn is_hmac_key_type(key_type: CK_KEY_TYPE) -> bool {
     matches!(
         key_type,
         x if x == CKK_SHA_1_HMAC as CK_KEY_TYPE
+            || x == CKK_SHA224_HMAC as CK_KEY_TYPE
             || x == CKK_SHA256_HMAC as CK_KEY_TYPE
             || x == CKK_SHA384_HMAC as CK_KEY_TYPE
             || x == CKK_SHA512_HMAC as CK_KEY_TYPE

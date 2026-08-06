@@ -181,18 +181,33 @@ fn generate_key_object(
 ) -> Result<TokenObject, Error> {
     let aes_generation =
         software_secret && mechanism.mechanism == CKM_AES_KEY_GEN as CK_MECHANISM_TYPE;
-    if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE && !aes_generation {
+    let des3_generation =
+        software_secret && mechanism.mechanism == CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE;
+    let pbkdf2_generation =
+        software_secret && mechanism.mechanism == CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE;
+    if mechanism.mechanism != CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE
+        && !aes_generation
+        && !des3_generation
+        && !pbkdf2_generation
+    {
         return Err(CKR_MECHANISM_INVALID.into());
     }
-    if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+    if !pbkdf2_generation && (!mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0) {
         return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
+    let pbkdf2_parameters = if pbkdf2_generation {
+        Some(parse_pbkdf2_parameters(mechanism)?)
+    } else {
+        None
+    };
     validate_unique_template(templ)?;
 
     let mut key_template = TokenObjectTemplate {
         class: Some(CKO_SECRET_KEY as CK_OBJECT_CLASS),
         key_type: Some(if aes_generation {
             CKK_AES as CK_KEY_TYPE
+        } else if des3_generation {
+            CKK_DES3 as CK_KEY_TYPE
         } else {
             CKK_GENERIC_SECRET as CK_KEY_TYPE
         }),
@@ -222,8 +237,11 @@ fn generate_key_object(
     if key.class != CKO_SECRET_KEY as CK_OBJECT_CLASS
         || (!software_secret && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE)
         || (aes_generation && key.key_type != CKK_AES as CK_KEY_TYPE)
+        || (des3_generation && key.key_type != CKK_DES3 as CK_KEY_TYPE)
         || (software_secret
             && !aes_generation
+            && !des3_generation
+            && !pbkdf2_generation
             && key.key_type != CKK_GENERIC_SECRET as CK_KEY_TYPE
             && !is_hmac_key_type(key.key_type))
     {
@@ -242,7 +260,11 @@ fn generate_key_object(
         }
     }
     let mut value = vec![0; value_len as usize];
-    getrandom::fill(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    if let Some(parameters) = pbkdf2_parameters {
+        derive_pbkdf2(&parameters, &mut value)?;
+    } else {
+        getrandom::fill(&mut value).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+    }
     key.material = if software_secret {
         KeyMaterial::SoftwareSecret(Zeroizing::new(value))
     } else {
@@ -251,6 +273,96 @@ fn generate_key_object(
     key.local = true;
     key.key_gen_mechanism = Some(mechanism.mechanism);
     Ok(key)
+}
+
+struct Pbkdf2Parameters<'a> {
+    password: &'a [u8],
+    salt: &'a [u8],
+    iterations: u32,
+    prf: CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE,
+}
+
+fn parse_pbkdf2_parameters(mechanism: &CK_MECHANISM) -> Result<Pbkdf2Parameters<'_>, Error> {
+    if mechanism.ulParameterLen as usize != ::std::mem::size_of::<CK_PKCS5_PBKD2_PARAMS2>() {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = unsafe { _as_ref(mechanism.pParameter.cast::<CK_PKCS5_PBKD2_PARAMS2>()) }
+        .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    if parameters.saltSource != CKZ_SALT_SPECIFIED as CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE
+        || !parameters.pPrfData.is_null()
+        || parameters.ulPrfDataLen != 0
+        || parameters.iterations == 0
+        || parameters.iterations > u32::MAX as CK_ULONG
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let salt = unsafe {
+        from_raw_parts(
+            parameters.pSaltSourceData.cast::<u8>(),
+            parameters.ulSaltSourceDataLen as usize,
+        )
+    }
+    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    let password = unsafe {
+        from_raw_parts(
+            parameters.pPassword.cast_const(),
+            parameters.ulPasswordLen as usize,
+        )
+    }
+    .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
+    Ok(Pbkdf2Parameters {
+        password,
+        salt,
+        iterations: parameters.iterations as u32,
+        prf: parameters.prf,
+    })
+}
+
+fn derive_pbkdf2(parameters: &Pbkdf2Parameters<'_>, output: &mut [u8]) -> Result<(), Error> {
+    match parameters.prf {
+        x if x == CKP_PKCS5_PBKD2_HMAC_SHA1 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
+            pbkdf2::pbkdf2_hmac::<sha1::Sha1>(
+                parameters.password,
+                parameters.salt,
+                parameters.iterations,
+                output,
+            );
+        }
+        x if x == CKP_PKCS5_PBKD2_HMAC_SHA224 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha224>(
+                parameters.password,
+                parameters.salt,
+                parameters.iterations,
+                output,
+            );
+        }
+        x if x == CKP_PKCS5_PBKD2_HMAC_SHA256 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+                parameters.password,
+                parameters.salt,
+                parameters.iterations,
+                output,
+            );
+        }
+        x if x == CKP_PKCS5_PBKD2_HMAC_SHA384 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha384>(
+                parameters.password,
+                parameters.salt,
+                parameters.iterations,
+                output,
+            );
+        }
+        x if x == CKP_PKCS5_PBKD2_HMAC_SHA512 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha512>(
+                parameters.password,
+                parameters.salt,
+                parameters.iterations,
+                output,
+            );
+        }
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+    Ok(())
 }
 
 ffi_entry_point! {

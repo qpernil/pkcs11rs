@@ -233,9 +233,9 @@ impl CcidAidConfiguration {
 impl JsonConfiguration {
     pub(crate) unsafe fn from_reserved(
         reserved: *mut std::ffi::c_void,
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<ReservedConfiguration, Error> {
         if reserved.is_null() {
-            return Ok(None);
+            return Ok(ReservedConfiguration::Empty);
         }
         let pointer = reserved.cast::<c_char>().cast::<u8>();
         let mut length = None;
@@ -249,19 +249,28 @@ impl JsonConfiguration {
             return Err(CKR_ARGUMENTS_BAD.into());
         };
         if length == 0 {
-            return Ok(None);
+            return Ok(ReservedConfiguration::Empty);
         }
         let encoded = unsafe { std::slice::from_raw_parts(pointer, length) };
         let encoded = std::str::from_utf8(encoded).map_err(|_| CKR_ARGUMENTS_BAD)?;
         if encoded.trim().is_empty() {
-            return Ok(None);
+            return Ok(ReservedConfiguration::Empty);
+        }
+        if !encoded.trim_start().starts_with('{') {
+            return Ok(ReservedConfiguration::Opaque);
         }
         let configuration: Self = serde_json::from_str(encoded).map_err(|_| CKR_ARGUMENTS_BAD)?;
         if configuration.version != 1 {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
-        Ok(Some(configuration))
+        Ok(ReservedConfiguration::Json(Box::new(configuration)))
     }
+}
+
+pub(crate) enum ReservedConfiguration {
+    Empty,
+    Opaque,
+    Json(Box<JsonConfiguration>),
 }
 
 impl ModuleConfiguration {
@@ -855,19 +864,22 @@ mod tests {
     }
 
     #[test]
-    fn bounded_reserved_string_accepts_null_and_rejects_bad_json() {
-        assert!(
-            unsafe { JsonConfiguration::from_reserved(std::ptr::null_mut()) }
-                .unwrap()
-                .is_none()
-        );
+    fn bounded_reserved_string_distinguishes_empty_opaque_and_json_values() {
+        assert!(matches!(
+            unsafe { JsonConfiguration::from_reserved(std::ptr::null_mut()) }.unwrap(),
+            ReservedConfiguration::Empty
+        ));
         let mut empty = [0u8];
-        assert!(
-            unsafe { JsonConfiguration::from_reserved(empty.as_mut_ptr().cast()) }
-                .unwrap()
-                .is_none()
-        );
-        let mut invalid = b"not json\0".to_vec();
+        assert!(matches!(
+            unsafe { JsonConfiguration::from_reserved(empty.as_mut_ptr().cast()) }.unwrap(),
+            ReservedConfiguration::Empty
+        ));
+        let mut opaque = b"provider-specific init args\0".to_vec();
+        assert!(matches!(
+            unsafe { JsonConfiguration::from_reserved(opaque.as_mut_ptr().cast()) }.unwrap(),
+            ReservedConfiguration::Opaque
+        ));
+        let mut invalid = b"{not json\0".to_vec();
         assert!(unsafe { JsonConfiguration::from_reserved(invalid.as_mut_ptr().cast()) }.is_err());
     }
 

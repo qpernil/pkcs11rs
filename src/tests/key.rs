@@ -6,7 +6,9 @@ fn generate_software_key_pair(
     parameters: Option<&mut [u8]>,
 ) -> (CK_OBJECT_HANDLE, CK_OBJECT_HANDLE) {
     let mut public_template = Vec::new();
-    let mut modulus_bits = 1024 as CK_ULONG;
+    // 2048 bits accommodates the fixed hash-length salt used by the combined
+    // SHA-512 RSA-PSS mechanisms.
+    let mut modulus_bits = 2048 as CK_ULONG;
     if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
         public_template.push(scalar_attribute(
             CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
@@ -95,7 +97,11 @@ fn sign_and_verify(
     };
     assert_eq!(
         crate::api::C_SignInit(session, &mut mechanism, private),
-        CKR_OK as CK_RV
+        CKR_OK as CK_RV,
+        "C_SignInit rejected {}",
+        crate::mechanism_name(mechanism_type)
+            .and_then(|name| name.to_str().ok())
+            .unwrap_or("unknown mechanism")
     );
     let mut signature_length = 0;
     assert_eq!(
@@ -106,7 +112,11 @@ fn sign_and_verify(
             std::ptr::null_mut(),
             &mut signature_length,
         ),
-        CKR_OK as CK_RV
+        CKR_OK as CK_RV,
+        "C_Sign length query rejected {}",
+        crate::mechanism_name(mechanism_type)
+            .and_then(|name| name.to_str().ok())
+            .unwrap_or("unknown mechanism")
     );
     let mut signature = vec![0; signature_length as usize];
     assert_eq!(
@@ -117,7 +127,11 @@ fn sign_and_verify(
             signature.as_mut_ptr(),
             &mut signature_length,
         ),
-        CKR_OK as CK_RV
+        CKR_OK as CK_RV,
+        "C_Sign rejected {}",
+        crate::mechanism_name(mechanism_type)
+            .and_then(|name| name.to_str().ok())
+            .unwrap_or("unknown mechanism")
     );
     assert_eq!(
         crate::api::C_VerifyInit(session, &mut mechanism, public),
@@ -148,6 +162,7 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
     for (key_type, mechanism_type, length) in [
         (CKK_GENERIC_SECRET, CKM_SHA256_HMAC, 32),
         (CKK_SHA_1_HMAC, CKM_SHA_1_HMAC, 20),
+        (CKK_SHA224_HMAC, CKM_SHA224_HMAC, 28),
         (CKK_SHA256_HMAC, CKM_SHA256_HMAC, 32),
         (CKK_SHA384_HMAC, CKM_SHA384_HMAC, 48),
         (CKK_SHA512_HMAC, CKM_SHA512_HMAC, 64),
@@ -236,6 +251,10 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
             "b617318655057264e28bc0b6fb378c8ef146be00",
         ),
         (
+            CKM_SHA224_HMAC as CK_MECHANISM_TYPE,
+            "896fb1128abbdf196832107cd49df33f47b4b1169912ba4f53684b22",
+        ),
+        (
             CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
         ),
@@ -279,6 +298,88 @@ fn software_hmac_session_keys_generate_import_sign_and_verify() {
         );
         assert_eq!(signature, expected);
     }
+
+    for (mechanism_type, expected) in [
+        (
+            CKM_SHA_1_HMAC_GENERAL as CK_MECHANISM_TYPE,
+            "b617318655057264e28bc0b6fb378c8ef146be00",
+        ),
+        (
+            CKM_SHA224_HMAC_GENERAL as CK_MECHANISM_TYPE,
+            "896fb1128abbdf196832107cd49df33f47b4b1169912ba4f53684b22",
+        ),
+        (
+            CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+        ),
+        (
+            CKM_SHA384_HMAC_GENERAL as CK_MECHANISM_TYPE,
+            concat!(
+                "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec6",
+                "82aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6"
+            ),
+        ),
+        (
+            CKM_SHA512_HMAC_GENERAL as CK_MECHANISM_TYPE,
+            concat!(
+                "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec278",
+                "7ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4",
+                "be9d914eeb61f1702e696c203a126854"
+            ),
+        ),
+    ] {
+        let mut output_length = 12 as CK_ULONG;
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: (&mut output_length as *mut CK_ULONG).cast(),
+            ulParameterLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        };
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+            CKR_OK as CK_RV
+        );
+        let mut signature = [0u8; 12];
+        let mut signature_length = signature.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_Sign(
+                TEST_SESSION_HANDLE,
+                b"Hi There".as_ptr().cast_mut(),
+                8,
+                signature.as_mut_ptr(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            signature.as_slice(),
+            &crate::parse_hex(expected).unwrap()[..12]
+        );
+        assert_eq!(
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, imported),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                TEST_SESSION_HANDLE,
+                b"Hi There".as_ptr().cast_mut(),
+                8,
+                signature.as_mut_ptr(),
+                signature.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+    }
+
+    let mut too_long = 33 as CK_ULONG;
+    let mut invalid_general = CK_MECHANISM {
+        mechanism: CKM_SHA256_HMAC_GENERAL as CK_MECHANISM_TYPE,
+        pParameter: (&mut too_long as *mut CK_ULONG).cast(),
+        ulParameterLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut invalid_general, imported),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
 
     let mut mechanism = CK_MECHANISM {
         mechanism: CKM_SHA256_HMAC as CK_MECHANISM_TYPE,
@@ -538,6 +639,268 @@ fn software_keys_enforce_allowed_mechanisms() {
         ),
         CKR_ATTRIBUTE_VALUE_INVALID as CK_RV
     );
+    finalize_for_test();
+}
+
+#[test]
+fn software_pbkdf2_supports_every_standard_hmac_prf() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut password = b"password".to_vec();
+    let mut salt = b"salt".to_vec();
+    let mut sensitive = CK_FALSE as CK_BBOOL;
+    let mut extractable = CK_TRUE as CK_BBOOL;
+    for (prf, expected) in [
+        (
+            CKP_PKCS5_PBKD2_HMAC_SHA1,
+            "0c60c80f961f0e71f3a9b524af6012062fe037a6",
+        ),
+        (
+            CKP_PKCS5_PBKD2_HMAC_SHA224,
+            "3c198cbdb9464b7857966bd05b7bc92bc1cc4e6e63155d4e490557fd",
+        ),
+        (
+            CKP_PKCS5_PBKD2_HMAC_SHA256,
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+        ),
+        (
+            CKP_PKCS5_PBKD2_HMAC_SHA384,
+            concat!(
+                "c0e14f06e49e32d73f9f52ddf1d0c5c7191609233631dadd",
+                "76a567db42b78676b38fc800cc53ddb642f5c74442e62be4"
+            ),
+        ),
+        (
+            CKP_PKCS5_PBKD2_HMAC_SHA512,
+            concat!(
+                "867f70cf1ade02cff3752599a3a53dc4af34c7a669815ae5",
+                "d513554e1c8cf252c02d470a285a0501bad999bfe943c08f",
+                "050235d7d68b1da55e63f73b60a57fce"
+            ),
+        ),
+    ] {
+        let expected = crate::parse_hex(expected).unwrap();
+        let mut parameters = CK_PKCS5_PBKD2_PARAMS2 {
+            saltSource: CKZ_SALT_SPECIFIED as CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE,
+            pSaltSourceData: salt.as_mut_ptr().cast(),
+            ulSaltSourceDataLen: salt.len() as CK_ULONG,
+            iterations: 1,
+            prf: prf as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE,
+            pPrfData: std::ptr::null_mut(),
+            ulPrfDataLen: 0,
+            pPassword: password.as_mut_ptr(),
+            ulPasswordLen: password.len() as CK_ULONG,
+        };
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE,
+            pParameter: (&mut parameters as *mut CK_PKCS5_PBKD2_PARAMS2).cast(),
+            ulParameterLen: std::mem::size_of::<CK_PKCS5_PBKD2_PARAMS2>() as CK_ULONG,
+        };
+        let mut value_length = expected.len() as CK_ULONG;
+        let mut template = [
+            scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut value_length),
+            scalar_attribute(CKA_SENSITIVE as CK_ATTRIBUTE_TYPE, &mut sensitive),
+            scalar_attribute(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE, &mut extractable),
+        ];
+        let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+                &mut key,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(object_value(TEST_SESSION_HANDLE, key), expected);
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let object = context.resolve_object(key).unwrap().unwrap();
+            assert_eq!(
+                object.key_gen_mechanism,
+                Some(CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE)
+            );
+        });
+    }
+
+    let mut invalid_parameters = CK_PKCS5_PBKD2_PARAMS2 {
+        saltSource: CKZ_SALT_SPECIFIED as CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE,
+        pSaltSourceData: salt.as_mut_ptr().cast(),
+        ulSaltSourceDataLen: salt.len() as CK_ULONG,
+        iterations: 0,
+        prf: CKP_PKCS5_PBKD2_HMAC_SHA256 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE,
+        pPrfData: std::ptr::null_mut(),
+        ulPrfDataLen: 0,
+        pPassword: password.as_mut_ptr(),
+        ulPasswordLen: password.len() as CK_ULONG,
+    };
+    let mut invalid_mechanism = CK_MECHANISM {
+        mechanism: CKM_PKCS5_PBKD2 as CK_MECHANISM_TYPE,
+        pParameter: (&mut invalid_parameters as *mut CK_PKCS5_PBKD2_PARAMS2).cast(),
+        ulParameterLen: std::mem::size_of::<CK_PKCS5_PBKD2_PARAMS2>() as CK_ULONG,
+    };
+    let mut value_length = 32 as CK_ULONG;
+    let mut template = [scalar_attribute(
+        CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+        &mut value_length,
+    )];
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut invalid_mechanism,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_MECHANISM_PARAM_INVALID as CK_RV
+    );
+    finalize_for_test();
+}
+
+#[test]
+fn software_des3_key_generation_and_ciphers_match_reference_vectors() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_DES3 as CK_KEY_TYPE;
+    let mut enabled = CK_TRUE as CK_BBOOL;
+    let mut key_value =
+        crate::parse_hex("0123456789abcdeffedcba987654321089abcdef01234567").unwrap();
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut key_value),
+    ];
+    let mut key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            TEST_SESSION_HANDLE,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut key,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut ecb = CK_MECHANISM {
+        mechanism: CKM_DES3_ECB as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_pkcs11_aes_mechanism_vector(
+        TEST_SESSION_HANDLE,
+        key,
+        &mut ecb,
+        &crate::parse_hex("0123456789abcdef").unwrap(),
+        &crate::parse_hex("691747fd88b6d228").unwrap(),
+    );
+
+    let mut iv = crate::parse_hex("1234567890abcdef").unwrap();
+    let mut cbc = CK_MECHANISM {
+        mechanism: CKM_DES3_CBC as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_pkcs11_aes_mechanism_vector(
+        TEST_SESSION_HANDLE,
+        key,
+        &mut cbc,
+        &crate::parse_hex("4e6f77206973207468652074696d6520").unwrap(),
+        &crate::parse_hex("204011f986e35647199e47af391620c5").unwrap(),
+    );
+
+    let mut padded = CK_MECHANISM {
+        mechanism: CKM_DES3_CBC_PAD as CK_MECHANISM_TYPE,
+        pParameter: iv.as_mut_ptr().cast(),
+        ulParameterLen: iv.len() as CK_ULONG,
+    };
+    assert_pkcs11_aes_mechanism_vector(
+        TEST_SESSION_HANDLE,
+        key,
+        &mut padded,
+        b"legacy 3DES",
+        &crate::parse_hex("61550078292c8e3f75d37cbb9e2d344a").unwrap(),
+    );
+
+    let mut value_length = 24 as CK_ULONG;
+    let mut generate_template = [
+        scalar_attribute(CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE, &mut value_length),
+        scalar_attribute(CKA_ENCRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+        scalar_attribute(CKA_DECRYPT as CK_ATTRIBUTE_TYPE, &mut enabled),
+    ];
+    let mut key_generation = CK_MECHANISM {
+        mechanism: CKM_DES3_KEY_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut generated = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKey(
+            TEST_SESSION_HANDLE,
+            &mut key_generation,
+            generate_template.as_mut_ptr(),
+            generate_template.len() as CK_ULONG,
+            &mut generated,
+        ),
+        CKR_OK as CK_RV
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let object = context.resolve_object(generated).unwrap().unwrap();
+        assert_eq!(object.key_type, CKK_DES3 as CK_KEY_TYPE);
+        assert!(matches!(
+            object.material,
+            crate::KeyMaterial::SoftwareSecret(ref value) if value.len() == 24
+        ));
+    });
+    let plaintext = crate::parse_hex("0123456789abcdef").unwrap();
+    let mut ciphertext = [0u8; 8];
+    let mut ciphertext_length = ciphertext.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut ecb, generated),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Encrypt(
+            TEST_SESSION_HANDLE,
+            plaintext.as_ptr().cast_mut(),
+            plaintext.len() as CK_ULONG,
+            ciphertext.as_mut_ptr(),
+            &mut ciphertext_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut recovered = [0u8; 8];
+    let mut recovered_length = recovered.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut ecb, generated),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Decrypt(
+            TEST_SESSION_HANDLE,
+            ciphertext.as_mut_ptr(),
+            ciphertext_length,
+            recovered.as_mut_ptr(),
+            &mut recovered_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(recovered.as_slice(), plaintext);
     finalize_for_test();
 }
 
@@ -1262,18 +1625,12 @@ fn software_session_key_pairs_cover_every_supported_curve() {
         CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
         None,
     );
-    sign_and_verify(
-        TEST_SESSION_HANDLE,
-        rsa_public,
-        rsa_private,
-        CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE,
-    );
-    sign_and_verify(
-        TEST_SESSION_HANDLE,
-        rsa_public,
-        rsa_private,
-        CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
-    );
+    for mechanism in crate::HASHED_RSA_PKCS_MECHANISMS
+        .into_iter()
+        .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+    {
+        sign_and_verify(TEST_SESSION_HANDLE, rsa_public, rsa_private, mechanism);
+    }
     let plaintext = b"software RSA decryption";
     let mut rsa = CK_MECHANISM {
         mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
@@ -1401,6 +1758,16 @@ fn software_session_key_pairs_cover_every_supported_curve() {
     );
     recovered.truncate(recovered_length as usize);
     assert_eq!(recovered, plaintext);
+
+    let mut p256_parameters = crate::ec_curve_parameters(crate::EcCurve::P256).to_vec();
+    let (p256_public, p256_private) = generate_software_key_pair(
+        TEST_SESSION_HANDLE,
+        CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        Some(&mut p256_parameters),
+    );
+    for mechanism in crate::HASHED_ECDSA_MECHANISMS {
+        sign_and_verify(TEST_SESSION_HANDLE, p256_public, p256_private, mechanism);
+    }
 
     for (algorithm, mut parameters, sign_mechanism) in [
         (

@@ -70,7 +70,7 @@ proactively reopen its USB handle.
 ### Verified suspend and ownership recovery
 
 The suspend detector checks wall-clock progress every two seconds and rebuilds
-the service when a timer gap is greater than twelve seconds. It therefore
+the service when a timer gap is greater than ten seconds. It therefore
 detects real system suspension, not merely display sleep or screen locking. For
 a manual test, allow the Mac to enter actual system sleep before measuring the
 sleep interval; one minute is a convenient reliable duration.
@@ -400,3 +400,64 @@ Set `RUST_LOG` to control structured diagnostics, for example:
 ```sh
 RUST_LOG=pkcs11rs_connector=debug cargo run -p pkcs11rs-connector -- [OPTIONS]
 ```
+
+## Running as a systemd service
+
+Build the release binary on the target Raspberry Pi or another Linux host and
+install it in a stable system path:
+
+```sh
+cargo build --locked --release -p pkcs11rs-connector
+sudo install -m 0755 target/release/pkcs11rs-connector /usr/local/bin/
+```
+
+For example, create a dedicated unprivileged account:
+
+```sh
+sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin \
+  pkcs11rs-connector
+```
+
+Grant that account access to the YubiHSM USB
+interface through the host's udev policy or a narrowly scoped device group.
+Do not run the connector as root merely to obtain USB access. TLS private keys,
+when used, should be readable by that account and no broader.
+
+An example `/etc/systemd/system/pkcs11rs-connector.service` for loopback HTTP
+is:
+
+```ini
+[Unit]
+Description=PKCS11RS multi-device YubiHSM connector
+After=network.target
+
+[Service]
+Type=simple
+User=pkcs11rs-connector
+Group=pkcs11rs-connector
+ExecStart=/usr/local/bin/pkcs11rs-connector --listen 127.0.0.1:12345
+Environment=RUST_LOG=pkcs11rs_connector=info
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Use the HTTPS and mTLS options documented above when the listener is reachable
+from another host. Then load and enable the unit:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now pkcs11rs-connector
+systemctl status pkcs11rs-connector
+journalctl -u pkcs11rs-connector -f
+```
+
+systemd stops the service with `SIGTERM`, which follows the connector's bounded
+graceful-shutdown path. `Restart=on-failure` restarts unexpected exits but not
+an intentional `systemctl stop`.

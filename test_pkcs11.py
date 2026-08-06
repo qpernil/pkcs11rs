@@ -5824,7 +5824,7 @@ class Pkcs11AbiTests(unittest.TestCase):
         )
         self.assertEqual(signature_len.value, 256)
 
-    def test_abi_yubihsm_does_not_advertise_software_only_private_signing(
+    def test_abi_yubihsm_does_not_advertise_unsupported_private_signing(
         self,
     ) -> None:
         self.assertEqual(self.lib.C_Initialize(None), CKR_OK)
@@ -5847,7 +5847,7 @@ class Pkcs11AbiTests(unittest.TestCase):
             ),
             CKR_OK,
         )
-        self.assertIn(CKM_SHA224_RSA_PKCS, mechanisms)
+        self.assertNotIn(CKM_SHA224_RSA_PKCS, mechanisms)
         info = CK_MECHANISM_INFO()
         self.assertEqual(
             self.lib.C_GetMechanismInfo(
@@ -5855,10 +5855,8 @@ class Pkcs11AbiTests(unittest.TestCase):
                 CKM_SHA224_RSA_PKCS,
                 ctypes.byref(info),
             ),
-            CKR_OK,
+            CKR_MECHANISM_INVALID,
         )
-        self.assertEqual(info.flags & CKF_VERIFY, CKF_VERIFY)
-        self.assertEqual(info.flags & CKF_SIGN, 0)
 
         object_class = CK_ULONG(CKO_PRIVATE_KEY)
         key_type = CK_ULONG(CKK_RSA)
@@ -8360,11 +8358,12 @@ fn main() {
             CKR_ARGUMENTS_BAD,
         )
 
-    def test_initialize_accepts_opaque_reserved_args_without_dereferencing(
+    def test_initialize_accepts_opaque_reserved_args(
         self,
     ) -> None:
         init_args = CK_C_INITIALIZE_ARGS()
-        init_args.pReserved = ctypes.c_void_p(1)
+        opaque = ctypes.create_string_buffer(b"provider-specific init args")
+        init_args.pReserved = ctypes.cast(opaque, ctypes.c_void_p)
 
         self.assertEqual(self.lib.C_Initialize(ctypes.byref(init_args)), CKR_OK)
         info = CK_INFO()
@@ -8786,6 +8785,8 @@ fn main() {
             CKM_EC_KEY_PAIR_GEN,
             CKM_ECDSA,
             CKM_GENERIC_SECRET_KEY_GEN,
+        }
+        software_only = {
             CKM_SHA_1,
             CKM_SHA224,
             CKM_SHA256,
@@ -8814,7 +8815,15 @@ fn main() {
         )
         advertised = set(mechanisms)
         self.assertEqual(len(advertised), count.value)
-        self.assertTrue(required.issubset(advertised))
+        self.assertTrue(
+            required.issubset(advertised),
+            f"missing required mechanisms: {sorted(required - advertised)}",
+        )
+        self.assertTrue(
+            advertised.isdisjoint(software_only),
+            f"hardware slot advertised software-only mechanisms: "
+            f"{sorted(advertised & software_only)}",
+        )
 
         info = CK_MECHANISM_INFO()
         self.assertEqual(

@@ -207,10 +207,11 @@ P-384, and P-521, OKP Ed25519, and RSA public keys are projected. Other COSE
 key types leave the data object available without creating misleading key
 objects.
 
-The projected public key exposes its standard EC or RSA parameters,
-`CKA_PUBLIC_KEY_INFO`, and the module's ordinary software public operations.
-The private object exposes no private key value. When credential management
-returns the RP ID, the private object has `CKA_SIGN=true`,
+The projected public key exposes its standard EC or RSA parameters and
+`CKA_PUBLIC_KEY_INFO`. It does not cause ordinary EC or RSA mechanisms to be
+advertised because the authenticator cannot perform their corresponding
+private-key operations. The private object exposes no private key value. When
+credential management returns the RP ID, the private object has `CKA_SIGN=true`,
 `CKA_ALWAYS_AUTHENTICATE=true`, and supports only
 `CKM_PKCS11RS_FIDO_ASSERTION`. If only an RP ID hash is available, the private
 projection remains non-operational because GetAssertion cannot be addressed
