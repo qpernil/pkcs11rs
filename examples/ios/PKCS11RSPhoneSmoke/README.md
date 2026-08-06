@@ -21,13 +21,16 @@ variable is only an input to this smoke-test UI; the module itself receives the
 URL through the JSON passed to `C_Initialize`.
 
 The smoke app calls `C_Initialize` once, refreshes the connector inventory with
-repeated `C_GetSlotList` calls whenever it becomes active, and calls
-`C_Finalize` only when the app terminates. This exercises the normal long-lived
-client lifecycle and connector recovery rather than rebuilding the module on
-every refresh. Returning to the app after the iPhone sleeps or after another
-app has been active runs the same refresh. If iOS terminated the process while
-it was suspended, the next launch initializes a new module instance before
-refreshing.
+`C_GetSlotList` whenever it becomes active, and calls `C_Finalize` only when the
+app terminates. The client initially supplies room for ten slots and retries
+with the returned required count only on `CKR_BUFFER_TOO_SMALL`, so an ordinary
+refresh needs one slot-list call and one connector inventory request. It uses
+the same PKCS #11 buffer contract with room for one hundred mechanisms per
+slot. This exercises the normal long-lived client lifecycle and connector
+recovery rather than rebuilding the module on every refresh. Returning to the
+app after the iPhone sleeps or after another app has been active runs the same
+refresh. If iOS terminated the process while it was suspended, the next launch
+initializes a new module instance before refreshing.
 
 The physical iPhone path has been verified against a connector running on a
 Mac across real Mac system sleep. On resume the connector rebuilt its listener,

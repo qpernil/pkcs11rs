@@ -199,7 +199,10 @@ HTTP connectors remain available.
 
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
 linking the XCFramework from Swift and configuring a remote YubiHSM connector
-with versioned JSON passed through `CK_C_INITIALIZE_ARGS.pReserved`.
+with versioned JSON passed through `CK_C_INITIALIZE_ARGS.pReserved`. It also
+uses the pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
+library-owned canonical `CKM_*` string for a recognized mechanism or null for
+an unknown value.
 
 ### Asynchronous multi-device connector
 
@@ -380,6 +383,11 @@ so a connection left stale by network loss or host sleep is not reused.
 Repeated URL entries intentionally remain separate endpoints, each with its own
 slots, connector client, and YubiHSM secure session.
 
+Direct YubiHSM USB discovery follows the same serial-based reconciliation on
+every `C_GetSlotList`: a newly attached serial gets a slot, detaching it marks
+that slot absent, and reattaching the same serial refreshes the existing slot's
+transport even if the operating system assigned a different USB device ID.
+
 Disable only direct YubiHSM USB discovery while retaining other local
 discovery and configured remote slots:
 
@@ -482,12 +490,13 @@ The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
 and FIDO2. Each selectable applet is exposed as its own PKCS #11
 slot.
 
-Discovery is a snapshot taken by the first `C_GetSlotList` after
-`C_Initialize`. An empty reader contributes no slot. A selected applet keeps
-its slot even if later initialization fails; existing slots reconnect and
-reselect their own AID when sessions are opened. New readers and applets that
-were absent from the original snapshot require `C_Finalize` followed by
-`C_Initialize`.
+PC/SC reader and applet topology is snapshotted by the first `C_GetSlotList`
+after `C_Initialize`. An empty reader contributes no slot. Every later
+`C_GetSlotList` refreshes the presence of registered slots, and existing slots
+also reconnect and reselect their own AID when sessions are opened. A selected
+applet therefore keeps its slot even if a later refresh fails. New readers and
+applets absent from the original PC/SC snapshot still require `C_Finalize`
+followed by `C_Initialize`.
 
 pkcs11rs opens PC/SC cards with `SCARD_SHARE_EXCLUSIVE` and does not currently
 use PC/SC transactions. A reader already held by another process therefore
@@ -796,10 +805,10 @@ AES-256-CBC and retains the inner PKCS #9 label and ID attributes.
   that the card reports as empty, so PKCS #11 operations cannot overwrite an
   existing OpenPGP key. Readable OpenPGP data objects are exported read-only.
 - YubiHSM native object properties are cached per slot and invalidated by object
-  sequence changes. Reinitialize the module after replacing a USB device or
-  changing the domains available to an authentication credential. Remote
-  connector serial/version changes and reconnections invalidate their slot
-  cache automatically.
+  sequence changes and transport reconnection. A replacement with a different
+  serial is discovered as a new slot by the next `C_GetSlotList`; changing the
+  domains available to an authentication credential still requires module
+  reinitialization.
 - Secure-channel credential provisioning and trust-anchor selection are
   deployment responsibilities.
 - Binary packaging, system installation, and platform-specific PKCS #11 loader

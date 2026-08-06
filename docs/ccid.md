@@ -16,20 +16,21 @@ native USB/HID discovery, but does not affect configured software slots or
 opt-in remote YubiHSM HTTP(S) connectors.
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
-can be selected successfully. Reader and applet discovery is a snapshot taken
+can be selected successfully. Reader and applet topology is a snapshot taken
 on the first `C_GetSlotList` call after `C_Initialize`; discovering newly added
-readers or applets requires `C_Finalize` followed by `C_Initialize`. Existing
-slots still refresh token presence when a session is opened. Initialization and
-object-discovery failures do not remove an already selected applet slot.
+readers or applets requires `C_Finalize` followed by `C_Initialize`. Subsequent
+`C_GetSlotList` calls refresh token presence for registered slots, as does
+opening a session. Initialization and object-discovery failures do not remove
+an already selected applet slot.
 
 An empty PC/SC reader contributes no slots to that snapshot. If a card is
 later inserted, no applet slots are synthesized for it until the module is
 reinitialized. Conversely, once an applet slot exists, a card removal or
-replacement does not change the slot list. Opening a session makes that slot
-refresh the reader connection and reselect its own AID. If the replacement
-card lacks the applet, the slot remains registered but reports no usable token
-and rejects communication. It does not morph into slots for other applets on
-the replacement card.
+replacement does not change the slot list. Listing slots or opening a session
+makes that slot refresh the reader connection and reselect its own AID. If the
+replacement card lacks the applet, the slot remains registered but reports no
+usable token and rejects communication. It does not morph into slots for other
+applets on the replacement card.
 
 ## PC/SC ownership and external daemons
 
