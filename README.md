@@ -202,7 +202,11 @@ linking the XCFramework from Swift and configuring a remote YubiHSM connector
 with versioned JSON passed through `CK_C_INITIALIZE_ARGS.pReserved`. It also
 uses the pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
 library-owned canonical `CKM_*` string for a recognized mechanism or null for
-an unknown value.
+an unknown value. Parallel helpers provide canonical `CKR_*`, `CKO_*`, `CKK_*`,
+`CKA_*`, and `CKP_*` names for return values, object classes, key types,
+attribute types, and profile IDs. Deprecated aliases resolve to their current
+canonical names, and every returned string remains owned by the library for the
+lifetime of the process.
 
 ### Asynchronous multi-device connector
 
