@@ -103,13 +103,14 @@ calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
 
 Applet connectors on a reader share one `PcscReaderState`, which owns the card
 connection, selected AID, APDU capabilities, SCP state, and complete APDU
-exchange lock. Local operations on different applet slots can execute
-concurrently; actual card exchanges on one reader are serialized. Different
-YubiHSMs and different PC/SC readers can also execute concurrently. When
-Yubico's device-information commands report the same physical serial over HID
-and PC/SC, pkcs11rs additionally prevents its own HID and CCID operations from
-overlapping. HID remains shared with other HID clients; no exclusive HID lock
-is requested.
+exchange lock. PKCS #11 calls targeting different applet slots may overlap
+while working with their independent slot and session state, but their card
+interactions cannot: each applet selection or complete APDU exchange on one
+reader holds the shared physical-reader gate. Different YubiHSMs and different
+PC/SC readers can execute concurrently. When Yubico's device-information
+commands report the same physical serial over HID and PC/SC, pkcs11rs
+additionally prevents its own HID and CCID operations from overlapping. HID
+remains shared with other HID clients; no exclusive HID lock is requested.
 
 See [Architecture](docs/architecture.md) for the object graph, lifecycle
 locking, session ownership, transport sharing, and cache boundaries.
