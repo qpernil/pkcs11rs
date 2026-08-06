@@ -20,7 +20,7 @@ rustls-pemfile = "2.2.0"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["limit", "load-shed", "util"] }
-tower-http = { version = "0.6", features = ["timeout"] }
+tower-http = { version = "0.6", features = ["timeout", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 

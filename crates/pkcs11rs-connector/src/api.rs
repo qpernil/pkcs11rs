@@ -13,11 +13,74 @@ use std::time::Duration;
 use tower::{
     limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer, BoxError, ServiceBuilder,
 };
-use tower_http::timeout::RequestBodyTimeoutLayer;
+use tower_http::{
+    timeout::RequestBodyTimeoutLayer,
+    trace::{MakeSpan, OnResponse, TraceLayer},
+};
+use tracing::Span;
 
 const MAX_COMMAND_BODY: usize = 3139;
 const OCTET_STREAM: &str = "application/octet-stream";
 const HTTP_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct HsmCommandMetrics {
+    serial: String,
+    usb_device_id: Option<String>,
+    elapsed: Duration,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct LogCommandResponse;
+
+#[derive(Clone, Copy)]
+struct MakeHttpSpan;
+
+impl<B> MakeSpan<B> for MakeHttpSpan {
+    fn make_span(&mut self, request: &axum::http::Request<B>) -> Span {
+        tracing::debug_span!(
+            "http_request",
+            method = %request.method(),
+            uri = %request.uri(),
+            version = ?request.version(),
+        )
+    }
+}
+
+impl<B> OnResponse<B> for LogCommandResponse {
+    fn on_response(self, response: &axum::http::Response<B>, latency: Duration, _span: &Span) {
+        let Some(metrics) = response.extensions().get::<HsmCommandMetrics>() else {
+            tracing::debug!(
+                status = response.status().as_u16(),
+                http_request_elapsed_ms = latency.as_millis(),
+                "HTTP request completed"
+            );
+            return;
+        };
+        match &metrics.error {
+            None => tracing::debug!(
+                status = response.status().as_u16(),
+                http_request_elapsed_ms = latency.as_millis(),
+                hsm_serial = %metrics.serial,
+                usb_device_id = %metrics.usb_device_id.as_deref().unwrap_or("-"),
+                hsm_outcome = "ok",
+                hsm_command_elapsed_ms = metrics.elapsed.as_millis(),
+                "HTTP request completed"
+            ),
+            Some(error) => tracing::debug!(
+                status = response.status().as_u16(),
+                http_request_elapsed_ms = latency.as_millis(),
+                hsm_serial = %metrics.serial,
+                usb_device_id = %metrics.usb_device_id.as_deref().unwrap_or("-"),
+                hsm_outcome = "error",
+                hsm_error = %error,
+                hsm_command_elapsed_ms = metrics.elapsed.as_millis(),
+                "HTTP request completed"
+            ),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,7 +117,17 @@ fn router_with_request_body_timeout(
         .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY))
         .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
         .with_state(state);
-    with_global_request_limit(router, max_in_flight_requests)
+    with_http_tracing(with_global_request_limit(router, max_in_flight_requests))
+}
+
+fn with_http_tracing(router: Router) -> Router {
+    router.layer(
+        TraceLayer::new_for_http()
+            .make_span_with(MakeHttpSpan)
+            .on_request(())
+            .on_response(LogCommandResponse)
+            .on_failure(()),
+    )
 }
 
 fn with_global_request_limit(router: Router, max_in_flight_requests: usize) -> Router {
@@ -103,7 +176,9 @@ async fn device_command(
             format!("no attached YubiHSM has serial {serial}"),
         );
     };
-    command_response(entry.command(&body).await)
+    let serial = entry.view().serial;
+    let usb_device_id = entry.usb_device_id();
+    command_response(serial, usb_device_id, entry.command(&body).await)
 }
 
 async fn legacy_status(State(state): State<AppState>) -> Response {
@@ -132,7 +207,11 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
         .select_legacy(state.legacy_serial.as_deref())
         .await
     {
-        Ok(entry) => command_response(entry.command(&body).await),
+        Ok(entry) => {
+            let serial = entry.view().serial;
+            let usb_device_id = entry.usb_device_id();
+            command_response(serial, usb_device_id, entry.command(&body).await)
+        }
         Err(LegacySelectionError::NoDevice) => problem(
             StatusCode::SERVICE_UNAVAILABLE,
             "no_device",
@@ -141,15 +220,27 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
     }
 }
 
-fn command_response(result: Result<Vec<u8>, crate::registry::TransportError>) -> Response {
-    match result {
+fn command_response(
+    serial: String,
+    usb_device_id: Option<String>,
+    (result, elapsed): (Result<Vec<u8>, crate::registry::TransportError>, Duration),
+) -> Response {
+    let error = result.as_ref().err().map(ToString::to_string);
+    let mut response = match result {
         Ok(response) => (StatusCode::OK, [(CONTENT_TYPE, OCTET_STREAM)], response).into_response(),
         Err(error) => problem(
             StatusCode::SERVICE_UNAVAILABLE,
             "device_transport_error",
             error.to_string(),
         ),
-    }
+    };
+    response.extensions_mut().insert(HsmCommandMetrics {
+        serial,
+        usb_device_id,
+        elapsed,
+        error,
+    });
+    response
 }
 
 fn problem(status: StatusCode, code: &'static str, message: String) -> Response {
@@ -165,9 +256,42 @@ mod tests {
     };
     use http_body_util::{BodyExt, Full};
     use hyper_util::rt::{TokioExecutor, TokioIo};
-    use std::time::Duration;
+    use std::{
+        io::Write,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
     use tokio::net::{TcpListener, TcpStream};
     use tower::ServiceExt;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for LogCapture {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     async fn body(response: Response) -> Vec<u8> {
         response
@@ -177,6 +301,81 @@ mod tests {
             .unwrap()
             .to_bytes()
             .to_vec()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn debug_logs_include_http_and_hsm_command_timings() {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(
+                "pkcs11rs_connector=debug",
+            ))
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        registry.insert_test_echo("logging-test-serial").await;
+        let app = router(registry_state(registry), 64);
+        let command_uri =
+            "/v1/devices/logging-test-serial/commands?logging-test=command-completion";
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(command_uri)
+                    .body(Body::from("command"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let log = capture.text();
+        assert!(log.contains("method=POST"));
+        assert!(log.contains(&format!("uri={command_uri}")));
+        assert!(log.contains("HTTP request completed"));
+        assert!(log.contains("hsm_serial=logging-test-serial"));
+        assert!(log.contains("usb_device_id=-"));
+        assert!(log.contains("hsm_outcome=\"ok\""));
+        assert!(log.contains("hsm_command_elapsed_ms="));
+        assert!(log.contains("http_request_elapsed_ms="));
+        assert!(log.contains("status=200"));
+        assert_eq!(
+            log.lines()
+                .filter(|line| {
+                    line.contains(&format!("uri={command_uri}"))
+                        && line.contains("HTTP request completed")
+                })
+                .count(),
+            1
+        );
+
+        let enumeration_uri = "/v1/devices?logging-test=enumeration-completion";
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(enumeration_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let log = capture.text();
+        let enumeration_log = log
+            .lines()
+            .find(|line| {
+                line.contains(&format!("uri={enumeration_uri}"))
+                    && line.contains("HTTP request completed")
+            })
+            .unwrap();
+        assert!(enumeration_log.contains("http_request_elapsed_ms="));
+        assert!(!enumeration_log.contains("hsm_command_elapsed_ms="));
     }
 
     #[tokio::test]

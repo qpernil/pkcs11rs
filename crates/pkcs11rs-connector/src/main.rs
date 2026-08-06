@@ -75,11 +75,16 @@ async fn main() -> Result<(), BoxError> {
     let args = Args::parse();
     validate_args(&args)?;
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut legacy_serial = args.legacy_serial.clone();
 
     loop {
-        match serve_until_restart(&args).await {
+        match serve_until_restart(&args, legacy_serial.clone()).await {
             Ok(ServeOutcome::Shutdown) => return Ok(()),
-            Ok(ServeOutcome::Resume { gap }) => {
+            Ok(ServeOutcome::Resume {
+                gap,
+                selected_legacy_serial,
+            }) => {
+                legacy_serial = selected_legacy_serial;
                 tracing::warn!(
                     ?gap,
                     "system suspend detected; restarting connector services"
@@ -98,16 +103,22 @@ async fn main() -> Result<(), BoxError> {
 
 enum ServeOutcome {
     Shutdown,
-    Resume { gap: Duration },
+    Resume {
+        gap: Duration,
+        selected_legacy_serial: Option<String>,
+    },
 }
 
-async fn serve_until_restart(args: &Args) -> Result<ServeOutcome, BoxError> {
+async fn serve_until_restart(
+    args: &Args,
+    legacy_serial: Option<String>,
+) -> Result<ServeOutcome, BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
     let discovery = spawn_discovery(registry.clone()).await?;
     let app = router(
         AppState {
-            registry,
-            legacy_serial: args.legacy_serial.clone(),
+            registry: registry.clone(),
+            legacy_serial: legacy_serial.clone(),
         },
         args.http_max_in_flight_requests,
     );
@@ -147,7 +158,14 @@ async fn serve_until_restart(args: &Args) -> Result<ServeOutcome, BoxError> {
                 }
             }
             discovery.abort();
-            ServeOutcome::Resume { gap }
+            let selected_legacy_serial = match legacy_serial {
+                Some(serial) => Some(serial),
+                None => registry.selected_legacy_serial().await,
+            };
+            ServeOutcome::Resume {
+                gap,
+                selected_legacy_serial,
+            }
         }
     };
     Ok(outcome)
