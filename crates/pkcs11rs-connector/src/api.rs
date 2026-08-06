@@ -14,7 +14,7 @@ use tower::{
     limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer, BoxError, ServiceBuilder,
 };
 use tower_http::{
-    timeout::RequestBodyTimeoutLayer,
+    timeout::RequestBodyDeadlineLayer,
     trace::{MakeSpan, OnResponse, TraceLayer},
 };
 use tracing::Span;
@@ -100,12 +100,12 @@ struct Problem {
 }
 
 pub fn router(state: AppState, max_in_flight_requests: usize) -> Router {
-    router_with_request_body_timeout(state, HTTP_REQUEST_BODY_TIMEOUT, max_in_flight_requests)
+    router_with_request_body_deadline(state, HTTP_REQUEST_BODY_TIMEOUT, max_in_flight_requests)
 }
 
-fn router_with_request_body_timeout(
+fn router_with_request_body_deadline(
     state: AppState,
-    request_body_timeout: Duration,
+    request_body_deadline: Duration,
     max_in_flight_requests: usize,
 ) -> Router {
     let router = Router::new()
@@ -115,7 +115,7 @@ fn router_with_request_body_timeout(
         .route("/connector/status", get(legacy_status))
         .route("/connector/api", post(legacy_command))
         .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY))
-        .layer(RequestBodyTimeoutLayer::new(request_body_timeout))
+        .layer(RequestBodyDeadlineLayer::new(request_body_deadline))
         .with_state(state);
     with_http_tracing(with_global_request_limit(router, max_in_flight_requests))
 }
@@ -621,21 +621,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stalled_http_request_body_times_out_before_command_processing() {
+    async fn request_body_deadline_does_not_reset_when_data_arrives() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("12345678").await;
-        let response = router_with_request_body_timeout(
+        let stream = futures_util::stream::unfold(0, |index| async move {
+            if index == 10 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Some((Ok::<_, std::io::Error>(Bytes::from_static(b"a")), index + 1))
+        });
+        let response = router_with_request_body_deadline(
             registry_state(registry),
-            Duration::from_millis(20),
+            Duration::from_millis(25),
             64,
         )
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/devices/12345678/commands")
-                .body(Body::from_stream(futures_util::stream::pending::<
-                    Result<Bytes, std::io::Error>,
-                >()))
+                .body(Body::from_stream(stream))
                 .unwrap(),
         )
         .await
