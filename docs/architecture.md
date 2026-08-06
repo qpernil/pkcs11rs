@@ -51,13 +51,13 @@ confined behind its `SlotContext` mutex. State shared between slots uses
 synchronized `Arc` handles instead.
 
 `C_GetSlotList` invokes the module discovery coordinator on both its first and
-subsequent calls. Each discovery provider reports opaque, provider-defined slot
-IDs and current presence. Reconciliation combines that ID with the provider
-instance identity: known identities retain their PKCS #11 slot IDs while
-absent, reappearing identities reuse those slots, and new identities receive
-new slots. Presence is therefore dynamic without renumbering or deleting a
-slot. Whether a slot reports `CKF_REMOVABLE_DEVICE` remains PKCS #11 backend
-metadata and is not part of discovery identity.
+subsequent calls. A snapshot-capable discovery provider reports opaque,
+provider-defined slot IDs and current presence. Reconciliation combines that
+ID with the provider instance identity: known identities retain their PKCS #11
+slot IDs while absent, reappearing identities reuse those slots, and new
+identities receive new slots. Presence is therefore dynamic without
+renumbering or deleting a slot. Whether a slot reports `CKF_REMOVABLE_DEVICE`
+remains PKCS #11 backend metadata and is not part of discovery identity.
 
 Configured HTTP inventories use configuration-entry ordinal as their provider
 instance and YubiHSM serial as their stable slot ID, so duplicate configured
@@ -116,10 +116,11 @@ at a time. Selecting an applet invalidates a secure channel belonging to
 another AID; the next protected operation reselects its AID and establishes
 the appropriate channel.
 
-Discovery is a snapshot. Only applets selected during the first
-`C_GetSlotList` after initialization become slots. Existing slots can reconnect
-and reselect their AID after card removal, but the slot registry does not
-morph to match a replacement card. See [CCID applet configuration](ccid.md).
+PC/SC topology is currently a snapshot. Only applets selected during the first
+`C_GetSlotList` after initialization become slots. Subsequent slot-list calls
+refresh registered-slot presence, and existing slots can reconnect and
+reselect their AID after card removal, but the slot registry does not morph to
+match a replacement card. See [CCID applet configuration](ccid.md).
 
 ## FIDO transports
 

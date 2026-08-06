@@ -16,12 +16,13 @@ enabled. See the
 before operating a remote connector service.
 
 Each returned serial creates a separate slot, so one connector host with two
-attached YubiHSMs produces two slots from one URL. Discovery is a snapshot when
-the PKCS #11 module is initialized; reinitialize the module to add a newly
-attached serial. Existing slots can reconnect to the same serial after a
-temporary detach. Remote slots are additive; they do not disable direct USB
-discovery. An unreachable connector yields no remote slots for that discovery
-cycle. The URL scheme selects plain HTTP or rustls-backed HTTPS.
+attached YubiHSMs produces two slots from one URL. Every `C_GetSlotList`
+reconciles configured HTTP inventories and direct USB inventory by serial. A
+new serial gets a new slot; an absent serial keeps its stable slot ID and
+becomes present again when rediscovered. Remote slots are additive; they do
+not disable direct USB discovery. An unreachable connector contributes no new
+slots and marks its registered slots absent for that refresh. The URL scheme
+selects plain HTTP or rustls-backed HTTPS.
 
 HTTPS verifies the server certificate and hostname against the Mozilla root
 snapshot embedded through the locked `webpki-roots` dependency. It does not
@@ -241,12 +242,12 @@ private view again.
 Successful PKCS #11 mutations update or evict the corresponding cached
 objects. Module reinitialization clears the object, metadata, attestation, and
 opaque-value caches and retries public discovery. Reinitialize the module after
-replacing a directly attached USB device or changing the domains visible to an
-authentication credential. A configured remote slot that cannot complete its
-initial status request remains empty until reinitialization. After a remote
-connector has connected successfully, however, a later transport recovery or
-status serial/version change advances its connection epoch, clears that
-slot's caches, and retries public discovery automatically.
+changing the domains visible to an authentication credential. Direct USB
+rediscovery of the same serial and remote transport recovery advance the
+connection epoch, clear the affected slot's caches, and retry public discovery
+automatically. A different direct USB serial becomes a new slot. A configured
+remote endpoint that cannot complete its initial inventory contributes no slot
+until a later `C_GetSlotList` succeeds.
 
 The retained discovery session has a distinct transport role from the PKCS #11
 user-login session and is never used for private or mutating operations.

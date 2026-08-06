@@ -57,8 +57,9 @@ label; `C_GetTokenInfo` reports the stored discovery failure.
 For USB HID, a slot is created after the HID interface can be opened, a
 CTAPHID channel can be allocated, and the CBOR capability is advertised. The
 endpoint can reopen the same HID path and allocate a new channel after device
-reinsertion. New HID devices and new smart-card applets are not added after
-the initial discovery snapshot; reinitialize the module to rescan.
+reinsertion. Every `C_GetSlotList` refreshes the presence of registered HID and
+CCID FIDO slots. New HID devices and new smart-card applets are not yet added
+after the initial topology snapshot; reinitialize the module to rescan them.
 
 Yubico's read-only configuration command supplies the physical serial used to
 correlate a YubiKey exposed through both USB interfaces. When both endpoints
