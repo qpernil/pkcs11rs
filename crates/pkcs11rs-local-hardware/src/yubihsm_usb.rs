@@ -10,7 +10,10 @@ pub const YUBIHSM_PRODUCT_ID: u16 = 0x0030;
 const YUBIHSM_INTERFACE: u8 = 0;
 const YUBIHSM_BULK_OUT_ENDPOINT: u8 = 0x01;
 const YUBIHSM_BULK_IN_ENDPOINT: u8 = 0x81;
+const YUBIHSM_MESSAGE_HEADER_SIZE: usize = 3;
+const YUBIHSM_LEGACY_MAX_MESSAGE_SIZE: usize = 2048;
 const YUBIHSM_MAX_MESSAGE_SIZE: usize = 3136;
+const YUBIHSM_LARGE_MESSAGE_MIN_VERSION: (u8, u8) = (2, 4);
 const YUBIHSM_USB_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
@@ -19,9 +22,20 @@ pub enum Error {
     Transfer(nusb::transfer::TransferError),
     DeviceFailure,
     DeviceRemoved,
-    SendBufferTooLarge,
+    InvalidMessageLength {
+        actual: usize,
+        expected: Option<usize>,
+    },
+    SendBufferTooLarge {
+        actual: usize,
+        maximum: usize,
+        firmware_version: (u8, u8),
+    },
     ReceiveBufferTooLarge,
-    IncompleteWrite { actual: usize, expected: usize },
+    IncompleteWrite {
+        actual: usize,
+        expected: usize,
+    },
     MissingBulkOutEndpoint,
 }
 
@@ -32,7 +46,28 @@ impl std::fmt::Display for Error {
             Self::Transfer(error) => write!(fmt, "USB transfer error: {error}"),
             Self::DeviceFailure => write!(fmt, "USB device operation failed"),
             Self::DeviceRemoved => write!(fmt, "USB device is not connected"),
-            Self::SendBufferTooLarge => write!(fmt, "USB send buffer is too large"),
+            Self::InvalidMessageLength {
+                actual,
+                expected: Some(expected),
+            } => write!(
+                fmt,
+                "invalid YubiHSM message length: received {actual} bytes, expected {expected}"
+            ),
+            Self::InvalidMessageLength {
+                actual,
+                expected: None,
+            } => write!(
+                fmt,
+                "invalid YubiHSM message length: received {actual} bytes, expected at least {YUBIHSM_MESSAGE_HEADER_SIZE}"
+            ),
+            Self::SendBufferTooLarge {
+                actual,
+                maximum,
+                firmware_version: (major, minor),
+            } => write!(
+                fmt,
+                "YubiHSM message is too large: received {actual} bytes, maximum {maximum} bytes for firmware {major}.{minor}"
+            ),
             Self::ReceiveBufferTooLarge => write!(fmt, "USB receive buffer is too large"),
             Self::IncompleteWrite { actual, expected } => {
                 write!(
@@ -75,6 +110,28 @@ pub struct YubiHsmUsbCandidate {
 impl YubiHsmUsbCandidate {
     pub fn id(&self) -> UsbDeviceId {
         self.info.id()
+    }
+
+    pub fn manufacturer(&self) -> &str {
+        self.info.manufacturer_string().unwrap_or("Yubico")
+    }
+
+    pub fn product(&self) -> &str {
+        self.info.product_string().unwrap_or("YubiHSM")
+    }
+
+    pub fn version(&self) -> (u8, u8) {
+        usb_bcd_version(self.info.device_version())
+    }
+
+    #[cfg(feature = "async-tokio")]
+    pub async fn serial(&self) -> Result<Option<String>, Error> {
+        if let Some(serial) = self.info.serial_number() {
+            return Ok(Some(serial.to_owned()));
+        }
+        let device = self.info.open().await?;
+        let descriptor = device.device_descriptor();
+        Ok(read_nusb_string_async(&device, descriptor.serial_number_string_index()).await)
     }
 
     #[cfg(feature = "blocking")]
@@ -313,7 +370,7 @@ impl YubiHsmUsbDevice {
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let (mut bulk_out, mut bulk_in) =
-            self.transfer_endpoints(send_buffer.len(), receive_buffer.len())?;
+            self.transfer_endpoints(send_buffer, receive_buffer.len())?;
         let completion = nusb_transfer_blocking(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
@@ -344,7 +401,7 @@ impl YubiHsmUsbDevice {
         response_timeout: Duration,
     ) -> Result<&'a [u8], Error> {
         let (mut bulk_out, mut bulk_in) =
-            self.transfer_endpoints(send_buffer.len(), receive_buffer.len())?;
+            self.transfer_endpoints(send_buffer, receive_buffer.len())?;
         let completion = nusb_transfer(
             &mut bulk_out,
             nusb::transfer::Buffer::from(send_buffer),
@@ -372,10 +429,10 @@ impl YubiHsmUsbDevice {
 
     fn transfer_endpoints(
         &self,
-        send_len: usize,
+        send_buffer: &[u8],
         receive_len: usize,
     ) -> Result<(BulkOutEndpoint, BulkInEndpoint), Error> {
-        u32::try_from(send_len).map_err(|_| Error::SendBufferTooLarge)?;
+        ensure_yubihsm_message(self.version, send_buffer)?;
         u32::try_from(receive_len).map_err(|_| Error::ReceiveBufferTooLarge)?;
         let interface = self.interface.as_ref().ok_or(Error::DeviceRemoved)?;
         Ok((
@@ -393,6 +450,47 @@ impl YubiHsmUsbDevice {
         completion.status?;
         ensure_complete_write(written, expected)?;
         Ok(needs_zero_length_packet(written, self.packet_size))
+    }
+}
+
+fn yubihsm_max_message_size(version: (u8, u8)) -> usize {
+    if version < YUBIHSM_LARGE_MESSAGE_MIN_VERSION {
+        YUBIHSM_LEGACY_MAX_MESSAGE_SIZE
+    } else {
+        YUBIHSM_MAX_MESSAGE_SIZE
+    }
+}
+
+fn ensure_yubihsm_message(version: (u8, u8), message: &[u8]) -> Result<(), Error> {
+    if message.len() < YUBIHSM_MESSAGE_HEADER_SIZE {
+        return Err(Error::InvalidMessageLength {
+            actual: message.len(),
+            expected: None,
+        });
+    }
+
+    let payload_len = usize::from(u16::from_be_bytes([message[1], message[2]]));
+    let expected = YUBIHSM_MESSAGE_HEADER_SIZE + payload_len;
+    if message.len() != expected {
+        return Err(Error::InvalidMessageLength {
+            actual: message.len(),
+            expected: Some(expected),
+        });
+    }
+
+    ensure_yubihsm_message_size(version, message.len())
+}
+
+fn ensure_yubihsm_message_size(version: (u8, u8), actual: usize) -> Result<(), Error> {
+    let maximum = yubihsm_max_message_size(version);
+    if actual <= maximum {
+        Ok(())
+    } else {
+        Err(Error::SendBufferTooLarge {
+            actual,
+            maximum,
+            firmware_version: version,
+        })
     }
 }
 
@@ -556,5 +654,61 @@ mod tests {
     fn bcd_version_extracts_major_and_minor_components() {
         assert_eq!(usb_bcd_version(0x0210), (2, 1));
         assert_eq!(usb_bcd_version(0x1234), (12, 3));
+    }
+
+    #[test]
+    fn message_size_limit_tracks_yubihsm_firmware() {
+        assert_eq!(yubihsm_max_message_size((1, 9)), 2048);
+        assert_eq!(yubihsm_max_message_size((2, 3)), 2048);
+        assert_eq!(yubihsm_max_message_size((2, 4)), 3136);
+        assert_eq!(yubihsm_max_message_size((2, 9)), 3136);
+        assert_eq!(yubihsm_max_message_size((0, 0)), 2048);
+        assert_eq!(yubihsm_max_message_size((3, 0)), 3136);
+
+        assert!(ensure_yubihsm_message((2, 3), &message_with_total_size(2048)).is_ok());
+        assert!(matches!(
+            ensure_yubihsm_message((2, 3), &message_with_total_size(2049)),
+            Err(Error::SendBufferTooLarge {
+                actual: 2049,
+                maximum: 2048,
+                firmware_version: (2, 3)
+            })
+        ));
+        assert!(ensure_yubihsm_message((2, 4), &message_with_total_size(3136)).is_ok());
+        assert!(matches!(
+            ensure_yubihsm_message((2, 4), &message_with_total_size(3137)),
+            Err(Error::SendBufferTooLarge {
+                actual: 3137,
+                maximum: 3136,
+                firmware_version: (2, 4)
+            })
+        ));
+    }
+
+    #[test]
+    fn message_framing_requires_an_exact_declared_payload_length() {
+        assert!(ensure_yubihsm_message((2, 4), &[0x03, 0x00, 0x00]).is_ok());
+        assert!(ensure_yubihsm_message((2, 4), &[0x03, 0x00, 0x01, 0xff]).is_ok());
+
+        for message in [
+            &[][..],
+            &[0x03, 0x00][..],
+            &[0x03, 0x00, 0x01][..],
+            &[0x03, 0x00, 0x00, 0xff][..],
+        ] {
+            assert!(matches!(
+                ensure_yubihsm_message((2, 4), message),
+                Err(Error::InvalidMessageLength { .. })
+            ));
+        }
+    }
+
+    fn message_with_total_size(total: usize) -> Vec<u8> {
+        let payload_len = total - YUBIHSM_MESSAGE_HEADER_SIZE;
+        let payload_len = u16::try_from(payload_len).unwrap();
+        let mut message = vec![0x03];
+        message.extend_from_slice(&payload_len.to_be_bytes());
+        message.resize(total, 0);
+        message
     }
 }

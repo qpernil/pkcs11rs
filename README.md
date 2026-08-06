@@ -231,9 +231,10 @@ POST /v1/devices/{serial}/commands
 ```
 
 PKCS11RS uses this API directly. Each URL in `PKCS11RS_YUBIHSM_URLS`
-identifies one connector service, and each device returned by that service
-becomes an independent PKCS #11 slot. PKCS11RS does not use the legacy
-single-device endpoints.
+identifies one connector service, and each device returned with status
+`available` becomes an independent PKCS #11 slot. Enumerated devices that the
+connector did not claim remain visible as `unclaimed` and are ignored by the
+client. PKCS11RS does not use the legacy single-device endpoints.
 
 Command request and response bodies are native YubiHSM frames with
 `application/octet-stream`. Each device has an independent asynchronous access

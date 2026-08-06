@@ -8,9 +8,10 @@ and asynchronous nusb dependencies never enter the iOS XCFramework.
 > **Security status:** the connector is suitable for loopback, a trusted
 > private network, or access through a tightly controlled VPN or reverse proxy.
 > It is not approved for direct exposure to the public Internet. HTTPS, mTLS,
-> bounded HTTP admission, transport timeouts, hot-plug handling, and recovery
-> after system suspend are implemented. Device-aware authorization, connection
-> and client rate limits, and the remaining operational controls are listed in
+> bounded HTTP admission, YubiHSM frame validation, firmware-aware USB limits,
+> transport timeouts, hot-plug handling, and recovery after system suspend are
+> implemented. Device-aware authorization, connection and client rate limits,
+> and the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
 ## Architecture
@@ -38,21 +39,55 @@ Device detachment removes the corresponding entry. A request already holding
 the entry completes with a transport error if the USB transfer fails; a newly
 attached device receives a new entry even when it has the same serial. Duplicate
 simultaneously attached serials are rejected rather than routed ambiguously.
+Only devices successfully opened and claimed appear in the registry and
+`/v1/devices`; physical attachment alone is not connector presence.
 
 The connector detects a delayed timer tick caused by system suspend. After
 resume it stops the old HTTP service, discards surviving connections, the USB
 discovery watcher, registry, mutexes, and device handles, and rebuilds them in
 the same process. An implicitly selected legacy serial is carried into the new
 service, so this recovery does not change the selected compatibility device.
-A full process restart starts a new implicit selection unless
-`--legacy-serial` is configured.
+The complete set of serials successfully claimed before suspend is also
+carried into the rebuilt service. Initial enumeration after resume reclaims
+only that set, preventing the connector from taking ownership of a device that
+another application was already using. A full process restart forgets this
+ownership set and starts a new implicit legacy selection unless
+`--legacy-serial` is configured. A fresh hot-plug event after the rebuild is
+handled normally and may add a newly attached device.
 
 Opening and claiming a device currently happens during initial discovery, a
-hot-plug event, or the complete rebuild after system resume. A failed open or
-claim is not retried while the device remains attached, a failed command does
-not proactively reopen its USB handle, and an ended hot-plug stream is reported
-but not restarted. These remain recovery limitations for failures that occur
-without a detach/attach event or system suspend.
+hot-plug event, or reclamation of a previously managed serial after system
+resume. A failed initial open or claim is logged, omitted from the advertised
+inventory, and intentionally not retried while the device remains attached;
+the device may belong to another local application. A failed command does not
+proactively reopen its USB handle.
+
+### Verified suspend and ownership recovery
+
+The suspend detector checks wall-clock progress every two seconds and rebuilds
+the service when a timer gap is greater than twelve seconds. It therefore
+detects real system suspension, not merely display sleep or screen locking. For
+a manual test, allow the Mac to enter actual system sleep before measuring the
+sleep interval; one minute is a convenient reliable duration.
+
+The ownership behavior has been verified on macOS with physical YubiHSMs:
+
+1. `yubihsm-shell` claimed one HSM through local USB before the connector
+   started.
+2. The connector left that HSM unmanaged while managing the other available
+   HSM.
+3. `yubihsm-shell` was stopped, making its HSM claimable without generating a
+   physical hot-plug event.
+4. After a real Mac sleep and resume, the connector rebuilt its HTTP and USB
+   services and reclaimed only the serial it had managed before sleep. It did
+   not take ownership of the now-claimable, previously unmanaged HSM.
+5. Removing the unmanaged HSM produced no connector detach log, because it had
+   no registry entry. Physically reconnecting it generated a new hot-plug event
+   and allowed the connector to claim and advertise it normally.
+
+This test covers the distinction between service reconstruction, release of a
+device by another process, and a genuine new physical attachment. The expected
+inventory can be checked before and after sleep with `GET /v1/devices`.
 
 The shared `pkcs11rs-local-hardware` crate exposes both blocking and async
 frontends. The existing PKCS #11 local connector continues to use the blocking
@@ -76,15 +111,32 @@ GET /v1/devices
       "product": "YubiHSM",
       "usb_version": "2.5",
       "status": "available"
+    },
+    {
+      "serial": "87654321",
+      "manufacturer": "Yubico",
+      "product": "YubiHSM",
+      "usb_version": "2.5",
+      "status": "unclaimed"
     }
   ]
 }
 ```
 
+The inventory contains every identifiable YubiHSM seen by USB enumeration.
+`available` means that the connector owns the device interface and can execute
+commands. `unclaimed` means that the device is physically present but was not
+claimed by this connector, for example because another process owns it. This
+makes the endpoint useful as remote USB inventory even when some attached
+devices cannot be used through this connector. An unclaimed device is left
+alone until it is physically detached and reattached; enumeration and resume
+do not retry the claim. Clients create slots only for `available` devices and
+ignore all other, including unknown future, status values.
+
 `GET /v1/devices/{serial}` returns one entry or `404 Not Found`.
 
 PKCS11RS consumes this API exclusively for remote YubiHSM access. One
-configured connector URL is discovered into one PKCS #11 slot per returned
+configured connector URL is discovered into one PKCS #11 slot per available
 serial, and every slot sends commands only to its serial-specific endpoint.
 
 ### Execute a command
@@ -97,16 +149,24 @@ Content-Type: application/octet-stream
 The body is one complete native YubiHSM command frame. A successful transport
 returns the native response frame as `application/octet-stream`, including
 ordinary device-level error frames. Transport failures use a structured JSON
-HTTP error.
+HTTP error. A command addressed to an enumerated `unclaimed` device returns
+`503 Service Unavailable` with error code `device_unclaimed`.
 
-The current HTTP body limit rejects inputs larger than 3,139 bytes, matching
-the broad limit accepted by Yubico's connector protocol. It does not yet
-require the three-byte frame header, compare the embedded big-endian payload
-length with the actual body, or apply the firmware-specific USB frame limit.
-Until the validation item below is implemented, only clients that already
-produce valid YubiHSM frames should be allowed to reach the command endpoints.
-The shared USB boundary must ultimately enforce a maximum total frame size of
-2,048 bytes before firmware 2.4 and 3,136 bytes for firmware 2.4 and later.
+The HTTP middleware accepts request bodies up to 8,192 bytes. This deliberately
+generic resource ceiling leaves room for a future firmware generation while
+preventing an unbounded body from consuming connector memory. It does not
+interpret YubiHSM framing before device selection or queueing.
+
+After the selected device gate is acquired, the shared USB transport requires
+the body to contain the command byte and two-byte big-endian payload length and
+requires that declared length to match the remaining bytes exactly. It then
+applies the firmware-specific total frame limit from that device's USB firmware
+version: 2,048 bytes for firmware before 2.4 and 3,136 bytes for firmware 2.4
+or any higher reported version. Future versions are thus treated like the
+newest known firmware until support for a larger device frame is added. Both
+checks run before endpoint access or bulk OUT submission. This protects
+asynchronous HTTP and blocking local access from malformed frames and sizes
+that can trigger hardware failures in some firmware versions.
 
 The server never automatically retries a command. This is important for
 non-idempotent operations whose outcome may be unknown after a transport
@@ -186,7 +246,7 @@ therefore has the same access.
 HTTP transport stages are bounded independently from HSM processing:
 
 - TLS handshakes and HTTP/1 header reads have five-second deadlines.
-- The complete request body has a five-second deadline and a 3,139-byte limit.
+- The complete request body has a five-second deadline and an 8,192-byte limit.
 - HTTP/2 request header lists are limited to 16 KiB.
 - A blocked response socket write has a five-second deadline; the timer runs
   only while a write is unable to make progress.
@@ -219,10 +279,14 @@ RUST_LOG=pkcs11rs_connector=debug pkcs11rs-connector
 At `debug`, one completion event is emitted when each HTTP response has been
 created. It includes the method, URI, HTTP version, status, and handler elapsed
 time. Command responses also include the HSM serial, transient USB device ID,
-transport outcome, and HSM command elapsed time. The HSM time starts after the
-device gate is acquired, so the difference from the handler time exposes queue
-waiting without producing a second command log entry. Socket delivery occurs
-after this event and is protected separately by the response-write timeout.
+transport outcome, and HSM command elapsed time. Failed commands also include a
+stable `hsm_error_code` and descriptive `hsm_error`. Framing mismatches use
+`invalid_command_frame`; frames above the selected firmware's limit use
+`command_too_large` and report the actual size, permitted size, and firmware
+version. The HSM time starts after the device gate is acquired, so the
+difference from the handler time exposes queue waiting without producing a
+second command log entry. Socket delivery occurs after this event and is
+protected separately by the response-write timeout.
 
 ## Deployment boundary
 
@@ -253,22 +317,10 @@ remain fail-closed in the connector itself.
 
 ### Protocol and USB safety
 
-- Validate every request as exactly one YubiHSM frame before acquiring the
-  device gate: require at least three bytes, decode the big-endian payload
-  length, and require `body length == 3 + declared length`.
-- Enforce the firmware-specific total USB frame maximum at the shared hardware
-  boundary: 2,048 bytes before firmware 2.4 and 3,136 bytes for firmware 2.4
-  and later. Apply the same rule to blocking local access and asynchronous
-  connector access so an HTTP bypass cannot reach older hardware.
 - After a USB transport failure, return the failure without replaying the
   command, discard the uncertain handle, and reopen it for a subsequent
   request. Automatic replay is unsafe because a mutating command may already
   have executed.
-- Periodically reconcile enumeration with the registry, retry transient open
-  and claim failures with bounded backoff, and recover or terminate if the
-  hot-plug event stream ends.
-- Make status reflect an actively usable device handle rather than registry
-  presence alone.
 
 ### Resource and denial-of-service controls
 

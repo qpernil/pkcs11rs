@@ -81,9 +81,13 @@ impl From<Error> for CK_RV {
                 CKR_DEVICE_REMOVED as CK_RV
             }
             #[cfg(feature = "native-hardware")]
-            Error::LocalHardware(pkcs11rs_local_hardware::Error::SendBufferTooLarge) => {
+            Error::LocalHardware(pkcs11rs_local_hardware::Error::SendBufferTooLarge { .. }) => {
                 crate::CKR_DATA_LEN_RANGE as CK_RV
             }
+            #[cfg(feature = "native-hardware")]
+            Error::LocalHardware(pkcs11rs_local_hardware::Error::InvalidMessageLength {
+                ..
+            }) => crate::CKR_DATA_LEN_RANGE as CK_RV,
             #[cfg(feature = "native-hardware")]
             Error::LocalHardware(pkcs11rs_local_hardware::Error::ReceiveBufferTooLarge) => {
                 crate::CKR_DEVICE_MEMORY as CK_RV

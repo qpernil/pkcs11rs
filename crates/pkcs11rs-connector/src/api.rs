@@ -1,8 +1,8 @@
-use crate::registry::{DeviceRegistry, LegacySelectionError};
+use crate::registry::{DeviceRegistry, LegacySelectionError, TransportError, TransportErrorKind};
 use axum::{
     body::Bytes,
     error_handling::HandleErrorLayer,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{Path, State},
     http::{header::CONTENT_TYPE, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -14,12 +14,13 @@ use tower::{
     limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer, BoxError, ServiceBuilder,
 };
 use tower_http::{
+    limit::RequestBodyLimitLayer,
     timeout::RequestBodyDeadlineLayer,
     trace::{MakeSpan, OnResponse, TraceLayer},
 };
 use tracing::Span;
 
-const MAX_COMMAND_BODY: usize = 3139;
+const MAX_COMMAND_BODY: usize = 8192;
 const OCTET_STREAM: &str = "application/octet-stream";
 const HTTP_REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -28,6 +29,7 @@ struct HsmCommandMetrics {
     serial: String,
     usb_device_id: Option<String>,
     elapsed: Duration,
+    error_code: Option<&'static str>,
     error: Option<String>,
 }
 
@@ -74,6 +76,7 @@ impl<B> OnResponse<B> for LogCommandResponse {
                 hsm_serial = %metrics.serial,
                 usb_device_id = %metrics.usb_device_id.as_deref().unwrap_or("-"),
                 hsm_outcome = "error",
+                hsm_error_code = metrics.error_code.unwrap_or("device_transport_error"),
                 hsm_error = %error,
                 hsm_command_elapsed_ms = metrics.elapsed.as_millis(),
                 "HTTP request completed"
@@ -114,7 +117,7 @@ fn router_with_request_body_deadline(
         .route("/v1/devices/{serial}/commands", post(device_command))
         .route("/connector/status", get(legacy_status))
         .route("/connector/api", post(legacy_command))
-        .layer(DefaultBodyLimit::max(MAX_COMMAND_BODY))
+        .layer(RequestBodyLimitLayer::new(MAX_COMMAND_BODY))
         .layer(RequestBodyDeadlineLayer::new(request_body_deadline))
         .with_state(state);
     with_http_tracing(with_global_request_limit(router, max_in_flight_requests))
@@ -154,8 +157,8 @@ async fn list_devices(State(state): State<AppState>) -> Json<DeviceList> {
 }
 
 async fn get_device(Path(serial): Path<String>, State(state): State<AppState>) -> Response {
-    match state.registry.get(&serial).await {
-        Some(entry) => Json(entry.view()).into_response(),
+    match state.registry.view(&serial).await {
+        Some(view) => Json(view).into_response(),
         None => problem(
             StatusCode::NOT_FOUND,
             "device_not_found",
@@ -170,15 +173,22 @@ async fn device_command(
     body: Bytes,
 ) -> Response {
     let Some(entry) = state.registry.get(&serial).await else {
+        if state.registry.view(&serial).await.is_some() {
+            return problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "device_unclaimed",
+                format!("YubiHSM {serial} is not claimed by this connector"),
+            );
+        }
         return problem(
             StatusCode::NOT_FOUND,
             "device_not_found",
             format!("no attached YubiHSM has serial {serial}"),
         );
     };
-    let serial = entry.view().serial;
+    let view = entry.view();
     let usb_device_id = entry.usb_device_id();
-    command_response(serial, usb_device_id, entry.command(&body).await)
+    command_response(view.serial, usb_device_id, entry.command(&body).await)
 }
 
 async fn legacy_status(State(state): State<AppState>) -> Response {
@@ -208,9 +218,9 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
         .await
     {
         Ok(entry) => {
-            let serial = entry.view().serial;
+            let view = entry.view();
             let usb_device_id = entry.usb_device_id();
-            command_response(serial, usb_device_id, entry.command(&body).await)
+            command_response(view.serial, usb_device_id, entry.command(&body).await)
         }
         Err(LegacySelectionError::NoDevice) => problem(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -223,21 +233,26 @@ async fn legacy_command(State(state): State<AppState>, body: Bytes) -> Response 
 fn command_response(
     serial: String,
     usb_device_id: Option<String>,
-    (result, elapsed): (Result<Vec<u8>, crate::registry::TransportError>, Duration),
+    (result, elapsed): (Result<Vec<u8>, TransportError>, Duration),
 ) -> Response {
+    let error_code = result.as_ref().err().map(TransportError::code);
     let error = result.as_ref().err().map(ToString::to_string);
     let mut response = match result {
         Ok(response) => (StatusCode::OK, [(CONTENT_TYPE, OCTET_STREAM)], response).into_response(),
-        Err(error) => problem(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "device_transport_error",
-            error.to_string(),
-        ),
+        Err(error) => {
+            let status = match error.kind() {
+                TransportErrorKind::InvalidCommandFrame => StatusCode::BAD_REQUEST,
+                TransportErrorKind::CommandTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                TransportErrorKind::DeviceTransport => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            problem(status, error.code(), error.to_string())
+        }
     };
     response.extensions_mut().insert(HsmCommandMetrics {
         serial,
         usb_device_id,
         elapsed,
+        error_code,
         error,
     });
     response
@@ -303,6 +318,15 @@ mod tests {
             .to_vec()
     }
 
+    fn command_frame(payload: &[u8]) -> Vec<u8> {
+        let payload_length = u16::try_from(payload.len()).unwrap();
+        let mut frame = Vec::with_capacity(3 + payload.len());
+        frame.push(0x03);
+        frame.extend_from_slice(&payload_length.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn debug_logs_include_http_and_hsm_command_timings() {
         let capture = LogCapture::default();
@@ -319,6 +343,15 @@ mod tests {
 
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("logging-test-serial").await;
+        registry
+            .insert_test_error(
+                "logging-error-serial",
+                TransportError::from(pkcs11rs_local_hardware::Error::InvalidMessageLength {
+                    actual: 3,
+                    expected: Some(4),
+                }),
+            )
+            .await;
         let app = router(registry_state(registry), 64);
         let command_uri =
             "/v1/devices/logging-test-serial/commands?logging-test=command-completion";
@@ -328,7 +361,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(command_uri)
-                    .body(Body::from("command"))
+                    .body(Body::from(command_frame(b"command")))
                     .unwrap(),
             )
             .await
@@ -354,6 +387,31 @@ mod tests {
                 .count(),
             1
         );
+
+        let error_uri = "/v1/devices/logging-error-serial/commands?logging-test=framing-error";
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(error_uri)
+                    .body(Body::from(command_frame(&[])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let log = capture.text();
+        let error_log = log
+            .lines()
+            .find(|line| {
+                line.contains(&format!("uri={error_uri}"))
+                    && line.contains("HTTP request completed")
+            })
+            .unwrap();
+        assert!(error_log.contains("hsm_outcome=\"error\""));
+        assert!(error_log.contains("hsm_error_code=\"invalid_command_frame\""));
+        assert!(error_log.contains("hsm_error="));
 
         let enumeration_uri = "/v1/devices?logging-test=enumeration-completion";
         let response = app
@@ -382,6 +440,7 @@ mod tests {
     async fn modern_routes_enumerate_and_address_devices_by_serial() {
         let registry = DeviceRegistry::new(Duration::from_secs(1));
         registry.insert_test_echo("12345678").await;
+        registry.insert_test_unclaimed("87654321").await;
         let app = router(
             AppState {
                 registry,
@@ -402,7 +461,44 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response_body = String::from_utf8(body(response).await).unwrap();
-        assert!(response_body.contains("12345678"));
+        assert!(response_body.contains(
+            r#"{"serial":"12345678","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"available"}"#
+        ));
+        assert!(response_body.contains(
+            r#"{"serial":"87654321","manufacturer":"Test","product":"YubiHSM","usb_version":"2.0","status":"unclaimed"}"#
+        ));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/devices/87654321")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(String::from_utf8(body(response).await)
+            .unwrap()
+            .contains(r#""status":"unclaimed""#));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/87654321/commands")
+                    .header(CONTENT_TYPE, OCTET_STREAM)
+                    .body(Body::from(command_frame(&[])))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(String::from_utf8(body(response).await)
+            .unwrap()
+            .contains(r#""code":"device_unclaimed""#));
 
         let response = app
             .oneshot(
@@ -410,14 +506,14 @@ mod tests {
                     .method("POST")
                     .uri("/v1/devices/12345678/commands")
                     .header(CONTENT_TYPE, OCTET_STREAM)
-                    .body(Body::from(vec![0x03, 0x01, 0x00]))
+                    .body(Body::from(command_frame(&[])))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CONTENT_TYPE], OCTET_STREAM);
-        assert_eq!(body(response).await, [0x03, 0x01, 0x00]);
+        assert_eq!(body(response).await, command_frame(&[]));
     }
 
     #[tokio::test]
@@ -480,7 +576,7 @@ mod tests {
             Request::builder()
                 .method("POST")
                 .uri("/connector/api")
-                .body(Body::from("command"))
+                .body(Body::from(command_frame(b"command")))
                 .unwrap(),
         )
         .await
@@ -498,7 +594,7 @@ mod tests {
             Request::builder()
                 .method("POST")
                 .uri("/v1/devices/12345678/commands")
-                .body(Body::from("command"))
+                .body(Body::from(command_frame(b"command")))
                 .unwrap(),
         )
         .await
@@ -589,7 +685,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/connector/api")
-                    .body(Body::from("command"))
+                    .body(Body::from(command_frame(b"command")))
                     .unwrap(),
             )
             .await
@@ -618,6 +714,75 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn declared_oversized_body_is_rejected_without_being_read() {
+        let registry = DeviceRegistry::new(Duration::from_secs(1));
+        registry.insert_test_echo("12345678").await;
+        let pending_body =
+            Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let response = tokio::time::timeout(
+            Duration::from_millis(50),
+            router(registry_state(registry), 64).oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/devices/12345678/commands")
+                    .header(axum::http::header::CONTENT_LENGTH, MAX_COMMAND_BODY + 1)
+                    .body(pending_body)
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("an oversized declared body must be rejected before it is read")
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn usb_validation_errors_have_specific_http_codes_and_messages() {
+        let cases = [
+            (
+                pkcs11rs_local_hardware::Error::InvalidMessageLength {
+                    actual: 3,
+                    expected: Some(7),
+                },
+                StatusCode::BAD_REQUEST,
+                "invalid_command_frame",
+                "received 3 bytes, expected 7",
+            ),
+            (
+                pkcs11rs_local_hardware::Error::SendBufferTooLarge {
+                    actual: 3137,
+                    maximum: 3136,
+                    firmware_version: (2, 5),
+                },
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "command_too_large",
+                "received 3137 bytes, maximum 3136 bytes for firmware 2.5",
+            ),
+            (
+                pkcs11rs_local_hardware::Error::DeviceRemoved,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "device_transport_error",
+                "USB device is not connected",
+            ),
+        ];
+
+        for (error, status, code, message) in cases {
+            let response = command_response(
+                String::from("12345678"),
+                Some(String::from("test-device")),
+                (Err(TransportError::from(error)), Duration::from_millis(1)),
+            );
+            assert_eq!(response.status(), status);
+            let metrics = response.extensions().get::<HsmCommandMetrics>().unwrap();
+            assert_eq!(metrics.error_code, Some(code));
+            assert!(metrics.error.as_deref().unwrap().contains(message));
+            let response_body = String::from_utf8(body(response).await).unwrap();
+            assert!(response_body.contains(&format!("\"code\":\"{code}\"")));
+            assert!(response_body.contains(message));
+        }
     }
 
     #[tokio::test]
