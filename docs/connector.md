@@ -7,10 +7,10 @@ and asynchronous nusb dependencies never enter the iOS XCFramework.
 
 > **Security status:** the connector is suitable for loopback, a trusted
 > private network, or access through a tightly controlled VPN or reverse proxy.
-> It is not yet hardened or approved for direct exposure to the public
-> Internet. HTTPS and mTLS are implemented, but transport encryption alone
-> does not supply the authorization, admission control, recovery, and
-> operational hardening listed in
+> It is not approved for direct exposure to the public Internet. HTTPS, mTLS,
+> bounded HTTP admission, transport timeouts, hot-plug handling, and recovery
+> after system suspend are implemented. Device-aware authorization, connection
+> and client rate limits, and the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
 ## Architecture
@@ -27,17 +27,32 @@ The gate is held from command submission through USB response completion. This
 means concurrent HTTP requests for one serial block without executing
 concurrently, while separate physical HSMs remain independent.
 
+The per-device gate deliberately has no queue timeout: accepted requests wait
+until preceding commands for that device finish. A global Tower concurrency
+limit bounds the number of requests in all device queues and handlers. The
+default is 64 requests and can be changed with
+`--http-max-in-flight-requests`; excess requests are rejected immediately with
+`503 Service Unavailable` without making an existing HTTP connection unusable.
+
 Device detachment removes the corresponding entry. A request already holding
 the entry completes with a transport error if the USB transfer fails; a newly
 attached device receives a new entry even when it has the same serial. Duplicate
 simultaneously attached serials are rejected rather than routed ambiguously.
 
-Opening and claiming a device currently happens only during initial discovery
-or a hot-plug event. A failed open or claim is not retried while the device
-remains attached, a failed command does not proactively reopen its USB handle,
-and an ended hot-plug stream is reported but not restarted. These are known
-recovery limitations rather than guarantees that an entry remains usable for
-as long as it remains in the registry.
+The connector detects a delayed timer tick caused by system suspend. After
+resume it stops the old HTTP service, discards surviving connections, the USB
+discovery watcher, registry, mutexes, and device handles, and rebuilds them in
+the same process. An implicitly selected legacy serial is carried into the new
+service, so this recovery does not change the selected compatibility device.
+A full process restart starts a new implicit selection unless
+`--legacy-serial` is configured.
+
+Opening and claiming a device currently happens during initial discovery, a
+hot-plug event, or the complete rebuild after system resume. A failed open or
+claim is not retried while the device remains attached, a failed command does
+not proactively reopen its USB handle, and an ended hot-plug stream is reported
+but not restarted. These remain recovery limitations for failures that occur
+without a detach/attach event or system suspend.
 
 The shared `pkcs11rs-local-hardware` crate exposes both blocking and async
 frontends. The existing PKCS #11 local connector continues to use the blocking
@@ -110,7 +125,8 @@ Selection follows these rules:
 
 1. `--legacy-serial SERIAL` always selects that serial or reports it absent.
 2. Without configuration, the serial of the first successfully discovered
-   device is latched for the connector process lifetime.
+   device is latched for the connector process lifetime, including internal
+   service rebuilds after system suspend.
 3. The legacy routes then behave as if a client addressed that serial through
    `/v1/devices/{serial}` and `/v1/devices/{serial}/commands`.
 4. Later attachments and changes to the device's transient USB identifier do
@@ -165,6 +181,49 @@ but the application does not yet extract the verified identity or restrict it
 to particular devices or commands. Every certificate accepted by that CA
 therefore has the same access.
 
+### Timeouts and admission
+
+HTTP transport stages are bounded independently from HSM processing:
+
+- TLS handshakes and HTTP/1 header reads have five-second deadlines.
+- The complete request body has a five-second deadline and a 3,139-byte limit.
+- HTTP/2 request header lists are limited to 16 KiB.
+- A blocked response socket write has a five-second deadline; the timer runs
+  only while a write is unable to make progress.
+- At most 64 HTTP requests are processed concurrently by default. Use
+  `--http-max-in-flight-requests` to change the limit. Excess requests receive
+  `503 Service Unavailable` immediately.
+
+There is no overall HTTP handler deadline. Once a complete request has entered
+the command handler, it may wait indefinitely for its device gate. After it
+obtains the gate, USB bulk writes have a fixed three-second timeout and the USB
+response has the timeout selected by `--command-timeout-seconds`, which defaults
+to 60 seconds. The response timeout does not include time spent waiting for the
+device gate. Response headers are created only after the command result is
+known, allowing the connector to return the correct final HTTP status.
+
+These boundaries avoid racing a generic HTTP request timer against an active
+USB command. The connector never automatically retries a command because a
+mutating command may have executed even when its response is lost.
+
+### Logging
+
+The default `info` level records listener state, device attachment and
+detachment by serial and transient USB device ID, and suspend recovery. Enable
+request diagnostics with:
+
+```sh
+RUST_LOG=pkcs11rs_connector=debug pkcs11rs-connector
+```
+
+At `debug`, one completion event is emitted when each HTTP response has been
+created. It includes the method, URI, HTTP version, status, and handler elapsed
+time. Command responses also include the HSM serial, transient USB device ID,
+transport outcome, and HSM command elapsed time. The HSM time starts after the
+device gate is acquired, so the difference from the handler time exposes queue
+waiting without producing a second command log entry. Socket delivery occurs
+after this event and is protected separately by the response-write timeout.
+
 ## Deployment boundary
 
 The recommended current deployments are:
@@ -213,16 +272,15 @@ remain fail-closed in the connector itself.
 
 ### Resource and denial-of-service controls
 
-- Add header-read, body-read, complete-request, write, and idle deadlines. The
-  USB command timeout begins only after a request obtains its device gate and
-  does not currently bound time spent waiting in front of that gate.
-- Bound accepted connections, simultaneous HTTP requests, HTTP/2 streams, and
-  total in-flight command work.
-- Replace the unbounded per-device mutex wait with bounded admission and a
-  short queue deadline. Return `429 Too Many Requests` or `503 Service
-  Unavailable` when capacity is exhausted.
-- Apply global and authenticated-client rate limits so many requests cannot
-  accumulate behind one slow HSM or across all attached HSMs.
+- Bound accepted TCP connections before they reach the HTTP request middleware.
+- Add authenticated-client and device-aware rate or admission limits so one
+  identity cannot consume the global request capacity. The current global
+  in-flight limit bounds total queued and executing work but does not provide
+  fairness between clients or devices.
+- Put public deployments behind infrastructure that supplies any additional
+  HTTP/2 stream, idle-connection, and slow-header protection required by their
+  threat model. Do not impose a generic complete-request deadline that can race
+  an HSM command after USB execution has begun.
 
 ### Authentication and authorization
 
@@ -275,6 +333,7 @@ firmware-specific rules even when an HTTP layer is bypassed.
 --listen ADDRESS
 --legacy-serial SERIAL
 --command-timeout-seconds SECONDS
+--http-max-in-flight-requests COUNT
 --tls-certificate PATH
 --tls-key PATH
 --tls-client-ca PATH
@@ -284,5 +343,5 @@ firmware-specific rules even when an HTTP layer is bypassed.
 Set `RUST_LOG` to control structured diagnostics, for example:
 
 ```sh
-RUST_LOG=pkcs11rs_connector=debug cargo run -p pkcs11rs-connector
+RUST_LOG=pkcs11rs_connector=debug cargo run -p pkcs11rs-connector -- [OPTIONS]
 ```

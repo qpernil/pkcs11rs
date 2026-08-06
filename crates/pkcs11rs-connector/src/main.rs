@@ -26,6 +26,7 @@ const RESUME_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
 const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -213,6 +214,10 @@ fn configure_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(Some(HTTP_STAGE_TIMEOUT));
+    server
+        .http_builder()
+        .http2()
+        .max_header_list_size(HTTP2_MAX_HEADER_LIST_SIZE);
 }
 
 async fn wait_for_resume() -> Duration {
