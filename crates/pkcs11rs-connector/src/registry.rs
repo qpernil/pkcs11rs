@@ -3,7 +3,11 @@ use pkcs11rs_local_hardware::{
     UsbDeviceId, YubiHsmHotplugEvent, YubiHsmUsbCandidate, YubiHsmUsbDevice,
 };
 use serde::Serialize;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{Mutex, RwLock};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -70,9 +74,15 @@ impl DeviceEntry {
         self.view.clone()
     }
 
-    pub async fn command(&self, request: &[u8]) -> Result<Vec<u8>, TransportError> {
+    pub fn usb_device_id(&self) -> Option<String> {
+        self.id.map(|id| format!("{id:?}"))
+    }
+
+    pub async fn command(&self, request: &[u8]) -> (Result<Vec<u8>, TransportError>, Duration) {
         let mut transport = self.transport.lock().await;
-        transport.command(request).await
+        let started_at = Instant::now();
+        let result = transport.command(request).await;
+        (result, started_at.elapsed())
     }
 }
 
@@ -137,6 +147,10 @@ impl DeviceRegistry {
             .and_then(|serial| state.devices.get(serial))
             .cloned()
             .ok_or(LegacySelectionError::NoDevice)
+    }
+
+    pub async fn selected_legacy_serial(&self) -> Option<String> {
+        self.state.read().await.legacy_serial.clone()
     }
 
     async fn contains_id(&self, id: UsbDeviceId) -> bool {
@@ -312,7 +326,7 @@ mod tests {
         registry.insert_test_echo("22222222").await;
         let selected = registry.select_legacy(None).await.unwrap();
         assert_eq!(selected.view().serial, "22222222");
-        assert_eq!(selected.command(b"hello").await.unwrap(), b"hello");
+        assert_eq!(selected.command(b"hello").await.0.unwrap(), b"hello");
 
         registry.insert_test_echo("11111111").await;
         assert_eq!(
@@ -348,6 +362,39 @@ mod tests {
         assert_eq!(
             registry.select_legacy(None).await.unwrap().view().serial,
             "22222222"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_selection_survives_a_registry_rebuild_within_the_process() {
+        let original = DeviceRegistry::new(Duration::from_secs(1));
+        original.insert_test_echo("22222222").await;
+        original.insert_test_echo("11111111").await;
+        let selected_serial = original.selected_legacy_serial().await.unwrap();
+        assert_eq!(selected_serial, "22222222");
+
+        let rebuilt = DeviceRegistry::new(Duration::from_secs(1));
+        rebuilt.insert_test_echo("11111111").await;
+        assert!(matches!(
+            rebuilt.select_legacy(Some(&selected_serial)).await,
+            Err(LegacySelectionError::NoDevice)
+        ));
+        rebuilt.insert_test_echo("22222222").await;
+        assert_eq!(
+            rebuilt
+                .select_legacy(Some(&selected_serial))
+                .await
+                .unwrap()
+                .view()
+                .serial,
+            "22222222"
+        );
+
+        let restarted = DeviceRegistry::new(Duration::from_secs(1));
+        restarted.insert_test_echo("11111111").await;
+        assert_eq!(
+            restarted.select_legacy(None).await.unwrap().view().serial,
+            "11111111"
         );
     }
 
@@ -387,8 +434,8 @@ mod tests {
             .await;
         let entry = registry.get("12345678").await.unwrap();
         let (left, right) = tokio::join!(entry.command(b"left"), entry.command(b"right"));
-        assert_eq!(left.unwrap(), b"left");
-        assert_eq!(right.unwrap(), b"right");
+        assert_eq!(left.0.unwrap(), b"left");
+        assert_eq!(right.0.unwrap(), b"right");
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 }
