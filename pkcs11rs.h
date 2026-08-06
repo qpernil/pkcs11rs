@@ -53,6 +53,15 @@ typedef struct PKCS11RS_BYTE_BUFFER {
 #define CKA_PKCS11RS_FIDO_RP_ID \
   (CKA_VENDOR_DEFINED | PKCS11RS_VENDOR_BASE | 3UL)
 
+/*
+ * Return the canonical CKM_* name for a mechanism recognized by this build.
+ * The returned string is NUL-terminated, immutable, owned by the library, and
+ * valid for the lifetime of the process. An unknown mechanism returns NULL.
+ */
+CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetMechanismName)(
+  CK_MECHANISM_TYPE type
+);
+
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
   CK_ULONG format;
 } CKM_YUBICO_AES_CCM_WRAP_PARAMS;

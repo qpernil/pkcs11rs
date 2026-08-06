@@ -1,21 +1,22 @@
 use crate::pkcs11::*;
 use crate::{
     as_mut, map, with_slot_context_mut, Error, SlotContext, TokenObject,
-    CKM_PKCS11RS_PROJECT_PUBLIC_KEY, CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP,
-    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192,
-    YUBIHSM_ALGO_AES192_CCM_WRAP, YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP,
-    YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB, YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_EC_BP256,
-    YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512, YUBIHSM_ALGO_EC_ECDSA_SHA1,
-    YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384, YUBIHSM_ALGO_EC_ECDSA_SHA512,
-    YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P384,
-    YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1, YUBIHSM_ALGO_HMAC_SHA256,
-    YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512, YUBIHSM_ALGO_RSA_2048,
-    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ALGO_RSA_OAEP_SHA1,
-    YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384, YUBIHSM_ALGO_RSA_OAEP_SHA512,
-    YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1, YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-    YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512, YUBIHSM_ALGO_RSA_PSS_SHA1,
-    YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384, YUBIHSM_ALGO_RSA_PSS_SHA512,
-    YUBIHSM_ALGO_X25519,
+    CKM_PKCS11RS_FIDO_ASSERTION, CKM_PKCS11RS_PREVIEW_SIGN, CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+    CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN, CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+    CKM_YUBICO_AES_CCM_WRAP, CKM_YUBICO_RSA_WRAP, YUBIHSM_ALGO_AES128,
+    YUBIHSM_ALGO_AES128_CCM_WRAP, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES192_CCM_WRAP,
+    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_AES256_CCM_WRAP, YUBIHSM_ALGO_AES_CBC, YUBIHSM_ALGO_AES_ECB,
+    YUBIHSM_ALGO_AES_KWP, YUBIHSM_ALGO_EC_BP256, YUBIHSM_ALGO_EC_BP384, YUBIHSM_ALGO_EC_BP512,
+    YUBIHSM_ALGO_EC_ECDSA_SHA1, YUBIHSM_ALGO_EC_ECDSA_SHA256, YUBIHSM_ALGO_EC_ECDSA_SHA384,
+    YUBIHSM_ALGO_EC_ECDSA_SHA512, YUBIHSM_ALGO_EC_K256, YUBIHSM_ALGO_EC_P224, YUBIHSM_ALGO_EC_P256,
+    YUBIHSM_ALGO_EC_P384, YUBIHSM_ALGO_EC_P521, YUBIHSM_ALGO_ED25519, YUBIHSM_ALGO_HMAC_SHA1,
+    YUBIHSM_ALGO_HMAC_SHA256, YUBIHSM_ALGO_HMAC_SHA384, YUBIHSM_ALGO_HMAC_SHA512,
+    YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096,
+    YUBIHSM_ALGO_RSA_OAEP_SHA1, YUBIHSM_ALGO_RSA_OAEP_SHA256, YUBIHSM_ALGO_RSA_OAEP_SHA384,
+    YUBIHSM_ALGO_RSA_OAEP_SHA512, YUBIHSM_ALGO_RSA_PKCS1_DECRYPT, YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+    YUBIHSM_ALGO_RSA_PKCS1_SHA256, YUBIHSM_ALGO_RSA_PKCS1_SHA384, YUBIHSM_ALGO_RSA_PKCS1_SHA512,
+    YUBIHSM_ALGO_RSA_PSS_SHA1, YUBIHSM_ALGO_RSA_PSS_SHA256, YUBIHSM_ALGO_RSA_PSS_SHA384,
+    YUBIHSM_ALGO_RSA_PSS_SHA512, YUBIHSM_ALGO_X25519,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +25,100 @@ pub(crate) struct MechanismDetails {
     pub(crate) min_key_size: CK_ULONG,
     pub(crate) max_key_size: CK_ULONG,
     pub(crate) flags: CK_FLAGS,
+}
+
+pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::ffi::CStr> {
+    macro_rules! known_mechanisms {
+        ($($mechanism:ident),+ $(,)?) => {
+            match type_ {
+                $(value if value == $mechanism as CK_MECHANISM_TYPE => {
+                    Some(unsafe {
+                        std::ffi::CStr::from_bytes_with_nul_unchecked(
+                            concat!(stringify!($mechanism), "\0").as_bytes()
+                        )
+                    })
+                })+
+                _ => None,
+            }
+        };
+    }
+
+    known_mechanisms!(
+        CKM_RSA_PKCS_KEY_PAIR_GEN,
+        CKM_RSA_PKCS,
+        CKM_RSA_X_509,
+        CKM_RSA_PKCS_OAEP,
+        CKM_RSA_PKCS_PSS,
+        CKM_SHA1_RSA_PKCS,
+        CKM_SHA224_RSA_PKCS,
+        CKM_SHA256_RSA_PKCS,
+        CKM_SHA384_RSA_PKCS,
+        CKM_SHA512_RSA_PKCS,
+        CKM_SHA1_RSA_PKCS_PSS,
+        CKM_SHA224_RSA_PKCS_PSS,
+        CKM_SHA256_RSA_PKCS_PSS,
+        CKM_SHA384_RSA_PKCS_PSS,
+        CKM_SHA512_RSA_PKCS_PSS,
+        CKM_SHA3_224_RSA_PKCS,
+        CKM_SHA3_256_RSA_PKCS,
+        CKM_SHA3_384_RSA_PKCS,
+        CKM_SHA3_512_RSA_PKCS,
+        CKM_SHA3_224_RSA_PKCS_PSS,
+        CKM_SHA3_256_RSA_PKCS_PSS,
+        CKM_SHA3_384_RSA_PKCS_PSS,
+        CKM_SHA3_512_RSA_PKCS_PSS,
+        CKM_RSA_AES_KEY_WRAP,
+        CKM_EC_KEY_PAIR_GEN,
+        CKM_ECDSA,
+        CKM_ECDSA_SHA1,
+        CKM_ECDSA_SHA224,
+        CKM_ECDSA_SHA256,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
+        CKM_ECDSA_SHA3_224,
+        CKM_ECDSA_SHA3_256,
+        CKM_ECDSA_SHA3_384,
+        CKM_ECDSA_SHA3_512,
+        CKM_ECDH1_DERIVE,
+        CKM_ECDH1_COFACTOR_DERIVE,
+        CKM_EC_EDWARDS_KEY_PAIR_GEN,
+        CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+        CKM_EDDSA,
+        CKM_GENERIC_SECRET_KEY_GEN,
+        CKM_AES_KEY_GEN,
+        CKM_AES_ECB,
+        CKM_AES_CBC,
+        CKM_AES_CBC_PAD,
+        CKM_AES_CTR,
+        CKM_AES_CCM,
+        CKM_AES_GCM,
+        CKM_AES_GMAC,
+        CKM_AES_CMAC,
+        CKM_AES_CMAC_GENERAL,
+        CKM_AES_KEY_WRAP,
+        CKM_AES_KEY_WRAP_KWP,
+        CKM_SHA_1,
+        CKM_SHA224,
+        CKM_SHA256,
+        CKM_SHA384,
+        CKM_SHA512,
+        CKM_SHA3_224,
+        CKM_SHA3_256,
+        CKM_SHA3_384,
+        CKM_SHA3_512,
+        CKM_SHA_1_HMAC,
+        CKM_SHA256_HMAC,
+        CKM_SHA384_HMAC,
+        CKM_SHA512_HMAC,
+        CKM_HKDF_DERIVE,
+        CKM_YUBICO_AES_CCM_WRAP,
+        CKM_YUBICO_RSA_WRAP,
+        CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+        CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+        CKM_PKCS11RS_PREVIEW_SIGN,
+        CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        CKM_PKCS11RS_FIDO_ASSERTION,
+    )
 }
 
 pub(crate) const MECHANISMS: [MechanismDetails; 5] = [
@@ -847,6 +942,15 @@ pub(crate) fn require_key_mechanism(
     Ok(())
 }
 
+/// Return the library-owned, NUL-terminated symbolic name for a mechanism
+/// recognized by this PKCS11RS build, or NULL for an unknown value.
+#[no_mangle]
+pub extern "C" fn PKCS11RS_GetMechanismName(
+    type_: CK_MECHANISM_TYPE,
+) -> *const std::os::raw::c_char {
+    mechanism_name(type_).map_or(std::ptr::null(), std::ffi::CStr::as_ptr)
+}
+
 ffi_entry_point! {
     pub fn C_GetMechanismList(
         slotID: CK_SLOT_ID,
@@ -923,4 +1027,37 @@ pub(crate) fn get_mechanism_info(
         log!(2, "C_GetMechanismInfo returning {:?}", info);
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn mechanism_names_include_standard_and_vendor_values() {
+        assert_eq!(
+            mechanism_name(CKM_RSA_PKCS as CK_MECHANISM_TYPE).and_then(|name| name.to_str().ok()),
+            Some("CKM_RSA_PKCS")
+        );
+        assert_eq!(
+            mechanism_name(CKM_YUBICO_RSA_WRAP).and_then(|name| name.to_str().ok()),
+            Some("CKM_YUBICO_RSA_WRAP")
+        );
+        assert_eq!(
+            mechanism_name(CKM_PKCS11RS_FIDO_ASSERTION).and_then(|name| name.to_str().ok()),
+            Some("CKM_PKCS11RS_FIDO_ASSERTION")
+        );
+        assert_eq!(mechanism_name(CK_ULONG::MAX), None);
+    }
+
+    #[test]
+    fn mechanism_name_extension_returns_a_static_c_string_or_null() {
+        let name = PKCS11RS_GetMechanismName(CKM_SHA256 as CK_MECHANISM_TYPE);
+        assert!(!name.is_null());
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
+            b"CKM_SHA256"
+        );
+        assert!(PKCS11RS_GetMechanismName(CK_ULONG::MAX).is_null());
+    }
 }
