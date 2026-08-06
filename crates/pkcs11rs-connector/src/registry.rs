@@ -4,7 +4,7 @@ use pkcs11rs_local_hardware::{
 };
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,25 +12,74 @@ use tokio::sync::{Mutex, RwLock};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceStatus {
+    Available,
+    Unclaimed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DeviceView {
     pub serial: String,
     pub manufacturer: String,
     pub product: String,
     pub usb_version: String,
-    pub status: &'static str,
+    pub status: DeviceStatus,
 }
 
-#[derive(Debug)]
-pub struct TransportError(String);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportErrorKind {
+    InvalidCommandFrame,
+    CommandTooLarge,
+    DeviceTransport,
+}
+
+#[derive(Clone, Debug)]
+pub struct TransportError {
+    kind: TransportErrorKind,
+    message: String,
+}
+
+impl TransportError {
+    pub fn kind(&self) -> TransportErrorKind {
+        self.kind
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            TransportErrorKind::InvalidCommandFrame => "invalid_command_frame",
+            TransportErrorKind::CommandTooLarge => "command_too_large",
+            TransportErrorKind::DeviceTransport => "device_transport_error",
+        }
+    }
+}
 
 impl std::fmt::Display for TransportError {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.write_str(&self.0)
+        fmt.write_str(&self.message)
     }
 }
 
 impl std::error::Error for TransportError {}
+
+impl From<pkcs11rs_local_hardware::Error> for TransportError {
+    fn from(error: pkcs11rs_local_hardware::Error) -> Self {
+        let kind = match &error {
+            pkcs11rs_local_hardware::Error::InvalidMessageLength { .. } => {
+                TransportErrorKind::InvalidCommandFrame
+            }
+            pkcs11rs_local_hardware::Error::SendBufferTooLarge { .. } => {
+                TransportErrorKind::CommandTooLarge
+            }
+            _ => TransportErrorKind::DeviceTransport,
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
+}
 
 trait CommandTransport: Send {
     fn command<'a>(
@@ -55,7 +104,7 @@ impl CommandTransport for UsbTransport {
                 .device
                 .transmit(request, &mut response, self.timeout)
                 .await
-                .map_err(|error| TransportError(error.to_string()))?;
+                .map_err(TransportError::from)?;
             let length = received.len();
             response.truncate(length);
             Ok(response)
@@ -88,6 +137,7 @@ impl DeviceEntry {
 
 #[derive(Default)]
 struct RegistryState {
+    inventory: HashMap<String, DeviceView>,
     devices: HashMap<String, Arc<DeviceEntry>>,
     serial_by_id: HashMap<UsbDeviceId, String>,
     legacy_serial: Option<String>,
@@ -117,12 +167,16 @@ impl DeviceRegistry {
             .state
             .read()
             .await
-            .devices
+            .inventory
             .values()
-            .map(|entry| entry.view())
+            .cloned()
             .collect::<Vec<_>>();
         devices.sort_by(|left, right| left.serial.cmp(&right.serial));
         devices
+    }
+
+    pub async fn view(&self, serial: &str) -> Option<DeviceView> {
+        self.state.read().await.inventory.get(serial).cloned()
     }
 
     pub async fn get(&self, serial: &str) -> Option<Arc<DeviceEntry>> {
@@ -153,8 +207,54 @@ impl DeviceRegistry {
         self.state.read().await.legacy_serial.clone()
     }
 
+    pub async fn managed_serials(&self) -> HashSet<String> {
+        self.state.read().await.devices.keys().cloned().collect()
+    }
+
     async fn contains_id(&self, id: UsbDeviceId) -> bool {
         self.state.read().await.serial_by_id.contains_key(&id)
+    }
+
+    async fn register(
+        &self,
+        id: UsbDeviceId,
+        view: DeviceView,
+        entry: Option<Arc<DeviceEntry>>,
+    ) -> bool {
+        let serial = view.serial.clone();
+        let mut state = self.state.write().await;
+        if state.inventory.contains_key(&serial) {
+            tracing::error!(%serial, ?id, "duplicate YubiHSM serial");
+            return false;
+        }
+        state.serial_by_id.insert(id, serial.clone());
+        state.inventory.insert(serial.clone(), view);
+        if let Some(entry) = entry {
+            if state.legacy_serial.is_none() {
+                state.legacy_serial = Some(serial.clone());
+            }
+            state.devices.insert(serial, entry);
+        }
+        true
+    }
+
+    async fn register_unclaimed(&self, id: UsbDeviceId, view: DeviceView) {
+        self.register(id, view, None).await;
+    }
+
+    fn candidate_view(
+        candidate: &YubiHsmUsbCandidate,
+        serial: String,
+        status: DeviceStatus,
+    ) -> DeviceView {
+        let version = candidate.version();
+        DeviceView {
+            serial,
+            manufacturer: candidate.manufacturer().to_owned(),
+            product: candidate.product().to_owned(),
+            usb_version: format!("{}.{}", version.0, version.1),
+            status,
+        }
     }
 
     async fn attach_candidate(&self, candidate: YubiHsmUsbCandidate) {
@@ -162,20 +262,35 @@ impl DeviceRegistry {
         if self.contains_id(id).await {
             return;
         }
+        let serial = match candidate.serial().await {
+            Ok(Some(serial)) if !serial.is_empty() => serial,
+            Ok(_) => {
+                tracing::warn!(?id, "ignoring YubiHSM without a serial number");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(?id, %error, "could not identify YubiHSM; leaving it unmanaged");
+                return;
+            }
+        };
+        let unclaimed_view =
+            Self::candidate_view(&candidate, serial.clone(), DeviceStatus::Unclaimed);
         let mut device = match candidate.open().await {
             Ok(device) => device,
             Err(error) => {
-                tracing::warn!(?id, %error, "could not open YubiHSM");
+                tracing::warn!(?id, %error, "could not open YubiHSM; leaving it unmanaged");
+                self.register_unclaimed(id, unclaimed_view).await;
                 return;
             }
         };
         if let Err(error) = device.connect().await {
-            tracing::warn!(?id, %error, "could not claim YubiHSM interface");
-            return;
-        }
-        let serial = device.serial().to_owned();
-        if serial.is_empty() {
-            tracing::warn!(?id, "ignoring YubiHSM without a serial number");
+            tracing::warn!(
+                ?id,
+                serial = device.serial(),
+                %error,
+                "could not claim YubiHSM interface; leaving it unmanaged"
+            );
+            self.register_unclaimed(id, unclaimed_view).await;
             return;
         }
         let version = device.version();
@@ -184,30 +299,19 @@ impl DeviceRegistry {
             manufacturer: device.manufacturer().to_owned(),
             product: device.product().to_owned(),
             usb_version: format!("{}.{}", version.0, version.1),
-            status: "available",
+            status: DeviceStatus::Available,
         };
         let entry = Arc::new(DeviceEntry {
             id: Some(id),
-            view,
+            view: view.clone(),
             transport: Mutex::new(Box::new(UsbTransport {
                 device,
                 timeout: self.command_timeout,
             })),
         });
-
-        let mut state = self.state.write().await;
-        if let Some(existing) = state.devices.get(&serial) {
-            if existing.id != Some(id) {
-                tracing::error!(%serial, ?id, existing_id = ?existing.id, "duplicate YubiHSM serial");
-            }
-            return;
+        if self.register(id, view, Some(entry)).await {
+            tracing::info!(%serial, ?id, "YubiHSM attached");
         }
-        state.serial_by_id.insert(id, serial.clone());
-        if state.legacy_serial.is_none() {
-            state.legacy_serial = Some(serial.clone());
-        }
-        state.devices.insert(serial.clone(), entry);
-        tracing::info!(%serial, ?id, "YubiHSM attached");
     }
 
     async fn detach(&self, id: UsbDeviceId) {
@@ -215,14 +319,15 @@ impl DeviceRegistry {
         let Some(serial) = state.serial_by_id.remove(&id) else {
             return;
         };
-        if state
+        let managed = state
             .devices
             .get(&serial)
-            .is_some_and(|entry| entry.id == Some(id))
-        {
+            .is_some_and(|entry| entry.id == Some(id));
+        if managed {
             state.devices.remove(&serial);
-            tracing::info!(%serial, ?id, "YubiHSM detached");
         }
+        state.inventory.remove(&serial);
+        tracing::info!(%serial, ?id, managed, "YubiHSM detached");
     }
 
     #[cfg(test)]
@@ -234,7 +339,7 @@ impl DeviceRegistry {
                 manufacturer: String::from("Test"),
                 product: String::from("YubiHSM"),
                 usb_version: String::from("2.0"),
-                status: "available",
+                status: DeviceStatus::Available,
             },
             transport: Mutex::new(transport),
         });
@@ -242,12 +347,28 @@ impl DeviceRegistry {
         if state.legacy_serial.is_none() {
             state.legacy_serial = Some(serial.to_owned());
         }
+        state.inventory.insert(serial.to_owned(), entry.view());
         state.devices.insert(serial.to_owned(), entry);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_unclaimed(&self, serial: &str) {
+        self.state.write().await.inventory.insert(
+            serial.to_owned(),
+            DeviceView {
+                serial: serial.to_owned(),
+                manufacturer: String::from("Test"),
+                product: String::from("YubiHSM"),
+                usb_version: String::from("2.0"),
+                status: DeviceStatus::Unclaimed,
+            },
+        );
     }
 
     #[cfg(test)]
     async fn remove_test(&self, serial: &str) {
         let mut state = self.state.write().await;
+        state.inventory.remove(serial);
         state.devices.remove(serial);
     }
 
@@ -261,6 +382,19 @@ impl DeviceRegistry {
         self.insert_test(serial, Box::new(FixedTransport(response)))
             .await;
     }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_test_error(&self, serial: &str, error: TransportError) {
+        self.insert_test(serial, Box::new(FixedErrorTransport(error)))
+            .await;
+    }
+}
+
+fn claim_during_initial_discovery(
+    resume_managed_serials: Option<&HashSet<String>>,
+    serial: &str,
+) -> bool {
+    resume_managed_serials.is_none_or(|managed_serials| managed_serials.contains(serial))
 }
 
 #[cfg(test)]
@@ -289,13 +423,59 @@ impl CommandTransport for FixedTransport {
     }
 }
 
+#[cfg(test)]
+struct FixedErrorTransport(TransportError);
+
+#[cfg(test)]
+impl CommandTransport for FixedErrorTransport {
+    fn command<'a>(
+        &'a mut self,
+        _request: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, TransportError>> {
+        Box::pin(async move { Err(self.0.clone()) })
+    }
+}
+
 pub async fn spawn_discovery(
     registry: DeviceRegistry,
+    resume_managed_serials: Option<&HashSet<String>>,
 ) -> Result<tokio::task::JoinHandle<()>, BoxError> {
     // Start watching before the initial list so no attachment can be missed in
     // the interval between enumeration and hot-plug subscription.
     let mut watch = pkcs11rs_local_hardware::watch_yubihsms()?;
     for candidate in pkcs11rs_local_hardware::yubihsm_candidates().await? {
+        if let Some(managed_serials) = resume_managed_serials {
+            let serial = match candidate.serial().await {
+                Ok(Some(serial)) => serial,
+                Ok(None) => {
+                    tracing::warn!(
+                        id = ?candidate.id(),
+                        "YubiHSM has no stable serial; leaving it unmanaged after resume"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        id = ?candidate.id(),
+                        %error,
+                        "could not identify YubiHSM; leaving it unmanaged after resume"
+                    );
+                    continue;
+                }
+            };
+            if !claim_during_initial_discovery(Some(managed_serials), &serial) {
+                tracing::debug!(
+                    %serial,
+                    id = ?candidate.id(),
+                    "leaving previously unmanaged YubiHSM unclaimed after resume"
+                );
+                let id = candidate.id();
+                let view =
+                    DeviceRegistry::candidate_view(&candidate, serial, DeviceStatus::Unclaimed);
+                registry.register_unclaimed(id, view).await;
+                continue;
+            }
+        }
         registry.attach_candidate(candidate).await;
     }
     Ok(tokio::spawn(async move {
@@ -315,6 +495,18 @@ pub async fn spawn_discovery(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn resume_initial_discovery_only_reclaims_previously_managed_serials() {
+        let managed = HashSet::from([String::from("11111111"), String::from("22222222")]);
+        assert!(claim_during_initial_discovery(None, "33333333"));
+        assert!(claim_during_initial_discovery(Some(&managed), "11111111"));
+        assert!(!claim_during_initial_discovery(Some(&managed), "33333333"));
+        assert!(!claim_during_initial_discovery(
+            Some(&HashSet::new()),
+            "11111111"
+        ));
+    }
 
     #[tokio::test]
     async fn legacy_selection_latches_the_first_serial_and_allows_an_override() {
@@ -370,6 +562,10 @@ mod tests {
         let original = DeviceRegistry::new(Duration::from_secs(1));
         original.insert_test_echo("22222222").await;
         original.insert_test_echo("11111111").await;
+        assert_eq!(
+            original.managed_serials().await,
+            HashSet::from([String::from("11111111"), String::from("22222222")])
+        );
         let selected_serial = original.selected_legacy_serial().await.unwrap();
         assert_eq!(selected_serial, "22222222");
 

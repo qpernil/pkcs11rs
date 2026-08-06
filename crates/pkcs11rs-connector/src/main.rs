@@ -9,6 +9,7 @@ use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
 use registry::{spawn_discovery, DeviceRegistry};
 use std::{
+    collections::HashSet,
     future::Future,
     io,
     net::SocketAddr,
@@ -77,15 +78,24 @@ async fn main() -> Result<(), BoxError> {
     validate_args(&args)?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut legacy_serial = args.legacy_serial.clone();
+    let mut resume_managed_serials: Option<HashSet<String>> = None;
 
     loop {
-        match serve_until_restart(&args, legacy_serial.clone()).await {
+        match serve_until_restart(
+            &args,
+            legacy_serial.clone(),
+            resume_managed_serials.as_ref(),
+        )
+        .await
+        {
             Ok(ServeOutcome::Shutdown) => return Ok(()),
             Ok(ServeOutcome::Resume {
                 gap,
                 selected_legacy_serial,
+                managed_serials,
             }) => {
                 legacy_serial = selected_legacy_serial;
+                resume_managed_serials = Some(managed_serials);
                 tracing::warn!(
                     ?gap,
                     "system suspend detected; restarting connector services"
@@ -107,15 +117,17 @@ enum ServeOutcome {
     Resume {
         gap: Duration,
         selected_legacy_serial: Option<String>,
+        managed_serials: HashSet<String>,
     },
 }
 
 async fn serve_until_restart(
     args: &Args,
     legacy_serial: Option<String>,
+    resume_managed_serials: Option<&HashSet<String>>,
 ) -> Result<ServeOutcome, BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
-    let discovery = spawn_discovery(registry.clone()).await?;
+    let discovery = spawn_discovery(registry.clone(), resume_managed_serials).await?;
     let app = router(
         AppState {
             registry: registry.clone(),
@@ -163,9 +175,11 @@ async fn serve_until_restart(
                 Some(serial) => Some(serial),
                 None => registry.selected_legacy_serial().await,
             };
+            let managed_serials = registry.managed_serials().await;
             ServeOutcome::Resume {
                 gap,
                 selected_legacy_serial,
+                managed_serials,
             }
         }
     };
@@ -281,6 +295,7 @@ mod tests {
     use tokio_rustls::{client::TlsStream, TlsConnector};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    const TEST_COMMAND: &[u8] = b"\x03\x00\x07command";
 
     struct PemFiles {
         directory: PathBuf,
@@ -497,7 +512,7 @@ mod tests {
             TcpStream::connect(address).await.unwrap(),
             Method::POST,
             format!("http://{address}/v1/devices/22222222/commands"),
-            b"command",
+            TEST_COMMAND,
         )
         .await;
         assert_eq!(version, Version::HTTP_2);
@@ -599,7 +614,7 @@ mod tests {
                 "https://localhost:{}/v1/devices/22222222/commands",
                 address.port()
             ),
-            b"command",
+            TEST_COMMAND,
         )
         .await;
         assert_eq!(version, Version::HTTP_2);

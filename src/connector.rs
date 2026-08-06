@@ -1432,6 +1432,9 @@ impl HttpConnector {
         let mut serials = HashSet::with_capacity(devices.devices.len());
         let mut connectors = Vec::with_capacity(devices.devices.len());
         for device in devices.devices {
+            if device.status != "available" {
+                continue;
+            }
             let identity = device.identity()?;
             if !serials.insert(identity.serial.clone()) {
                 return Err(CKR_DEVICE_ERROR.into());
@@ -1757,7 +1760,7 @@ mod tests {
             assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
             write_http_response(
                 &mut connection,
-                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"available"},{"serial":"12345678","usb_version":"2.4","status":"available"}]}"#,
+                br#"{"devices":[{"serial":"87654321","usb_version":"2.5","status":"available"},{"serial":"55555555","usb_version":"2.5","status":"unclaimed"},{"serial":"12345678","usb_version":"2.4","status":"available"}]}"#,
                 true,
             );
         });
