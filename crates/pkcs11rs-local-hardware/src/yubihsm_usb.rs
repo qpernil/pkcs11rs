@@ -124,6 +124,19 @@ impl YubiHsmUsbCandidate {
         usb_bcd_version(self.info.device_version())
     }
 
+    #[cfg(feature = "blocking")]
+    pub fn serial_blocking(&self) -> Result<Option<String>, Error> {
+        if let Some(serial) = self.info.serial_number() {
+            return Ok(Some(serial.to_owned()));
+        }
+        let device = self.info.open().wait()?;
+        let descriptor = device.device_descriptor();
+        Ok(read_nusb_string(
+            &device,
+            descriptor.serial_number_string_index(),
+        ))
+    }
+
     #[cfg(feature = "async-tokio")]
     pub async fn serial(&self) -> Result<Option<String>, Error> {
         if let Some(serial) = self.info.serial_number() {

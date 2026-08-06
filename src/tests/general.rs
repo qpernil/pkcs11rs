@@ -2784,6 +2784,45 @@ pub fn open_session_refreshes_token_presence() {
 }
 
 #[test]
+pub fn get_slot_list_refreshes_registered_slot_presence() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(TestSlot {
+            present: std::cell::Cell::new(true),
+            remove_on_refresh: true,
+            login_active: None,
+            software_private_operations: false,
+            mechanisms: crate::MECHANISMS.to_vec(),
+            token_objects: Vec::new(),
+            session_objects: Vec::new(),
+        }),
+    );
+
+    let mut count = CK_UNAVAILABLE_INFORMATION as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, ::std::ptr::null_mut(), &mut count,),
+        CKR_OK as CK_RV
+    );
+    let mut slots = vec![0; count as usize];
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slots.as_mut_ptr(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert!(!slots[..count as usize].contains(&TEST_SLOT_ID));
+
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 pub fn different_yubihsm_slots_execute_concurrently() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
