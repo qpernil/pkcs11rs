@@ -370,11 +370,15 @@ made. The setting can be used with or without a client identity.
 Create this bundle with the `yubihsm-tls-ca` purpose so every entry is checked
 as an independent TLS trust anchor.
 
-Remote connector slots are added alongside directly attached USB devices. Each
-configured URL always has a slot; an unreachable connector or a connector with
-no device is reported as an empty slot until the module is reinitialized.
-Repeated URLs intentionally create separate slots, each with its own connector
-client and YubiHSM secure session.
+Remote connector slots are added alongside directly attached USB devices.
+Every `C_GetSlotList` reconciles each configured connector inventory. A newly
+reported serial gets a new slot; a known serial keeps its slot ID, remains
+registered while absent, and becomes present again when it reappears. A
+connector that is unreachable before its first successful inventory contributes
+no slot yet. Successful rediscovery also replaces the slot's pooled HTTP client
+so a connection left stale by network loss or host sleep is not reused.
+Repeated URL entries intentionally remain separate endpoints, each with its own
+slots, connector client, and YubiHSM secure session.
 
 Disable only direct YubiHSM USB discovery while retaining other local
 discovery and configured remote slots:

@@ -169,6 +169,7 @@ ffi_entry_point! {
             };
             match with_context(|ctx| {
                 ctx.init()?;
+                ctx.refresh_discovery()?;
                 let slot_contexts = ctx
                     .slot_contexts
                     .read()

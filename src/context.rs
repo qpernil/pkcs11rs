@@ -270,6 +270,8 @@ pub(crate) struct ModuleContext {
     pub(crate) handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
+    pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
+    discovery_refresh: Mutex<()>,
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
@@ -307,7 +309,141 @@ pub(crate) struct SessionContext {
 pub(crate) struct SlotContextRegistry {
     slots: HashMap<CK_SLOT_ID, Arc<Mutex<SlotContext>>>,
     session_slots: HashMap<CK_SESSION_HANDLE, CK_SLOT_ID>,
+    discovered_slots: HashMap<DiscoveredSlotIdentity, DiscoveredSlotRegistration>,
     discovered: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DiscoverySourceIdentity {
+    provider: &'static str,
+    endpoint: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DiscoveredSlotIdentity {
+    source: DiscoverySourceIdentity,
+    // Opaque to reconciliation. The discovery provider decides how to keep
+    // this identifier stable across repeated inventory snapshots.
+    provider_slot_id: String,
+}
+
+enum DiscoveredSlotCandidate {
+    HttpYubiHsm {
+        identity: DiscoveredSlotIdentity,
+        connector: HttpConnector,
+    },
+    #[cfg(feature = "native-hardware")]
+    UsbYubiHsm {
+        identity: DiscoveredSlotIdentity,
+        candidate: pkcs11rs_local_hardware::YubiHsmUsbCandidate,
+    },
+}
+
+struct DiscoverySnapshot {
+    source: DiscoverySourceIdentity,
+    candidates: Vec<DiscoveredSlotCandidate>,
+}
+
+#[derive(Clone)]
+enum DiscoveredSlotBackend {
+    HttpYubiHsm(HttpConnector),
+    #[cfg(feature = "native-hardware")]
+    UsbYubiHsm(UsbConnector),
+}
+
+#[derive(Clone)]
+struct DiscoveredSlotRegistration {
+    slot_id: CK_SLOT_ID,
+    backend: DiscoveredSlotBackend,
+}
+
+struct PreparedDiscoveredSlot {
+    identity: DiscoveredSlotIdentity,
+    registration: DiscoveredSlotRegistration,
+    context: SlotContext,
+}
+
+const HTTP_YUBIHSM_DISCOVERY_PROVIDER: &str = "http-yubihsm";
+#[cfg(feature = "native-hardware")]
+const USB_YUBIHSM_DISCOVERY_PROVIDER: &str = "usb-yubihsm";
+
+impl DiscoverySourceIdentity {
+    fn configured_http_yubihsm(endpoint_index: usize) -> Self {
+        Self {
+            provider: HTTP_YUBIHSM_DISCOVERY_PROVIDER,
+            endpoint: endpoint_index.to_string(),
+        }
+    }
+
+    #[cfg(feature = "native-hardware")]
+    fn local_usb_yubihsm() -> Self {
+        Self {
+            provider: USB_YUBIHSM_DISCOVERY_PROVIDER,
+            endpoint: String::from("local"),
+        }
+    }
+}
+
+impl DiscoveredSlotCandidate {
+    fn identity(&self) -> &DiscoveredSlotIdentity {
+        match self {
+            Self::HttpYubiHsm { identity, .. } => identity,
+            #[cfg(feature = "native-hardware")]
+            Self::UsbYubiHsm { identity, .. } => identity,
+        }
+    }
+}
+
+impl DiscoverySnapshot {
+    fn new(
+        source: DiscoverySourceIdentity,
+        candidates: Vec<DiscoveredSlotCandidate>,
+    ) -> Result<Self, Error> {
+        let identities = candidates
+            .iter()
+            .map(|candidate| candidate.identity())
+            .collect::<HashSet<_>>();
+        if identities.len() != candidates.len()
+            || identities.iter().any(|identity| identity.source != source)
+        {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        Ok(Self { source, candidates })
+    }
+}
+
+impl DiscoveredSlotBackend {
+    fn mark_absent(&self) {
+        match self {
+            Self::HttpYubiHsm(connector) => connector.mark_discovery_absent(),
+            #[cfg(feature = "native-hardware")]
+            Self::UsbYubiHsm(connector) => connector.mark_discovery_absent(),
+        }
+    }
+
+    fn apply_candidate(&self, candidate: DiscoveredSlotCandidate) -> Result<(), Error> {
+        match (self, candidate) {
+            (
+                Self::HttpYubiHsm(current),
+                DiscoveredSlotCandidate::HttpYubiHsm { connector, .. },
+            ) => current.apply_discovered(&connector),
+            #[cfg(feature = "native-hardware")]
+            (Self::UsbYubiHsm(current), DiscoveredSlotCandidate::UsbYubiHsm { candidate, .. }) => {
+                current.apply_discovered(candidate)
+            }
+            #[cfg(feature = "native-hardware")]
+            _ => Err(CKR_DEVICE_ERROR.into()),
+        }
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn http_yubihsm_connector(&self) -> &HttpConnector {
+        match self {
+            Self::HttpYubiHsm(connector) => connector,
+            #[cfg(feature = "native-hardware")]
+            Self::UsbYubiHsm(_) => panic!("expected an HTTP YubiHSM discovery backend"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -346,6 +482,7 @@ impl SlotContextRegistry {
         Self {
             slots: HashMap::new(),
             session_slots: HashMap::new(),
+            discovered_slots: HashMap::new(),
             discovered: false,
         }
     }
@@ -740,6 +877,7 @@ impl ModuleContext {
         #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
         let yubihsm_usb = configuration.yubihsm_usb;
         let secure_channels = Arc::new(configuration.secure_channels);
+        let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         let mut context = ModuleContext {
             debug_level,
             hardware_discovery,
@@ -775,6 +913,8 @@ impl ModuleContext {
             handles: handles.clone(),
             pinentry: pinentry.clone(),
             trust_store: trust_store.clone(),
+            hsmauth_providers,
+            discovery_refresh: Mutex::new(()),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
         #[cfg(feature = "abi-tests")]
@@ -863,6 +1003,7 @@ impl ModuleContext {
         )
     }
 
+    #[cfg(test)]
     fn insert_yubihsm_slot_with_discovery(
         slot_contexts: &mut SlotContextRegistry,
         slot_id: CK_SLOT_ID,
@@ -1632,135 +1773,11 @@ impl ModuleContext {
             // PC/SC hardware discovery.
             return Ok(());
         }
-        let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
+        let hsmauth_providers = self.hsmauth_providers.clone();
         #[cfg(feature = "native-hardware")]
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
         #[cfg(feature = "native-hardware")]
         let mut pcsc_devices: HashMap<PhysicalDeviceKey, Arc<DeviceContext>> = HashMap::new();
-        #[cfg(feature = "native-hardware")]
-        if self.yubihsm_usb {
-            let candidates = match pkcs11rs_local_hardware::yubihsm_candidates_blocking() {
-                Ok(candidates) => Some(candidates),
-                Err(error) => {
-                    log!(1, "YubiHSM USB enumeration: {}", error);
-                    None
-                }
-            };
-            for candidate in candidates.into_iter().flatten() {
-                let mut connector: UsbConnector = match candidate.open_blocking() {
-                    Ok(connector) => connector,
-                    Err(error) => {
-                        log!(1, "YubiHSM USB open: {}", error);
-                        continue;
-                    }
-                };
-                let name = connector.name();
-                log!(2, "{}", name);
-                if slot_contexts.values().any(|context| {
-                    context
-                        .lock()
-                        .ok()
-                        .map(|context| context.slot.name() == name)
-                        .unwrap_or(false)
-                }) {
-                    continue;
-                }
-                if let Err(error) = connector.connect_blocking() {
-                    log!(1, "YubiHSM USB claim interface: {}", error);
-                    continue;
-                }
-                let Some(slot_id) = slot_contexts.next_slot_id() else {
-                    log!(1, "YubiHSM slot ID space exhausted");
-                    continue;
-                };
-                let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
-                    Rc::new(connector),
-                    (0, 0, 0),
-                    Vec::new(),
-                    hsmauth_providers.clone(),
-                    self.yubihsm_public_discovery_config.clone(),
-                );
-                yubihsm_slot.set_pinentry(self.pinentry.clone());
-                yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
-                let mut slot = Box::new(yubihsm_slot);
-                if let Err(error) = slot.init_slot() {
-                    log!(1, "YubiHSM GET DEVICE INFO: {:?}", error);
-                    continue;
-                }
-                if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
-                    &mut slot_contexts,
-                    slot_id,
-                    slot,
-                    true,
-                    self.handles.clone(),
-                    self.pinentry.clone(),
-                    self.trust_store.clone(),
-                ) {
-                    log!(1, "YubiHSM slot registration: {:?}", error);
-                    continue;
-                }
-            }
-        }
-        // Remote connector slots are explicitly configured and remain
-        // independent of automatic local hardware discovery.
-        for url in self.yubihsm_urls.clone() {
-            let connectors =
-                match HttpConnector::discover_with_tls(url.clone(), &self.yubihsm_http_tls) {
-                    Ok(connectors) => connectors,
-                    Err(error) => {
-                        log!(1, "YubiHSM connector discovery at {url}: {:?}", error);
-                        continue;
-                    }
-                };
-            for mut connector in connectors {
-                let connected = match connector.connect() {
-                    Ok(()) => true,
-                    Err(error) => {
-                        log!(1, "YubiHSM connector connection to {url}: {:?}", error);
-                        false
-                    }
-                };
-                let name = connector.name();
-                log!(2, "{} at {}", name, url);
-                let Some(slot_id) = slot_contexts.next_slot_id() else {
-                    log!(1, "YubiHSM connector slot ID space exhausted");
-                    break;
-                };
-                let connector = Rc::new(connector);
-                let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
-                    connector.clone(),
-                    (0, 0, 0),
-                    Vec::new(),
-                    hsmauth_providers.clone(),
-                    self.yubihsm_public_discovery_config.clone(),
-                );
-                yubihsm_slot.set_pinentry(self.pinentry.clone());
-                yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
-                let mut slot = Box::new(yubihsm_slot);
-                if connected {
-                    if let Err(error) = slot.init_slot() {
-                        log!(1, "YubiHSM GET DEVICE INFO through {url}: {:?}", error);
-                        connector.set_unavailable();
-                    }
-                }
-                if let Err(error) = Self::insert_yubihsm_slot_with_discovery(
-                    &mut slot_contexts,
-                    slot_id,
-                    slot,
-                    true,
-                    self.handles.clone(),
-                    self.pinentry.clone(),
-                    self.trust_store.clone(),
-                ) {
-                    log!(
-                        1,
-                        "YubiHSM connector slot registration for {url}: {:?}",
-                        error
-                    );
-                    continue;
-                }
-            }
-        }
         #[cfg(feature = "native-hardware")]
         if let Some(context) = self.pcsc.clone() {
             if let Ok(readers) = context.list_readers_owned() {
@@ -2142,6 +2159,313 @@ impl ModuleContext {
         log!(2, "ModuleContext.init {:?}", self);
         Ok(())
     }
+
+    fn prepare_http_yubihsm_slot(
+        &self,
+        slot_id: CK_SLOT_ID,
+        identity: DiscoveredSlotIdentity,
+        connector: HttpConnector,
+    ) -> Result<PreparedDiscoveredSlot, Error> {
+        connector.accept_discovered();
+        let discovery_connector = connector.clone();
+        let connector = Rc::new(connector);
+        let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+            connector.clone(),
+            (0, 0, 0),
+            Vec::new(),
+            self.hsmauth_providers.clone(),
+            self.yubihsm_public_discovery_config.clone(),
+        );
+        yubihsm_slot.set_pinentry(self.pinentry.clone());
+        yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
+        let mut slot = Box::new(yubihsm_slot);
+        slot.init_slot()?;
+        let context = Self::new_yubihsm_slot_context(
+            slot_id,
+            slot,
+            true,
+            self.handles.clone(),
+            self.pinentry.clone(),
+            self.trust_store.clone(),
+        )?;
+        Ok(PreparedDiscoveredSlot {
+            identity,
+            registration: DiscoveredSlotRegistration {
+                slot_id,
+                backend: DiscoveredSlotBackend::HttpYubiHsm(discovery_connector),
+            },
+            context,
+        })
+    }
+
+    #[cfg(feature = "native-hardware")]
+    fn prepare_usb_yubihsm_slot(
+        &self,
+        slot_id: CK_SLOT_ID,
+        identity: DiscoveredSlotIdentity,
+        candidate: pkcs11rs_local_hardware::YubiHsmUsbCandidate,
+    ) -> Result<PreparedDiscoveredSlot, Error> {
+        let mut connector = UsbConnector::open_blocking(candidate)?;
+        connector.connect_blocking()?;
+        let discovery_connector = connector.clone();
+        let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
+            Rc::new(connector),
+            (0, 0, 0),
+            Vec::new(),
+            self.hsmauth_providers.clone(),
+            self.yubihsm_public_discovery_config.clone(),
+        );
+        yubihsm_slot.set_pinentry(self.pinentry.clone());
+        yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
+        let mut slot = Box::new(yubihsm_slot);
+        slot.init_slot()?;
+        let context = Self::new_yubihsm_slot_context(
+            slot_id,
+            slot,
+            true,
+            self.handles.clone(),
+            self.pinentry.clone(),
+            self.trust_store.clone(),
+        )?;
+        Ok(PreparedDiscoveredSlot {
+            identity,
+            registration: DiscoveredSlotRegistration {
+                slot_id,
+                backend: DiscoveredSlotBackend::UsbYubiHsm(discovery_connector),
+            },
+            context,
+        })
+    }
+
+    fn prepare_discovered_slot(
+        &self,
+        slot_id: CK_SLOT_ID,
+        candidate: DiscoveredSlotCandidate,
+    ) -> Result<PreparedDiscoveredSlot, Error> {
+        match candidate {
+            DiscoveredSlotCandidate::HttpYubiHsm {
+                identity,
+                connector,
+            } => self.prepare_http_yubihsm_slot(slot_id, identity, connector),
+            #[cfg(feature = "native-hardware")]
+            DiscoveredSlotCandidate::UsbYubiHsm {
+                identity,
+                candidate,
+            } => self.prepare_usb_yubihsm_slot(slot_id, identity, candidate),
+        }
+    }
+
+    fn mark_discovery_source_absent(&self, source: &DiscoverySourceIdentity) -> Result<(), Error> {
+        let registrations = {
+            let slot_contexts = self
+                .slot_contexts
+                .read()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+            slot_contexts
+                .discovered_slots
+                .iter()
+                .filter(|(identity, _)| identity.source == *source)
+                .map(|(_, registration)| registration.clone())
+                .collect::<Vec<_>>()
+        };
+        for registration in registrations {
+            registration.backend.mark_absent();
+        }
+        Ok(())
+    }
+
+    fn reconcile_discovery_snapshot(&self, snapshot: DiscoverySnapshot) -> Result<(), Error> {
+        let discovered_identities = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.identity().clone())
+            .collect::<HashSet<_>>();
+        let registrations = {
+            let slot_contexts = self
+                .slot_contexts
+                .read()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+            slot_contexts
+                .discovered_slots
+                .iter()
+                .filter(|(identity, _)| identity.source == snapshot.source)
+                .map(|(identity, registration)| (identity.clone(), registration.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+        for (identity, registration) in &registrations {
+            if !discovered_identities.contains(identity) {
+                registration.backend.mark_absent();
+            }
+        }
+        for candidate in snapshot.candidates {
+            if let Some(registration) = registrations.get(candidate.identity()) {
+                if let Err(error) = registration.backend.apply_candidate(candidate) {
+                    registration.backend.mark_absent();
+                    log!(
+                        1,
+                        "{} discovery at {} could not refresh slot {}: {error:?}",
+                        snapshot.source.provider,
+                        snapshot.source.endpoint,
+                        registration.slot_id
+                    );
+                }
+                continue;
+            }
+            let slot_id = self
+                .slot_contexts
+                .read()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+                .next_slot_id()
+                .ok_or(CKR_DEVICE_ERROR)?;
+            match self.prepare_discovered_slot(slot_id, candidate) {
+                Ok(prepared) => {
+                    let mut slot_contexts = self
+                        .slot_contexts
+                        .write()
+                        .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+                    if slot_contexts
+                        .discovered_slots
+                        .contains_key(&prepared.identity)
+                        || slot_contexts.contains_key(&slot_id)
+                    {
+                        return Err(CKR_CANT_LOCK.into());
+                    }
+                    slot_contexts.insert_yubihsm_slot_context(slot_id, prepared.context);
+                    slot_contexts
+                        .discovered_slots
+                        .insert(prepared.identity, prepared.registration);
+                }
+                Err(error) => log!(
+                    1,
+                    "{} discovery at {} could not initialize a slot: {error:?}",
+                    snapshot.source.provider,
+                    snapshot.source.endpoint
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_http_yubihsm_discovery(&self) -> Result<(), Error> {
+        for (endpoint_index, configured_url) in self.yubihsm_urls.iter().enumerate() {
+            let source = DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index);
+            let discovery =
+                HttpConnector::discover_with_tls(configured_url.clone(), &self.yubihsm_http_tls);
+            let connectors = match discovery {
+                Ok(connectors) => connectors,
+                Err(error) => {
+                    self.mark_discovery_source_absent(&source)?;
+                    log!(
+                        1,
+                        "YubiHSM connector discovery refresh at {configured_url}: {error:?}"
+                    );
+                    continue;
+                }
+            };
+            let candidates = connectors
+                .into_iter()
+                .map(|connector| {
+                    let (_, serial) = connector.endpoint_identity()?;
+                    Ok(DiscoveredSlotCandidate::HttpYubiHsm {
+                        identity: DiscoveredSlotIdentity {
+                            source: source.clone(),
+                            provider_slot_id: serial,
+                        },
+                        connector,
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            self.reconcile_discovery_snapshot(DiscoverySnapshot::new(source, candidates)?)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "native-hardware")]
+    fn refresh_usb_yubihsm_discovery(&self) -> Result<(), Error> {
+        if !self.yubihsm_usb {
+            return Ok(());
+        }
+        let source = DiscoverySourceIdentity::local_usb_yubihsm();
+        let candidates = match pkcs11rs_local_hardware::yubihsm_candidates_blocking() {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.mark_discovery_source_absent(&source)?;
+                log!(1, "YubiHSM USB discovery refresh: {error}");
+                return Ok(());
+            }
+        };
+        let candidates = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                let provider_slot_id = match candidate.serial_blocking() {
+                    Ok(Some(serial)) if !serial.trim().is_empty() => serial.trim().to_owned(),
+                    Ok(_) => {
+                        log!(
+                            1,
+                            "YubiHSM USB candidate {:?} has no stable serial and was omitted",
+                            candidate.id()
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        log!(
+                            1,
+                            "YubiHSM USB candidate {:?} serial discovery failed: {error}",
+                            candidate.id()
+                        );
+                        return None;
+                    }
+                };
+                Some(DiscoveredSlotCandidate::UsbYubiHsm {
+                    identity: DiscoveredSlotIdentity {
+                        source: source.clone(),
+                        provider_slot_id,
+                    },
+                    candidate,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.reconcile_discovery_snapshot(DiscoverySnapshot::new(source, candidates)?)
+    }
+
+    fn refresh_registered_slots(&self) -> Result<(), Error> {
+        let refreshable_slots = {
+            let slot_contexts = self
+                .slot_contexts
+                .read()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+            let discovered_slot_ids = slot_contexts
+                .discovered_slots
+                .values()
+                .map(|registration| registration.slot_id)
+                .collect::<HashSet<_>>();
+            slot_contexts
+                .iter()
+                .filter(|(slot_id, _)| !discovered_slot_ids.contains(slot_id))
+                .map(|(_, context)| context.clone())
+                .collect::<Vec<_>>()
+        };
+        for context in refreshable_slots {
+            if let Ok(context) = context.lock() {
+                let _ = context.slot.refresh();
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn refresh_discovery(&self) -> Result<(), Error> {
+        let _refresh = self
+            .discovery_refresh
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        #[cfg(feature = "native-hardware")]
+        self.refresh_usb_yubihsm_discovery()?;
+        self.refresh_http_yubihsm_discovery()?;
+        // PC/SC and FIDO discovery sources plug into this coordinator and
+        // feed the same snapshot reconciler as their inventories become
+        // refreshable.
+        self.refresh_registered_slots()
+    }
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -2236,6 +2560,8 @@ pub(crate) static MODULE_CONTEXT: RwLock<Option<ModuleContext>> = RwLock::new(No
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+    #[cfg(not(feature = "abi-tests"))]
+    use std::io::{Read, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_STORAGE_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -2274,6 +2600,385 @@ mod discovery_tests {
         PhysicalDeviceKey::YubicoSerial(serial.to_owned())
     }
 
+    #[cfg(not(feature = "abi-tests"))]
+    fn read_http_request(stream: &mut impl Read) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+        let header_end = loop {
+            let length = stream.read(&mut buffer).unwrap();
+            assert_ne!(length, 0);
+            request.extend_from_slice(&buffer[..length]);
+            if let Some(offset) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                break offset + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let length = stream.read(&mut buffer).unwrap();
+            assert_ne!(length, 0);
+            request.extend_from_slice(&buffer[..length]);
+        }
+        request
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn http_response(stream: &mut impl Write, body: &[u8]) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn yubihsm_frame(command: u8, data: &[u8]) -> Vec<u8> {
+        let mut frame = vec![command];
+        frame.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        frame.extend_from_slice(data);
+        frame
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn yubihsm_device_info(serial: u32) -> Vec<u8> {
+        let mut data = vec![2, 5, 0];
+        data.extend_from_slice(&serial.to_be_bytes());
+        data.extend_from_slice(&[62, 3, 1, 2]);
+        yubihsm_frame(0x86, &data)
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn connector_inventory(serials: &[&str]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "devices": serials
+                .iter()
+                .map(|serial| serde_json::json!({
+                    "serial": serial,
+                    "usb_version": "2.5",
+                    "status": "available"
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn connector_test_context(url: String) -> ModuleContext {
+        let mut configuration = ModuleConfiguration::resolve(None).unwrap();
+        configuration.debug_level = 0;
+        configuration.pinentry = None;
+        configuration.hardware_discovery = false;
+        configuration.token_storage = None;
+        configuration.fido2_storage = None;
+        configuration.software_slots.clear();
+        configuration.software_discovery_pins.clear();
+        configuration.yubihsm_urls = vec![url];
+        configuration.yubihsm_usb = false;
+        configuration.yubihsm_public_discovery = None;
+        configuration.yubihsm_device_trust_prefix = std::ffi::OsString::new();
+        configuration.yubihsm_tls_client_certificate_bundle = None;
+        configuration.yubihsm_tls_client_private_key = None;
+        configuration.yubihsm_tls_ca_certificate_bundle = None;
+        ModuleContext::new_with_configuration(configuration).unwrap()
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    fn http_slot_identity(endpoint_index: usize, serial: &str) -> DiscoveredSlotIdentity {
+        DiscoveredSlotIdentity {
+            source: DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index),
+            provider_slot_id: serial.to_owned(),
+        }
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    #[test]
+    fn repeated_http_discovery_preserves_slots_and_presence() {
+        struct Interaction {
+            request_line: &'static [u8],
+            request_body: Option<&'static [u8]>,
+            response_body: Vec<u8>,
+        }
+
+        const GET_DEVICES: &[u8] = b"GET /v1/devices HTTP/1.1\r\n";
+        const POST_A: &[u8] = b"POST /v1/devices/12345678/commands HTTP/1.1\r\n";
+        const POST_B: &[u8] = b"POST /v1/devices/87654321/commands HTTP/1.1\r\n";
+        let interactions = vec![
+            Interaction {
+                request_line: GET_DEVICES,
+                request_body: None,
+                response_body: connector_inventory(&["12345678"]),
+            },
+            Interaction {
+                request_line: POST_A,
+                request_body: Some(b"\x06\x00\x00"),
+                response_body: yubihsm_device_info(12_345_678),
+            },
+            Interaction {
+                request_line: POST_A,
+                request_body: Some(b"\x06\x00\x01\x01"),
+                response_body: yubihsm_frame(0x86, b"YubiHSM 2"),
+            },
+            Interaction {
+                request_line: GET_DEVICES,
+                request_body: None,
+                response_body: connector_inventory(&["12345678", "87654321"]),
+            },
+            Interaction {
+                request_line: POST_B,
+                request_body: Some(b"\x06\x00\x00"),
+                response_body: yubihsm_device_info(87_654_321),
+            },
+            Interaction {
+                request_line: POST_B,
+                request_body: Some(b"\x06\x00\x01\x01"),
+                response_body: yubihsm_frame(0x86, b"YubiHSM 2"),
+            },
+            Interaction {
+                request_line: GET_DEVICES,
+                request_body: None,
+                response_body: connector_inventory(&["87654321"]),
+            },
+            Interaction {
+                request_line: GET_DEVICES,
+                request_body: None,
+                response_body: connector_inventory(&["12345678", "87654321"]),
+            },
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for interaction in interactions {
+                let (mut connection, _) = listener.accept().unwrap();
+                connection
+                    .set_read_timeout(Some(std::time::Duration::from_secs(6)))
+                    .unwrap();
+                let request = read_http_request(&mut connection);
+                assert!(request.starts_with(interaction.request_line));
+                let header_end = request
+                    .windows(4)
+                    .position(|value| value == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                assert_eq!(
+                    &request[header_end..],
+                    interaction.request_body.unwrap_or_default()
+                );
+                http_response(&mut connection, &interaction.response_body);
+            }
+        });
+
+        let url = format!("http://{address}");
+        let context = connector_test_context(url.clone());
+        context.init().unwrap();
+
+        context.refresh_discovery().unwrap();
+        let (first_slot_id, first_connector) = {
+            let slots = context.slot_contexts.read().unwrap();
+            assert_eq!(slots.len(), 1);
+            let registration = slots
+                .discovered_slots
+                .get(&http_slot_identity(0, "12345678"))
+                .unwrap();
+            (
+                registration.slot_id,
+                registration.backend.http_yubihsm_connector().clone(),
+            )
+        };
+        assert!(first_connector.is_present());
+
+        context.refresh_discovery().unwrap();
+        let second_slot_id = {
+            let slots = context.slot_contexts.read().unwrap();
+            assert_eq!(slots.len(), 2);
+            slots
+                .discovered_slots
+                .get(&http_slot_identity(0, "87654321"))
+                .unwrap()
+                .slot_id
+        };
+        assert!(second_slot_id > first_slot_id);
+
+        context.refresh_discovery().unwrap();
+        assert!(!first_connector.is_present());
+        {
+            let slots = context.slot_contexts.read().unwrap();
+            assert_eq!(slots.len(), 2);
+            assert_eq!(
+                slots
+                    .discovered_slots
+                    .get(&http_slot_identity(0, "12345678"))
+                    .unwrap()
+                    .slot_id,
+                first_slot_id
+            );
+        }
+
+        context.refresh_discovery().unwrap();
+        assert!(first_connector.is_present());
+        assert_eq!(first_connector.connection_epoch(), 1);
+        {
+            let slots = context.slot_contexts.read().unwrap();
+            assert_eq!(slots.len(), 2);
+            assert_eq!(
+                slots
+                    .discovered_slots
+                    .get(&http_slot_identity(0, "12345678"))
+                    .unwrap()
+                    .slot_id,
+                first_slot_id
+            );
+        }
+        server.join().unwrap();
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    #[test]
+    fn duplicate_http_urls_remain_independent_slots() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                for (request_line, request_body, response_body) in [
+                    (
+                        b"GET /v1/devices HTTP/1.1\r\n".as_slice(),
+                        b"".as_slice(),
+                        connector_inventory(&["12345678"]),
+                    ),
+                    (
+                        b"POST /v1/devices/12345678/commands HTTP/1.1\r\n".as_slice(),
+                        b"\x06\x00\x00".as_slice(),
+                        yubihsm_device_info(12_345_678),
+                    ),
+                    (
+                        b"POST /v1/devices/12345678/commands HTTP/1.1\r\n".as_slice(),
+                        b"\x06\x00\x01\x01".as_slice(),
+                        yubihsm_frame(0x86, b"YubiHSM 2"),
+                    ),
+                ] {
+                    let (mut connection, _) = listener.accept().unwrap();
+                    let request = read_http_request(&mut connection);
+                    assert!(request.starts_with(request_line));
+                    let header_end = request
+                        .windows(4)
+                        .position(|value| value == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    assert_eq!(&request[header_end..], request_body);
+                    http_response(&mut connection, &response_body);
+                }
+            }
+        });
+
+        let url = format!("http://{address}");
+        let mut context = connector_test_context(url.clone());
+        context.yubihsm_urls.push(url);
+        context.init().unwrap();
+        context.refresh_discovery().unwrap();
+        server.join().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        assert_eq!(slots.len(), 2);
+        let first = slots
+            .discovered_slots
+            .get(&http_slot_identity(0, "12345678"))
+            .unwrap();
+        let second = slots
+            .discovered_slots
+            .get(&http_slot_identity(1, "12345678"))
+            .unwrap();
+        assert_ne!(first.slot_id, second.slot_id);
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    #[test]
+    fn http_discovery_recovers_after_listener_restart() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let initial_server = std::thread::spawn(move || {
+            for (request_line, request_body, response_body) in [
+                (
+                    b"GET /v1/devices HTTP/1.1\r\n".as_slice(),
+                    b"".as_slice(),
+                    connector_inventory(&["12345678"]),
+                ),
+                (
+                    b"POST /v1/devices/12345678/commands HTTP/1.1\r\n".as_slice(),
+                    b"\x06\x00\x00".as_slice(),
+                    yubihsm_device_info(12_345_678),
+                ),
+                (
+                    b"POST /v1/devices/12345678/commands HTTP/1.1\r\n".as_slice(),
+                    b"\x06\x00\x01\x01".as_slice(),
+                    yubihsm_frame(0x86, b"YubiHSM 2"),
+                ),
+            ] {
+                let (mut connection, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut connection);
+                assert!(request.starts_with(request_line));
+                let header_end = request
+                    .windows(4)
+                    .position(|value| value == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                assert_eq!(&request[header_end..], request_body);
+                http_response(&mut connection, &response_body);
+            }
+        });
+
+        let url = format!("http://{address}");
+        let context = connector_test_context(url.clone());
+        context.init().unwrap();
+        context.refresh_discovery().unwrap();
+        initial_server.join().unwrap();
+        let (slot_id, connector) = {
+            let slots = context.slot_contexts.read().unwrap();
+            let registration = slots
+                .discovered_slots
+                .get(&http_slot_identity(0, "12345678"))
+                .unwrap();
+            (
+                registration.slot_id,
+                registration.backend.http_yubihsm_connector().clone(),
+            )
+        };
+        assert!(connector.is_present());
+
+        context.refresh_discovery().unwrap();
+        assert!(!connector.is_present());
+
+        let listener = std::net::TcpListener::bind(address).unwrap();
+        let restarted_server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut connection);
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
+            http_response(&mut connection, &connector_inventory(&["12345678"]));
+        });
+        context.refresh_discovery().unwrap();
+        restarted_server.join().unwrap();
+
+        assert!(connector.is_present());
+        assert_eq!(connector.connection_epoch(), 1);
+        let slots = context.slot_contexts.read().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            slots
+                .discovered_slots
+                .get(&http_slot_identity(0, "12345678"))
+                .unwrap()
+                .slot_id,
+            slot_id
+        );
+    }
+
     #[test]
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
         let configuration = ModuleConfiguration::resolve(None).unwrap();
@@ -2298,6 +3003,8 @@ mod discovery_tests {
             trust_store: Arc::new(crate::yubihsm::trust::TrustStore::new_with_prefix(
                 std::ffi::OsString::new(),
             )),
+            hsmauth_providers: Arc::new(HsmAuthProviderRegistry::default()),
+            discovery_refresh: Mutex::new(()),
             slot_contexts: RwLock::new(SlotContextRegistry::new()),
         };
 
