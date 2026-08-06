@@ -104,7 +104,10 @@ async fn main() -> Result<(), BoxError> {
             Err(error) => {
                 tracing::error!(%error, "connector service stopped; retrying");
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                    result = shutdown_signal() => {
+                        result?;
+                        return Ok(());
+                    }
                     _ = tokio::time::sleep(SERVER_RESTART_DELAY) => {}
                 }
             }
@@ -149,7 +152,8 @@ async fn serve_until_restart(
             discovery.abort();
             return result.map(|()| ServeOutcome::Shutdown).map_err(Into::into);
         }
-        _ = tokio::signal::ctrl_c() => {
+        result = shutdown_signal() => {
+            result?;
             handle.graceful_shutdown(Some(Duration::from_secs(10)));
             let result = server.await;
             discovery.abort();
@@ -184,6 +188,21 @@ async fn serve_until_restart(
         }
     };
     Ok(outcome)
+}
+
+async fn shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }
 
 fn connector_server(
@@ -281,6 +300,12 @@ mod tests {
     use hyper::{Method, Request, Version};
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
+    #[cfg(unix)]
+    use std::{
+        env,
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+    };
     use std::{
         fs,
         net::TcpListener,
@@ -296,6 +321,55 @@ mod tests {
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     const TEST_COMMAND: &[u8] = b"\x03\x00\x07command";
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_completes_shutdown_signal() {
+        const CHILD_ENVIRONMENT: &str = "PKCS11RS_CONNECTOR_SIGTERM_TEST_CHILD";
+        const READY_MARKER: &str = "PKCS11RS_CONNECTOR_SIGTERM_READY";
+
+        if env::var_os(CHILD_ENVIRONMENT).is_some() {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let shutdown = tokio::spawn(shutdown_signal());
+                    tokio::task::yield_now().await;
+                    eprintln!("{READY_MARKER}");
+                    shutdown.await.unwrap().unwrap();
+                });
+            return;
+        }
+
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::sigterm_completes_shutdown_signal",
+                "--nocapture",
+            ])
+            .env(CHILD_ENVIRONMENT, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(stderr.read_line(&mut line).unwrap(), 0);
+            if line.contains(READY_MARKER) {
+                break;
+            }
+        }
+
+        let signal_status = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(signal_status.success());
+        assert!(child.wait().unwrap().success());
+    }
 
     struct PemFiles {
         directory: PathBuf,

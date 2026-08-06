@@ -55,6 +55,11 @@ ownership set and starts a new implicit legacy selection unless
 `--legacy-serial` is configured. A fresh hot-plug event after the rebuild is
 handled normally and may add a newly attached device.
 
+Ctrl-C (`SIGINT`) and the Unix service-manager termination signal (`SIGTERM`)
+both initiate the same bounded graceful HTTP shutdown before discovery and USB
+state are released. This allows service managers such as systemd to use their
+normal termination behavior without a connector-specific kill-signal override.
+
 Opening and claiming a device currently happens during initial discovery, a
 hot-plug event, or reclamation of a previously managed serial after system
 resume. A failed initial open or claim is logged, omitted from the advertised
@@ -355,8 +360,6 @@ remain fail-closed in the connector itself.
   strings. Record security audit events by authenticated identity, device
   serial, command code, result, and duration without recording command payloads
   or secrets.
-- Handle both Ctrl-C and service-manager termination signals with bounded
-  graceful shutdown.
 - Run as a dedicated unprivileged account with access only to the required USB
   devices and TLS files. Combine this with firewall rules and operating-system
   service sandboxing.
