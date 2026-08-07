@@ -18,8 +18,8 @@ use crate::{
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad, BackendSession, CcidApplication,
     CcidConfiguration, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorTlsConfig,
-    IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PivSlot,
+    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorEndpoint,
+    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PivSlot,
     SecureChannelConfiguration, SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot,
     TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
@@ -260,6 +260,7 @@ pub(crate) struct ModuleContext {
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
+    yubihsm_http_endpoints: Mutex<HashMap<usize, HttpConnectorEndpoint>>,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     pub(crate) yubihsm_device_trust_prefix: std::ffi::OsString,
     pub(crate) ccid_configurations: Vec<CcidConfiguration>,
@@ -903,6 +904,7 @@ impl ModuleContext {
             },
             yubihsm_urls,
             yubihsm_http_tls,
+            yubihsm_http_endpoints: Mutex::new(HashMap::new()),
             yubihsm_public_discovery_config,
             yubihsm_device_trust_prefix: configuration.yubihsm_device_trust_prefix,
             ccid_configurations: configuration.ccid_configurations,
@@ -2167,7 +2169,6 @@ impl ModuleContext {
         identity: DiscoveredSlotIdentity,
         connector: HttpConnector,
     ) -> Result<PreparedDiscoveredSlot, Error> {
-        connector.accept_discovered();
         let discovery_connector = connector.clone();
         let connector = Rc::new(connector);
         let mut yubihsm_slot = YubiHsmSlot::with_hsmauth_providers_and_public_discovery(
@@ -2350,12 +2351,27 @@ impl ModuleContext {
     fn refresh_http_yubihsm_discovery(&self) -> Result<(), Error> {
         for (endpoint_index, configured_url) in self.yubihsm_urls.iter().enumerate() {
             let source = DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index);
-            let discovery =
-                HttpConnector::discover_with_tls(configured_url.clone(), &self.yubihsm_http_tls);
+            let candidate_endpoint = HttpConnectorEndpoint::new(configured_url.clone())?;
+            let endpoint = {
+                let mut endpoints = self
+                    .yubihsm_http_endpoints
+                    .lock()
+                    .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+                match endpoints.get(&endpoint_index) {
+                    Some(endpoint) if endpoint.url() == candidate_endpoint.url() => {
+                        endpoint.clone()
+                    }
+                    _ => {
+                        endpoints.insert(endpoint_index, candidate_endpoint.clone());
+                        candidate_endpoint
+                    }
+                }
+            };
+            let discovery = HttpConnector::discover_with_tls(&endpoint, &self.yubihsm_http_tls);
             let connectors = match discovery {
                 Ok(connectors) => connectors,
                 Err(error) => {
-                    self.mark_discovery_source_absent(&source)?;
+                    endpoint.mark_disconnected();
                     log!(
                         1,
                         "YubiHSM connector discovery refresh at {configured_url}: {error:?}"
@@ -2897,6 +2913,10 @@ mod discovery_tests {
             .get(&http_slot_identity(1, "12345678"))
             .unwrap();
         assert_ne!(first.slot_id, second.slot_id);
+        assert!(!first
+            .backend
+            .http_yubihsm_connector()
+            .shares_endpoint_with(second.backend.http_yubihsm_connector()));
     }
 
     #[cfg(not(feature = "abi-tests"))]
@@ -2992,6 +3012,7 @@ mod discovery_tests {
             pcsc: None,
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),
+            yubihsm_http_endpoints: Mutex::new(HashMap::new()),
             yubihsm_public_discovery_config: None,
             yubihsm_device_trust_prefix: std::ffi::OsString::new(),
             ccid_configurations: configuration.ccid_configurations,

@@ -9,9 +9,9 @@ and asynchronous nusb dependencies never enter the iOS XCFramework.
 > private network, or access through a tightly controlled VPN or reverse proxy.
 > It is not approved for direct exposure to the public Internet. HTTPS, mTLS,
 > bounded HTTP admission, YubiHSM frame validation, firmware-aware USB limits,
-> transport timeouts, hot-plug handling, and recovery after system suspend are
-> implemented. Device-aware authorization, connection and client rate limits,
-> and the remaining operational controls are listed in
+> transport timeouts, hot-plug handling, and continuity across system suspend
+> are implemented. Device-aware authorization, connection and client rate
+> limits, and the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
 ## Architecture
@@ -39,60 +39,125 @@ Device detachment removes the corresponding entry. A request already holding
 the entry completes with a transport error if the USB transfer fails; a newly
 attached device receives a new entry even when it has the same serial. Duplicate
 simultaneously attached serials are rejected rather than routed ambiguously.
-Only devices successfully opened and claimed appear in the registry and
-`/v1/devices`; physical attachment alone is not connector presence.
+Every identifiable device appears in `/v1/devices`; devices the connector
+successfully claimed are `available`, while devices owned elsewhere are
+`unclaimed`.
 
-The connector detects a delayed timer tick caused by system suspend. After
-resume it stops the old HTTP service, discards surviving connections, the USB
-discovery watcher, registry, mutexes, and device handles, and rebuilds them in
-the same process. An implicitly selected legacy serial is carried into the new
-service, so this recovery does not change the selected compatibility device.
-The complete set of serials successfully claimed before suspend is also
-carried into the rebuilt service. Initial enumeration after resume reclaims
-only that set, preventing the connector from taking ownership of a device that
-another application was already using. A full process restart forgets this
-ownership set and starts a new implicit legacy selection unless
-`--legacy-serial` is configured. A fresh hot-plug event after the rebuild is
-handled normally and may add a newly attached device.
+System suspend pauses the process but does not trigger connector
+reconstruction. The HTTP listener, accepted connections, USB discovery
+watcher, registry, and claimed device handles remain in place. Requests made
+while the host or its network interface is unavailable can time out, but new
+requests are accepted after network recovery without rebinding the listener.
+Sleep/wake does not rescan USB or retry an initially failed claim. Ordinary
+physical detach and attach events continue to update the registry.
 
 Ctrl-C (`SIGINT`) and the Unix service-manager termination signal (`SIGTERM`)
 both initiate the same bounded graceful HTTP shutdown before discovery and USB
 state are released. This allows service managers such as systemd to use their
 normal termination behavior without a connector-specific kill-signal override.
 
-Opening and claiming a device currently happens during initial discovery, a
-hot-plug event, or reclamation of a previously managed serial after system
-resume. A failed initial open or claim is logged, omitted from the advertised
-inventory, and intentionally not retried while the device remains attached;
-the device may belong to another local application. A failed command does not
-proactively reopen its USB handle.
+Opening and claiming a device happens during initial discovery or a hot-plug
+event. A failed initial open or claim is logged as `unclaimed` and intentionally
+not retried while the device remains attached; it may belong to another local
+application. A failed command does not proactively reopen its USB handle.
 
-### Verified suspend and ownership recovery
+### Verified sleep/wake behavior
 
-The suspend detector checks wall-clock progress every two seconds and rebuilds
-the service when a timer gap is greater than ten seconds. It therefore
-detects real system suspension, not merely display sleep or screen locking. For
-a manual test, allow the Mac to enter actual system sleep before measuring the
-sleep interval; one minute is a convenient reliable duration.
+A USB-only test retained one claimed YubiHSM handle across 121.7 seconds of
+real macOS sleep. Immediately after wake, a cleartext `DeviceInfo` command
+through the original handle completed in under one millisecond. Enumeration
+while retaining that claim took two milliseconds. Releasing the original and
+performing a complete enumerate, open, claim, and `DeviceInfo` sequence also
+completed successfully, with each phase taking at most two milliseconds. This
+supports retaining USB state rather than rebuilding it after every delayed
+timer tick. A longer overnight sleep remains a useful deeper-power-state test.
 
-The ownership behavior has been verified on macOS with physical YubiHSMs:
+Ownership behavior has also been verified with two physical YubiHSMs:
 
 1. `yubihsm-shell` claimed one HSM through local USB before the connector
    started.
 2. The connector left that HSM unmanaged while managing the other available
    HSM.
 3. `yubihsm-shell` was stopped, making its HSM claimable without generating a
-   physical hot-plug event.
-4. After a real Mac sleep and resume, the connector rebuilt its HTTP and USB
-   services and reclaimed only the serial it had managed before sleep. It did
-   not take ownership of the now-claimable, previously unmanaged HSM.
-5. Removing the unmanaged HSM produced no connector detach log, because it had
-   no registry entry. Physically reconnecting it generated a new hot-plug event
-   and allowed the connector to claim and advertise it normally.
+   physical hot-plug event. It remained `unclaimed` because the connector does
+   not rescan or retry claims while a device stays attached.
+4. Physically reconnecting it generated a new hot-plug event and allowed the
+   connector to claim and advertise it as `available`.
 
-This test covers the distinction between service reconstruction, release of a
-device by another process, and a genuine new physical attachment. The expected
-inventory can be checked before and after sleep with `GET /v1/devices`.
+YubiHSM secure sessions are separate from USB transport state. The device
+expires a secure session after 30 seconds without a session command and then
+returns error `0x03` (`invalid session`). Real sleep cannot be bridged by a
+host keepalive. A logged-in client must therefore discard the expired session
+and authenticate again after a sufficiently long sleep; retaining the HTTP and
+USB transports does not retain an expired secure session. See Yubico's
+[Session documentation](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-intro-core-concepts.html#session).
+
+### USB-only sleep/wake test
+
+The separate `yubihsm-usb-resume-test` binary isolates the YubiHSM USB path
+from HTTP, networking, PKCS #11, and secure sessions. Stop the connector and
+any other process using the selected YubiHSM, then run:
+
+```sh
+cargo run -p pkcs11rs-connector --release \
+  --bin yubihsm-usb-resume-test -- --serial 12345678
+```
+
+After a successful baseline command, put the Mac into real system sleep. The
+test detects a delayed wall-clock tick. Immediately after wake it sends the
+unauthenticated cleartext YubiHSM `DeviceInfo` command
+through the original claimed handle, tests fresh enumeration while retaining
+that handle, releases it, and repeats enumeration, open, claim, and
+`DeviceInfo` through a fresh handle. Every phase reports its duration and
+outcome. The test is read-only and does not create, use, or close a YubiHSM
+secure session; session continuity can therefore be tested separately after
+the underlying USB behavior is known.
+
+### HTTP listener sleep/wake test
+
+The separate `http-resume-test` binary isolates the connector's HTTP server
+stack from USB and the YubiHSM protocol. It retains one HTTP/1.1 connection
+across real system sleep and, immediately after wake, tests that connection in
+parallel with a new TCP connection and HTTP request. The fresh connection is
+the direct test of whether the preserved listener still accepts after wake.
+
+Run it on a port separate from the connector, then sleep the Mac when prompted:
+
+```sh
+cargo run -p pkcs11rs-connector --release \
+  --bin http-resume-test
+```
+
+The default listener is `0.0.0.0:12346`, while the automated probes connect
+through `127.0.0.1`. A usable fresh connection proves local listener and accept
+behavior; it does not prove that a LAN interface is externally reachable. To
+test that remaining path from another computer, request the real connector
+with a new cache-busting value after wake:
+
+```text
+http://192.168.1.169:12345/v1/devices?probe=1
+```
+
+A newly started command-line HTTP client with `Connection: close` gives the
+strongest fresh-connection test. If localhost succeeds immediately while the
+remote request remains delayed, the failure is between the LAN interface and
+the remote client.
+
+On macOS, this test has been verified across 70.0 seconds of real sleep. The
+pre-sleep HTTP/1.1 connection had been closed, while a fresh TCP connection was
+accepted and served in one millisecond immediately after wake. Closure of the
+idle connection is informational: the server's five-second HTTP/1 header-read
+deadline is allowed to close it. The successful fresh request is the relevant
+listener and accept result.
+
+PKCS11RS uses one pooled `ureq` agent for each configured connector entry.
+Inventory refreshes and every slot returned for that entry reuse the agent
+while it remains healthy. Concurrent requests may open separate TCP
+connections from its pool; they are not serialized onto one HTTP/1.1
+connection. A transport failure clears the shared agent and pool for that
+connector entry. The next caller-initiated inventory refresh then starts with
+a fresh agent; the client does not retry internally. Even identical configured
+URL strings remain independent connector entries with independent pools.
 
 The shared `pkcs11rs-local-hardware` crate exposes both blocking and async
 frontends. The existing PKCS #11 local connector continues to use the blocking
@@ -134,8 +199,8 @@ commands. `unclaimed` means that the device is physically present but was not
 claimed by this connector, for example because another process owns it. This
 makes the endpoint useful as remote USB inventory even when some attached
 devices cannot be used through this connector. An unclaimed device is left
-alone until it is physically detached and reattached; enumeration and resume
-do not retry the claim. Clients create slots only for `available` devices and
+alone until it is physically detached and reattached; sleep/wake does not retry
+the claim. Clients create slots only for `available` devices and
 ignore all other, including unknown future, status values.
 
 `GET /v1/devices/{serial}` returns one entry or `404 Not Found`.
@@ -190,8 +255,7 @@ Selection follows these rules:
 
 1. `--legacy-serial SERIAL` always selects that serial or reports it absent.
 2. Without configuration, the serial of the first successfully discovered
-   device is latched for the connector process lifetime, including internal
-   service rebuilds after system suspend.
+   device is latched for the connector process lifetime.
 3. The legacy routes then behave as if a client addressed that serial through
    `/v1/devices/{serial}` and `/v1/devices/{serial}/commands`.
 4. Later attachments and changes to the device's transient USB identifier do
@@ -273,9 +337,9 @@ mutating command may have executed even when its response is lost.
 
 ### Logging
 
-The default `info` level records listener state, device attachment and
-detachment by serial and transient USB device ID, and suspend recovery. Enable
-request diagnostics with:
+The default `info` level records listener state and device attachment and
+detachment by serial and transient USB device ID. Enable request diagnostics
+with:
 
 ```sh
 RUST_LOG=pkcs11rs_connector=debug pkcs11rs-connector

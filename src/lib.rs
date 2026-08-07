@@ -1013,7 +1013,9 @@ mod connector;
 pub(crate) use connector::{
     ensure_complete_write, needs_zero_length_packet, usb_bcd_version, PcscReaderState,
 };
-pub(crate) use connector::{Connector, HttpConnector, HttpConnectorTlsConfig, SharedConnector};
+pub(crate) use connector::{
+    Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig, SharedConnector,
+};
 #[cfg(feature = "native-hardware")]
 pub(crate) use connector::{PcscAppletConnector, PcscConnector, UsbConnector};
 

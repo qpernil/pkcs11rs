@@ -9,23 +9,13 @@ use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
 use registry::{spawn_discovery, DeviceRegistry};
 use std::{
-    collections::HashSet,
-    future::Future,
-    io,
-    net::SocketAddr,
-    path::PathBuf,
-    pin::Pin,
-    sync::Arc,
-    time::{Duration, SystemTime},
+    future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type ServerFuture = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
-const RESUME_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-const RESUME_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 const SERVER_RESTART_DELAY: Duration = Duration::from_secs(1);
-const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_STAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 
@@ -77,30 +67,10 @@ async fn main() -> Result<(), BoxError> {
     let args = Args::parse();
     validate_args(&args)?;
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut legacy_serial = args.legacy_serial.clone();
-    let mut resume_managed_serials: Option<HashSet<String>> = None;
 
     loop {
-        match serve_until_restart(
-            &args,
-            legacy_serial.clone(),
-            resume_managed_serials.as_ref(),
-        )
-        .await
-        {
-            Ok(ServeOutcome::Shutdown) => return Ok(()),
-            Ok(ServeOutcome::Resume {
-                gap,
-                selected_legacy_serial,
-                managed_serials,
-            }) => {
-                legacy_serial = selected_legacy_serial;
-                resume_managed_serials = Some(managed_serials);
-                tracing::warn!(
-                    ?gap,
-                    "system suspend detected; restarting connector services"
-                );
-            }
+        match serve_until_shutdown(&args).await {
+            Ok(()) => return Ok(()),
             Err(error) => {
                 tracing::error!(%error, "connector service stopped; retrying");
                 tokio::select! {
@@ -115,26 +85,13 @@ async fn main() -> Result<(), BoxError> {
     }
 }
 
-enum ServeOutcome {
-    Shutdown,
-    Resume {
-        gap: Duration,
-        selected_legacy_serial: Option<String>,
-        managed_serials: HashSet<String>,
-    },
-}
-
-async fn serve_until_restart(
-    args: &Args,
-    legacy_serial: Option<String>,
-    resume_managed_serials: Option<&HashSet<String>>,
-) -> Result<ServeOutcome, BoxError> {
+async fn serve_until_shutdown(args: &Args) -> Result<(), BoxError> {
     let registry = DeviceRegistry::new(Duration::from_secs(args.command_timeout_seconds));
-    let discovery = spawn_discovery(registry.clone(), resume_managed_serials).await?;
+    let discovery = spawn_discovery(registry.clone()).await?;
     let app = router(
         AppState {
-            registry: registry.clone(),
-            legacy_serial: legacy_serial.clone(),
+            registry,
+            legacy_serial: args.legacy_serial.clone(),
         },
         args.http_max_in_flight_requests,
     );
@@ -147,10 +104,10 @@ async fn serve_until_restart(
             return Err(error);
         }
     };
-    let outcome = tokio::select! {
+    tokio::select! {
         result = &mut server => {
             discovery.abort();
-            return result.map(|()| ServeOutcome::Shutdown).map_err(Into::into);
+            result?;
         }
         result = shutdown_signal() => {
             result?;
@@ -158,36 +115,9 @@ async fn serve_until_restart(
             let result = server.await;
             discovery.abort();
             result?;
-            ServeOutcome::Shutdown
         }
-        gap = wait_for_resume() => {
-            // Connections which survived suspend can retain unusable network and
-            // USB state. Stop them promptly, then let the outer loop rebuild the
-            // listener, registry, discovery watcher, and device handles.
-            handle.shutdown();
-            match tokio::time::timeout(SERVER_STOP_TIMEOUT, &mut server).await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "HTTP server failed while stopping after resume");
-                }
-                Err(_) => {
-                    tracing::warn!("HTTP server did not stop promptly after resume; dropping it");
-                }
-            }
-            discovery.abort();
-            let selected_legacy_serial = match legacy_serial {
-                Some(serial) => Some(serial),
-                None => registry.selected_legacy_serial().await,
-            };
-            let managed_serials = registry.managed_serials().await;
-            ServeOutcome::Resume {
-                gap,
-                selected_legacy_serial,
-                managed_serials,
-            }
-        }
-    };
-    Ok(outcome)
+    }
+    Ok(())
 }
 
 async fn shutdown_signal() -> io::Result<()> {
@@ -251,24 +181,6 @@ fn configure_http<A>(server: &mut axum_server::Server<SocketAddr, A>) {
         .http_builder()
         .http2()
         .max_header_list_size(HTTP2_MAX_HEADER_LIST_SIZE);
-}
-
-async fn wait_for_resume() -> Duration {
-    let mut last_check = SystemTime::now();
-    loop {
-        tokio::time::sleep(RESUME_CHECK_INTERVAL).await;
-        let now = SystemTime::now();
-        if let Ok(gap) = now.duration_since(last_check) {
-            if is_resume_gap(gap) {
-                return gap;
-            }
-        }
-        last_check = now;
-    }
-}
-
-fn is_resume_gap(gap: Duration) -> bool {
-    gap > RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD
 }
 
 fn validate_args(args: &Args) -> Result<(), BoxError> {
@@ -541,15 +453,6 @@ mod tests {
         let args = Args::try_parse_from(["pkcs11rs-connector"]).unwrap();
         assert_eq!(args.command_timeout_seconds, 60);
         assert_eq!(args.http_max_in_flight_requests, 64);
-    }
-
-    #[test]
-    fn delayed_timer_tick_detects_a_system_resume() {
-        assert!(!is_resume_gap(RESUME_CHECK_INTERVAL));
-        assert!(!is_resume_gap(RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD));
-        assert!(is_resume_gap(
-            RESUME_CHECK_INTERVAL + RESUME_GAP_THRESHOLD + Duration::from_millis(1)
-        ));
     }
 
     #[tokio::test]

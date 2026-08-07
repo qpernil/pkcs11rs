@@ -3,6 +3,7 @@ name = "pkcs11rs-connector"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
+default-run = "pkcs11rs-connector"
 description = "Asynchronous multi-device HTTP(S) gateway for locally attached YubiHSMs"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -18,7 +19,7 @@ pkcs11rs-local-hardware = { path = "../pkcs11rs-local-hardware", default-feature
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["limit", "load-shed", "util"] }
 tower-http = { version = "0.7", features = ["limit", "timeout", "trace"] }
 tracing = "0.1.44"

@@ -222,7 +222,6 @@ pub(crate) struct HidFidoEndpoint {
     descriptor: HidDeviceDescriptor,
     transport: Rc<CtapHidTransport>,
     device: Arc<DeviceContext>,
-    present: Cell<bool>,
     serial: String,
     firmware_version: (u8, u8, u8),
 }
@@ -247,7 +246,6 @@ impl HidFidoEndpoint {
             descriptor,
             transport,
             device,
-            present: Cell::new(true),
             serial,
             firmware_version,
         }
@@ -314,28 +312,22 @@ impl FidoEndpoint for HidFidoEndpoint {
     }
 
     fn is_present(&self) -> bool {
-        self.present.get() && self.transport.is_connected()
+        self.transport.is_connected()
     }
 
     fn refresh(&self) -> Result<(), Error> {
         if self.transport.is_connected() {
-            self.present.set(true);
             return Ok(());
         }
         match self.descriptor.open() {
             Ok(io) => match self.transport.reconnect(Box::new(io)) {
-                Ok(_) => {
-                    self.present.set(true);
-                    Ok(())
-                }
+                Ok(_) => Ok(()),
                 Err(error) => {
-                    self.present.set(false);
                     self.transport.disconnect();
                     Err(error)
                 }
             },
             Err(error) => {
-                self.present.set(false);
                 self.transport.disconnect();
                 Err(error)
             }
