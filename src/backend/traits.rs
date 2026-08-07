@@ -393,9 +393,11 @@ pub(crate) trait Slot {
             Err(CKR_ATTRIBUTE_TYPE_INVALID.into())
         }
     }
+    #[cfg(test)]
     fn yubihsm_forget_object(&self, _id: u16, _object_type: u8) -> Result<(), Error> {
         Ok(())
     }
+    #[cfg(test)]
     fn yubihsm_owned_metadata_objects(
         &self,
         _id: u16,
@@ -425,6 +427,13 @@ pub(crate) trait Slot {
         _slot_id: CK_SLOT_ID,
         _unique_id: &str,
     ) -> Result<(), Error> {
+        Err(CKR_ACTION_PROHIBITED.into())
+    }
+    fn yubihsm_destroy_native_object(
+        &self,
+        _slot_id: CK_SLOT_ID,
+        _unique_id: &str,
+    ) -> Result<Option<String>, Error> {
         Err(CKR_ACTION_PROHIBITED.into())
     }
     fn hsmauth_administration(

@@ -280,41 +280,19 @@ fn create_object(
         if software_secret && object.token && !object.private {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         }
-        if crate::backed_object::supports_backed_object(&object) {
+        let yubihsm_public_wrap = ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm
+            && object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+            && object.key_type == CKK_RSA as CK_KEY_TYPE
+            && object.wrap;
+        if yubihsm_public_wrap && !object.token {
+            return Err(CKR_TEMPLATE_INCONSISTENT.into());
+        }
+        if crate::backed_object::supports_backed_object(&object) && !yubihsm_public_wrap {
             *object_handle = ctx.store_backed_object(session_handle, object)?;
             return Ok(());
         }
         if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm && object.token {
-            let hardware_object = yubihsm_hardware_import_object(&object)?;
-            let (command, expected_class) = yubihsm_import_command(&hardware_object)?;
-            let response = ctx
-                ._get_session(session_handle)?
-                .1
-                .yubihsm_command(&command)?;
-            let id = parse_yubihsm_object_id(&response)?;
-            ctx.refresh_slot_token_objects(slot_id)?;
-            let (handle, imported) = ctx
-                .resolved_objects()?
-                .into_iter()
-                .find(|(_, object)| {
-                    object.slot_id == Some(slot_id)
-                        && object.class == expected_class
-                        && matches!(object.material, KeyMaterial::YubiHsm { id: object_id, .. } if object_id == id)
-                })
-                .ok_or(CKR_DEVICE_ERROR)?;
-            let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
-                slot_id,
-                &imported.unique_id,
-                (!object.id.is_empty()).then_some(object.id.as_slice()),
-                (!object.label.is_empty()).then_some(object.label.as_str()),
-            );
-            let refresh = ctx.refresh_slot_token_objects(slot_id);
-            if let Err(error) = metadata_result {
-                let _ = refresh;
-                return Err(error);
-            }
-            refresh?;
-            *object_handle = handle;
+            *object_handle = import_yubihsm_token_object(ctx, session_handle, slot_id, &object)?;
             return Ok(());
         }
         if matches!(object.material, KeyMaterial::SoftwarePrivate(_))
@@ -1029,9 +1007,70 @@ pub(super) fn yubihsm_object_parameters(
     })
 }
 
+pub(super) fn import_yubihsm_token_object(
+    ctx: &mut SlotContext,
+    session_handle: CK_SESSION_HANDLE,
+    slot_id: CK_SLOT_ID,
+    object: &TokenObject,
+) -> Result<CK_OBJECT_HANDLE, Error> {
+    let hardware_object = yubihsm_hardware_import_object(object)?;
+    let (command, expected_class, expected_object_type) = yubihsm_import_command(&hardware_object)?;
+    let response = ctx
+        ._get_session(session_handle)?
+        .1
+        .yubihsm_command(&command)?;
+    let id = parse_yubihsm_object_id(&response)?;
+    ctx.refresh_slot_token_objects(slot_id)?;
+    let imported = ctx
+        .resolved_objects()?
+        .into_iter()
+        .find_map(|(_, candidate)| {
+            (candidate.slot_id == Some(slot_id)
+                && candidate.class == expected_class
+                && matches!(
+                    candidate.material,
+                    KeyMaterial::YubiHsm {
+                        id: object_id,
+                        object_type,
+                        ..
+                    } if object_id == id && object_type == expected_object_type
+                ))
+            .then_some(candidate)
+        })
+        .ok_or(CKR_DEVICE_ERROR)?;
+    let metadata_result = ctx.get_slot(slot_id)?.yubihsm_set_attributes(
+        slot_id,
+        &imported.unique_id,
+        (!object.id.is_empty()).then_some(object.id.as_slice()),
+        (!object.label.is_empty()).then_some(object.label.as_str()),
+    );
+    let refresh = ctx.refresh_slot_token_objects(slot_id);
+    if let Err(error) = metadata_result {
+        let _ = refresh;
+        return Err(error);
+    }
+    refresh?;
+    ctx.resolved_objects()?
+        .into_iter()
+        .find_map(|(handle, candidate)| {
+            (candidate.slot_id == Some(slot_id)
+                && candidate.class == expected_class
+                && matches!(
+                    candidate.material,
+                    KeyMaterial::YubiHsm {
+                        id: object_id,
+                        object_type,
+                        ..
+                    } if object_id == id && object_type == expected_object_type
+                ))
+            .then_some(handle)
+        })
+        .ok_or(CKR_DEVICE_ERROR.into())
+}
+
 fn yubihsm_import_command(
     object: &TokenObject,
-) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS), Error> {
+) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS, u8), Error> {
     match &object.material {
         KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
             if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
@@ -1057,6 +1096,7 @@ fn yubihsm_import_command(
                     &value,
                 )?,
                 CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
+                YUBIHSM_ASYMMETRIC_KEY,
             ))
         }
         KeyMaterial::Secret(value) if object.class == CKO_SECRET_KEY as CK_OBJECT_CLASS => {
@@ -1097,6 +1137,46 @@ fn yubihsm_import_command(
                     value,
                 )?,
                 CKO_SECRET_KEY as CK_OBJECT_CLASS,
+                if code == YubiHsmCommandCode::PutSymmetricKey {
+                    YUBIHSM_SYMMETRIC_KEY
+                } else {
+                    YUBIHSM_HMAC_KEY
+                },
+            ))
+        }
+        KeyMaterial::Public(PublicKeyMaterial::Rsa(key))
+            if object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.wrap =>
+        {
+            if object.private
+                || object.encrypt
+                || object.decrypt
+                || object.sign
+                || object.verify
+                || object.derive
+                || object.unwrap
+                || !object.extractable
+                || key.e() != &BigUint::from(65537u32)
+            {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            let (algorithm, modulus_length) = match key.size() {
+                256 => (YUBIHSM_ALGO_RSA_2048, 256),
+                384 => (YUBIHSM_ALGO_RSA_3072, 384),
+                512 => (YUBIHSM_ALGO_RSA_4096, 512),
+                _ => return Err(CKR_KEY_SIZE_RANGE.into()),
+            };
+            let parameters = YubiHsmDelegatedObjectParameters {
+                object: yubihsm_object_parameters(object, YUBIHSM_PUBLIC_WRAP_KEY, algorithm)?,
+                delegated_capabilities: [0xff; 8],
+            };
+            Ok((
+                YubiHsmCommand::put_delegated_object(
+                    YubiHsmCommandCode::PutPublicWrapKey,
+                    &parameters,
+                    &padded_big_num(key.n(), modulus_length)?,
+                )?,
+                CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+                YUBIHSM_PUBLIC_WRAP_KEY,
             ))
         }
         _ => Err(CKR_TEMPLATE_INCONSISTENT.into()),
@@ -1435,6 +1515,9 @@ fn copy_object(
             .resolve_object(object)?
             .filter(|object| object.is_visible_to(logged_in))
             .ok_or(CKR_OBJECT_HANDLE_INVALID)?;
+        if ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
+            return Err(CKR_ACTION_PROHIBITED.into());
+        }
         if matches!(
             copied_object.material,
             KeyMaterial::Profile { .. }
@@ -1602,35 +1685,7 @@ fn destroy_object(
             id, object_type, ..
         } = stored_object.material
         {
-            let related_metadata = ctx
-                .get_slot(slot_id)?
-                .yubihsm_owned_metadata_objects(id, object_type)?;
-            ctx._get_session(session_handle)?
-                .1
-                .yubihsm_command(&YubiHsmCommand::delete_object(id, object_type & !0x80))?;
-            ctx.get_slot(slot_id)?
-                .yubihsm_forget_object(id, object_type)?;
-            let mut cleanup_error = None;
-            for (metadata_id, _metadata_sequence) in related_metadata {
-                match ctx
-                    ._get_session(session_handle)?
-                    .1
-                    .yubihsm_command(&YubiHsmCommand::delete_object(metadata_id, YUBIHSM_OPAQUE))
-                {
-                    Ok(_) => {
-                        if let Err(error) = ctx
-                            .get_slot(slot_id)?
-                            .yubihsm_forget_object(metadata_id, YUBIHSM_OPAQUE)
-                        {
-                            cleanup_error.get_or_insert(error);
-                        }
-                    }
-                    Err(error) => {
-                        cleanup_error.get_or_insert(error);
-                    }
-                }
-            }
-            let removed: Vec<_> = ctx
+            let public_handles = ctx
                 .resolved_objects()?
                 .into_iter()
                 .filter_map(|(handle, candidate)| match candidate.material {
@@ -1640,20 +1695,28 @@ fn destroy_object(
                         ..
                     } if candidate.slot_id == Some(slot_id)
                         && candidate_id == id
+                        && candidate.token
+                        && candidate.is_yubihsm_public_projection()
                         && candidate_type & !0x80 == object_type & !0x80 =>
                     {
                         Some(handle)
                     }
                     _ => None,
                 })
-                .collect();
-            for handle in removed {
-                ctx.remove_object_handle(handle);
-            }
-            return match cleanup_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            };
+                .collect::<Vec<_>>();
+            let detached_public = ctx
+                .get_slot(slot_id)?
+                .yubihsm_destroy_native_object(slot_id, &stored_object.unique_id)?;
+            let rebindings = detached_public
+                .map(|unique_id| {
+                    public_handles
+                        .into_iter()
+                        .map(|handle| (handle, unique_id.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            ctx.refresh_slot_token_objects_with_rebindings(slot_id, &rebindings)?;
+            return Ok(());
         }
         ctx.remove_object_handle(object);
         Ok(())
@@ -1871,6 +1934,9 @@ fn object_attribute_value(
     if object.attribute_is_sensitive(attribute_type) {
         return Ok(None);
     }
+    if attribute_type == CKA_COPYABLE as CK_ATTRIBUTE_TYPE && ctx.slot.kind() == SlotKind::YubiHsm {
+        return Ok(Some(bool_attribute(false)));
+    }
     if let KeyMaterial::YubiHsm {
         id,
         object_type: YUBIHSM_OPAQUE,
@@ -2007,12 +2073,12 @@ fn set_attribute_value(
             ctx.refresh_slot_token_objects(slot_id)?;
             return Ok(());
         }
-        if stored_object.token && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm {
+        if stored_object.token
+            && ctx.get_slot(slot_id)?.kind() == SlotKind::YubiHsm
+            && matches!(stored_object.material, KeyMaterial::YubiHsm { .. })
+        {
             if templ.is_empty() {
                 return Ok(());
-            }
-            if !matches!(stored_object.material, KeyMaterial::YubiHsm { .. }) {
-                return Err(CKR_ACTION_PROHIBITED.into());
             }
             let mut id = None;
             let mut label = None;

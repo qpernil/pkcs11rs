@@ -353,11 +353,13 @@ pretend that a host-memory object is a persistent token object.
 
 The pkcs11rs reference implementation routes generic token projections through
 the slot's `StorageProvider`. Slots without token storage reject the request.
-Its YubiHSM provider stores a validated `CKA_PUBLIC_KEY_INFO` and the supported
-public-object policy attributes in a canonical metadata aspect owned by
-pkcs11rs. Legacy Yubico metadata and identity-only canonical aspects do not
-establish object existence. Destroying the public token object removes only
-that aspect; the hardware private key and its unrelated metadata remain.
+Its YubiHSM provider stores an explicit public-aspect marker and only the
+public-object attributes that differ from the native defaults. The linked
+native key remains the authoritative public-material source, so its SPKI is
+not duplicated in device metadata. Destroying the public token object removes
+only that aspect; the hardware private key and its unrelated metadata remain.
+Destroying the private key first transforms the surviving public aspect into
+a standalone public-key record containing the complete public material.
 
 ### 5.3 Protocol-backed private key
 

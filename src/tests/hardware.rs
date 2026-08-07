@@ -624,7 +624,7 @@ mod hardware_provisioning {
 
     #[test]
     #[ignore = "generates, wraps, destroys, restores, and cleans up persistent keys on a live YubiHSM"]
-    fn generated_ec_key_round_trips_through_private_rsa_wrap_key_on_hardware() {
+    fn generated_ec_key_round_trips_through_rsa_public_wrap_key_on_hardware() {
         if std::env::var(RSA_WRAP_ENABLE_ENV).as_deref() != Ok("1") {
             eprintln!("skipped hardware wrap test; set {RSA_WRAP_ENABLE_ENV}=1 to enable it");
             return;
@@ -643,7 +643,7 @@ mod hardware_provisioning {
             DEFAULT_ADMIN_PASSWORD,
         );
         let pin = format!("{admin_id:04x}{admin_password}");
-        let result = generated_ec_private_rsa_wrap_round_trip(slot_id, pin.as_bytes());
+        let result = rsa_public_wrap_round_trip(slot_id, pin.as_bytes());
         let finalize = crate::api::C_Finalize(std::ptr::null_mut());
         result.unwrap();
         assert_eq!(finalize, CKR_OK as CK_RV);

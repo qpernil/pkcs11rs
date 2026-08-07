@@ -66,7 +66,7 @@ mod preview_sign_mock;
 #[path = "wrap.rs"]
 mod wrap;
 #[cfg(not(feature = "abi-tests"))]
-use wrap::generated_ec_private_rsa_wrap_round_trip;
+use wrap::rsa_public_wrap_round_trip;
 
 fn bytes_attribute(type_: CK_ATTRIBUTE_TYPE, value: &mut [u8]) -> CK_ATTRIBUTE {
     CK_ATTRIBUTE {
@@ -103,7 +103,7 @@ fn yubihsm_objects_with_persisted_public(
         target_type: info.object_type,
         target_id: info.id,
         target_sequence: info.sequence,
-        primary_class: None,
+        primary_class: Some(CKO_PRIVATE_KEY as CK_OBJECT_CLASS),
         id: None,
         label: None,
         public: true,
@@ -2868,7 +2868,7 @@ fn yubihsm_legacy_reference_metadata_does_not_create_a_public_token_object() {
         primary_class: None,
         id: Some(b"private-id".to_vec()),
         label: Some("private label".to_owned()),
-        public: true,
+        public: false,
         public_id: Some(b"public-id".to_vec()),
         public_label: Some("public label".to_owned()),
         public_attributes: crate::key_metadata::KeyAttributes::new(),

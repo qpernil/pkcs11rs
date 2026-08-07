@@ -1,8 +1,8 @@
 use super::crypt::yubihsm_ec_coordinate_length;
 use super::object::{
-    piv_key_object_handles, publish_software_secret_object, required_template_value,
-    validate_software_secret_length, validate_unique_template, yubihsm_hardware_import_object,
-    yubihsm_id, yubihsm_object_parameters,
+    import_yubihsm_token_object, piv_key_object_handles, publish_software_secret_object,
+    required_template_value, validate_software_secret_length, validate_unique_template,
+    yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
@@ -639,7 +639,9 @@ fn generate_key_pair(
         let mut projected = project_public_key_object(&imported_private, public_template)?;
         projected.local = true;
         projected.key_gen_mechanism = Some(mechanism.mechanism);
-        let public = if projected.token {
+        let public = if projected.wrap {
+            import_yubihsm_token_object(ctx, session_handle, slot_id, &projected)?
+        } else if projected.token {
             ctx.get_slot(slot_id)?.yubihsm_persist_public_projection(
                 slot_id,
                 &imported_private.unique_id,
@@ -1276,18 +1278,14 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         optional_bool_template_attribute(private_template, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
             .unwrap_or(false);
     let private_unwrap =
-        optional_bool_template_attribute(private_template, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
-            .unwrap_or(false);
+        optional_bool_template_attribute(private_template, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?;
     let private_extractable =
         optional_bool_template_attribute(private_template, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?
             .unwrap_or(false);
     let public_filtered = public_template
         .iter()
         .copied()
-        .filter(|attribute| {
-            attribute.type_ != CKA_WRAP as CK_ATTRIBUTE_TYPE
-                && attribute.type_ != CKA_UNWRAP as CK_ATTRIBUTE_TYPE
-        })
+        .filter(|attribute| attribute.type_ != CKA_UNWRAP as CK_ATTRIBUTE_TYPE)
         .collect::<Vec<_>>();
     let private_filtered = private_template
         .iter()
@@ -1311,6 +1309,8 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
         key_type,
     )?;
+    let wrap_key = public_wrap || private_unwrap.unwrap_or(false);
+    private_object.unwrap = wrap_key;
     private_object.extractable = private_extractable;
     private_object.never_extractable = !private_extractable;
     if !private_object.token {
@@ -1336,11 +1336,10 @@ pub(crate) fn yubihsm_generate_key_pair_command(
         private_object.label = public_object.label.clone();
     }
     let hardware = yubihsm_hardware_import_object(&private_object)?;
-    let wrap_key = private_unwrap;
     if public_unwrap
-        || public_wrap
         || private_wrap
         || (wrap_key && key_type != CKK_RSA as CK_KEY_TYPE)
+        || (public_wrap && (!public_object.token || private_unwrap == Some(false)))
         || (wrap_key
             && (public_object.encrypt
                 || public_object.decrypt
@@ -1427,7 +1426,6 @@ fn project_public_key_object(
                 || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
-                || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
                 || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
         ) {
             parsed.apply_attribute(attribute).map_err(Error::from)?;
@@ -1441,6 +1439,15 @@ fn project_public_key_object(
         || projected.sign
         || projected.decrypt
         || projected.derive
+        || projected.wrap
+            && (!projected.token
+                || !matches!(
+                    base.material,
+                    KeyMaterial::YubiHsm {
+                        object_type: YUBIHSM_WRAP_KEY,
+                        ..
+                    }
+                ))
         || projected.encrypt && projected.key_type != CKK_RSA as CK_KEY_TYPE
         || projected.verify
             && !matches!(
@@ -1552,7 +1559,13 @@ fn derive_key(
             }
             let projected = project_public_key_object(&base, templ)?;
             validate_new_object_access(&projected, flags, logged_in)?;
-            if projected.token
+            if projected.wrap {
+                if ctx.get_slot(slot_id)?.kind() != SlotKind::YubiHsm {
+                    return Err(CKR_TEMPLATE_INCONSISTENT.into());
+                }
+                *key_handle =
+                    import_yubihsm_token_object(ctx, session_handle, slot_id, &projected)?;
+            } else if projected.token
                 && matches!(
                     &base.material,
                     KeyMaterial::YubiHsm {

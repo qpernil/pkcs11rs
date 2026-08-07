@@ -51,7 +51,10 @@ object for ordinary software verification or RSA encryption. YubiHSM private
 keys can additionally produce persistent public token objects backed by
 pkcs11rs-owned canonical metadata. See the
 [public-key projection proposal](docs/public-key-projection-proposal.md) for
-the proposed standard semantics and current implementation boundary.
+the proposed standard semantics and current implementation boundary. YubiHSM
+RSA wrap keys add an explicit native-public-wrap case; its complete
+`C_GenerateKeyPair`, `C_CreateObject`, and `C_DeriveKey` template matrices are
+documented under [RSA public wrap keys](docs/yubihsm-auth.md#rsa-public-wrap-keys).
 
 ## PKCS #11 3.2 profiles
 
@@ -752,12 +755,14 @@ them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
 `PKCS11RS_TEST_YUBIHSM_SOURCE` when more than one is present.
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
-auto-assigned object IDs, generates an exportable P-256 target and RSA-2048
-wrap key, restores the wrapped target, and removes both keys before returning:
+only exported PKCS #11 calls to generate an exportable P-256 target and an
+RSA-2048 private wrap key. It materializes the distinct YubiHSM RSA public wrap
+key through `C_GenerateKeyPair`, `C_CreateObject`, and `C_DeriveKey`, restores
+the wrapped target, and removes every created object before returning:
 
 ```sh
 PKCS11RS_TEST_YUBIHSM_RSA_WRAP=1 \
-cargo test generated_ec_key_round_trips_through_private_rsa_wrap_key_on_hardware \
+cargo test generated_ec_key_round_trips_through_rsa_public_wrap_key_on_hardware \
   -- --ignored --nocapture
 ```
 
@@ -833,15 +838,21 @@ metadata objects on the device. Its canonical CBOR uses the distinct
 `Meta object for ...` namespace are read-only compatibility input, used only
 when no pkcs11rs metadata exists for the target; pkcs11rs never rewrites or
 deletes them. A YubiHSM public token object exists only when its canonical
-public aspect contains validated public-key material. `C_GenerateKeyPair`
+public aspect is explicitly present; linked public material comes from the
+native key and is not duplicated in metadata. `C_GenerateKeyPair`
 returns a session public key by default and persists it only when the public
 template explicitly sets `CKA_TOKEN=CK_TRUE`; the same choice is available
 through `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`. Destroying that public object removes
-only the canonical public aspect, while destroying the hardware private object
-also removes its pkcs11rs-owned companion metadata. See
+only the canonical public aspect. Destroying the hardware private object first
+morphs a surviving public aspect into a standalone public-key record. See
 [Content-addressed CBOR storage](docs/storage.md) and
 [Experimental FIDO previewSign boundary](docs/preview-sign.md) for the exact
 integration limits.
+
+`C_CopyObject` is unsupported across a YubiHSM slot, including for public keys
+whose implementation backing is an internal opaque record. Such objects report
+`CKA_COPYABLE=CK_FALSE`; use `C_CreateObject` to create an independent public
+key explicitly.
 
 The module has typed software private-key implementations for RSA, NIST P-224,
 P-256, P-384 and P-521, secp256k1, brainpoolP256r1, brainpoolP384r1,

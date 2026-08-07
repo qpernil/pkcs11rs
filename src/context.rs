@@ -1589,12 +1589,20 @@ impl SlotContext {
     }
 
     pub(crate) fn refresh_slot_token_objects(&mut self, slot_id: CK_SLOT_ID) -> Result<(), Error> {
+        self.refresh_slot_token_objects_with_rebindings(slot_id, &[])
+    }
+
+    pub(crate) fn refresh_slot_token_objects_with_rebindings(
+        &mut self,
+        slot_id: CK_SLOT_ID,
+        rebindings: &[(CK_OBJECT_HANDLE, String)],
+    ) -> Result<(), Error> {
         self.require_slot_id(slot_id)?;
         let mut objects = self.slot.token_objects(slot_id)?;
         let stored = self.stored_token_objects()?;
         self.record_backed_objects(&stored);
         objects.extend(stored.into_iter().map(|(_, object)| object));
-        self.reconcile_slot_token_objects(slot_id, objects)
+        self.reconcile_slot_token_objects_with_rebindings(slot_id, objects, rebindings)
     }
 
     pub(crate) fn init_token(

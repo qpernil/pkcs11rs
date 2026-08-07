@@ -277,11 +277,12 @@ credential.
 YubiHSM PKCS #11 metadata objects are internal opaque-data companions and are
 never exposed as PKCS #11 objects. Metadata may contain any subset of the
 private object's `CKA_ID` and `CKA_LABEL`. Canonical metadata may additionally
-contain a public aspect with validated `CKA_PUBLIC_KEY_INFO` and supported
-public-object attributes. That complete canonical aspect represents a real
-public token object; an empty or identity-only aspect does not. Valid overrides
-apply regardless of whether the target was first seen by public discovery,
-user login, or a successful mutation.
+contain an explicit public aspect with sparse public-object attribute deltas.
+The linked native key supplies the public material, so its SPKI is not
+duplicated in metadata. Public-aspect presence represents a real public token
+object even when no attribute delta is required. Valid overrides apply
+regardless of whether the target was first seen by public discovery, user
+login, or a successful mutation.
 
 Metadata is linked from the target's native cache entry. The companion's
 contents identify the target object type, ID, and sequence, while its own
@@ -296,8 +297,9 @@ the pkcs11rs namespace. `C_SetAttributeValue` writes a replacement canonical
 metadata object before removing older canonical companions, and creating an
 object automatically creates metadata when requested attributes cannot be
 encoded by the native YubiHSM object. New metadata uses YubiHSM
-auto-allocation. Destroying the main object deletes its pkcs11rs-owned
-companions but leaves legacy companions untouched.
+auto-allocation. Metadata is not created when native attributes suffice, and
+setting the final override back to its native value deletes an otherwise empty
+record. A private and its linked public aspect share one record.
 
 `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` with `CKA_TOKEN=CK_TRUE` creates or replaces
 the canonical public aspect for an asymmetric or RSA wrap key. The object is
@@ -309,6 +311,104 @@ the public object removes only the public aspect and does not delete the
 hardware private key or legacy metadata. If removing the aspect would otherwise
 reveal a legacy record, pkcs11rs retains an empty canonical shadow so legacy
 input cannot silently regain authority.
+
+Deleting the private key first preserves the public object's lifetime.
+pkcs11rs reads the native public material, removes the private aspect, and
+morphs the same physical metadata-object ID into a standalone
+`pkcs11rs.public-key` record before deleting the hardware key. The public
+handle is rebound to that standalone backing. This transition consumes no
+additional steady-state YubiHSM object and remains possible at the device's
+256-object limit.
+
+### RSA public wrap keys
+
+A native YubiHSM RSA public wrap key is a separate object type from the
+ordinary public projection of a private RSA wrap key. pkcs11rs selects that
+native type only from an explicit `CKA_WRAP=CK_TRUE` request. An omitted
+Boolean attribute has its normal PKCS #11 default of `CK_FALSE`, so omitting
+`CKA_WRAP` and supplying `CKA_WRAP=CK_FALSE` have the same result.
+
+`CKA_TOKEN=CK_TRUE` is required for a native public wrap key because the
+YubiHSM object is persistent. An omitted or false `CKA_TOKEN` requests a
+session object. That remains valid for an ordinary public key, but it is
+inconsistent with `CKA_WRAP=CK_TRUE` on the special paths below.
+
+`C_CreateObject` has no private source key from which to infer intent. Its RSA
+public-key template is interpreted as follows:
+
+| `CKA_WRAP` | `CKA_TOKEN` | PKCS #11 object | Device representation | Relationship |
+| --- | --- | --- | --- | --- |
+| Absent or false | Absent/false | Ordinary session `CKO_PUBLIC_KEY` | Session-memory backed public material | Standalone |
+| Absent or false | True | Ordinary token `CKO_PUBLIC_KEY` | Internal opaque `pkcs11rs.public-key` record | Standalone |
+| True | Absent/false | None: `CKR_TEMPLATE_INCONSISTENT` | None | None |
+| True | True | Wrap-capable token `CKO_PUBLIC_KEY` | Native `YUBIHSM_PUBLIC_WRAP_KEY` | Standalone |
+
+Thus `CKA_WRAP=CK_FALSE` never means “probably a public wrap key.” It is an
+ordinary RSA public key, because PKCS #11 provides no other provenance in
+`C_CreateObject`.
+
+For `C_DeriveKey` with `CKM_PKCS11RS_PROJECT_PUBLIC_KEY`, both the template and
+the base key are known:
+
+| Base private object | `CKA_WRAP` | `CKA_TOKEN` | Resulting public object | Device representation and relationship |
+| --- | --- | --- | --- | --- |
+| Any projectable private key | Absent or false | Absent/false | Ordinary session `CKO_PUBLIC_KEY` | Session-memory projection; no persistent object |
+| Native YubiHSM asymmetric or RSA wrap key | Absent or false | True | Ordinary token `CKO_PUBLIC_KEY` | Canonical metadata public aspect linked to the base hardware object |
+| Native RSA wrap key | True | Absent/false | None: `CKR_TEMPLATE_INCONSISTENT` | None |
+| Native RSA wrap key | True | True | Wrap-capable token `CKO_PUBLIC_KEY` | Separate native `YUBIHSM_PUBLIC_WRAP_KEY`; not a metadata aspect |
+| Any other private key | True | Either | None: `CKR_TEMPLATE_INCONSISTENT` | None |
+
+The ordinary token projection in the second row remains synthetic and
+metadata-backed even when its base is a native private wrap key. Only the
+explicit true/true row materializes the distinct native public wrap object.
+“Linked” describes its backing and validation source, not a shared PKCS #11
+lifetime: the projected public key is a genuine token object with its own
+identity. It can be found and destroyed independently, and destroying it
+removes only the canonical public aspect without destroying the private
+hardware key.
+
+For RSA `C_GenerateKeyPair`, the public template describes the returned public
+object and the private template describes the generated hardware key:
+
+| Public `CKA_WRAP` | Public `CKA_TOKEN` | Private `CKA_UNWRAP` | Private object created | Public object returned |
+| --- | --- | --- | --- | --- |
+| Absent or false | Absent/false | Absent or false | Native `YUBIHSM_ASYMMETRIC_KEY` | Ordinary session `CKO_PUBLIC_KEY` projection |
+| Absent or false | True | Absent or false | Native `YUBIHSM_ASYMMETRIC_KEY` | Ordinary metadata-backed token `CKO_PUBLIC_KEY` aspect linked to the private key |
+| Absent or false | Absent/false | True | Native `YUBIHSM_WRAP_KEY` with RSA algorithm | Ordinary session `CKO_PUBLIC_KEY` projection |
+| Absent or false | True | True | Native `YUBIHSM_WRAP_KEY` with RSA algorithm | Ordinary metadata-backed token `CKO_PUBLIC_KEY` aspect linked to the private wrap key |
+| True | Absent/false | Either | None: `CKR_TEMPLATE_INCONSISTENT` | None |
+| True | True | Absent or true | Native `YUBIHSM_WRAP_KEY` with RSA algorithm | Separate native `YUBIHSM_PUBLIC_WRAP_KEY`, exposed as a wrap-capable token `CKO_PUBLIC_KEY` |
+| True | True | False | None: `CKR_TEMPLATE_INCONSISTENT` | None |
+
+On successful public-wrap generation pkcs11rs makes the private key
+unwrap-capable. `CKA_WRAP` on the private template and `CKA_UNWRAP` on the
+public template are inconsistent. Wrap-key generation is RSA-only and rejects
+ordinary sign, verify, encrypt, decrypt, or derive capabilities on either half.
+
+The native public object is used with `C_WrapKey` and
+`CKM_YUBICO_RSA_WRAP`; the native private wrap key is used with `C_UnwrapKey`.
+Applications can discover the public object normally with
+`C_FindObjects*`, inspect it with `C_GetAttributeValue`, and remove it with
+`C_DestroyObject`. Destroying it does not implicitly destroy its separately
+represented private wrap key.
+
+All three persistent public forms therefore have independent PKCS #11
+lifecycles. A metadata-backed projection is linked to a private key only for
+material validation, a public key imported by `C_CreateObject` has standalone
+opaque backing, and a public wrap key has a standalone native YubiHSM object.
+
+`C_CopyObject` is unsupported for every object presented through a YubiHSM
+slot and returns `CKR_ACTION_PROHIBITED`; those objects report
+`CKA_COPYABLE=CK_FALSE`. This slot-wide rule does not vary according to whether
+an object's physical backing happens to be native hardware or an internal
+opaque record. Applications create another independent public object explicitly
+with `C_CreateObject`.
+
+`C_SetAttributeValue` remains supported for mutable attributes. Native objects
+store `CKA_ID` and `CKA_LABEL` deltas in canonical metadata, linked public
+projections store those deltas in their public aspect, and standalone public
+token keys replace their own internal `pkcs11rs.public-key` record while
+preserving the PKCS #11 handle. Session public-key updates remain in memory.
 
 Companions have canonical `pkcs11rs.backed-key` logical contents. The
 provider-owned backing binds the target domains and primary key class, and
@@ -328,6 +428,10 @@ from treating unfamiliar canonical CBOR as MDB1 and makes ownership apparent
 in `yubihsm-shell` listings. See
 [Content-addressed CBOR storage](storage.md#yubihsm-backend-metadata) for the
 shared schema and backend behavior.
+
+Normal PKCS #11 operations deliberately do not normalize legacy metadata.
+Inspection, migration, and removal belong to separate maintenance tooling with
+an explicit apply step; that tooling is outside the runtime compatibility path.
 
 ## YubiHSM login
 

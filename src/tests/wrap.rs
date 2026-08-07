@@ -1343,29 +1343,35 @@ fn install_yubihsm_wrap_test_objects(
         algorithm: crate::YUBIHSM_ALGO_RSA_2048,
         key: vec![0xa5; 256],
     };
-    let public_wrap_parameters = crate::yubihsm::DelegatedObjectParameters {
-        object: crate::YubiHsmObjectParameters {
-            id: 33,
-            label: "RSA public wrap",
-            domains: 0xffff,
-            capabilities: [0; 8],
-            algorithm: crate::YUBIHSM_ALGO_RSA_2048,
-        },
-        delegated_capabilities: [0; 8],
-    };
-    let public_wrap_command = crate::YubiHsmCommand::put_delegated_object(
-        crate::YubiHsmCommandCode::PutPublicWrapKey,
-        &public_wrap_parameters,
-        &public_key.key,
-    )
-    .unwrap();
-    crate::with_session_context_mut(session, |ctx| {
-        ctx._get_session(session)?
-            .1
-            .yubihsm_command(&public_wrap_command)
-            .map(|_| ())
-    })
-    .unwrap();
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut label = b"RSA public wrap".to_vec();
+    let mut modulus = public_key.key.clone();
+    let mut public_exponent = vec![0x01, 0x00, 0x01];
+    let mut public_wrap_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+        bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+        bytes_attribute(
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            &mut public_exponent,
+        ),
+    ];
+    let mut rsa_public_wrap = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            public_wrap_template.as_mut_ptr(),
+            public_wrap_template.len() as CK_ULONG,
+            &mut rsa_public_wrap,
+        ),
+        CKR_OK as CK_RV
+    );
 
     let definitions = [
         yubihsm_wrap_test_object(
@@ -1404,24 +1410,11 @@ fn install_yubihsm_wrap_test_objects(
                 public_key: Some(public_key.clone()),
             },
         ),
-        yubihsm_wrap_test_object(
-            slot_id,
-            YubiHsmWrapTestObject {
-                id: 33,
-                object_type: crate::YUBIHSM_PUBLIC_WRAP_KEY,
-                algorithm: crate::YUBIHSM_ALGO_RSA_2048,
-                capabilities: &[],
-                delegated_capabilities: &[],
-                label: "RSA public wrap",
-                public_key: Some(public_key),
-            },
-        ),
     ];
     let mut target = None;
     let mut ccm = None;
     let mut rsa_private = None;
     let mut rsa_synthetic_public = None;
-    let mut rsa_public_wrap = None;
     with_test_slot_context(slot_id, |context| {
         for objects in definitions {
             for object in objects {
@@ -1437,7 +1430,6 @@ fn install_yubihsm_wrap_test_objects(
                     (31, crate::YUBIHSM_WRAP_KEY) => ccm = Some(handle),
                     (32, crate::YUBIHSM_WRAP_KEY) => rsa_private = Some(handle),
                     (32, crate::YUBIHSM_WRAP_KEY_PUBLIC) => rsa_synthetic_public = Some(handle),
-                    (33, crate::YUBIHSM_PUBLIC_WRAP_KEY) => rsa_public_wrap = Some(handle),
                     _ => {}
                 }
             }
@@ -1448,7 +1440,7 @@ fn install_yubihsm_wrap_test_objects(
         ccm.unwrap(),
         rsa_private.unwrap(),
         rsa_synthetic_public.unwrap(),
-        rsa_public_wrap.unwrap(),
+        rsa_public_wrap,
     )
 }
 
@@ -1556,22 +1548,44 @@ fn yubihsm_rsa_wrap_generation_uses_pkcs11_template_roles() {
         pParameter: std::ptr::null_mut(),
         ulParameterLen: 0,
     };
-    let (_, _, command) =
+    let (private_object, public_object, command) =
         crate::yubihsm_generate_key_pair_command(&mechanism, &public, &private).unwrap();
     assert_eq!(command.code(), crate::YubiHsmCommandCode::GenerateWrapKey);
+    assert!(private_object.unwrap);
+    assert!(!public_object.wrap);
 
-    let mut unsupported_wrap = CK_TRUE as CK_BBOOL;
-    let unsupported_public = [
+    let mut public_wrap = CK_TRUE as CK_BBOOL;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let public = [
         scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
-        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut unsupported_wrap),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut public_wrap),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+    ];
+    let private = [scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token)];
+    let (private_object, public_object, command) =
+        crate::yubihsm_generate_key_pair_command(&mechanism, &public, &private).unwrap();
+    assert_eq!(command.code(), crate::YubiHsmCommandCode::GenerateWrapKey);
+    assert!(private_object.unwrap);
+    assert!(public_object.wrap);
+
+    let mut no_unwrap = CK_FALSE as CK_BBOOL;
+    let private = [
+        scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut no_unwrap),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
     ];
     assert_eq!(
         CK_RV::from(
-            crate::yubihsm_generate_key_pair_command(&mechanism, &unsupported_public, &private)
-                .unwrap_err()
+            crate::yubihsm_generate_key_pair_command(&mechanism, &public, &private).unwrap_err()
         ),
         CKR_TEMPLATE_INCONSISTENT as CK_RV
     );
+
+    let mut wrap = CK_FALSE as CK_BBOOL;
+    let public = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+    ];
+    let mut unwrap = CK_TRUE as CK_BBOOL;
     let mut private_wrap = CK_TRUE as CK_BBOOL;
     let private = [
         scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
@@ -1682,62 +1696,179 @@ fn checked_ulong_attribute(
     Ok(CK_ULONG::from_ne_bytes(value))
 }
 
-fn provision_rsa_public_wrap_key(
+fn checked_public_wrap_attributes(
     session: CK_SESSION_HANDLE,
-    slot_id: CK_SLOT_ID,
-    generated_public: CK_OBJECT_HANDLE,
-) -> Result<CK_OBJECT_HANDLE, String> {
-    let modulus = checked_attribute(session, generated_public, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
-    let algorithm = match modulus.len() {
-        256 => crate::YUBIHSM_ALGO_RSA_2048,
-        384 => crate::YUBIHSM_ALGO_RSA_3072,
-        512 => crate::YUBIHSM_ALGO_RSA_4096,
-        length => return Err(format!("unsupported RSA public modulus length {length}")),
-    };
-    let parameters = crate::yubihsm::DelegatedObjectParameters {
-        object: crate::YubiHsmObjectParameters {
-            id: 0,
-            label: "PKCS11 RSA public wrap test",
-            domains: 0xffff,
-            capabilities: crate::yubihsm_capabilities(&[0x0c]),
-            algorithm,
-        },
-        delegated_capabilities: [0xff; 8],
-    };
-    let command = crate::YubiHsmCommand::put_delegated_object(
-        crate::YubiHsmCommandCode::PutPublicWrapKey,
-        &parameters,
-        &modulus,
-    )
-    .map_err(|error| format!("failed to encode public wrap key: {error:?}"))?;
-
-    crate::with_session_context_mut(session, |ctx| {
-        let response = ctx._get_session(session)?.1.yubihsm_command(&command)?;
-        let id = crate::parse_yubihsm_object_id(&response)?;
-        ctx.refresh_slot_token_objects(slot_id)?;
-        ctx.resolved_objects()?
-            .into_iter()
-            .find_map(|(handle, object)| {
-                (object.slot_id == Some(slot_id)
-                    && matches!(
-                        object.material,
-                        KeyMaterial::YubiHsm {
-                            id: object_id,
-                            object_type: crate::YUBIHSM_PUBLIC_WRAP_KEY,
-                            ..
-                        } if object_id == id
-                    ))
-                .then_some(handle)
-            })
-            .ok_or(CKR_DEVICE_ERROR.into())
-    })
-    .map_err(|error| format!("failed to provision public wrap key: {error:?}"))
+    object: CK_OBJECT_HANDLE,
+) -> Result<(), String> {
+    if checked_ulong_attribute(session, object, CKA_CLASS as CK_ATTRIBUTE_TYPE)?
+        != CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+        || checked_ulong_attribute(session, object, CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE)?
+            != CKK_RSA as CK_KEY_TYPE
+        || !checked_bool_attribute(session, object, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
+        || !checked_bool_attribute(session, object, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
+    {
+        return Err(format!(
+            "object {object} is not a token RSA public wrap key"
+        ));
+    }
+    Ok(())
 }
 
-pub(super) fn generated_ec_private_rsa_wrap_round_trip(
-    slot_id: CK_SLOT_ID,
-    pin: &[u8],
-) -> Result<(), String> {
+fn checked_find_public_wrap_by_label(
+    session: CK_SESSION_HANDLE,
+    label: &[u8],
+) -> Result<CK_OBJECT_HANDLE, String> {
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut label = label.to_vec();
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+    ];
+    checked_rv(
+        "C_FindObjectsInit RSA public wrap key",
+        crate::api::C_FindObjectsInit(session, template.as_mut_ptr(), template.len() as CK_ULONG),
+    )?;
+    let mut objects = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 2];
+    let mut count = 0;
+    let find = checked_rv(
+        "C_FindObjects RSA public wrap key",
+        crate::api::C_FindObjects(
+            session,
+            objects.as_mut_ptr(),
+            objects.len() as CK_ULONG,
+            &mut count,
+        ),
+    );
+    let finish = checked_rv(
+        "C_FindObjectsFinal RSA public wrap key",
+        crate::api::C_FindObjectsFinal(session),
+    );
+    find?;
+    finish?;
+    if count != 1 {
+        return Err(format!(
+            "expected one RSA public wrap key with label {:?}, found {count}",
+            String::from_utf8_lossy(&label)
+        ));
+    }
+    Ok(objects[0])
+}
+
+fn checked_wrap_key(
+    session: CK_SESSION_HANDLE,
+    wrapper: CK_OBJECT_HANDLE,
+    target: CK_OBJECT_HANDLE,
+) -> Result<Vec<u8>, String> {
+    let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(true);
+    initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
+    let mut wrapped_length = 0;
+    checked_rv(
+        "C_WrapKey length query",
+        crate::api::C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapper,
+            target,
+            std::ptr::null_mut(),
+            &mut wrapped_length,
+        ),
+    )?;
+    let mut wrapped = vec![0; wrapped_length as usize];
+    checked_rv(
+        "C_WrapKey",
+        crate::api::C_WrapKey(
+            session,
+            &mut mechanism,
+            wrapper,
+            target,
+            wrapped.as_mut_ptr(),
+            &mut wrapped_length,
+        ),
+    )?;
+    wrapped.truncate(wrapped_length as usize);
+    Ok(wrapped)
+}
+
+fn create_rsa_public_wrap_key(
+    session: CK_SESSION_HANDLE,
+    generated_public: CK_OBJECT_HANDLE,
+) -> Result<CK_OBJECT_HANDLE, String> {
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut label = b"PKCS11 RSA public wrap test".to_vec();
+    let mut modulus =
+        checked_attribute(session, generated_public, CKA_MODULUS as CK_ATTRIBUTE_TYPE)?;
+    let mut public_exponent = checked_attribute(
+        session,
+        generated_public,
+        CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+    )?;
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+        bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+        bytes_attribute(
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            &mut public_exponent,
+        ),
+    ];
+    let mut public_wrap_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    checked_rv(
+        "C_CreateObject RSA public wrap key",
+        crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut public_wrap_key,
+        ),
+    )?;
+    Ok(public_wrap_key)
+}
+
+fn derive_rsa_public_wrap_key(
+    session: CK_SESSION_HANDLE,
+    private_wrap_key: CK_OBJECT_HANDLE,
+) -> Result<CK_OBJECT_HANDLE, String> {
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut wrap = CK_TRUE as CK_BBOOL;
+    let mut label = b"PKCS11 RSA derived public wrap test".to_vec();
+    let mut template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+    ];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut public_wrap_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    checked_rv(
+        "C_DeriveKey RSA public wrap key",
+        crate::api::C_DeriveKey(
+            session,
+            &mut mechanism,
+            private_wrap_key,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut public_wrap_key,
+        ),
+    )?;
+    Ok(public_wrap_key)
+}
+
+pub(super) fn rsa_public_wrap_round_trip(slot_id: CK_SLOT_ID, pin: &[u8]) -> Result<(), String> {
     let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
     checked_rv(
         "C_OpenSession",
@@ -1768,7 +1899,8 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     let mut target_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut wrapper_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut wrapper_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
-    let mut public_wrap_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut created_public_wrap = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut derived_public_wrap = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let mut restored = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     let operation = (|| -> Result<(), String> {
         let mut ec_parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
@@ -1805,17 +1937,16 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
         let target_id = checked_attribute(session, target_private, CKA_ID as CK_ATTRIBUTE_TYPE)?;
 
         let mut modulus_bits = 2048 as CK_ULONG;
-        let mut wrap = CK_FALSE as CK_BBOOL;
-        let mut unwrap = CK_TRUE as CK_BBOOL;
+        let mut wrap = CK_TRUE as CK_BBOOL;
+        let mut generated_public_label = b"PKCS11 RSA generated public wrap test".to_vec();
         let mut rsa_public_template = [
             scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
             scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
             scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut generated_public_label),
         ];
-        let mut rsa_private_template = [
-            scalar_attribute(CKA_UNWRAP as CK_ATTRIBUTE_TYPE, &mut unwrap),
-            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
-        ];
+        let mut rsa_private_template =
+            [scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token)];
         let mut rsa_generation = CK_MECHANISM {
             mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
             pParameter: std::ptr::null_mut(),
@@ -1834,12 +1965,34 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
                 &mut wrapper_private,
             ),
         )?;
-        if checked_bool_attribute(session, wrapper_public, CKA_WRAP as CK_ATTRIBUTE_TYPE)?
+        if !checked_bool_attribute(session, wrapper_private, CKA_TOKEN as CK_ATTRIBUTE_TYPE)?
             || !checked_bool_attribute(session, wrapper_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE)?
         {
             return Err("generated RSA wrap-key attributes are inconsistent".to_owned());
         }
-        public_wrap_key = provision_rsa_public_wrap_key(session, slot_id, wrapper_public)?;
+        created_public_wrap = create_rsa_public_wrap_key(session, wrapper_public)?;
+        derived_public_wrap = derive_rsa_public_wrap_key(session, wrapper_private)?;
+        for (handle, label) in [
+            (
+                wrapper_public,
+                b"PKCS11 RSA generated public wrap test".as_slice(),
+            ),
+            (
+                created_public_wrap,
+                b"PKCS11 RSA public wrap test".as_slice(),
+            ),
+            (
+                derived_public_wrap,
+                b"PKCS11 RSA derived public wrap test".as_slice(),
+            ),
+        ] {
+            checked_public_wrap_attributes(session, handle)?;
+            if checked_find_public_wrap_by_label(session, label)? != handle {
+                return Err(format!(
+                    "C_FindObjects returned a different handle for public wrap key {handle}"
+                ));
+            }
+        }
 
         let (mut mechanism, mut parameters, mut oaep) = rsa_wrap_mechanism(true);
         initialize_rsa_wrap_mechanism(&mut mechanism, &mut parameters, &mut oaep);
@@ -1858,31 +2011,15 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
             ));
         }
 
-        let mut wrapped_length = 0;
-        checked_rv(
-            "C_WrapKey length query",
-            crate::api::C_WrapKey(
-                session,
-                &mut mechanism,
-                public_wrap_key,
-                target_private,
-                std::ptr::null_mut(),
-                &mut wrapped_length,
-            ),
-        )?;
-        let mut wrapped = vec![0; wrapped_length as usize];
-        checked_rv(
-            "C_WrapKey",
-            crate::api::C_WrapKey(
-                session,
-                &mut mechanism,
-                public_wrap_key,
-                target_private,
-                wrapped.as_mut_ptr(),
-                &mut wrapped_length,
-            ),
-        )?;
-        wrapped.truncate(wrapped_length as usize);
+        let mut wrapped = checked_wrap_key(session, wrapper_public, target_private)?;
+        for wrapper in [created_public_wrap, derived_public_wrap] {
+            let alternative = checked_wrap_key(session, wrapper, target_private)?;
+            if alternative.is_empty() {
+                return Err(format!(
+                    "public wrap key {wrapper} produced no wrapped data"
+                ));
+            }
+        }
 
         let collision_rv = crate::api::C_UnwrapKey(
             session,
@@ -1935,7 +2072,9 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
     for (name, handle) in [
         ("restored EC key", restored),
         ("original EC key", target_private),
-        ("RSA public wrap key", public_wrap_key),
+        ("generated RSA public wrap key", wrapper_public),
+        ("created RSA public wrap key", created_public_wrap),
+        ("derived RSA public wrap key", derived_public_wrap),
         ("RSA wrap key", wrapper_private),
     ] {
         if handle != CK_INVALID_HANDLE as CK_OBJECT_HANDLE {
@@ -1953,7 +2092,7 @@ pub(super) fn generated_ec_private_rsa_wrap_round_trip(
 }
 
 #[test]
-fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
+fn generated_ec_key_round_trips_through_rsa_public_wrap_key() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     assert_eq!(
@@ -1964,7 +2103,7 @@ fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
     const SLOT_ID: CK_SLOT_ID = 99;
     let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
     install_test_slot_with_backend(SLOT_ID, slot);
-    generated_ec_private_rsa_wrap_round_trip(SLOT_ID, b"0001password").unwrap();
+    rsa_public_wrap_round_trip(SLOT_ID, b"0001password").unwrap();
 
     let commands = commands.borrow();
     for command in [
@@ -1979,6 +2118,627 @@ fn generated_ec_key_round_trips_through_private_rsa_wrap_key() {
             "missing mock command {command:?}"
         );
     }
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|(actual, _)| { *actual == crate::YubiHsmCommandCode::PutPublicWrapKey as u8 })
+            .count(),
+        3,
+        "generation, C_CreateObject, and C_DeriveKey must each create a native public wrap key"
+    );
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+    let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut modulus_bits = 2048 as CK_ULONG;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut public_token = CK_FALSE as CK_BBOOL;
+    let mut wrap = CK_FALSE as CK_BBOOL;
+    let mut sign = CK_TRUE as CK_BBOOL;
+    let mut native_private_label = b"native RSA private key".to_vec();
+    let mut public_template = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut public_token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap),
+    ];
+    let mut private_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut native_private_label),
+    ];
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut ordinary_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut ordinary_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            public_template.as_mut_ptr(),
+            public_template.len() as CK_ULONG,
+            private_template.as_mut_ptr(),
+            private_template.len() as CK_ULONG,
+            &mut ordinary_public,
+            &mut ordinary_private,
+        ),
+        CKR_OK as CK_RV
+    );
+    let opaque_command_count = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == crate::YubiHsmCommandCode::PutOpaque as u8)
+            .count()
+    };
+    assert_eq!(
+        opaque_command_count(),
+        0,
+        "native generation without overrides must not create metadata"
+    );
+    let private_metadata_mutation_start = commands.borrow().len();
+    let mut override_label = b"temporary private label override".to_vec();
+    let mut override_template = [bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        &mut override_label,
+    )];
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            session,
+            ordinary_private,
+            override_template.as_mut_ptr(),
+            override_template.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(opaque_command_count(), 1);
+    let mut restore_template = [bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        &mut native_private_label,
+    )];
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            session,
+            ordinary_private,
+            restore_template.as_mut_ptr(),
+            restore_template.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        opaque_command_count(),
+        1,
+        "restoring the native label must delete metadata instead of replacing it"
+    );
+    assert!(
+        commands.borrow()[private_metadata_mutation_start..]
+            .iter()
+            .any(|(command, payload)| {
+                *command == crate::YubiHsmCommandCode::DeleteObject as u8
+                    && payload.get(2) == Some(&crate::YUBIHSM_OPAQUE)
+            }),
+        "restoring the native private-key label must delete the empty metadata object"
+    );
+
+    let mut modulus =
+        checked_attribute(session, ordinary_public, CKA_MODULUS as CK_ATTRIBUTE_TYPE).unwrap();
+    let mut public_exponent = checked_attribute(
+        session,
+        ordinary_public,
+        CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+    )
+    .unwrap();
+    let public_wrap_command_count = || {
+        commands
+            .borrow()
+            .iter()
+            .filter(|(command, _)| *command == crate::YubiHsmCommandCode::PutPublicWrapKey as u8)
+            .count()
+    };
+    assert_eq!(public_wrap_command_count(), 0);
+
+    let mut created = Vec::new();
+    for (label, token_value, wrap_value) in [
+        ("default session RSA public key", None, None),
+        (
+            "default-token explicit non-wrap RSA public key",
+            None,
+            Some(false),
+        ),
+        ("explicit session RSA public key", Some(false), None),
+        (
+            "explicit session non-wrap RSA public key",
+            Some(false),
+            Some(false),
+        ),
+        ("ordinary token RSA public key", Some(true), None),
+        (
+            "explicit non-wrap token RSA public key",
+            Some(true),
+            Some(false),
+        ),
+    ] {
+        let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+        let mut key_type = CKK_RSA as CK_KEY_TYPE;
+        let mut token = CK_BBOOL::from(token_value.unwrap_or(false));
+        let mut wrap = CK_BBOOL::from(wrap_value.unwrap_or(false));
+        let mut label = label.as_bytes().to_vec();
+        let mut template = vec![
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+            bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+            bytes_attribute(
+                CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+                &mut public_exponent,
+            ),
+        ];
+        if token_value.is_some() {
+            template.push(scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token));
+        }
+        if wrap_value.is_some() {
+            template.push(scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap));
+        }
+        let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let rv = crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut object,
+        );
+        assert_eq!(
+            rv,
+            CKR_OK as CK_RV,
+            "C_CreateObject failed for {label:?}, CKA_TOKEN={token_value:?}, CKA_WRAP={wrap_value:?}; commands={:?}",
+            commands.borrow()
+        );
+        assert_eq!(
+            checked_bool_attribute(session, object, CKA_TOKEN as CK_ATTRIBUTE_TYPE).unwrap(),
+            token_value.unwrap_or(false)
+        );
+        assert!(!checked_bool_attribute(session, object, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+        created.push(object);
+    }
+    assert_eq!(public_wrap_command_count(), 0);
+
+    let standalone_token_public = created[4];
+    assert!(!checked_bool_attribute(
+        session,
+        standalone_token_public,
+        CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+    )
+    .unwrap());
+    let mut copied_standalone = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CopyObject(
+            session,
+            standalone_token_public,
+            std::ptr::null_mut(),
+            0,
+            &mut copied_standalone,
+        ),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+    assert_eq!(copied_standalone, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    let mut updated_standalone_label = b"updated standalone token key".to_vec();
+    let mut update_standalone = [bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        &mut updated_standalone_label,
+    )];
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            session,
+            standalone_token_public,
+            update_standalone.as_mut_ptr(),
+            update_standalone.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        checked_attribute(
+            session,
+            standalone_token_public,
+            CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        )
+        .unwrap(),
+        updated_standalone_label
+    );
+
+    let mut projection = CK_MECHANISM {
+        mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        pParameter: std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut session_projections = Vec::new();
+    let mut default_session_projection = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection,
+            ordinary_private,
+            std::ptr::null_mut(),
+            0,
+            &mut default_session_projection,
+        ),
+        CKR_OK as CK_RV
+    );
+    session_projections.push(default_session_projection);
+    let mut projection_token_false = CK_FALSE as CK_BBOOL;
+    let mut projection_wrap_false = CK_FALSE as CK_BBOOL;
+    let mut explicit_session_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut projection_token_false),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut projection_wrap_false),
+    ];
+    let mut explicit_session_projection = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection,
+            ordinary_private,
+            explicit_session_template.as_mut_ptr(),
+            explicit_session_template.len() as CK_ULONG,
+            &mut explicit_session_projection,
+        ),
+        CKR_OK as CK_RV
+    );
+    session_projections.push(explicit_session_projection);
+    for object in &session_projections {
+        assert!(!checked_bool_attribute(session, *object, CKA_TOKEN as CK_ATTRIBUTE_TYPE).unwrap());
+        assert!(!checked_bool_attribute(session, *object, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    }
+
+    let mut projected_label = b"ordinary token public projection".to_vec();
+    let mut projection_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut projected_label),
+    ];
+    let mut projected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection,
+            ordinary_private,
+            projection_template.as_mut_ptr(),
+            projection_template.len() as CK_ULONG,
+            &mut projected,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert!(checked_bool_attribute(session, projected, CKA_TOKEN as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(!checked_bool_attribute(session, projected, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    let projected_spki_before_morph =
+        checked_attribute(session, projected, CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE).unwrap();
+    assert!(
+        !checked_bool_attribute(session, projected, CKA_COPYABLE as CK_ATTRIBUTE_TYPE,).unwrap()
+    );
+    let mut projected_copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CopyObject(
+            session,
+            projected,
+            std::ptr::null_mut(),
+            0,
+            &mut projected_copy,
+        ),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+    assert_eq!(projected_copy, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(public_wrap_command_count(), 0);
+
+    let mut wrap_true = CK_TRUE as CK_BBOOL;
+    let mut invalid_projection_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap_true),
+    ];
+    let mut invalid_projected = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection,
+            ordinary_private,
+            invalid_projection_template.as_mut_ptr(),
+            invalid_projection_template.len() as CK_ULONG,
+            &mut invalid_projected,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(invalid_projected, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    let mut invalid_session_projection_template = [
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut projection_token_false),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap_true),
+    ];
+    assert_eq!(
+        crate::api::C_DeriveKey(
+            session,
+            &mut projection,
+            ordinary_private,
+            invalid_session_projection_template.as_mut_ptr(),
+            invalid_session_projection_template.len() as CK_ULONG,
+            &mut invalid_projected,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+
+    let mut token_false = CK_FALSE as CK_BBOOL;
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_RSA as CK_KEY_TYPE;
+    let mut invalid_create_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token_false),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap_true),
+        bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+        bytes_attribute(
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            &mut public_exponent,
+        ),
+    ];
+    let mut invalid_created = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            invalid_create_template.as_mut_ptr(),
+            invalid_create_template.len() as CK_ULONG,
+            &mut invalid_created,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(invalid_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    let mut invalid_default_token_template = invalid_create_template
+        .iter()
+        .copied()
+        .filter(|attribute| attribute.type_ != CKA_TOKEN as CK_ATTRIBUTE_TYPE)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            invalid_default_token_template.as_mut_ptr(),
+            invalid_default_token_template.len() as CK_ULONG,
+            &mut invalid_created,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(invalid_created, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+    let mut invalid_generation_public = [
+        scalar_attribute(CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE, &mut modulus_bits),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token_false),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap_true),
+    ];
+    let mut invalid_generation_private =
+        [scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token)];
+    let mut invalid_public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    let mut invalid_private = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_GenerateKeyPair(
+            session,
+            &mut mechanism,
+            invalid_generation_public.as_mut_ptr(),
+            invalid_generation_public.len() as CK_ULONG,
+            invalid_generation_private.as_mut_ptr(),
+            invalid_generation_private.len() as CK_ULONG,
+            &mut invalid_public,
+            &mut invalid_private,
+        ),
+        CKR_TEMPLATE_INCONSISTENT as CK_RV
+    );
+    assert_eq!(public_wrap_command_count(), 0);
+
+    let mut native_label = b"explicit token RSA public wrap key".to_vec();
+    let mut native_create_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        scalar_attribute(CKA_WRAP as CK_ATTRIBUTE_TYPE, &mut wrap_true),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut native_label),
+        bytes_attribute(CKA_MODULUS as CK_ATTRIBUTE_TYPE, &mut modulus),
+        bytes_attribute(
+            CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE,
+            &mut public_exponent,
+        ),
+    ];
+    let mut native_public_wrap = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            native_create_template.as_mut_ptr(),
+            native_create_template.len() as CK_ULONG,
+            &mut native_public_wrap,
+        ),
+        CKR_OK as CK_RV
+    );
+    checked_public_wrap_attributes(session, native_public_wrap).unwrap();
+    assert_eq!(public_wrap_command_count(), 1);
+    assert!(!checked_bool_attribute(
+        session,
+        native_public_wrap,
+        CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+    )
+    .unwrap());
+    let mut native_copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CopyObject(
+            session,
+            native_public_wrap,
+            std::ptr::null_mut(),
+            0,
+            &mut native_copy,
+        ),
+        CKR_ACTION_PROHIBITED as CK_RV
+    );
+    assert_eq!(native_copy, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+    assert_eq!(public_wrap_command_count(), 1);
+
+    let opaque_before_native_update = opaque_command_count();
+    let public_wrap_metadata_mutation_start = commands.borrow().len();
+    let mut native_override_label = b"temporary native public wrap override".to_vec();
+    let mut native_override = [bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        &mut native_override_label,
+    )];
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            session,
+            native_public_wrap,
+            native_override.as_mut_ptr(),
+            native_override.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(opaque_command_count(), opaque_before_native_update + 1);
+    let mut native_restore = [bytes_attribute(
+        CKA_LABEL as CK_ATTRIBUTE_TYPE,
+        &mut native_label,
+    )];
+    assert_eq!(
+        crate::api::C_SetAttributeValue(
+            session,
+            native_public_wrap,
+            native_restore.as_mut_ptr(),
+            native_restore.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        opaque_command_count(),
+        opaque_before_native_update + 1,
+        "restoring a native public-wrap label must remove its metadata without writing a replacement"
+    );
+    assert!(
+        commands.borrow()[public_wrap_metadata_mutation_start..]
+            .iter()
+            .any(|(command, payload)| {
+                *command == crate::YubiHsmCommandCode::DeleteObject as u8
+                    && payload.get(2) == Some(&crate::YUBIHSM_OPAQUE)
+            }),
+        "restoring the native public-wrap label must delete the empty metadata object"
+    );
+
+    let command_start = commands.borrow().len();
+    assert_eq!(
+        crate::api::C_DestroyObject(session, ordinary_private),
+        CKR_OK as CK_RV
+    );
+    let detach_commands = commands.borrow()[command_start..].to_vec();
+    let put_index = detach_commands
+        .iter()
+        .position(|(command, payload)| {
+            *command == crate::YubiHsmCommandCode::PutOpaque as u8
+                && payload
+                    .get(2..42)
+                    .is_some_and(|label| label.starts_with(b"pkcs11rs stored "))
+        })
+        .expect("private-first deletion must write a standalone public-key record");
+    let reused_metadata_id = &detach_commands[put_index].1[..2];
+    assert_ne!(reused_metadata_id, [0, 0]);
+    let linked_delete_index = detach_commands
+        .iter()
+        .position(|(command, payload)| {
+            *command == crate::YubiHsmCommandCode::DeleteObject as u8
+                && payload.get(..2) == Some(reused_metadata_id)
+                && payload.get(2) == Some(&crate::YUBIHSM_OPAQUE)
+        })
+        .expect("detachment must free the linked record before reusing its object ID");
+    let private_delete_index = detach_commands
+        .iter()
+        .position(|(command, payload)| {
+            *command == crate::YubiHsmCommandCode::DeleteObject as u8
+                && payload.get(2) == Some(&crate::YUBIHSM_ASYMMETRIC_KEY)
+        })
+        .expect("private-first deletion must remove the native private key");
+    assert!(linked_delete_index < put_index);
+    assert!(put_index < private_delete_index);
+    assert!(checked_bool_attribute(session, projected, CKA_TOKEN as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(!checked_bool_attribute(session, projected, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap());
+    assert!(!projected_spki_before_morph.is_empty());
+    assert_eq!(
+        checked_attribute(session, projected, CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE).unwrap(),
+        projected_spki_before_morph,
+        "the same public handle must retain identical key material after becoming standalone"
+    );
+    assert_eq!(
+        checked_attribute(session, projected, CKA_LABEL as CK_ATTRIBUTE_TYPE).unwrap(),
+        projected_label,
+        "the same public handle must retain its label after becoming standalone"
+    );
+    assert!(
+        !checked_bool_attribute(session, ordinary_public, CKA_TOKEN as CK_ATTRIBUTE_TYPE).unwrap()
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, projected),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DestroyObject(session, ordinary_public),
+        CKR_OK as CK_RV
+    );
+    for object in session_projections {
+        assert_eq!(
+            crate::api::C_DestroyObject(session, object),
+            CKR_OK as CK_RV
+        );
+    }
+    for object in &created {
+        assert_eq!(
+            checked_ulong_attribute(session, *object, CKA_CLASS as CK_ATTRIBUTE_TYPE).unwrap(),
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            "a standalone public key must outlive the unrelated private key"
+        );
+    }
+    for (name, object) in std::iter::once(("native public wrap key".to_owned(), native_public_wrap))
+        .chain(
+            created
+                .into_iter()
+                .enumerate()
+                .map(|(index, object)| (format!("created ordinary public key {index}"), object)),
+        )
+    {
+        assert_eq!(
+            crate::api::C_DestroyObject(session, object),
+            CKR_OK as CK_RV,
+            "cleanup failed for {name} handle {object}"
+        );
+    }
+    assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
         CKR_OK as CK_RV
@@ -2029,7 +2789,7 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         !checked_bool_attribute(session, rsa_private, CKA_UNWRAP as CK_ATTRIBUTE_TYPE).unwrap()
     );
     assert!(
-        !checked_bool_attribute(session, rsa_public_wrap, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap()
+        checked_bool_attribute(session, rsa_public_wrap, CKA_WRAP as CK_ATTRIBUTE_TYPE).unwrap()
     );
 
     let mut ccm_mechanism = CK_MECHANISM {
