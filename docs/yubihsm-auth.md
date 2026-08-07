@@ -80,16 +80,12 @@ pkcs11rs-tool certificate-bundle create \
 The exact bundle schema and the distinction between import and storage formats
 are documented in [`formats.md`](formats.md).
 
-Direct YubiHSM USB discovery is enabled by default. Set
-`PKCS11RS_YUBIHSM_USB=0` to disable it without affecting configured HTTP
-connector slots. The only accepted values are `0` and `1`. Direct USB access
-uses usbfs on Linux, IOKit on macOS, and WinUSB on Windows through `nusb`; it
-does not require libusb.
-
-`PKCS11RS_HARDWARE_DISCOVERY=0` is the broader local-discovery switch. It
-disables direct YubiHSM USB together with native FIDO HID and PC/SC/CCID
-discovery. It deliberately does not disable `PKCS11RS_YUBIHSM_URLS`, because
-remote HTTP(S) connector slots are explicitly configured.
+Direct YubiHSM USB discovery follows `hardware.discovery` and its
+`PKCS11RS_HARDWARE_DISCOVERY` environment fallback. Disabling local hardware
+discovery also disables native FIDO HID and PC/SC/CCID discovery, but does not
+disable explicitly configured remote HTTP(S) connector slots. Direct USB
+access uses usbfs on Linux, IOKit on macOS, and WinUSB on Windows through
+`nusb`; it does not require libusb.
 
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For
@@ -232,6 +228,26 @@ discovery credential and retains the resulting session again. If no discovery
 credential is configured, a logged-out hardware read returns
 `CKR_USER_NOT_LOGGED_IN`. Loss of a user session is reconciled as PKCS #11
 logout and is never silently treated as continued user authentication.
+
+YubiHSM secure sessions expire after 30 seconds without a session command. By
+default, an explicit YubiHSM `0x03` (`invalid session`) response therefore
+invalidates the backend session and logs out the PKCS #11 user. Set
+`yubihsm.recreate_sessions` to `true`, or
+`PKCS11RS_YUBIHSM_RECREATE_SESSIONS=1`, to opt into transparent recovery. On
+that explicit response only, the module authenticates again and replays the
+interrupted command once. It never recreates or replays after an ambiguous
+transport, framing, encryption, or response-MAC failure, and it does not run a
+keepalive or background timer.
+
+While opted in, direct symmetric authentication retains the derived static AES
+keys in zeroizing memory. Direct asymmetric authentication retains only the
+static ECDH shared secret, not the password-derived private key. YubiHSM Auth
+authentication retains the selected provider and its zeroizing credential
+password; recreation invokes the applet's session-key calculation again. A
+credential requiring touch therefore waits for touch in the ordinary applet
+command path, with no special keepalive or presence handling. All retained
+reauthentication material is dropped when the session is logged out,
+invalidated, finalized, or replaced.
 
 Later reconstructions of the same YubiHSM object type, ID, and sequence reuse
 the shared cache cell. Logout retains public objects and successful public
@@ -390,8 +406,10 @@ envelope.
 
 The module asks the YubiHSM Auth applet to calculate the session keys and keeps
 those keys in zeroizing memory only for the life of the authenticated YubiHSM
-session. Credential passwords are not cached. The direct YubiHSM login forms
-remain available even when no YubiHSM Auth applet is connected.
+session. Credential passwords are not retained by default. They are retained
+in zeroizing memory for the authenticated session only when session recreation
+is explicitly enabled. The direct YubiHSM login forms remain available even
+when no YubiHSM Auth applet is connected.
 
 ### Asymmetric device-key trust
 

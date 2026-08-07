@@ -233,6 +233,43 @@ pub(crate) enum DirectAuthenticationAlgorithm {
     Asymmetric,
 }
 
+pub(crate) enum DirectAuthenticationMaterial {
+    Symmetric(Zeroizing<[u8; 32]>),
+    Asymmetric(Zeroizing<[u8; P256_PRIVATE_KEY_LENGTH]>),
+}
+
+impl std::fmt::Debug for DirectAuthenticationMaterial {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Symmetric(_) => fmt.write_str("Symmetric([REDACTED])"),
+            Self::Asymmetric(_) => fmt.write_str("Asymmetric([REDACTED])"),
+        }
+    }
+}
+
+impl DirectAuthenticationMaterial {
+    pub(crate) fn authenticate(
+        &self,
+        connector: &dyn Connector,
+        authkey_id: u16,
+    ) -> Result<SecureSession, Error> {
+        match self {
+            Self::Symmetric(static_keys) => SecureSession::authenticate_symmetric_with_static_keys(
+                connector,
+                authkey_id,
+                static_keys,
+            ),
+            Self::Asymmetric(static_secret) => {
+                SecureSession::authenticate_asymmetric_with_static_secret(
+                    connector,
+                    authkey_id,
+                    static_secret,
+                )
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for SecureSession {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("SecureSession")
@@ -407,47 +444,54 @@ impl SecureSession {
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
         cached_algorithm: Option<DirectAuthenticationAlgorithm>,
-    ) -> Result<(Self, DirectAuthenticationAlgorithm), Error> {
+    ) -> Result<
+        (
+            Self,
+            DirectAuthenticationAlgorithm,
+            DirectAuthenticationMaterial,
+        ),
+        Error,
+    > {
         let first = cached_algorithm.unwrap_or(DirectAuthenticationAlgorithm::Symmetric);
         match first {
             DirectAuthenticationAlgorithm::Symmetric => {
-                if let Some(session) =
+                if let Some((session, material)) =
                     Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
                 {
-                    return Ok((session, DirectAuthenticationAlgorithm::Symmetric));
+                    return Ok((session, DirectAuthenticationAlgorithm::Symmetric, material));
                 }
                 log!(
                     2,
                     "YubiHSM Authentication Key {:04x} rejected symmetric CREATE SESSION with wrong length; trying asymmetric authentication",
                     authkey_id
                 );
-                let session = Self::authenticate_asymmetric_detect_format(
+                let (session, material) = Self::authenticate_asymmetric_detect_format(
                     connector,
                     authkey_id,
                     password,
                     trust_prefix,
                 )?
                 .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
-                Ok((session, DirectAuthenticationAlgorithm::Asymmetric))
+                Ok((session, DirectAuthenticationAlgorithm::Asymmetric, material))
             }
             DirectAuthenticationAlgorithm::Asymmetric => {
-                if let Some(session) = Self::authenticate_asymmetric_detect_format(
+                if let Some((session, material)) = Self::authenticate_asymmetric_detect_format(
                     connector,
                     authkey_id,
                     password,
                     trust_prefix,
                 )? {
-                    return Ok((session, DirectAuthenticationAlgorithm::Asymmetric));
+                    return Ok((session, DirectAuthenticationAlgorithm::Asymmetric, material));
                 }
                 log!(
                     2,
                     "YubiHSM Authentication Key {:04x} rejected asymmetric CREATE SESSION with wrong length; trying symmetric authentication",
                     authkey_id
                 );
-                let session =
+                let (session, material) =
                     Self::authenticate_symmetric_detect_format(connector, authkey_id, password)?
                         .ok_or_else(|| Error::from(CKR_DATA_LEN_RANGE))?;
-                Ok((session, DirectAuthenticationAlgorithm::Symmetric))
+                Ok((session, DirectAuthenticationAlgorithm::Symmetric, material))
             }
         }
     }
@@ -461,14 +505,28 @@ impl SecureSession {
     ) -> Result<Self, Error> {
         let handshake = Self::begin_symmetric(connector, authkey_id, host_challenge)?;
         Self::complete_symmetric_with_password(connector, handshake, password)
+            .map(|(session, _)| session)
     }
 
     fn complete_symmetric_with_password(
         connector: &dyn Connector,
         handshake: SymmetricHandshake,
         password: &[u8],
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, DirectAuthenticationMaterial), Error> {
         let static_keys = crate::yubico_password_kdf(password)?;
+        let session =
+            Self::complete_symmetric_with_static_keys(connector, handshake, &static_keys)?;
+        Ok((
+            session,
+            DirectAuthenticationMaterial::Symmetric(static_keys),
+        ))
+    }
+
+    fn complete_symmetric_with_static_keys(
+        connector: &dyn Connector,
+        handshake: SymmetricHandshake,
+        static_keys: &[u8; 32],
+    ) -> Result<Self, Error> {
         let s_enc = derive_key(&static_keys[..16], 0x04, &handshake.context)?;
         let s_mac = derive_key(&static_keys[16..], 0x06, &handshake.context)?;
         let s_rmac = derive_key(&static_keys[16..], 0x07, &handshake.context)?;
@@ -483,11 +541,22 @@ impl SecureSession {
         )
     }
 
+    fn authenticate_symmetric_with_static_keys(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        static_keys: &[u8; 32],
+    ) -> Result<Self, Error> {
+        let mut challenge = [0u8; CHALLENGE_LENGTH];
+        getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+        let handshake = Self::begin_symmetric(connector, authkey_id, challenge)?;
+        Self::complete_symmetric_with_static_keys(connector, handshake, static_keys)
+    }
+
     fn authenticate_symmetric_detect_format(
         connector: &dyn Connector,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Option<(Self, DirectAuthenticationMaterial)>, Error> {
         let mut challenge = [0u8; CHALLENGE_LENGTH];
         getrandom::fill(&mut challenge).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
         let handshake = match Self::begin_symmetric(connector, authkey_id, challenge) {
@@ -682,7 +751,7 @@ impl SecureSession {
         authkey_id: u16,
         password: &[u8],
         trust_prefix: Option<&std::ffi::OsStr>,
-    ) -> Result<Option<Self>, Error> {
+    ) -> Result<Option<(Self, DirectAuthenticationMaterial)>, Error> {
         let host_ephemeral_key = P256SecretKey::generate();
         let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
 
@@ -692,45 +761,101 @@ impl SecureSession {
             Err(error) if is_wrong_length_error(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let session_keys = (|| {
+        let static_secret = (|| {
             let host_static_key = crate::yubico_kdf::yubico_password_p256_key(password)?;
             let device_static_key = trusted_device_public_key(connector, trust_prefix)?;
+            let static_secret = p256_ecdh(&host_static_key, &device_static_key)?;
+            Ok(Zeroizing::new(
+                static_secret
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            ))
+        })();
+        match static_secret {
+            Ok(static_secret) => {
+                match Self::complete_asymmetric_with_static_secret(
+                    connector,
+                    handshake,
+                    &host_ephemeral_key,
+                    &host_ephemeral_public,
+                    &static_secret,
+                    CKR_PIN_INCORRECT as crate::CK_RV,
+                ) {
+                    Ok(session) => Ok(Some((
+                        session,
+                        DirectAuthenticationMaterial::Asymmetric(static_secret),
+                    ))),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => {
+                Self::close_failed_asymmetric_handshake(connector, handshake);
+                Err(error)
+            }
+        }
+    }
+
+    fn authenticate_asymmetric_with_static_secret(
+        connector: &dyn Connector,
+        authkey_id: u16,
+        static_secret: &[u8; P256_PRIVATE_KEY_LENGTH],
+    ) -> Result<Self, Error> {
+        let host_ephemeral_key = P256SecretKey::generate();
+        let host_ephemeral_public = p256_public_key(&host_ephemeral_key)?;
+        let handshake = Self::begin_asymmetric(connector, authkey_id, &host_ephemeral_public)?;
+        Self::complete_asymmetric_with_static_secret(
+            connector,
+            handshake,
+            &host_ephemeral_key,
+            &host_ephemeral_public,
+            static_secret,
+            CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV,
+        )
+    }
+
+    fn complete_asymmetric_with_static_secret(
+        connector: &dyn Connector,
+        handshake: AsymmetricHandshake,
+        host_ephemeral_key: &P256SecretKey,
+        host_ephemeral_public: &[u8; P256_PUBLIC_KEY_LENGTH],
+        static_secret: &[u8; P256_PRIVATE_KEY_LENGTH],
+        receipt_error: crate::CK_RV,
+    ) -> Result<Self, Error> {
+        let keys = (|| {
             let device_ephemeral_public = &handshake.context[P256_PUBLIC_KEY_LENGTH..];
             let device_ephemeral_key = parse_p256_public_key(device_ephemeral_public)?;
-
-            let ephemeral_secret = p256_ecdh(&host_ephemeral_key, &device_ephemeral_key)?;
-            let static_secret = p256_ecdh(&host_static_key, &device_static_key)?;
-            let session_keys = x963_session_keys(&ephemeral_secret, &static_secret);
+            let ephemeral_secret = p256_ecdh(host_ephemeral_key, &device_ephemeral_key)?;
+            let session_keys = x963_session_keys(&ephemeral_secret, static_secret);
 
             let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
             receipt_input.extend_from_slice(device_ephemeral_public);
-            receipt_input.extend_from_slice(&host_ephemeral_public);
+            receipt_input.extend_from_slice(host_ephemeral_public);
             let expected_receipt = aes_cmac(&session_keys[..16], &receipt_input)?;
             if !bool::from(expected_receipt.ct_eq(&handshake.receipt)) {
-                return Err(CKR_PIN_INCORRECT.into());
+                return Err(Error::from(receipt_error));
             }
-            Ok((
-                Zeroizing::new(
-                    session_keys[16..32]
-                        .try_into()
-                        .map_err(|_| CKR_DEVICE_ERROR)?,
-                ),
-                Zeroizing::new(
-                    session_keys[32..48]
-                        .try_into()
-                        .map_err(|_| CKR_DEVICE_ERROR)?,
-                ),
-                Zeroizing::new(
-                    session_keys[48..64]
-                        .try_into()
-                        .map_err(|_| CKR_DEVICE_ERROR)?,
-                ),
-            ))
+            let s_enc = Zeroizing::new(
+                session_keys[16..32]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            );
+            let s_mac = Zeroizing::new(
+                session_keys[32..48]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            );
+            let s_rmac = Zeroizing::new(
+                session_keys[48..64]
+                    .try_into()
+                    .map_err(|_| CKR_DEVICE_ERROR)?,
+            );
+            Ok((s_enc, s_mac, s_rmac))
         })();
-        match session_keys {
-            Ok((s_enc, s_mac, s_rmac)) => Ok(Some(Self::complete_asymmetric_with_session_keys(
+        match keys {
+            Ok((s_enc, s_mac, s_rmac)) => Ok(Self::complete_asymmetric_with_session_keys(
                 handshake, s_enc, s_mac, s_rmac,
-            ))),
+            )),
             Err(error) => {
                 Self::close_failed_asymmetric_handshake(connector, handshake);
                 Err(error)

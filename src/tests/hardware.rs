@@ -2,6 +2,18 @@
 use super::*;
 
 #[cfg(not(feature = "abi-tests"))]
+fn initialize_direct_hardware(recreate_yubihsm_sessions: bool) -> CK_RV {
+    initialize_with_configuration(serde_json::json!({
+        "version": 1,
+        "hardware": {"discovery": true},
+        "yubihsm": {
+            "urls": [],
+            "recreate_sessions": recreate_yubihsm_sessions
+        }
+    }))
+}
+
+#[cfg(not(feature = "abi-tests"))]
 mod hardware_provisioning {
     use super::*;
     use std::rc::Rc;
@@ -23,6 +35,15 @@ mod hardware_provisioning {
     const DEFAULT_ADMIN_ID: &str = "0001";
     const DEFAULT_ADMIN_PASSWORD: &str = "password";
     const AUTHENTICATION_KEY_DOMAINS: u16 = 0xffff;
+
+    fn direct_hardware_configuration() -> crate::ModuleConfiguration {
+        let mut configuration = crate::ModuleConfiguration::resolve(None)
+            .expect("failed to resolve hardware configuration");
+        configuration.hardware_discovery = true;
+        configuration.yubihsm_urls.clear();
+        configuration
+    }
+
     fn environment(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_owned())
     }
@@ -96,6 +117,7 @@ mod hardware_provisioning {
         let selector = std::env::var("PKCS11RS_TEST_YUBIHSM_SOURCE").ok();
         crate::with_context(|context| {
             context.init()?;
+            context.refresh_discovery()?;
             let slot_contexts = context
                 .slot_contexts
                 .read()
@@ -211,25 +233,88 @@ mod hardware_provisioning {
         session
     }
 
+    fn hardware_session_state(session: CK_SESSION_HANDLE) -> CK_STATE {
+        let mut info = CK_SESSION_INFO {
+            slotID: 0,
+            state: 0,
+            flags: 0,
+            ulDeviceError: 0,
+        };
+        assert_eq!(
+            crate::api::C_GetSessionInfo(session, &mut info),
+            CKR_OK as CK_RV
+        );
+        info.state
+    }
+
+    #[test]
+    #[ignore = "requires at least one directly connected YubiHSM accessed through nusb"]
+    fn direct_hardware_survives_initialize_finalize_orderings() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
+        assert_eq!(
+            initialize_direct_hardware(false),
+            CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV
+        );
+
+        let mut count = 0;
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+            CKR_OK as CK_RV
+        );
+        let mut slot_ids = vec![0; count as usize];
+        assert_eq!(
+            crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, slot_ids.as_mut_ptr(), &mut count),
+            CKR_OK as CK_RV
+        );
+        slot_ids.truncate(count as usize);
+        assert!(
+            slot_ids.into_iter().any(|slot_id| {
+                let mut info = CK_SLOT_INFO {
+                    slotDescription: [0; 64],
+                    manufacturerID: [0; 32],
+                    flags: 0,
+                    hardwareVersion: CK_VERSION { major: 0, minor: 0 },
+                    firmwareVersion: CK_VERSION { major: 0, minor: 0 },
+                };
+                crate::api::C_GetSlotInfo(slot_id, &mut info) == CKR_OK as CK_RV
+                    && String::from_utf8_lossy(&info.slotDescription)
+                        .trim_end()
+                        .starts_with("Yubico YubiHSM ")
+            }),
+            "expected at least one directly connected YubiHSM"
+        );
+
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+        );
+
+        for _ in 0..3 {
+            assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
+            assert_eq!(
+                crate::api::C_Finalize(std::ptr::null_mut()),
+                CKR_OK as CK_RV
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires at least one directly connected YubiHSM accessed through nusb"]
     fn direct_yubihsm_usb_slot_reports_metadata() {
-        assert!(
-            std::env::var_os("PKCS11RS_YUBIHSM_URLS").is_none(),
-            "unset PKCS11RS_YUBIHSM_URLS so the selected slot must use direct USB"
-        );
-        assert_ne!(
-            std::env::var("PKCS11RS_YUBIHSM_USB").as_deref(),
-            Ok("0"),
-            "direct YubiHSM USB discovery must be enabled"
-        );
-
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let mut count = 0;
         assert_eq!(
             crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
@@ -303,6 +388,141 @@ mod hardware_provisioning {
     }
 
     #[test]
+    #[ignore = "waits for a live YubiHSM secure session to expire after 30 seconds"]
+    fn recreates_expired_yubihsm_session_on_hardware() {
+        const SESSION_EXPIRY_WAIT: std::time::Duration = std::time::Duration::from_secs(35);
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(initialize_direct_hardware(true), CKR_OK as CK_RV);
+
+        let slot_id = select_yubihsm_slot();
+        let session = open_hardware_session(slot_id);
+        let credential = format!(
+            "{}{}",
+            environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
+            environment(
+                "PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD",
+                DEFAULT_ADMIN_PASSWORD,
+            )
+        );
+        login_hardware_session(session, CKU_USER as CK_USER_TYPE, &credential);
+
+        let mut baseline = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(
+                session,
+                baseline.as_mut_ptr(),
+                baseline.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        eprintln!(
+            "waiting {} seconds without a YubiHSM command so the secure session expires",
+            SESSION_EXPIRY_WAIT.as_secs()
+        );
+        std::thread::sleep(SESSION_EXPIRY_WAIT);
+
+        let mut after_expiry = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(
+                session,
+                after_expiry.as_mut_ptr(),
+                after_expiry.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV,
+            "the first command after expiry should recreate the secure session and run once"
+        );
+        assert_ne!(baseline, after_expiry);
+
+        assert_eq!(
+            hardware_session_state(session),
+            CKS_RO_USER_FUNCTIONS as CK_STATE
+        );
+
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
+    #[ignore = "waits for a live YubiHSM secure session to expire after 30 seconds"]
+    fn expired_yubihsm_session_logs_out_every_pkcs11_session_on_hardware() {
+        const SESSION_EXPIRY_WAIT: std::time::Duration = std::time::Duration::from_secs(35);
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
+
+        let slot_id = select_yubihsm_slot();
+        let sessions = [
+            open_hardware_session(slot_id),
+            open_hardware_session(slot_id),
+        ];
+        let credential = format!(
+            "{}{}",
+            environment("PKCS11RS_TEST_YUBIHSM_ADMIN_ID", DEFAULT_ADMIN_ID),
+            environment(
+                "PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD",
+                DEFAULT_ADMIN_PASSWORD,
+            )
+        );
+        login_hardware_session(sessions[0], CKU_USER as CK_USER_TYPE, &credential);
+        for session in sessions {
+            assert_eq!(
+                hardware_session_state(session),
+                CKS_RO_USER_FUNCTIONS as CK_STATE
+            );
+        }
+
+        let mut baseline = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(
+                sessions[0],
+                baseline.as_mut_ptr(),
+                baseline.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        eprintln!(
+            "waiting {} seconds without a YubiHSM command so the secure session expires",
+            SESSION_EXPIRY_WAIT.as_secs()
+        );
+        std::thread::sleep(SESSION_EXPIRY_WAIT);
+
+        let mut after_expiry = [0u8; 32];
+        assert_eq!(
+            crate::api::C_GenerateRandom(
+                sessions[1],
+                after_expiry.as_mut_ptr(),
+                after_expiry.len() as CK_ULONG,
+            ),
+            CKR_SESSION_CLOSED as CK_RV
+        );
+        for session in sessions {
+            assert_eq!(
+                hardware_session_state(session),
+                CKS_RO_PUBLIC_SESSION as CK_STATE
+            );
+        }
+        assert_eq!(
+            crate::api::C_Logout(sessions[0]),
+            CKR_USER_NOT_LOGGED_IN as CK_RV
+        );
+
+        for session in sessions {
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        }
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    #[test]
     #[ignore = "runs many concurrent PKCS #11 operations against two present YubiHSM hardware slots"]
     fn concurrent_yubihsm_hardware_slots_survive_many_threaded_operations() {
         const THREAD_COUNT: usize = 16;
@@ -311,10 +531,7 @@ mod hardware_provisioning {
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
 
         let slots = select_two_yubihsm_slots();
         eprintln!(
@@ -415,10 +632,7 @@ mod hardware_provisioning {
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = select_yubihsm_slot();
         let admin_id = hex_u16(
             "PKCS11RS_TEST_YUBIHSM_ADMIN_ID",
@@ -447,10 +661,7 @@ mod hardware_provisioning {
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
 
         let piv_slot_id = select_piv_slot();
         let yubihsm_slot_id = select_yubihsm_slot();
@@ -800,11 +1011,11 @@ mod hardware_provisioning {
             kvn,
         };
 
-        let configuration = crate::ModuleConfiguration::resolve(None)
-            .expect("failed to resolve hardware configuration");
+        let configuration = direct_hardware_configuration();
         let context = crate::ModuleContext::new_with_configuration(configuration)
             .expect("failed to create hardware context");
         context.init().unwrap();
+        context.refresh_discovery().unwrap();
         let slot_contexts = context.slot_contexts.read().unwrap();
         let issuer_sd = select_connector(
             slot_contexts
@@ -975,11 +1186,11 @@ mod hardware_provisioning {
             "YubiHSM admin password must be 8..=64 bytes"
         );
 
-        let configuration = crate::ModuleConfiguration::resolve(None)
-            .expect("failed to resolve hardware configuration");
+        let configuration = direct_hardware_configuration();
         let context = crate::ModuleContext::new_with_configuration(configuration)
             .expect("failed to create hardware context");
         context.init().unwrap();
+        context.refresh_discovery().unwrap();
         let slot_contexts = context.slot_contexts.read().unwrap();
         let hsmauth = select_connector(
             slot_contexts
@@ -1016,7 +1227,7 @@ mod hardware_provisioning {
             );
         }
 
-        let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
+        let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
             yubihsm.as_ref(),
             admin_id,
             admin_password.as_bytes(),
@@ -1061,7 +1272,7 @@ mod hardware_provisioning {
         }
 
         if existing_key.is_some() {
-            let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
+            let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
                 yubihsm.as_ref(),
                 admin_id,
                 admin_password.as_bytes(),
@@ -1132,7 +1343,7 @@ mod hardware_provisioning {
             public_key,
         )
         .expect("failed to encode the asymmetric authentication key");
-        let (mut admin_session, _) = crate::YubiHsmSecureSession::authenticate_direct(
+        let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
             yubihsm.as_ref(),
             admin_id,
             admin_password.as_bytes(),
@@ -1590,10 +1801,7 @@ mod fido2_hardware {
     fn fido2_hid_read_only_get_info() {
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         crate::with_context(|context| {
             let slot_contexts = context
@@ -1756,10 +1964,7 @@ mod fido2_hardware {
         let mut pin = std::env::var(CURRENT_PIN_ENV)
             .expect("PKCS11RS_FIDO2_TEST_PIN gates the single FIDO PIN verification")
             .into_bytes();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let (hid_slot_id, piv_slot_id) = paired_hid_fido_and_piv_slot_ids();
 
         let mut hid_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
@@ -1850,10 +2055,7 @@ mod fido2_hardware {
     fn fido2_read_only_resident_credential_enumeration() {
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let pin = std::env::var("PKCS11RS_FIDO2_TEST_PIN")
             .expect("PKCS11RS_FIDO2_TEST_PIN must contain the configured FIDO2 PIN");
         let slot_id = fido2_slot_id();
@@ -1896,10 +2098,7 @@ mod fido2_hardware {
         };
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         let mut session = 0;
         assert_eq!(
@@ -2039,10 +2238,7 @@ mod fido2_hardware {
         let mut pin = zeroize::Zeroizing::new(pin.into_bytes());
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         let credential = crate::with_context(|context| {
             let slot_contexts = context
@@ -2130,10 +2326,7 @@ mod fido2_hardware {
         let pin = zeroize::Zeroizing::new(pin.into_bytes());
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         let registration = crate::with_context(|context| {
             let slot_contexts = context
@@ -2184,10 +2377,7 @@ mod fido2_hardware {
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         let mut before = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert_eq!(
@@ -2288,10 +2478,7 @@ mod fido2_hardware {
 
         let _guard = TEST_LOCK.lock().unwrap();
         finalize_for_test();
-        assert_eq!(
-            crate::api::C_Initialize(std::ptr::null_mut()),
-            CKR_OK as CK_RV
-        );
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
         let slot_id = fido2_slot_id();
         let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert_eq!(

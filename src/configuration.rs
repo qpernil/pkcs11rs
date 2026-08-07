@@ -64,7 +64,7 @@ struct JsonSoftwareSlotConfiguration {
 #[serde(deny_unknown_fields)]
 struct JsonYubiHsmConfiguration {
     urls: Option<Vec<String>>,
-    usb: Option<bool>,
+    recreate_sessions: Option<bool>,
     public_discovery: Option<String>,
     device_trust_prefix: Option<String>,
     #[serde(default)]
@@ -199,7 +199,7 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     pub(crate) yubihsm_urls: Vec<String>,
-    pub(crate) yubihsm_usb: bool,
+    pub(crate) yubihsm_recreate_sessions: bool,
     pub(crate) yubihsm_public_discovery: Option<OsString>,
     pub(crate) yubihsm_device_trust_prefix: OsString,
     pub(crate) yubihsm_tls_client_certificate_bundle: Option<OsString>,
@@ -303,15 +303,14 @@ impl ModuleConfiguration {
                 &mut environment,
             )?)
             .unwrap_or(true);
-        let yubihsm_usb = hardware_discovery
-            && explicit
-                .yubihsm
-                .usb
-                .or(environment_switch(
-                    "PKCS11RS_YUBIHSM_USB",
-                    &mut environment,
-                )?)
-                .unwrap_or(true);
+        let yubihsm_recreate_sessions = explicit
+            .yubihsm
+            .recreate_sessions
+            .or(environment_switch(
+                "PKCS11RS_YUBIHSM_RECREATE_SESSIONS",
+                &mut environment,
+            )?)
+            .unwrap_or(false);
 
         let software_slots = resolve_software_slots(explicit.software.slots, &mut environment)?;
         let software_discovery_pins = software_slots
@@ -413,7 +412,7 @@ impl ModuleConfiguration {
             software_slots,
             software_discovery_pins,
             yubihsm_urls,
-            yubihsm_usb,
+            yubihsm_recreate_sessions,
             yubihsm_public_discovery: resolve_os(
                 explicit.yubihsm.public_discovery,
                 "PKCS11RS_YUBIHSM_DISCOVERY",
@@ -792,7 +791,7 @@ mod tests {
         .unwrap();
         assert_eq!(configuration.debug_level, 2);
         assert!(!configuration.hardware_discovery);
-        assert!(!configuration.yubihsm_usb);
+        assert!(!configuration.yubihsm_recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://one", "http://two"]);
         assert_eq!(configuration.secure_channels.scp03.security_level, 0x33);
     }
@@ -804,7 +803,10 @@ mod tests {
                 r#"{
                     "version": 1,
                     "debug": 1,
-                    "yubihsm": {"urls": ["http://json/"]},
+                    "yubihsm": {
+                        "urls": ["http://json/"],
+                        "recreate_sessions": true
+                    },
                     "ccid": {"applications": ["hsmauth"]}
                 }"#,
             )),
@@ -812,11 +814,13 @@ mod tests {
                 ("PKCS11RS_DEBUG", "2"),
                 ("PKCS11RS_HARDWARE_DISCOVERY", "0"),
                 ("PKCS11RS_YUBIHSM_URLS", "http://environment"),
+                ("PKCS11RS_YUBIHSM_RECREATE_SESSIONS", "0"),
             ],
         )
         .unwrap();
         assert_eq!(configuration.debug_level, 1);
         assert!(!configuration.hardware_discovery);
+        assert!(configuration.yubihsm_recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://json"]);
         assert_eq!(configuration.ccid_configurations.len(), 1);
         assert_eq!(
@@ -851,6 +855,10 @@ mod tests {
         assert!(
             serde_json::from_str::<JsonConfiguration>(r#"{"version":1,"unknown":true}"#).is_err()
         );
+        assert!(serde_json::from_str::<JsonConfiguration>(
+            r#"{"version":1,"yubihsm":{"usb":false}}"#
+        )
+        .is_err());
         assert!(resolve(
             Some(json(
                 r#"{

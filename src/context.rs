@@ -253,7 +253,6 @@ pub(crate) fn configured_yubihsm_http_tls(
 pub(crate) struct ModuleContext {
     pub(crate) debug_level: u8,
     pub(crate) hardware_discovery: bool,
-    pub(crate) yubihsm_usb: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
     #[cfg(feature = "native-hardware")]
@@ -261,6 +260,7 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     yubihsm_http_endpoints: Mutex<HashMap<usize, HttpConnectorEndpoint>>,
+    pub(crate) yubihsm_recreate_sessions: bool,
     pub(crate) yubihsm_public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
     pub(crate) yubihsm_device_trust_prefix: std::ffi::OsString,
     pub(crate) ccid_configurations: Vec<CcidConfiguration>,
@@ -691,7 +691,6 @@ impl std::fmt::Debug for ModuleContext {
         let pcsc: Option<&str> = None;
         fmt.debug_struct("ModuleContext")
             .field("hardware_discovery", &self.hardware_discovery)
-            .field("yubihsm_usb", &self.yubihsm_usb)
             .field("software_slots", &self.software_slots)
             .field(
                 "software_public_discovery",
@@ -699,6 +698,7 @@ impl std::fmt::Debug for ModuleContext {
             )
             .field("pcsc", &pcsc)
             .field("yubihsm_urls", &self.yubihsm_urls)
+            .field("yubihsm_recreate_sessions", &self.yubihsm_recreate_sessions)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
             .field(
                 "yubihsm_public_discovery_config",
@@ -814,10 +814,7 @@ impl ModuleContext {
         configuration: ModuleConfiguration,
     ) -> Result<ModuleContext, Error> {
         #[cfg(feature = "abi-tests")]
-        let _ = (
-            configuration.yubihsm_usb,
-            configuration.yubihsm_public_discovery.as_ref(),
-        );
+        let _ = (configuration.yubihsm_public_discovery.as_ref(),);
         let debug_level = configuration.debug_level;
         let pinentry = Arc::new(pinentry::Pinentry::from_configuration(
             configuration.pinentry,
@@ -875,17 +872,11 @@ impl ModuleContext {
             )?;
         #[cfg(feature = "abi-tests")]
         let yubihsm_public_discovery_config = None;
-        #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
-        let yubihsm_usb = configuration.yubihsm_usb;
         let secure_channels = Arc::new(configuration.secure_channels);
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         let mut context = ModuleContext {
             debug_level,
             hardware_discovery,
-            #[cfg(any(feature = "abi-tests", not(feature = "native-hardware")))]
-            yubihsm_usb: false,
-            #[cfg(all(not(feature = "abi-tests"), feature = "native-hardware"))]
-            yubihsm_usb,
             software_slots,
             software_discovery_pins,
             #[cfg(all(feature = "native-hardware", feature = "abi-tests"))]
@@ -905,6 +896,7 @@ impl ModuleContext {
             yubihsm_urls,
             yubihsm_http_tls,
             yubihsm_http_endpoints: Mutex::new(HashMap::new()),
+            yubihsm_recreate_sessions: configuration.yubihsm_recreate_sessions,
             yubihsm_public_discovery_config,
             yubihsm_device_trust_prefix: configuration.yubihsm_device_trust_prefix,
             ccid_configurations: configuration.ccid_configurations,
@@ -2179,6 +2171,7 @@ impl ModuleContext {
             self.yubihsm_public_discovery_config.clone(),
         );
         yubihsm_slot.set_pinentry(self.pinentry.clone());
+        yubihsm_slot.recreate_sessions = self.yubihsm_recreate_sessions;
         yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
         let mut slot = Box::new(yubihsm_slot);
         slot.init_slot()?;
@@ -2218,6 +2211,7 @@ impl ModuleContext {
             self.yubihsm_public_discovery_config.clone(),
         );
         yubihsm_slot.set_pinentry(self.pinentry.clone());
+        yubihsm_slot.recreate_sessions = self.yubihsm_recreate_sessions;
         yubihsm_slot.trust_prefix = Some(self.yubihsm_device_trust_prefix.clone());
         let mut slot = Box::new(yubihsm_slot);
         slot.init_slot()?;
@@ -2399,7 +2393,7 @@ impl ModuleContext {
 
     #[cfg(feature = "native-hardware")]
     fn refresh_usb_yubihsm_discovery(&self) -> Result<(), Error> {
-        if !self.yubihsm_usb {
+        if !self.hardware_discovery {
             return Ok(());
         }
         let source = DiscoverySourceIdentity::local_usb_yubihsm();
@@ -2699,7 +2693,6 @@ mod discovery_tests {
         configuration.software_slots.clear();
         configuration.software_discovery_pins.clear();
         configuration.yubihsm_urls = vec![url];
-        configuration.yubihsm_usb = false;
         configuration.yubihsm_public_discovery = None;
         configuration.yubihsm_device_trust_prefix = std::ffi::OsString::new();
         configuration.yubihsm_tls_client_certificate_bundle = None;
@@ -3006,13 +2999,13 @@ mod discovery_tests {
         let context = ModuleContext {
             debug_level: 0,
             hardware_discovery: false,
-            yubihsm_usb: false,
             software_slots: Vec::new(),
             software_discovery_pins: HashMap::new(),
             pcsc: None,
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),
             yubihsm_http_endpoints: Mutex::new(HashMap::new()),
+            yubihsm_recreate_sessions: false,
             yubihsm_public_discovery_config: None,
             yubihsm_device_trust_prefix: std::ffi::OsString::new(),
             ccid_configurations: configuration.ccid_configurations,
