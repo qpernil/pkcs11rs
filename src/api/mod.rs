@@ -22,6 +22,7 @@ macro_rules! non_session_unsupported_stub {
 
 mod crypt;
 mod general;
+mod host_ccid;
 mod hsmauth;
 mod interfaces;
 mod key;
@@ -39,6 +40,9 @@ pub use key::*;
 pub use object::*;
 pub use session::*;
 pub use wrap::*;
+
+#[cfg(test)]
+pub(crate) use host_ccid::{INITIALIZE_ARGS_MAGIC, INITIALIZE_ARGS_VERSION};
 
 #[cfg(test)]
 pub(crate) use hsmauth::*;

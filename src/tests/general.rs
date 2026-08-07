@@ -245,6 +245,111 @@ pub fn initialize_accepts_json_reserved_configuration() {
     );
 }
 
+#[cfg(not(feature = "abi-tests"))]
+static HOST_CCID_ENUMERATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(not(feature = "abi-tests"))]
+unsafe extern "C" fn enumerate_no_ccid_readers(
+    _context: *mut std::ffi::c_void,
+    _sink_context: *mut std::ffi::c_void,
+    _add_reader: Option<crate::backend::HostCcidAddReader>,
+) -> CK_RV {
+    HOST_CCID_ENUMERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CKR_OK as CK_RV
+}
+
+#[repr(C)]
+struct TestInitializeArgsV1 {
+    magic: CK_ULONG,
+    size: CK_ULONG,
+    version: CK_ULONG,
+    configuration: *const CK_UTF8CHAR,
+    configuration_length: CK_ULONG,
+    hardware_context: *mut std::ffi::c_void,
+    enumerate_ccid_readers: Option<crate::backend::HostCcidEnumerate>,
+}
+
+#[cfg(not(feature = "abi-tests"))]
+#[test]
+pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    HOST_CCID_ENUMERATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let configuration = b"{\"version\":1,\"debug\":1,\"yubihsm\":{\"urls\":[]}}";
+    let mut extension = TestInitializeArgsV1 {
+        magic: crate::api::INITIALIZE_ARGS_MAGIC,
+        size: std::mem::size_of::<TestInitializeArgsV1>() as CK_ULONG,
+        version: crate::api::INITIALIZE_ARGS_VERSION,
+        configuration: configuration.as_ptr(),
+        configuration_length: configuration.len() as CK_ULONG,
+        hardware_context: std::ptr::null_mut(),
+        enumerate_ccid_readers: Some(enumerate_no_ccid_readers),
+    };
+    let mut init_args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_OS_LOCKING_OK as CK_FLAGS,
+        pReserved: (&mut extension as *mut TestInitializeArgsV1).cast(),
+    };
+
+    assert_eq!(
+        crate::api::C_Initialize((&mut init_args as *mut CK_C_INITIALIZE_ARGS).cast()),
+        CKR_OK as CK_RV
+    );
+    let mut count = 0;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        HOST_CCID_ENUMERATIONS.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        HOST_CCID_ENUMERATIONS.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
+pub fn initialize_rejects_unknown_magic_wrapper_version() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    let mut extension = TestInitializeArgsV1 {
+        magic: crate::api::INITIALIZE_ARGS_MAGIC,
+        size: std::mem::size_of::<TestInitializeArgsV1>() as CK_ULONG,
+        version: crate::api::INITIALIZE_ARGS_VERSION + 1,
+        configuration: std::ptr::null(),
+        configuration_length: 0,
+        hardware_context: std::ptr::null_mut(),
+        enumerate_ccid_readers: None,
+    };
+    let mut init_args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_OS_LOCKING_OK as CK_FLAGS,
+        pReserved: (&mut extension as *mut TestInitializeArgsV1).cast(),
+    };
+
+    assert_eq!(
+        crate::api::C_Initialize((&mut init_args as *mut CK_C_INITIALIZE_ARGS).cast()),
+        CKR_ARGUMENTS_BAD as CK_RV
+    );
+}
+
 #[test]
 pub fn finalize_rejects_reserved_arg() {
     let _guard = TEST_LOCK.lock().unwrap();

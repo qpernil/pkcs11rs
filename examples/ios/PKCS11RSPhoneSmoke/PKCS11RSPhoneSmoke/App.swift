@@ -21,14 +21,6 @@ private func connectorConfiguration() -> ConnectorConfiguration {
 
     let object: [String: Any] = [
         "version": 1,
-        "hardware": [
-            "discovery": false,
-        ],
-        "software": [
-            "slots": [
-                ["name": "iPhone smoke software"],
-            ],
-        ],
         "yubihsm": [
             "urls": [url],
         ],
@@ -57,13 +49,31 @@ private func mechanismName(_ mechanism: CK_MECHANISM_TYPE) -> String {
 private final class ModuleInspector {
     private var initialized = false
 
-    func inspect(configuration: ConnectorConfiguration) -> String {
+    func inspect(
+        configuration: ConnectorConfiguration,
+        smartCardDiscovery: SmartCardReaderDiscovery
+    ) -> String {
         if !initialized {
             var arguments = CK_C_INITIALIZE_ARGS()
             arguments.flags = CK_FLAGS(CKF_OS_LOCKING_OK)
+            var extensionArguments = PKCS11RS_INITIALIZE_ARGS_V1()
+            extensionArguments.ulMagic = CK_ULONG(PKCS11RS_INITIALIZE_ARGS_MAGIC)
+            extensionArguments.ulSize = CK_ULONG(
+                MemoryLayout<PKCS11RS_INITIALIZE_ARGS_V1>.size
+            )
+            extensionArguments.ulVersion = CK_ULONG(PKCS11RS_INITIALIZE_ARGS_VERSION)
+            extensionArguments.ulConfigurationLen = CK_ULONG(configuration.json.utf8.count)
+            extensionArguments.pHardwareContext = Unmanaged
+                .passUnretained(smartCardDiscovery)
+                .toOpaque()
+            extensionArguments.enumerateCcidReaders = enumerateCcidReadersCallback
             let initialize = configuration.json.withCString { json in
-                arguments.pReserved = UnsafeMutableRawPointer(mutating: json)
-                return C_Initialize(&arguments)
+                extensionArguments.pConfiguration = UnsafeRawPointer(json)
+                    .assumingMemoryBound(to: CK_UTF8CHAR.self)
+                return withUnsafeMutablePointer(to: &extensionArguments) { extensionPointer in
+                    arguments.pReserved = UnsafeMutableRawPointer(extensionPointer)
+                    return C_Initialize(&arguments)
+                }
             }
             guard initialize == CKR_OK else {
                 return "C_Initialize failed: \(initialize)"
@@ -187,6 +197,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         qos: .userInitiated
     )
     private let moduleInspector = ModuleInspector()
+    private let smartCardDiscovery = SmartCardReaderDiscovery()
 
     func application(
         _ application: UIApplication,
@@ -221,11 +232,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
     private func refresh() {
         let configuration = connectorConfiguration()
-        textView?.text = "Connecting to YubiHSM at\n\(configuration.url)…"
+        textView?.text = "Inspecting local USB-C CCID readers…"
         inspectionQueue.async { [weak self] in
             guard let self else { return }
-            let result = moduleInspector.inspect(configuration: configuration)
-            print(result)
+            let result = moduleInspector.inspect(
+                configuration: configuration,
+                smartCardDiscovery: smartCardDiscovery
+            )
             DispatchQueue.main.async {
                 self.textView?.text = result
             }

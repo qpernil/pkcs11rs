@@ -1,12 +1,51 @@
 # PKCS11RS iPhone smoke test
 
-This small UIKit application links the generated `PKCS11RS.xcframework`,
-passes a versioned JSON configuration through
-`CK_C_INITIALIZE_ARGS.pReserved`, and displays the module, slot, and token
-metadata returned by PKCS #11. For every present slot it also enumerates the
-mechanisms with `C_GetMechanismList`, queries their key-size ranges and flags
-with `C_GetMechanismInfo`, and displays canonical standard, Yubico, and
-PKCS11RS mechanism names returned by `PKCS11RS_GetMechanismName`.
+This small UIKit application links the generated `PKCS11RS.xcframework` and
+passes `PKCS11RS_INITIALIZE_ARGS_V1` through `CK_C_INITIALIZE_ARGS.pReserved`.
+The extension contains the versioned JSON configuration and a host CCID reader
+enumerator. The app displays the module, slot, and token metadata returned by
+PKCS #11. For every present slot it also enumerates the mechanisms with
+`C_GetMechanismList`, queries their key-size ranges and flags with
+`C_GetMechanismInfo`, and displays names returned by
+`PKCS11RS_GetMechanismName`.
+
+The app does not enumerate or register readers before `C_Initialize`.
+`C_Initialize` retains the enumerator and its context in the module. During
+every `C_GetSlotList`, normal hardware discovery invokes
+`enumerateCcidReadersCallback`. Swift then reads the current
+`TKSmartCardSlotManager` inventory and calls the Rust-provided reader sink once
+per reader with its name, ATR, APDU sizes, callback context, and
+`hostCcidTransmitCallback`. The reader objects are retained until the module is
+finalized.
+
+The smoke configuration leaves `hardware.discovery` at its default of `true`.
+That setting is the policy gate for both native and host-provided hardware
+discovery. A native desktop build without a host enumerator uses PC/SC. A build
+initialized with a host enumerator uses that provider for CCID readers. Both
+providers feed the same Rust reader loop and configured CCID slot discovery.
+
+A configured application becomes a slot only when its AID can be selected. The
+result uses the existing PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, or
+FIDO2-over-CCID slot implementation; no applet logic is implemented in Swift.
+YubiKey FIDO2 normally uses its separate FIDO interface and therefore does not
+become a CCID slot unless the configured FIDO2 AID is actually selectable.
+
+The PKCS #11 inspection runs on a background queue. The callback adapts each
+synchronous Rust transport request to CryptoTokenKit's asynchronous session and
+transmit APIs, waits off the main thread, copies the response into Rust's
+caller-owned buffer, and then returns the PKCS #11 status. The app retains every
+reader callback context for the lifetime of the module.
+
+The UI displays only the PKCS #11 module and slot inventory returned after
+initialization. It does not display reader metadata, enumeration status, or
+per-APDU transport diagnostics. Enumeration itself sends no APDUs and does not
+authenticate, change configuration, or modify objects on the key.
+
+This path requires a physical iPhone or iPad with a CCID-enabled key attached
+directly or through a USB-C adapter. A Simulator cannot expose that USB reader.
+If no hardware slot appears, confirm that the key and adapter support CCID and
+that another application is not holding the smart-card session, then foreground
+the smoke app again.
 
 Build the XCFramework before opening the Xcode project:
 
@@ -20,14 +59,12 @@ The app defaults to `http://192.168.1.169:12345`. Override that URL with the
 variable is only an input to this smoke-test UI; the module itself receives the
 URL through the JSON passed to `C_Initialize`.
 
-The JSON also configures an in-memory software slot named
-`iPhone smoke software`. It appears beside the remote YubiHSM slots and lets the
-same UI compare the complete software mechanism set with each hardware-backed
-set.
-
-The smoke app calls `C_Initialize` once, refreshes the connector inventory with
-`C_GetSlotList` whenever it becomes active, and calls `C_Finalize` only when the
-app terminates. The client initially supplies room for ten slots and retries
+The smoke app calls `C_Initialize` once, enumerates local readers during every
+`C_GetSlotList`, and calls `C_Finalize` only when the app terminates. Readers
+first attached after initialization append their configured application slots.
+Slots already allocated to a reader remain stable if it disappears; they report
+no token until that reader returns. The client initially supplies room for ten
+slots and retries
 with the returned required count only on `CKR_BUFFER_TOO_SMALL`, so an ordinary
 refresh needs one slot-list call and one connector inventory request. It uses
 the same PKCS #11 buffer contract with room for one hundred mechanisms per

@@ -1,9 +1,10 @@
 # SCP11a, SCP11b, and SCP11c configuration
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11b` to establish an SCP11b secure
-channel for the selected CCID applet on a PC/SC card. See
-[`ccid.md`](ccid.md) for the default applet list, allowlist, AID overrides, and
-shared-slot behavior. YubiKey SCP11 support requires firmware 5.7.2 or later.
+channel for the selected CCID applet over native PC/SC or a host-provided CCID
+transport. See [`ccid.md`](ccid.md) for the default applet list, allowlist, AID
+overrides, and shared-slot behavior. YubiKey SCP11 support requires firmware
+5.7.2 or later.
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp11a` to use SCP11a instead. SCP11a adds
 mutual authentication and requires the OCE credentials described below.

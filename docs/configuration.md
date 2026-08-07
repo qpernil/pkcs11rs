@@ -1,17 +1,19 @@
 # Initialization configuration
 
 pkcs11rs accepts a versioned JSON configuration through
-`CK_C_INITIALIZE_ARGS.pReserved`. This gives applications a configuration path
-that does not depend on process environment variables and works with the same
-PKCS #11 C ABI on iOS, macOS, Linux, and Windows.
+`CK_C_INITIALIZE_ARGS.pReserved`. The reserved pointer may be either the legacy
+direct JSON string described below or the magic-tagged
+`PKCS11RS_INITIALIZE_ARGS_V1` wrapper. The wrapper additionally carries a host
+CCID reader enumerator for platforms such as iOS. Both forms use the same PKCS
+#11 C ABI on iOS, macOS, Linux, and Windows.
 
-The value must be a NUL-terminated UTF-8 string whose terminator occurs within
-the first 64 KiB. pkcs11rs reads the string only during the call and does not
-retain the pointer. A nonempty value whose first non-whitespace character is
-`{` is treated as pkcs11rs JSON: the object must contain `"version": 1`, and
-invalid JSON, unknown fields, or an unsupported version makes `C_Initialize`
-return `CKR_ARGUMENTS_BAD`. Invalid UTF-8 or a missing terminator also returns
-`CKR_ARGUMENTS_BAD`.
+In the direct form, the value must be a NUL-terminated UTF-8 string whose
+terminator occurs within the first 64 KiB. pkcs11rs reads the string only during
+the call and does not retain the pointer. A nonempty value whose first
+non-whitespace character is `{` is treated as pkcs11rs JSON: the object must
+contain `"version": 1`, and invalid JSON, unknown fields, or an unsupported
+version makes `C_Initialize` return `CKR_ARGUMENTS_BAD`. Invalid UTF-8 or a
+missing terminator also returns `CKR_ARGUMENTS_BAD`.
 
 A nonempty value whose first non-whitespace character is not `{` is accepted
 as opaque provider initialization data and ignored. This preserves
@@ -75,13 +77,13 @@ a public key or CA certificate.
     }
   },
   "scp03": {
-    "bmk": "00112233445566778899aabbccddeeff",
+    "bmk": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
     "key_version": 1,
     "key_id": 0,
     "security_level": 51
   },
   "scp11": {
-    "sd_public_key": "04...",
+    "sd_public_key": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
     "key_version": 1,
     "oce_private_key": "/etc/pkcs11rs/oce-key.der",
     "oce_certificate_bundle": "/etc/pkcs11rs/oce-chain.cbor",
@@ -101,7 +103,8 @@ remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
 rules in [SCP11 configuration](scp11.md).
 
 `hardware.discovery` controls every local hardware discovery mechanism,
-including direct YubiHSM USB. It does not affect explicitly configured
+including direct YubiHSM USB, native FIDO HID, native PC/SC, and a
+host-provided CCID enumerator. It does not affect explicitly configured
 `yubihsm.urls`. `yubihsm.recreate_sessions` defaults to `false`; its security
 and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 
@@ -149,7 +152,7 @@ environment variable's dynamic names. Each entry carries its own optional
 `discovery_pin`. An omitted pin still falls back to that slot's legacy dynamic
 environment variable.
 
-## C example
+## Direct JSON C example
 
 ```c
 static const char config[] =
@@ -167,3 +170,59 @@ The application owns `config` and only needs to keep it alive until
 `C_Initialize` returns. Passing a null argument to `C_Initialize`, rather than
 a `CK_C_INITIALIZE_ARGS` structure, continues to use environment variables and
 defaults exactly as before.
+
+## Host CCID wrapper
+
+When `pReserved` begins with `PKCS11RS_INITIALIZE_ARGS_MAGIC`, pkcs11rs reads a
+`PKCS11RS_INITIALIZE_ARGS_V1` instead of a direct string. `ulSize` must cover
+the complete version-one structure and `ulVersion` must equal
+`PKCS11RS_INITIALIZE_ARGS_VERSION`; an invalid size or version returns
+`CKR_ARGUMENTS_BAD`. `pConfiguration` contains exactly
+`ulConfigurationLen` UTF-8 bytes and need not be NUL-terminated. The length is
+limited to 64 KiB. A zero length supplies no explicit JSON configuration.
+
+```c
+static CK_RV enumerate_ccid_readers(
+    void *hardware_context,
+    void *sink_context,
+    PKCS11RS_ADD_CCID_READER add_reader);
+
+static const CK_UTF8CHAR config[] =
+    "{\"version\":1,\"hardware\":{\"discovery\":true},"
+    "\"yubihsm\":{\"urls\":[]}}";
+
+PKCS11RS_INITIALIZE_ARGS_V1 extension = {0};
+extension.ulMagic = PKCS11RS_INITIALIZE_ARGS_MAGIC;
+extension.ulSize = sizeof(extension);
+extension.ulVersion = PKCS11RS_INITIALIZE_ARGS_VERSION;
+extension.pConfiguration = config;
+extension.ulConfigurationLen = sizeof(config) - 1;
+extension.pHardwareContext = NULL; /* Or an application-owned context. */
+extension.enumerateCcidReaders = enumerate_ccid_readers;
+
+CK_C_INITIALIZE_ARGS args = {0};
+args.flags = CKF_OS_LOCKING_OK;
+args.pReserved = &extension;
+
+CK_RV rv = C_Initialize(&args);
+```
+
+The wrapper and configuration bytes only need to remain alive through
+`C_Initialize`. The enumerator function, `pHardwareContext`, every reader
+transport function, and every per-reader context passed to `add_reader` must
+remain valid until `C_Finalize`. Callbacks may run on any thread making a PKCS
+#11 call and must support that calling model.
+
+When `hardware.discovery` is true, the enumerator is invoked once during every
+`C_GetSlotList`. It calls `add_reader` once for each current reader and supplies
+a stable UTF-8 reader name, ATR, maximum input and output APDU lengths,
+transport context, and `PKCS11RS_HOST_CCID_TRANSMIT` function. Reader names are
+the inventory identity: new names append slots, an omitted known name marks its
+slots absent, and reporting that name again restores those same slots. When a
+host enumerator is present it is used instead of native PC/SC. If
+`hardware.discovery` is false, neither host enumeration nor native local
+hardware discovery runs.
+
+If the reserved pointer does not contain the exact magic value, pkcs11rs keeps
+the legacy direct-string interpretation. The callback typedefs and field
+declarations in [`pkcs11rs.h`](../pkcs11rs.h) are the authoritative C ABI.

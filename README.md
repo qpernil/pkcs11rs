@@ -16,10 +16,12 @@ The minimum supported Rust version is 1.85.
 
 ## Backends
 
-- **YubiKey PIV** over PC/SC, including RSA, ECDSA, Ed25519, ECDH/X25519,
-  certificates, metadata, attestation, PIN policy, and random generation.
-- **YubiKey OpenPGP** over PC/SC, including signing, RSA deciphering, ECDH,
-  certificates, OpenPGP PIN KDFs, and random generation.
+- **YubiKey PIV** over native PC/SC or host-provided CCID, including RSA,
+  ECDSA, Ed25519, ECDH/X25519, certificates, metadata, attestation, PIN policy,
+  and random generation.
+- **YubiKey OpenPGP** over native PC/SC or host-provided CCID, including
+  signing, RSA deciphering, ECDH, certificates, OpenPGP PIN KDFs, and random
+  generation.
 - **YubiHSM 2** over direct USB or the HTTP YubiHSM Connector, including
   authenticated sessions, hardware-backed asymmetric, symmetric, HMAC,
   wrapping, opaque, and authentication objects.
@@ -90,19 +92,21 @@ context containing its sessions, login state, and object-handle state.
 Searches and active cryptographic operations belong to their individual
 sessions.
 
-For integrations that can forward provider configuration, including iOS
-applications without a useful process-environment configuration model,
-`CK_C_INITIALIZE_ARGS.pReserved` may point to a NUL-terminated UTF-8 JSON
-configuration object. pkcs11rs reads it during `C_Initialize` and does not
-retain the pointer. Explicit JSON fields take precedence; omitted fields retain
-the documented environment-variable and built-in fallbacks. A null or empty
-string selects the legacy fallback behavior. For compatibility with providers
-such as OpenSSL, a nonempty string whose first non-whitespace character is not
-`{` is accepted as opaque application data and ignored; JSON-looking input is
-validated strictly. See
+For integrations that can forward provider configuration,
+`CK_C_INITIALIZE_ARGS.pReserved` accepts either a direct NUL-terminated UTF-8
+JSON string or `PKCS11RS_INITIALIZE_ARGS_V1`. The versioned wrapper carries an
+explicit-length JSON value and an optional host CCID enumerator, which is how
+the iOS smoke app supplies CryptoTokenKit readers. pkcs11rs copies the
+configuration during `C_Initialize`; callback functions and their contexts must
+remain valid until `C_Finalize`. Explicit JSON fields take precedence, while
+omitted fields retain the documented environment-variable and built-in
+fallbacks. A null or empty direct string selects the legacy fallback behavior.
+For compatibility with providers such as OpenSSL, a nonempty direct string
+whose first non-whitespace character is not `{` is accepted as opaque
+application data and ignored; JSON-looking input is validated strictly. See
 [Initialization configuration](docs/configuration.md) for the complete schema,
-validation rules, and C example. `C_Finalize` still requires its reserved
-argument to be null.
+wrapper ABI, validation rules, and C examples. `C_Finalize` still requires its
+reserved argument to be null.
 
 Initialization and finalization are nonblocking lifecycle transitions. They
 return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
@@ -114,10 +118,11 @@ exchange lock. PKCS #11 calls targeting different applet slots may overlap
 while working with their independent slot and session state, but their card
 interactions cannot: each applet selection or complete APDU exchange on one
 reader holds the shared physical-reader gate. Different YubiHSMs and different
-PC/SC readers can execute concurrently. When Yubico's device-information
-commands report the same physical serial over HID and PC/SC, pkcs11rs
-additionally prevents its own HID and CCID operations from overlapping. HID
-remains shared with other HID clients; no exclusive HID lock is requested.
+native or host-provided CCID readers can execute concurrently. When Yubico's
+device-information commands report the same physical serial over HID and CCID,
+pkcs11rs additionally prevents its own HID and CCID operations from
+overlapping. HID remains shared with other HID clients; no exclusive HID lock
+is requested.
 
 See [Architecture](docs/architecture.md) for the object graph, lifecycle
 locking, session ownership, transport sharing, and cache boundaries.
@@ -208,15 +213,17 @@ The default deployment target is iOS 18.0; set `IPHONEOS_DEPLOYMENT_TARGET`
 when invoking the command to override it.
 The command also includes an iOS umbrella header with the platform macros
 required by the standard PKCS #11 headers and a Clang module map, allowing a
-Swift target that links the XCFramework to use `import PKCS11RS`. Local
-USB/HID/PCSC hardware transports are not available on iOS, so this experimental
-artifact is built without them; software slots and configured remote YubiHSM
-HTTP connectors remain available.
+Swift target that links the XCFramework to use `import PKCS11RS`. The artifact
+omits the desktop native USB, HID, and PC/SC transports. An embedding app may
+still supply local CCID readers through `PKCS11RS_INITIALIZE_ARGS_V1`; software
+slots and configured remote YubiHSM HTTP connectors also remain available.
 
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
-linking the XCFramework from Swift and configuring a remote YubiHSM connector
-with versioned JSON passed through `CK_C_INITIALIZE_ARGS.pReserved`. It also
-uses the pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
+linking the XCFramework from Swift, enumerating local CryptoTokenKit smart-card
+readers, forwarding their APDUs through the host CCID callbacks, and configuring
+a remote YubiHSM connector. Both the callback and versioned JSON configuration
+are passed through `CK_C_INITIALIZE_ARGS.pReserved`. The app also uses the
+pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
 library-owned canonical `CKM_*` string for a recognized mechanism or null for
 an unknown value. Parallel helpers provide canonical `CKR_*`, `CKO_*`, `CKK_*`,
 `CKA_*`, and `CKP_*` names for return values, object classes, key types,
@@ -320,8 +327,9 @@ Disable all automatic local hardware discovery with:
 export PKCS11RS_HARDWARE_DISCOVERY=0
 ```
 
-This skips direct YubiHSM USB, native FIDO HID, and PC/SC/CCID reader
-discovery, including PIV, OpenPGP, YubiHSM Auth, Issuer SD, and FIDO2 applets.
+This skips direct YubiHSM USB, native FIDO HID, and native or host-provided
+CCID reader discovery, including PIV, OpenPGP, YubiHSM Auth, Issuer SD, and
+FIDO2 applets.
 It does not disable named software slots or URLs explicitly configured through
 `PKCS11RS_YUBIHSM_URLS`; remote HTTP(S) connectors are already opt-in. The
 setting defaults to `1`. Any value other than `0` or `1` makes
@@ -508,21 +516,25 @@ with compatible hardware. See [Named software slots](docs/software.md) and
 
 ## CCID Configuration
 
-The default PC/SC discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
-and FIDO2. Each selectable applet is exposed as its own PKCS #11
-slot.
+The default CCID discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
+and FIDO2. Each selectable applet is exposed as its own PKCS #11 slot. Native
+builds enumerate readers through PC/SC unless the host supplies a CCID
+enumerator during `C_Initialize`.
 
-PC/SC reader and applet topology is snapshotted by the first `C_GetSlotList`
-after `C_Initialize`. An empty reader contributes no slot. Every later
-`C_GetSlotList` refreshes the presence of registered slots, and existing slots
-also reconnect and reselect their own AID when sessions are opened. A selected
-applet therefore keeps its slot even if a later refresh fails. New readers and
-applets absent from the original PC/SC snapshot still require `C_Finalize`
-followed by `C_Initialize`.
+Every `C_GetSlotList` enumerates the current native or host-provided reader
+names. A reader is probed for its configured applets until it contributes at
+least one slot, so a new reader or a card inserted into a previously empty
+reader can append slots without reinitializing the module. Once a reader name
+has contributed slots, those slot IDs remain registered for the module
+lifetime. Later listings refresh their presence, and session opens reconnect
+and reselect the slot's AID. Removing the reader therefore marks its existing
+slots absent; returning the same reader name reuses them. Replacing a known
+reader's card does not reinterpret its established applet topology or remove
+its slots.
 
 pkcs11rs opens PC/SC cards with `SCARD_SHARE_EXCLUSIVE` and does not currently
 use PC/SC transactions. A reader already held by another process therefore
-contributes no CCID applet slots to the discovery snapshot. On macOS this
+contributes no new CCID applet slots on that listing. On macOS this
 commonly includes GnuPG `scdaemon`; native FIDO HID discovery is independent
 and may still expose the authenticator. `PKCS11RS_DEBUG=1` logs the reader name
 when it cannot be opened, while level `2` also logs successful reader opens.

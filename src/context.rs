@@ -18,13 +18,14 @@ use crate::{
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad, BackendSession, CcidApplication,
     CcidConfiguration, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorEndpoint,
-    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PivSlot,
-    SecureChannelConfiguration, SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot,
-    TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    HostCcidConnector, HostCcidProvider, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
+    HttpConnectorEndpoint, HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration,
+    OpenPgpSlot, PcscAppletConnector, PcscReaderState, PivSlot, SecureChannelConfiguration,
+    SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot, TokenObject,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(feature = "native-hardware")]
-use crate::{HidFidoEndpoint, PcscAppletConnector, PcscConnector, UsbConnector};
+use crate::{HidFidoEndpoint, PcscConnector, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial, ABI_TEST_SLOT_ID};
 #[cfg(any(test, feature = "abi-tests"))]
@@ -255,6 +256,8 @@ pub(crate) struct ModuleContext {
     pub(crate) hardware_discovery: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
+    host_ccid_provider: Option<HostCcidProvider>,
+    ccid_readers: Mutex<HashMap<String, CcidReaderInventoryEntry>>,
     #[cfg(feature = "native-hardware")]
     pub(crate) pcsc: Option<pcsc::Context>,
     pub(crate) yubihsm_urls: Vec<String>,
@@ -274,6 +277,16 @@ pub(crate) struct ModuleContext {
     pub(crate) hsmauth_providers: Arc<HsmAuthProviderRegistry>,
     discovery_refresh: Mutex<()>,
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
+}
+
+struct EnumeratedCcidReader {
+    connector: SharedConnector,
+    reader_state: Arc<PcscReaderState>,
+    host_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+struct CcidReaderInventoryEntry {
+    host_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 // Mutable token state shared by every PKCS #11 session opened on this slot.
@@ -466,12 +479,12 @@ fn resolve_fido_duplicate(
 }
 
 fn hid_device_context(
-    pcsc_devices: &HashMap<PhysicalDeviceKey, Arc<DeviceContext>>,
+    ccid_devices: &HashMap<PhysicalDeviceKey, Arc<DeviceContext>>,
     identity: DeviceIdentity,
 ) -> (Arc<DeviceContext>, bool) {
     match identity
         .physical_key()
-        .and_then(|key| pcsc_devices.get(&key))
+        .and_then(|key| ccid_devices.get(&key))
     {
         Some(device) => (device.clone(), true),
         None => (Arc::new(DeviceContext::new(identity)), false),
@@ -809,9 +822,18 @@ impl std::fmt::Debug for SessionContext {
 }
 
 impl ModuleContext {
+    #[cfg(all(test, not(feature = "abi-tests")))]
     #[allow(unused_mut)]
     pub(crate) fn new_with_configuration(
         configuration: ModuleConfiguration,
+    ) -> Result<ModuleContext, Error> {
+        Self::new_with_configuration_and_host_ccid(configuration, None)
+    }
+
+    #[allow(unused_mut)]
+    pub(crate) fn new_with_configuration_and_host_ccid(
+        configuration: ModuleConfiguration,
+        host_ccid_provider: Option<HostCcidProvider>,
     ) -> Result<ModuleContext, Error> {
         #[cfg(feature = "abi-tests")]
         let _ = (configuration.yubihsm_public_discovery.as_ref(),);
@@ -841,10 +863,7 @@ impl ModuleContext {
         ]);
         #[cfg(feature = "abi-tests")]
         slots.extend(abi_test_yubihsm_slots()?);
-        #[cfg(feature = "native-hardware")]
         let hardware_discovery = configuration.hardware_discovery;
-        #[cfg(not(feature = "native-hardware"))]
-        let hardware_discovery = false;
         let yubihsm_urls = configuration.yubihsm_urls;
         let software_slots = configuration.software_slots;
         let token_storage = configured_token_storage(configuration.token_storage)?;
@@ -879,10 +898,12 @@ impl ModuleContext {
             hardware_discovery,
             software_slots,
             software_discovery_pins,
+            host_ccid_provider,
+            ccid_readers: Mutex::new(HashMap::new()),
             #[cfg(all(feature = "native-hardware", feature = "abi-tests"))]
             pcsc: None,
             #[cfg(all(feature = "native-hardware", not(feature = "abi-tests")))]
-            pcsc: if hardware_discovery {
+            pcsc: if hardware_discovery && host_ccid_provider.is_none() {
                 match pcsc::Context::establish(pcsc::Scope::System) {
                     Ok(context) => Some(context),
                     Err(e) => {
@@ -1697,14 +1718,291 @@ impl SlotContext {
 }
 
 impl ModuleContext {
+    fn enumerate_ccid_readers(&self) -> Result<Vec<EnumeratedCcidReader>, Error> {
+        if !self.hardware_discovery {
+            return Ok(Vec::new());
+        }
+        if let Some(provider) = self.host_ccid_provider {
+            return provider
+                .enumerate()?
+                .into_iter()
+                .map(|registration| {
+                    let connector = HostCcidConnector::new(registration);
+                    let reader_state = connector.reader_state();
+                    let host_presence = Some(connector.presence());
+                    Ok(EnumeratedCcidReader {
+                        connector: Arc::new(connector) as SharedConnector,
+                        reader_state,
+                        host_presence,
+                    })
+                })
+                .collect();
+        }
+        #[cfg(feature = "native-hardware")]
+        if let Some(context) = self.pcsc.clone() {
+            let readers = context
+                .list_readers_owned()
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+            return Ok(readers
+                .into_iter()
+                .map(|reader| {
+                    let connector = PcscConnector {
+                        reader,
+                        context: context.clone(),
+                        state: Arc::new(Default::default()),
+                    };
+                    let reader_state = connector.state.clone();
+                    EnumeratedCcidReader {
+                        connector: Arc::new(connector) as SharedConnector,
+                        reader_state,
+                        host_presence: None,
+                    }
+                })
+                .collect());
+        }
+        Ok(Vec::new())
+    }
+
+    fn insert_ccid_reader_slots(
+        &self,
+        slot_contexts: &mut SlotContextRegistry,
+        base_connector: SharedConnector,
+        reader_state: Arc<PcscReaderState>,
+        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+    ) -> Result<Vec<CK_SLOT_ID>, Error> {
+        base_connector.refresh()?;
+        let reader_name = base_connector.name();
+        match YubiKeyClient.discover(base_connector.as_ref()) {
+            Ok(info) => {
+                reader_state.device.replace(
+                    base_connector.connection_epoch(),
+                    DeviceIdentity {
+                        manufacturer: String::from("Yubico"),
+                        product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
+                        serial: info.serial.unwrap_or_else(|| String::from("0")),
+                        hardware_version: None,
+                        firmware_version: info.version,
+                    },
+                )?;
+            }
+            Err(error) => log!(
+                2,
+                "YubiKey Management device-information discovery failed on {}: {:?}",
+                reader_name,
+                error
+            ),
+        }
+
+        let mut reader_slots = Vec::new();
+        let mut reader_fido_slots = Vec::new();
+        let mut next_reader_slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
+        for configuration in self.ccid_configurations.clone() {
+            let application_label = ccid_application_label(configuration.application);
+            let slot_id = next_reader_slot_id;
+            next_reader_slot_id = next_reader_slot_id.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
+            let application_aid = self
+                .ccid_aids
+                .for_application(configuration.application)
+                .to_vec();
+            if let Err(error) = select_application(base_connector.as_ref(), &application_aid) {
+                log!(
+                    1,
+                    "CCID application AID selection for {} on {}: {:?}",
+                    application_label,
+                    reader_name,
+                    error
+                );
+                continue;
+            }
+            reader_state.set_selected_application(&application_aid)?;
+            let application_connector = PcscAppletConnector::new_configured(
+                base_connector.clone(),
+                &application_aid,
+                configuration.secure_channel,
+                reader_state.clone(),
+                self.secure_channels.clone(),
+                self.pinentry.clone(),
+            );
+            let shared_application_connector: SharedConnector =
+                Arc::new(application_connector.clone());
+            let application_connector: Rc<dyn Connector> = Rc::new(application_connector);
+            let mut slot: Box<dyn Slot> = match configuration.application {
+                CcidApplication::Piv => Box::new(PivSlot::new_with_device(
+                    application_connector,
+                    application_aid.clone(),
+                    reader_state.device.clone(),
+                )),
+                CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new_with_device(
+                    application_connector,
+                    application_aid.clone(),
+                    reader_state.device.clone(),
+                )),
+                CcidApplication::HsmAuth => {
+                    let hsmauth_slot = HsmAuthSlot::new_shared_with_device(
+                        application_connector,
+                        shared_application_connector,
+                        application_aid,
+                        reader_state.device.clone(),
+                    );
+                    match hsmauth_slot.providers() {
+                        Ok(mut providers) => {
+                            for provider in &mut providers {
+                                provider.trust_prefix =
+                                    Some(self.yubihsm_device_trust_prefix.clone());
+                            }
+                            if let Err(error) = self.hsmauth_providers.extend(providers) {
+                                log!(1, "YubiHSM Auth provider registration: {:?}", error);
+                            }
+                        }
+                        Err(error) => log!(2, "YubiHSM Auth credential discovery: {:?}", error),
+                    }
+                    Box::new(hsmauth_slot)
+                }
+                CcidApplication::IssuerSecurityDomain => {
+                    Box::new(IssuerSecurityDomainSlot::new_with_device(
+                        application_connector,
+                        application_aid,
+                        reader_state.device.clone(),
+                    ))
+                }
+                CcidApplication::Fido2 => {
+                    let fido_slot = Fido2Slot::new_with_device(
+                        application_connector,
+                        application_aid,
+                        reader_state.device.clone(),
+                    );
+                    if let Some(key) = fido_slot.physical_device_key() {
+                        reader_fido_slots.push((
+                            key,
+                            slot_id,
+                            configuration.secure_channel.is_some(),
+                        ));
+                    }
+                    Box::new(fido_slot)
+                }
+            };
+            if slot.is_present() {
+                if let Err(error) = slot.init_slot() {
+                    log!(
+                        1,
+                        "CCID application initialization failed for reader {}, applet {}: {:?}",
+                        reader_name,
+                        application_label,
+                        error
+                    );
+                    slot.set_discovery_error(&error);
+                } else {
+                    slot.clear_discovery_error();
+                }
+            }
+            let token_objects = if slot.is_present() {
+                match slot.token_objects(slot_id) {
+                    Ok(objects) => objects,
+                    Err(error) => {
+                        log!(2, "CCID object discovery: {:?}", error);
+                        slot.set_discovery_error(&error);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            reader_slots.push((slot_id, slot, token_objects));
+        }
+
+        if reader_slots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let inserted_slot_ids = slot_contexts.insert_slot_contexts(
+            reader_slots,
+            self.handles.clone(),
+            self.pinentry.clone(),
+            self.trust_store.clone(),
+            self.token_storage.as_ref(),
+            self.fido_storage.as_ref(),
+        )?;
+        for (key, slot_id, secure_channel) in reader_fido_slots {
+            if inserted_slot_ids.contains(&slot_id) {
+                ccid_fido_slots.insert(key, (slot_id, secure_channel));
+            }
+        }
+        Ok(inserted_slot_ids)
+    }
+
+    fn reconcile_ccid_readers(
+        &self,
+        slot_contexts: &mut SlotContextRegistry,
+        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+    ) -> Result<HashMap<PhysicalDeviceKey, Arc<DeviceContext>>, Error> {
+        let readers = match self.enumerate_ccid_readers() {
+            Ok(readers) => readers,
+            Err(error) => {
+                log!(1, "CCID reader enumeration failed: {:?}", error);
+                return Ok(HashMap::new());
+            }
+        };
+        let reader_names = readers
+            .iter()
+            .map(|reader| reader.connector.name())
+            .collect::<HashSet<_>>();
+        let mut inventory = self
+            .ccid_readers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        for (name, reader) in inventory.iter() {
+            if let Some(presence) = &reader.host_presence {
+                presence.store(
+                    reader_names.contains(name),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+
+        let mut ccid_devices = HashMap::new();
+        for reader in readers {
+            let name = reader.connector.name();
+            if inventory.contains_key(&name) {
+                continue;
+            }
+            match self.insert_ccid_reader_slots(
+                slot_contexts,
+                reader.connector.clone(),
+                reader.reader_state.clone(),
+                ccid_fido_slots,
+            ) {
+                Ok(slot_ids) if !slot_ids.is_empty() => {
+                    if let Some(key) = reader
+                        .reader_state
+                        .device
+                        .identity(reader.connector.connection_epoch())
+                        .physical_key()
+                    {
+                        ccid_devices
+                            .entry(key)
+                            .or_insert_with(|| reader.reader_state.device.clone());
+                    }
+                    inventory.insert(
+                        name,
+                        CcidReaderInventoryEntry {
+                            host_presence: reader.host_presence,
+                        },
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => log!(1, "CCID reader {} discovery failed: {:?}", name, error),
+            }
+        }
+        Ok(ccid_devices)
+    }
+
     #[allow(unreachable_code)]
-    pub(crate) fn init(&self) -> Result<(), Error> {
+    pub(crate) fn init(&self) -> Result<bool, Error> {
         let mut slot_contexts = self
             .slot_contexts
             .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         if !slot_contexts.begin_discovery() {
-            return Ok(());
+            return Ok(false);
         }
         if !self.software_slots.is_empty() {
             let first_slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
@@ -1739,7 +2037,7 @@ impl ModuleContext {
         }
         #[cfg(feature = "abi-tests")]
         {
-            return Ok(());
+            return Ok(true);
         }
         #[cfg(feature = "mock-yubikey")]
         {
@@ -1773,226 +2071,12 @@ impl ModuleContext {
             // A mock build is a deterministic, self-contained PKCS #11
             // artifact. Do not mix its synthetic slot with USB, HTTP, or
             // PC/SC hardware discovery.
-            return Ok(());
+            return Ok(true);
         }
-        #[cfg(feature = "native-hardware")]
-        let hsmauth_providers = self.hsmauth_providers.clone();
-        #[cfg(feature = "native-hardware")]
         let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
-        #[cfg(feature = "native-hardware")]
-        let mut pcsc_devices: HashMap<PhysicalDeviceKey, Arc<DeviceContext>> = HashMap::new();
-        #[cfg(feature = "native-hardware")]
-        if let Some(context) = self.pcsc.clone() {
-            if let Ok(readers) = context.list_readers_owned() {
-                for reader in readers {
-                    let connector = PcscConnector {
-                        reader,
-                        context: context.clone(),
-                        state: Arc::new(Default::default()),
-                    };
-                    let name = connector.name();
-                    if let Err(error) = connector.refresh() {
-                        log!(1, "PCSC reader {} has no usable card: {:?}", name, error);
-                        continue;
-                    }
-                    log!(2, "PCSC reader {} opened", name);
-                    match YubiKeyClient.discover(&connector) {
-                        Ok(info) => {
-                            if let Err(error) = connector.set_yubikey_device_info(info) {
-                                log!(
-                                    1,
-                                    "YubiKey physical-device identity for {}: {:?}",
-                                    name,
-                                    error
-                                );
-                            }
-                        }
-                        Err(error) => log!(
-                            2,
-                            "YubiKey Management device-information discovery failed on {}: {:?}",
-                            name,
-                            error
-                        ),
-                    }
-                    let connection_epoch = connector.connection_epoch();
-                    if let Some(key) = connector
-                        .state
-                        .device
-                        .identity(connection_epoch)
-                        .physical_key()
-                    {
-                        pcsc_devices
-                            .entry(key)
-                            .or_insert_with(|| connector.state.device.clone());
-                    }
-                    let configurations = self.ccid_configurations.clone();
-                    let reader_state = connector.state.clone();
-                    let base_connector: SharedConnector = Arc::new(connector);
-                    let mut reader_slots = Vec::new();
-                    let mut reader_fido_slots = Vec::new();
-                    let Some(mut next_reader_slot_id) = slot_contexts.next_slot_id() else {
-                        log!(1, "PCSC slot ID space exhausted");
-                        break;
-                    };
-                    for configuration in configurations {
-                        let application_label = ccid_application_label(configuration.application);
-                        let slot_id = next_reader_slot_id;
-                        let Some(next_slot_id) = next_reader_slot_id.checked_add(1) else {
-                            log!(1, "PCSC slot ID space exhausted");
-                            break;
-                        };
-                        next_reader_slot_id = next_slot_id;
-                        let application_aid = self
-                            .ccid_aids
-                            .for_application(configuration.application)
-                            .to_vec();
-                        if let Err(error) =
-                            select_application(base_connector.as_ref(), &application_aid)
-                        {
-                            log!(
-                                1,
-                                "CCID application AID selection for {}: {:?}",
-                                application_label,
-                                error
-                            );
-                            continue;
-                        }
-                        if let Err(error) = reader_state.set_selected_application(&application_aid)
-                        {
-                            log!(
-                                1,
-                                "CCID application selection state for {}: {:?}",
-                                application_label,
-                                error
-                            );
-                            continue;
-                        }
-                        let application_connector = PcscAppletConnector::new_configured(
-                            base_connector.clone(),
-                            &application_aid,
-                            configuration.secure_channel,
-                            reader_state.clone(),
-                            self.secure_channels.clone(),
-                            self.pinentry.clone(),
-                        );
-                        let shared_application_connector: SharedConnector =
-                            Arc::new(application_connector.clone());
-                        let application_connector: Rc<dyn Connector> =
-                            Rc::new(application_connector);
-                        let mut slot: Box<dyn Slot> = match configuration.application {
-                            CcidApplication::Piv => Box::new(PivSlot::new_with_device(
-                                application_connector,
-                                application_aid.clone(),
-                                reader_state.device.clone(),
-                            )),
-                            CcidApplication::OpenPgp => Box::new(OpenPgpSlot::new_with_device(
-                                application_connector,
-                                application_aid.clone(),
-                                reader_state.device.clone(),
-                            )),
-                            CcidApplication::HsmAuth => {
-                                let hsmauth_slot = HsmAuthSlot::new_shared_with_device(
-                                    application_connector,
-                                    shared_application_connector,
-                                    application_aid,
-                                    reader_state.device.clone(),
-                                );
-                                match hsmauth_slot.providers() {
-                                    Ok(mut providers) => {
-                                        for provider in &mut providers {
-                                            provider.trust_prefix =
-                                                Some(self.yubihsm_device_trust_prefix.clone());
-                                        }
-                                        if let Err(error) = hsmauth_providers.extend(providers) {
-                                            log!(
-                                                1,
-                                                "YubiHSM Auth provider registration: {:?}",
-                                                error
-                                            );
-                                        }
-                                    }
-                                    Err(error) => {
-                                        log!(2, "YubiHSM Auth credential discovery: {:?}", error)
-                                    }
-                                }
-                                Box::new(hsmauth_slot)
-                            }
-                            CcidApplication::IssuerSecurityDomain => {
-                                Box::new(IssuerSecurityDomainSlot::new_with_device(
-                                    application_connector,
-                                    application_aid,
-                                    reader_state.device.clone(),
-                                ))
-                            }
-                            CcidApplication::Fido2 => {
-                                let fido_slot = Fido2Slot::new_with_device(
-                                    application_connector,
-                                    application_aid,
-                                    reader_state.device.clone(),
-                                );
-                                if let Some(key) = fido_slot.physical_device_key() {
-                                    log!(2, "FIDO CCID physical-device candidate: {:?}", key);
-                                    reader_fido_slots.push((
-                                        key,
-                                        slot_id,
-                                        configuration.secure_channel.is_some(),
-                                    ));
-                                }
-                                Box::new(fido_slot)
-                            }
-                        };
-                        if slot.is_present() {
-                            if let Err(error) = slot.init_slot() {
-                                log!(
-                                    1,
-                                    "CCID application initialization failed for reader {}, applet {}: {:?}",
-                                    base_connector.name(),
-                                    application_label,
-                                    error
-                                );
-                                slot.set_discovery_error(&error);
-                            } else {
-                                slot.clear_discovery_error();
-                            }
-                        }
-                        let token_objects = if slot.is_present() {
-                            match slot.token_objects(slot_id) {
-                                Ok(objects) => objects,
-                                Err(error) => {
-                                    log!(2, "CCID object discovery: {:?}", error);
-                                    slot.set_discovery_error(&error);
-                                    Vec::new()
-                                }
-                            }
-                        } else {
-                            Vec::new()
-                        };
-                        reader_slots.push((slot_id, slot, token_objects));
-                    }
-                    if !reader_slots.is_empty() {
-                        match slot_contexts.insert_slot_contexts(
-                            reader_slots,
-                            self.handles.clone(),
-                            self.pinentry.clone(),
-                            self.trust_store.clone(),
-                            self.token_storage.as_ref(),
-                            self.fido_storage.as_ref(),
-                        ) {
-                            Ok(inserted_slot_ids) => {
-                                for (key, slot_id, secure_channel) in reader_fido_slots {
-                                    if inserted_slot_ids.contains(&slot_id) {
-                                        ccid_fido_slots.insert(key, (slot_id, secure_channel));
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                log!(1, "PCSC slot context registration: {:?}", error);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let ccid_devices = self.reconcile_ccid_readers(&mut slot_contexts, &mut ccid_fido_slots)?;
+        #[cfg(not(feature = "native-hardware"))]
+        let _ = ccid_devices;
         #[cfg(feature = "native-hardware")]
         let hid_descriptors = if self.hardware_discovery {
             match enumerate_fido_devices() {
@@ -2060,11 +2144,11 @@ impl ModuleContext {
                     .and_then(|info| info.version)
                     .or(Some(init.firmware_version)),
             };
-            let (device, shares_pcsc_gate) = hid_device_context(&pcsc_devices, identity);
-            if shares_pcsc_gate {
+            let (device, shares_ccid_gate) = hid_device_context(&ccid_devices, identity);
+            if shares_ccid_gate {
                 log!(
                     2,
-                    "FIDO HID endpoint {} shares the physical-device operation gate with PC/SC",
+                    "FIDO HID endpoint {} shares the physical-device operation gate with CCID",
                     descriptor.name()
                 );
             }
@@ -2160,7 +2244,7 @@ impl ModuleContext {
         }
         drop(slot_contexts);
         log!(2, "ModuleContext.init {:?}", self);
-        Ok(())
+        Ok(true)
     }
 
     fn prepare_http_yubihsm_slot(
@@ -2472,17 +2556,40 @@ impl ModuleContext {
         Ok(())
     }
 
+    #[cfg(not(feature = "abi-tests"))]
+    fn refresh_ccid_discovery(&self) -> Result<(), Error> {
+        let mut slot_contexts = self
+            .slot_contexts
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        let mut ccid_fido_slots = HashMap::new();
+        self.reconcile_ccid_readers(&mut slot_contexts, &mut ccid_fido_slots)?;
+        Ok(())
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
     pub(crate) fn refresh_discovery(&self) -> Result<(), Error> {
+        self.refresh_discovery_after_init(false)
+    }
+
+    #[allow(unreachable_code)]
+    pub(crate) fn refresh_discovery_after_init(&self, initialized: bool) -> Result<(), Error> {
         let _refresh = self
             .discovery_refresh
             .lock()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        #[cfg(feature = "abi-tests")]
+        {
+            let _ = initialized;
+            return self.refresh_registered_slots();
+        }
+        #[cfg(not(feature = "abi-tests"))]
+        if !initialized {
+            self.refresh_ccid_discovery()?;
+        }
         #[cfg(feature = "native-hardware")]
         self.refresh_usb_yubihsm_discovery()?;
         self.refresh_http_yubihsm_discovery()?;
-        // PC/SC and FIDO discovery sources plug into this coordinator and
-        // feed the same snapshot reconciler as their inventories become
-        // refreshable.
         self.refresh_registered_slots()
     }
 }
@@ -3009,6 +3116,8 @@ mod discovery_tests {
             hardware_discovery: false,
             software_slots: Vec::new(),
             software_discovery_pins: HashMap::new(),
+            host_ccid_provider: None,
+            ccid_readers: Mutex::new(HashMap::new()),
             pcsc: None,
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),

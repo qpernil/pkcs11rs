@@ -203,7 +203,7 @@ use openpgp::{
 };
 
 mod yubikey;
-use yubikey::{Client as YubiKeyClient, DeviceInfo as YubiKeyDeviceInfo};
+use yubikey::Client as YubiKeyClient;
 
 mod yubihsm;
 use yubihsm::{
@@ -1012,14 +1012,13 @@ use abi_test_backend::*;
 
 mod connector;
 #[cfg(test)]
+pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, usb_bcd_version};
 pub(crate) use connector::{
-    ensure_complete_write, needs_zero_length_packet, usb_bcd_version, PcscReaderState,
-};
-pub(crate) use connector::{
-    Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig, SharedConnector,
+    Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig, PcscAppletConnector,
+    PcscReaderState, SharedConnector,
 };
 #[cfg(feature = "native-hardware")]
-pub(crate) use connector::{PcscAppletConnector, PcscConnector, UsbConnector};
+pub(crate) use connector::{PcscConnector, UsbConnector};
 
 #[cfg(feature = "mock-yubikey")]
 mod mock_yubikey;

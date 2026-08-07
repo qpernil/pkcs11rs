@@ -1,6 +1,9 @@
 # CCID applet configuration
 
-The PC/SC transport automatically probes these CCID applets by default:
+CCID discovery uses native PC/SC unless `C_Initialize` receives a host reader
+enumerator through `PKCS11RS_INITIALIZE_ARGS_V1`. Both providers feed the same
+reader reconciliation and applet-probing path. The following applets are
+probed by default:
 
 | Applet | Default AID | AID override |
 | --- | --- | --- |
@@ -10,27 +13,38 @@ The PC/SC transport automatically probes these CCID applets by default:
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 | FIDO2 | `A0 00 00 06 47 2F 00 01` | `PKCS11RS_FIDO2_AID` |
 
-Set `PKCS11RS_HARDWARE_DISCOVERY=0` to skip PC/SC context creation and all
-CCID reader and applet probes. This global local-discovery switch also skips
-native USB/HID discovery, but does not affect configured software slots or
-opt-in remote YubiHSM HTTP(S) connectors.
+Set `PKCS11RS_HARDWARE_DISCOVERY=0` to skip native PC/SC context creation or a
+configured host enumerator and all CCID reader and applet probes. This global
+local-discovery switch also skips native USB/HID discovery, but does not affect
+configured software slots or opt-in remote YubiHSM HTTP(S) connectors.
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
-can be selected successfully. Reader and applet topology is a snapshot taken
-on the first `C_GetSlotList` call after `C_Initialize`; discovering newly added
-readers or applets requires `C_Finalize` followed by `C_Initialize`. Subsequent
-`C_GetSlotList` calls refresh token presence for registered slots, as does
-opening a session. Initialization and object-discovery failures do not remove
-an already selected applet slot.
+can be selected successfully. Every `C_GetSlotList` asks the selected provider
+for its current reader inventory. A reader name that has not yet contributed a
+slot is probed for every configured applet. This lets newly attached readers,
+and cards inserted into readers that were previously empty or unavailable,
+append slots without `C_Finalize`/`C_Initialize`.
 
-An empty PC/SC reader contributes no slots to that snapshot. If a card is
-later inserted, no applet slots are synthesized for it until the module is
-reinitialized. Conversely, once an applet slot exists, a card removal or
-replacement does not change the slot list. Listing slots or opening a session
-makes that slot refresh the reader connection and reselect its own AID. If the
-replacement card lacks the applet, the slot remains registered but reports no
-usable token and rejects communication. It does not morph into slots for other
-applets on the replacement card.
+Once a reader name contributes at least one slot, that reader's applet topology
+and slot IDs remain stable for the module lifetime. Subsequent listings refresh
+token presence for those registered slots, as does opening a session. A removed
+reader or card therefore leaves its slots registered but absent; when the same
+reader name returns, those slots reconnect and reselect their own AIDs. A
+replacement card does not make an established reader morph into a different
+set of slots. Reinitialization is required only when the caller wants to forget
+that stable inventory and probe a known reader name as entirely new.
+
+## Host-provided readers
+
+`PKCS11RS_INITIALIZE_ARGS_V1` can supply an enumerator for platforms without
+native PC/SC access. The enumerator is called once during every
+`C_GetSlotList` and calls the Rust-provided sink once for each current reader,
+including a stable UTF-8 name, ATR, APDU size limits, transport context, and
+synchronous APDU callback. Supplying this enumerator selects it instead of
+native PC/SC. Omitting a previously registered name marks that reader's slots
+absent; reporting the same name later restores them without changing slot IDs.
+The configuration guide documents the exact
+[`C_Initialize` wrapper ABI](configuration.md#host-ccid-wrapper).
 
 ## PC/SC ownership and external daemons
 
@@ -39,8 +53,9 @@ on reconnect. Its shared reader state serializes complete applet selections and
 APDU exchanges among pkcs11rs slots, but it does not call
 `SCardBeginTransaction` or `SCardEndTransaction`. This means another process
 holding either a shared or exclusive PC/SC connection can prevent pkcs11rs from
-opening that reader. If this happens during the initial snapshot, none of that
-reader's CCID applets become slots.
+opening that reader. Until the reader has contributed a slot, a later
+`C_GetSlotList` retries the applet probe. If the reader already has slots, they
+remain registered and report the failed connection as token absence.
 
 On macOS, GnuPG `scdaemon` is a common competing owner. It can use either its
 built-in CCID driver, which opens the USB CCID interface directly and bypasses
@@ -90,9 +105,10 @@ PKCS11RS_CCID_APPLICATIONS=piv,openpgp
 Accepted names are `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`. Names are
 case-insensitive and duplicates are ignored.
 
-The YubiKey Management applet is probed once per PC/SC device before applet
-discovery. Its device-wide serial number, firmware version, hardware part
-number, capabilities, and configuration metadata are cached in the shared
+The YubiKey Management applet is probed during each applet-discovery attempt
+for a native or host-provided reader that has not yet contributed slots. Its
+device-wide serial number, firmware version, hardware part number,
+capabilities, and configuration metadata are cached in the shared
 physical-device context and are not exposed as a separate PKCS #11 slot. The
 part number is reported as the PKCS #11 token model. Applet-specific serials
 remain local to their applet slot and do not overwrite the physical identity.
@@ -133,7 +149,7 @@ token-information calls continue to report the failure. When GetInfo succeeds,
 the primary CTAP version is included in the PKCS #11 slot description and
 token label. The device manufacturer, model, serial number, hardware version,
 and firmware version use the shared YubiKey metadata. Set
-`PKCS11RS_CCID_APPLICATIONS=fido2` to restrict the PC/SC applet probe; it does
+`PKCS11RS_CCID_APPLICATIONS=fido2` to restrict the CCID applet probe; it does
 not disable native FIDO HID discovery. Set `PKCS11RS_DEBUG=2` to print the
 complete reported versions, extensions, AAGUID, options, maximum message size,
 PIN/UV protocols, and transports.

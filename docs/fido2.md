@@ -44,9 +44,9 @@ pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --list-slots
 pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --show-info
 ```
 
-Set `PKCS11RS_HARDWARE_DISCOVERY=0` to disable both native FIDO HID discovery
-and the FIDO CCID probe along with all other automatic local hardware
-discovery.
+Set `PKCS11RS_HARDWARE_DISCOVERY=0` to disable native FIDO HID discovery and
+the FIDO probe over either native or host-provided CCID, along with all other
+automatic local hardware discovery.
 
 A FIDO2 slot is created when the FIDO AID can be selected. As with the other
 CCID applets, the slot remains registered if subsequent initialization or
@@ -58,8 +58,12 @@ For USB HID, a slot is created after the HID interface can be opened, a
 CTAPHID channel can be allocated, and the CBOR capability is advertised. The
 endpoint can reopen the same HID path and allocate a new channel after device
 reinsertion. Every `C_GetSlotList` refreshes the presence of registered HID and
-CCID FIDO slots. New HID devices and new smart-card applets are not yet added
-after the initial topology snapshot; reinitialize the module to rescan them.
+CCID FIDO slots. Native HID device inventory remains initial-only, so a new HID
+authenticator requires module reinitialization. CCID reader inventory is
+enumerated on every listing: a FIDO smart-card applet on a new reader, or on a
+reader that had not previously contributed any applet slot, can append a slot
+without reinitialization. A reader that already has slots retains its
+established applet topology and is not reinterpreted as a different card.
 
 Yubico's read-only configuration command supplies the physical serial used to
 correlate a YubiKey exposed through both USB interfaces. When both endpoints
