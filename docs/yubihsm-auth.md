@@ -82,10 +82,10 @@ are documented in [`formats.md`](formats.md).
 
 Direct YubiHSM USB discovery follows `hardware.discovery` and its
 `PKCS11RS_HARDWARE_DISCOVERY` environment fallback. Disabling local hardware
-discovery also disables native FIDO HID and PC/SC/CCID discovery, but does not
-disable explicitly configured remote HTTP(S) connector slots. Direct USB
-access uses usbfs on Linux, IOKit on macOS, and WinUSB on Windows through
-`nusb`; it does not require libusb.
+discovery also disables native FIDO HID and both native and host-provided CCID
+discovery, but does not disable explicitly configured remote HTTP(S) connector
+slots. Direct USB access uses usbfs on Linux, IOKit on macOS, and WinUSB on
+Windows through `nusb`; it does not require libusb.
 
 YubiHSM Auth credentials are objects in the applet slot and authentication
 methods for every present YubiHSM slot, whether reached over USB or HTTP. For

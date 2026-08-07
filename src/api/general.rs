@@ -13,18 +13,21 @@ ffi_entry_point! {
         init_args: CK_VOID_PTR,
     ) -> CK_RV {
         log!(2, "C_Initialize called with {:?}", init_args);
-        let explicit_configuration = match validate_initialize_args(init_args) {
-            Ok(configuration) => configuration,
+        let initialization = match validate_initialize_args(init_args) {
+            Ok(initialization) => initialization,
             Err(rv) => return rv,
         };
-        let configuration = match ModuleConfiguration::resolve(explicit_configuration) {
+        let configuration = match ModuleConfiguration::resolve(initialization.configuration) {
             Ok(configuration) => configuration,
             Err(error) => return error.into(),
         };
         match lock_context_write() {
             Ok(mut guard) => match guard.as_mut() {
                 Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
-                None => match ModuleContext::new_with_configuration(configuration) {
+                None => match ModuleContext::new_with_configuration_and_host_ccid(
+                    configuration,
+                    initialization.host_ccid_provider,
+                ) {
                     Ok(context) => {
                         *guard = Some(context);
                         CKR_OK as CK_RV
@@ -37,24 +40,19 @@ ffi_entry_point! {
     }
 }
 
-fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<Option<JsonConfiguration>, CK_RV> {
+fn validate_initialize_args(
+    init_args: CK_VOID_PTR,
+) -> Result<super::host_ccid::InitializeReserved, CK_RV> {
     if init_args.is_null() {
-        return Ok(None);
+        return Ok(super::host_ccid::InitializeReserved {
+            configuration: None,
+            host_ccid_provider: None,
+        });
     }
 
     let args = unsafe { _as_ref(init_args.cast::<CK_C_INITIALIZE_ARGS>()) }?;
-    let reserved =
-        unsafe { JsonConfiguration::from_reserved(args.pReserved) }.map_err(CK_RV::from)?;
-    let configuration = match reserved {
-        ReservedConfiguration::Empty => None,
-        ReservedConfiguration::Json(configuration) => Some(*configuration),
-        ReservedConfiguration::Opaque => {
-            if matches!(std::env::var("PKCS11RS_DEBUG").as_deref(), Ok("1" | "2")) {
-                eprintln!("C_Initialize received opaque pReserved data");
-            }
-            None
-        }
-    };
+    let initialization = unsafe { super::host_ccid::parse_initialize_reserved(args.pReserved) }
+        .map_err(CK_RV::from)?;
 
     let callbacks = [
         args.CreateMutex.is_some(),
@@ -77,7 +75,7 @@ fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<Option<JsonConfigu
         return Err(CKR_CANT_LOCK as CK_RV);
     }
 
-    Ok(configuration)
+    Ok(initialization)
 }
 
 ffi_entry_point! {
@@ -178,8 +176,8 @@ ffi_entry_point! {
                 Err(error) => return error.into(),
             };
             match with_context(|ctx| {
-                ctx.init()?;
-                ctx.refresh_discovery()?;
+                let initialized = ctx.init()?;
+                ctx.refresh_discovery_after_init(initialized)?;
                 let slot_contexts = ctx
                     .slot_contexts
                     .read()

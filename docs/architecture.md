@@ -51,7 +51,7 @@ confined behind its `SlotContext` mutex. State shared between slots uses
 synchronized `Arc` handles instead.
 
 `C_GetSlotList` invokes the module discovery coordinator on both its first and
-subsequent calls. A snapshot-capable discovery provider reports opaque,
+subsequent calls. An inventory provider reports opaque,
 provider-defined slot IDs and current presence. Reconciliation combines that
 ID with the provider instance identity: known identities retain their PKCS #11
 slot IDs while absent, reappearing identities reuse those slots, and new
@@ -65,9 +65,11 @@ URLs remain independent. Direct YubiHSM USB inventory uses the device serial;
 reattachment replaces the transport behind the existing slot even when the OS
 assigns a new USB device ID. Inventory requests and new-slot HSM initialization
 run without holding the slot-registry write lock; only registry snapshots and
-final insertion use it. Existing PC/SC and HID slots refresh their transports
-on every listing; their provider-wide new-device inventory is still created
-during module initialization.
+final insertion use it. PC/SC or host-provided CCID reader inventory is
+enumerated on every listing, so new reader names can append applet slots.
+Existing PC/SC and HID slots refresh their transports on every listing. Native
+HID provider-wide new-device inventory is still created only during module
+initialization.
 
 ## Slots, backends, and mechanisms
 
@@ -106,11 +108,11 @@ The `abi-tests` feature uses synthetic slots that identify the real backend
 kind they model. Production dispatch therefore does not contain a generic
 test-slot branch.
 
-## PC/SC applet topology
+## CCID applet topology
 
-One physical PC/SC reader has one shared `PcscReaderState`. Every selected
-applet gets a separate logical PKCS #11 slot and a slot-local connector facade,
-while all facades share:
+One physical native or host-provided CCID reader has one shared
+`PcscReaderState`. Every selected applet gets a separate logical PKCS #11 slot
+and a slot-local connector facade, while all facades share:
 
 - the card connection and complete APDU-exchange lock;
 - the current selected AID and APDU capabilities;
@@ -125,11 +127,15 @@ reselect its applet when it next accesses the card. Selecting an applet
 invalidates a secure channel belonging to another AID; the next protected
 exchange reselects its AID and establishes the appropriate channel.
 
-PC/SC topology is currently a snapshot. Only applets selected during the first
-`C_GetSlotList` after initialization become slots. Subsequent slot-list calls
-refresh registered-slot presence, and existing slots can reconnect and
-reselect their AID after card removal, but the slot registry does not morph to
-match a replacement card. See [CCID applet configuration](ccid.md).
+Native PC/SC and a host-provided enumerator both produce the same internal
+reader records. The UTF-8 reader name is the stable inventory key. Every
+`C_GetSlotList` enumerates the current names and probes any name that has not
+yet contributed a slot. New readers and cards inserted into previously empty
+readers can therefore append applet slots. Once a reader has contributed
+slots, its applet topology and slot IDs are stable for the module lifetime.
+Removal marks those slots absent, return of the same name reconnects them, and
+a replacement card does not morph the registry into another applet set. See
+[CCID applet configuration](ccid.md).
 
 ## FIDO transports
 
@@ -149,9 +155,11 @@ HID replaces the unsecured CCID view. An explicitly configured CCID secure
 channel reverses that preference because HID cannot provide SCP03 or SCP11.
 Unknown or unvalidated identities remain separate rather than being merged.
 Applet serials remain applet metadata and cannot overwrite the physical
-device identity used for correlation. A HID authenticator absent from the
-initial discovery snapshot creates no slot; a previously discovered endpoint
-can reopen the same device and allocate a fresh channel after reinsertion.
+device identity used for correlation. A native HID authenticator absent from
+initial module discovery creates no slot; a previously discovered endpoint can
+reopen the same device and allocate a fresh channel after reinsertion. FIDO
+over CCID follows the dynamic reader inventory described above, so a FIDO
+applet on a newly discovered reader can append a slot later.
 
 When `PKCS11RS_TOKEN_STORAGE` is configured, a stable physical Yubico serial
 selects a versioned local token provider separately for each applet. Stored
@@ -218,8 +226,10 @@ process that loads the PKCS #11 library. The daemon enables the optional
 `async-tokio` frontend. Both frontends share device construction, connection
 state, endpoints, complete-write checks, dynamic zero-length-packet decisions,
 and response copying; only waiting for USB completion differs. Portable builds
-and the iOS XCFramework omit local hardware completely, while remote HTTP(S)
-connector slots remain available to the provider.
+and the iOS XCFramework omit the native local-hardware crate. An embedding host
+can still inject CCID reader enumeration and APDU transport through
+`PKCS11RS_INITIALIZE_ARGS_V1`, while remote HTTP(S) connector slots remain
+available to the provider.
 
 The daemon is currently a private-network component, not a public security
 boundary. It implements TLS and optional mTLS, bounded request bodies and

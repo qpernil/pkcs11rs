@@ -231,6 +231,21 @@ impl CcidAidConfiguration {
 }
 
 impl JsonConfiguration {
+    pub(crate) fn from_bytes(encoded: &[u8]) -> Result<Option<Self>, Error> {
+        let encoded = std::str::from_utf8(encoded).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        if encoded.trim().is_empty() {
+            return Ok(None);
+        }
+        if !encoded.trim_start().starts_with('{') {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let configuration: Self = serde_json::from_str(encoded).map_err(|_| CKR_ARGUMENTS_BAD)?;
+        if configuration.version != 1 {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Some(configuration))
+    }
+
     pub(crate) unsafe fn from_reserved(
         reserved: *mut std::ffi::c_void,
     ) -> Result<ReservedConfiguration, Error> {
@@ -259,11 +274,9 @@ impl JsonConfiguration {
         if !encoded.trim_start().starts_with('{') {
             return Ok(ReservedConfiguration::Opaque);
         }
-        let configuration: Self = serde_json::from_str(encoded).map_err(|_| CKR_ARGUMENTS_BAD)?;
-        if configuration.version != 1 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        Ok(ReservedConfiguration::Json(Box::new(configuration)))
+        Ok(ReservedConfiguration::Json(Box::new(
+            Self::from_bytes(encoded.as_bytes())?.ok_or(CKR_ARGUMENTS_BAD)?,
+        )))
     }
 }
 

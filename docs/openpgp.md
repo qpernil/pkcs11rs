@@ -1,15 +1,17 @@
 # YubiKey OpenPGP client
 
 The OpenPGP client exposes the YubiKey OpenPGP smart-card applet as a PKCS #11
-slot over PC/SC. Common CCID discovery and slot behavior is documented in
-[`ccid.md`](ccid.md). To limit discovery to OpenPGP, configure it with:
+slot over native PC/SC or a host-provided CCID transport. Common CCID discovery
+and slot behavior is documented in [`ccid.md`](ccid.md). To limit discovery to
+OpenPGP, configure it with:
 
 ```text
 PKCS11RS_CCID_APPLICATIONS=openpgp
 ```
 
-The default transport is direct PC/SC. SCP03 or SCP11 configuration is
-documented in [`scp03.md`](scp03.md) and [`scp11.md`](scp11.md).
+Native builds use PC/SC unless the embedding host supplies a CCID enumerator.
+SCP03 or SCP11 configuration is documented in [`scp03.md`](scp03.md) and
+[`scp11.md`](scp11.md).
 
 ## Discovery
 

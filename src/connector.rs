@@ -148,32 +148,35 @@ impl Default for PcscTransportState {
 }
 
 #[derive(Debug)]
-#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscReaderState {
     // This is the physical-reader gate. PKCS slot state is protected separately
     // by the applet's SlotContext.
     operation: Mutex<()>,
+    #[cfg(feature = "native-hardware")]
     transport: Mutex<PcscTransportState>,
     secure_channel: Mutex<SecureChannelState>,
     pub(crate) device: Arc<DeviceContext>,
 }
 
-#[cfg(feature = "native-hardware")]
 impl Default for PcscReaderState {
     fn default() -> Self {
-        Self {
-            operation: Mutex::new(()),
-            transport: Mutex::new(PcscTransportState::default()),
-            secure_channel: Mutex::new(SecureChannelState::default()),
-            device: Arc::new(DeviceContext::new(DeviceIdentity::unknown(
-                "Yubico", "YubiKey",
-            ))),
-        }
+        Self::new(Arc::new(DeviceContext::new(DeviceIdentity::unknown(
+            "Yubico", "YubiKey",
+        ))))
     }
 }
 
-#[cfg(feature = "native-hardware")]
 impl PcscReaderState {
+    pub(crate) fn new(device: Arc<DeviceContext>) -> Self {
+        Self {
+            operation: Mutex::new(()),
+            #[cfg(feature = "native-hardware")]
+            transport: Mutex::new(PcscTransportState::default()),
+            secure_channel: Mutex::new(SecureChannelState::default()),
+            device,
+        }
+    }
+
     fn with_operation<T>(&self, operation: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
         let _guard = self.operation.lock().map_err(|_| CKR_MUTEX_BAD)?;
         operation()
@@ -196,6 +199,7 @@ impl PcscReaderState {
     pub(crate) fn with_secure_channel(application_aid: Vec<u8>, session: Scp03Session) -> Self {
         Self {
             operation: Mutex::new(()),
+            #[cfg(feature = "native-hardware")]
             transport: Mutex::new(PcscTransportState::default()),
             secure_channel: Mutex::new(SecureChannelState {
                 application_aid,
@@ -210,7 +214,6 @@ impl PcscReaderState {
 }
 
 #[derive(Debug, Default)]
-#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscAppletState {
     pub(crate) enabled: std::sync::atomic::AtomicBool,
     pub(crate) applet_present: std::sync::atomic::AtomicBool,
@@ -218,7 +221,6 @@ pub(crate) struct PcscAppletState {
 }
 
 #[derive(Clone)]
-#[cfg(feature = "native-hardware")]
 pub(crate) struct PcscAppletConnector {
     pub(crate) base: SharedConnector,
     pub(crate) application_aid: Vec<u8>,
@@ -229,7 +231,6 @@ pub(crate) struct PcscAppletConnector {
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
 }
 
-#[cfg(feature = "native-hardware")]
 impl std::fmt::Debug for PcscAppletConnector {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         fmt.debug_struct("PcscAppletConnector")
@@ -242,7 +243,6 @@ impl std::fmt::Debug for PcscAppletConnector {
     }
 }
 
-#[cfg(feature = "native-hardware")]
 impl PcscAppletConnector {
     #[cfg(test)]
     pub(crate) fn discovery_error(&self) -> Option<String> {
@@ -454,7 +454,6 @@ impl PcscAppletConnector {
     }
 }
 
-#[cfg(feature = "native-hardware")]
 impl Connector for PcscAppletConnector {
     fn as_debug(&self) -> &dyn std::fmt::Debug {
         self
@@ -1094,19 +1093,6 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
 
 #[cfg(feature = "native-hardware")]
 impl PcscConnector {
-    pub(crate) fn set_yubikey_device_info(&self, info: YubiKeyDeviceInfo) -> Result<(), Error> {
-        self.state.device.replace(
-            self.connection_epoch(),
-            DeviceIdentity {
-                manufacturer: String::from("Yubico"),
-                product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
-                serial: info.serial.unwrap_or_else(|| String::from("0")),
-                hardware_version: None,
-                firmware_version: info.version,
-            },
-        )
-    }
-
     fn _reconnect(&self) -> Result<(), Error> {
         let mut state = self
             .state

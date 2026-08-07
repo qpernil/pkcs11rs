@@ -1,15 +1,16 @@
 # SCP03 configuration
 
-Set `PKCS11RS_CCID_SECURE_CHANNEL=scp03` to use SCP03 as the transport for
-the selected CCID applet on a PC/SC card. See [`ccid.md`](ccid.md) for the
-default applet list, allowlist, AID overrides, and shared-slot behavior.
+Set `PKCS11RS_CCID_SECURE_CHANNEL=scp03` to use SCP03 for the selected CCID
+applet. The reader may come from native PC/SC or a host-provided CCID
+transport. See [`ccid.md`](ccid.md) for the default applet list, allowlist, AID
+overrides, and shared-slot behavior.
 
 For the Issuer SD, the selected AID is the Secure Domain used for
 management. For PIV and OpenPGP, the transport initializes against those
 applets' AIDs directly.
 
-The PC/SC CCID path selects an application and establishes an SCP03 channel
-during `C_Login`. The channel is scoped to the selected application and is
+The CCID path selects an application and establishes an SCP03 channel during
+`C_Login`. The channel is scoped to the selected application and is
 renegotiated when another applet is selected.
 
 SCP03 configuration is supplied as hexadecimal environment variables:
@@ -52,7 +53,8 @@ implemented.
 The APDU codec supports short and extended Case 2, 3, and 4 commands. It
 automatically uses extended encoding when command data exceeds 255 bytes or
 when SCP03 encryption, padding, and C-MAC increase the protected data beyond
-that boundary. Extended responses use the PC/SC extended receive-buffer size.
+that boundary. Extended responses use the reader transport's advertised
+maximum response size.
 Secure messaging currently operates on basic logical channel 0; commands for
 other logical channels are rejected.
 

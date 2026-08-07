@@ -1,6 +1,7 @@
 mod ccid;
 mod crypto;
 mod ctap;
+mod host_ccid;
 mod openpgp;
 mod piv;
 mod software;
@@ -26,6 +27,9 @@ pub(crate) use ctap::CcidCtapTransport;
 #[cfg(feature = "native-hardware")]
 pub(crate) use ctap::HidFidoEndpoint;
 pub(crate) use ctap::{project_cose_public_key, Fido2Slot};
+#[cfg(all(test, not(feature = "abi-tests")))]
+pub(crate) use host_ccid::HostCcidAddReader;
+pub(crate) use host_ccid::{HostCcidConnector, HostCcidEnumerate, HostCcidProvider};
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
 pub(crate) use piv::{
     piv_algorithm_from_certificate, piv_ec_parameters, piv_effective_pin_policy,
