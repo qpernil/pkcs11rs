@@ -91,9 +91,10 @@ the selected provider supplies the lifetime. The same canonical logical object
 can therefore be held in a session memory provider or a slot token provider.
 Aspect presence alone does not prove that a provider can reconstruct an
 object: each provider must validate the stable material required by its backing
-model. The YubiHSM backend, for example, requires a canonical public aspect
-containing `CKA_PUBLIC_KEY_INFO`; an empty or identity-only public aspect does
-not create a public token object.
+model. For example, a YubiHSM-linked public aspect is a persistent presence
+marker plus sparse attribute deltas; its public material comes from the linked
+native key. A standalone public-key record instead contains the complete
+public material because it has no native source.
 
 The generic layer validates the CBOR representation and the semantic type of
 every standard key attribute supported by pkcs11rs. Provider-specific
@@ -184,18 +185,23 @@ does not interpret or traverse them.
 
 ## YubiHSM backend metadata
 
-YubiHSM implements `StorageProvider` over pkcs11rs-owned opaque-data companion
+YubiHSM implements `StorageProvider` over pkcs11rs-owned internal opaque-data
 objects. The provider's logical interface remains immutable and
 content-addressed: `list` returns references for canonical records, `get`
 returns their exact canonical CBOR, `put` validates and idempotently creates a
-matching companion, and `delete` removes the companion identified by a
+matching internal object, and `delete` removes the object identified by a
 reference.
 
-The physical records retain YubiHSM's useful back-pointer addressing. They are
-labelled for the native target and can be found and understood in
-`yubihsm-shell`; content references do not replace that device-level
-relationship. Backend-native hardware keys also remain backend-native rather
-than being reconstructed by the generic provider decoder.
+There are two physical forms. Metadata companions retain YubiHSM's useful
+back-pointer addressing: they are labelled for the native target and can be
+found and understood in `yubihsm-shell`; content references do not replace
+that device-level relationship. Standalone public token keys created through
+`C_CreateObject` have no native target and are stored under an internal
+`pkcs11rs stored ...` label as complete `pkcs11rs.public-key` records. The
+opaque record is hidden from PKCS #11 enumeration; only the reconstructed
+`CKO_PUBLIC_KEY` is exposed. Backend-native hardware keys remain
+backend-native rather than being reconstructed by the generic provider
+decoder.
 
 The provider-owned backing inside the canonical record identifies the native
 object by type, ID, sequence, and domains and records its primary PKCS #11 key
@@ -209,10 +215,16 @@ pkcs11rs namespace exists for the target. pkcs11rs never writes, rewrites, or
 deletes MDB1 companions, including when their target is deleted; their target
 sequence makes resulting orphans inert if an object ID is reused.
 
-All new records are canonical CBOR and use the `pkcs11rs metadata 0x...` label.
-MDB1 objects retain Yubico's `Meta object for 0x...` label. The separate
-namespaces make ownership clear in `yubihsm-shell` listings and prevent
-Yubico's PKCS #11 module from treating unfamiliar canonical CBOR as MDB1.
+Legacy inspection, migration, and removal are reserved for separate maintenance
+tooling with an explicit apply step. Runtime PKCS #11 operations never perform
+that normalization implicitly.
+
+All new records are canonical CBOR. Target-linked metadata uses the
+`pkcs11rs metadata 0x...` label, standalone public keys use
+`pkcs11rs stored ...`, and MDB1 objects retain Yubico's
+`Meta object for 0x...` label. The separate namespaces make ownership clear in
+`yubihsm-shell` listings and prevent Yubico's PKCS #11 module from treating
+unfamiliar canonical CBOR as MDB1.
 
 Provider mutation requires a secure session with the applicable YubiHSM
 capabilities. Metadata replacement remains failure-safe: the new canonical
@@ -222,7 +234,10 @@ part of the provider's list, get, put, delete, or replacement lifecycle.
 Canonical metadata can contain sparse private-key overrides and a complete
 public aspect. Presence of validated public key material creates a genuine
 public token object; removing that public object removes only the public aspect
-and leaves the hardware private key and unrelated metadata intact.
+and leaves the hardware private key and unrelated metadata intact. A
+standalone public key instead has its own content identity and lifecycle: it
+survives rediscovery without any private key, and destroying it removes only
+its own internal record.
 
 ## Current integration boundary
 
@@ -230,7 +245,9 @@ Provider-backed session object lifecycle is complete for public projections
 and previewSign registration and derived-key objects: create/copy or derive,
 read, update where permitted, refresh, and destroy all operate through the
 session memory provider. The same operations use the slot provider when
-`CKA_TOKEN=CK_TRUE`.
+`CKA_TOKEN=CK_TRUE`. YubiHSM is intentionally stricter: `C_CopyObject` is
+unsupported for the entire slot, including internally backed standalone public
+objects, so all objects exposed by that slot report `CKA_COPYABLE=CK_FALSE`.
 
 Applications can restore an exported previewSign derived private key with
 `C_CreateObject` by supplying both its registration and derived-key vendor

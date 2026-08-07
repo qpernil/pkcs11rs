@@ -6,7 +6,7 @@ use crate::*;
 use minicbor::{Decoder, Encoder};
 use rsa::{traits::PublicKeyParts, BigUint, RsaPublicKey};
 
-const PUBLIC_KEY_PROVIDER: &str = "pkcs11rs.public-key";
+pub(crate) const PUBLIC_KEY_PROVIDER: &str = "pkcs11rs.public-key";
 const PREVIEW_SIGN_REGISTRATION_PROVIDER: &str = "pkcs11rs.preview-sign-registration";
 const PREVIEW_SIGN_DERIVED_PROVIDER: &str = "pkcs11rs.preview-sign-derived";
 const PUBLIC_KEY_SCHEMA: &str = "pkcs11rs.public-key-material";

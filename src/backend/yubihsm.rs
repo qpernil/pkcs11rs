@@ -11,6 +11,7 @@ const YUBIHSM_BACKING_SCHEMA: &str = "pkcs11rs.yubihsm.object";
 const YUBIHSM_BACKING_SCHEMA_VERSION: u64 = 1;
 const YUBIHSM_LEGACY_METADATA_LABEL_PREFIX: &str = "Meta object for 0x";
 const YUBIHSM_CANONICAL_METADATA_LABEL_PREFIX: &str = "pkcs11rs metadata 0x";
+const YUBIHSM_STORED_OBJECT_LABEL_PREFIX: &str = "pkcs11rs stored ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum YubiHsmMetadataPhysicalFormat {
@@ -712,13 +713,17 @@ impl YubiHsmPkcs11Metadata {
             && self.public_attributes.is_empty()
     }
 
-    fn persisted_public_key_info(&self) -> Option<&[u8]> {
-        if !self.public {
-            return None;
-        }
-        match self.public_attributes.get(u64::from(CKA_PUBLIC_KEY_INFO)) {
-            Some(KeyAttributeValue::Bytes(value)) => Some(value),
-            _ => None,
+    fn has_public_aspect(&self) -> bool {
+        self.public
+    }
+
+    fn prepare_for_canonical_write(&mut self, target: &YubiHsmObjectInfo) {
+        if self.primary_class.is_none() {
+            self.primary_class = Some(yubihsm_object_class(target));
+            self.public = false;
+            self.public_id = None;
+            self.public_label = None;
+            self.public_attributes = KeyAttributes::new();
         }
     }
 
@@ -1739,6 +1744,13 @@ impl YubiHsmSlot {
             let info =
                 self.listed_object_info(session, entry.id, entry.object_type, entry.sequence)?;
             if info.object_type == YUBIHSM_OPAQUE && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA {
+                if info.label.starts_with(YUBIHSM_STORED_OBJECT_LABEL_PREFIX) {
+                    discovered.push(YubiHsmDiscoveredObject {
+                        info,
+                        public_key: None,
+                    });
+                    continue;
+                }
                 let Some((format, (target_sequence, target_type, target_id))) =
                     yubihsm_metadata_label(&info.label)
                 else {
@@ -1886,6 +1898,9 @@ impl YubiHsmSlot {
         } = self.discover_objects(session)?;
         let mut candidates = Vec::new();
         'discovered: for YubiHsmDiscoveredObject { info, public_key } in discovered {
+            if info.label.starts_with(YUBIHSM_STORED_OBJECT_LABEL_PREFIX) {
+                continue;
+            }
             let certificate = if info.object_type == YUBIHSM_OPAQUE
                 && info.algorithm == YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE
             {
@@ -2402,6 +2417,7 @@ impl YubiHsmSlot {
         let mut metadata = current
             .clone()
             .unwrap_or_else(|| Self::empty_pkcs11_metadata(&info));
+        metadata.prepare_for_canonical_write(&info);
 
         if let Some(id) = id {
             let value = (id != info.id.to_be_bytes()).then(|| id.to_vec());
@@ -2507,19 +2523,20 @@ impl YubiHsmSlot {
         let mut metadata = current
             .clone()
             .unwrap_or_else(|| Self::empty_pkcs11_metadata(&info));
+        metadata.prepare_for_canonical_write(&info);
         metadata.public = true;
         metadata.public_id =
             (projection.id != info.id.to_be_bytes()).then(|| projection.id.clone());
         metadata.public_label =
             (projection.label != yubihsm_object_label(&info)).then(|| projection.label.clone());
-        metadata.public_attributes = yubihsm_public_projection_attributes(projection)?;
+        metadata.public_attributes = yubihsm_public_projection_attributes(&info, projection)?;
         self.replace_pkcs11_metadata_record(&info, current.as_ref(), &metadata)
     }
 
     fn destroy_public_projection(&self, slot_id: CK_SLOT_ID, unique_id: &str) -> Result<(), Error> {
         let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
         let mut metadata = current.ok_or(CKR_ACTION_PROHIBITED)?;
-        if !public || metadata.persisted_public_key_info().is_none() {
+        if !public || !metadata.has_public_aspect() {
             return Err(CKR_ACTION_PROHIBITED.into());
         }
         let previous = metadata.clone();
@@ -2528,6 +2545,151 @@ impl YubiHsmSlot {
         metadata.public_label = None;
         metadata.public_attributes = KeyAttributes::new();
         self.replace_pkcs11_metadata_record(&info, Some(&previous), &metadata)
+    }
+
+    fn destroy_native_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<String>, Error> {
+        let (info, current, public) = self.metadata_target_by_unique_id(slot_id, unique_id)?;
+        if public {
+            return Err(CKR_OBJECT_HANDLE_INVALID.into());
+        }
+        let related_metadata = self.related_metadata_object(info.id, info.object_type)?;
+        let canonical_metadata = self.metadata_objects_in_format(
+            &related_metadata,
+            YubiHsmMetadataPhysicalFormat::CanonicalCbor,
+        )?;
+        let mut replaced_metadata = None;
+        let detached = if current
+            .as_ref()
+            .is_some_and(YubiHsmPkcs11Metadata::has_public_aspect)
+        {
+            let key = YubiHsmObjectKey::from_info(&info);
+            let metadata = self
+                .object_metadata
+                .try_borrow()
+                .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                .get(&key)
+                .cloned()
+                .ok_or(CKR_DEVICE_ERROR)?;
+            let mut public_object = yubihsm_token_objects_with_generation(
+                slot_id,
+                metadata.info,
+                metadata.public_key,
+                metadata.generation,
+                metadata.attributes.as_ref(),
+            )?
+            .into_iter()
+            .find(|object| object.is_yubihsm_public_projection())
+            .ok_or(CKR_DEVICE_ERROR)?;
+            public_object.material =
+                crate::backed_object::projected_public_key_material(&public_object)?;
+            let encoded = crate::backed_object::encode_backed_object(&public_object)?.object;
+            let reference = ContentReference::for_object(&encoded);
+            let existed = StorageProvider::list(self)
+                .map_err(crate::backed_object::storage_error)?
+                .contains(&reference);
+            let linked_value = current.as_ref().ok_or(CKR_DEVICE_ERROR)?.encode(&info)?;
+            let mut linked_object = None;
+            for (id, sequence) in &canonical_metadata {
+                let candidate = self
+                    .cached_object_info(*id, YUBIHSM_OPAQUE, Some(*sequence))?
+                    .ok_or(CKR_DEVICE_ERROR)?;
+                let value = self.storage_object_value(&candidate)?;
+                if value == linked_value {
+                    linked_object = Some((candidate, value));
+                    break;
+                }
+            }
+            let (linked_info, linked_value) = linked_object.ok_or(CKR_DEVICE_ERROR)?;
+            self.delete_metadata_objects(&[(linked_info.id, linked_info.sequence)])?;
+            if !existed {
+                if let Err(error) = self.write_standalone_storage_object(
+                    &encoded,
+                    &reference,
+                    linked_info.id,
+                    linked_info.domains,
+                ) {
+                    let restore = send_yubihsm_secure_command(
+                        self.connector.as_ref(),
+                        self.session.as_ref(),
+                        &YubiHsmCommand::put_object(
+                            YubiHsmCommandCode::PutOpaque,
+                            &YubiHsmObjectParameters {
+                                id: linked_info.id,
+                                label: &linked_info.label,
+                                domains: linked_info.domains,
+                                capabilities: linked_info.capabilities,
+                                algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                            },
+                            &linked_value,
+                        )?,
+                    );
+                    if restore.is_ok() {
+                        let _ = self.forget_cached_object(linked_info.id, YUBIHSM_OPAQUE);
+                    }
+                    return Err(error);
+                }
+                self.metadata_storage_writes
+                    .try_borrow_mut()
+                    .map_err(|_| Error::from(CKR_CANT_LOCK))?
+                    .insert(reference.clone(), linked_info.id);
+            }
+            replaced_metadata = Some((linked_info, linked_value, existed));
+            Some(reference)
+        } else {
+            None
+        };
+
+        if let Err(error) = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &YubiHsmCommand::delete_object(info.id, info.object_type),
+        ) {
+            if let Some((linked_info, linked_value, existed)) = replaced_metadata {
+                if !existed {
+                    let _ = send_yubihsm_secure_command(
+                        self.connector.as_ref(),
+                        self.session.as_ref(),
+                        &YubiHsmCommand::delete_object(linked_info.id, YUBIHSM_OPAQUE),
+                    );
+                    let _ = self.forget_cached_object(linked_info.id, YUBIHSM_OPAQUE);
+                }
+                let restore = send_yubihsm_secure_command(
+                    self.connector.as_ref(),
+                    self.session.as_ref(),
+                    &YubiHsmCommand::put_object(
+                        YubiHsmCommandCode::PutOpaque,
+                        &YubiHsmObjectParameters {
+                            id: linked_info.id,
+                            label: &linked_info.label,
+                            domains: linked_info.domains,
+                            capabilities: linked_info.capabilities,
+                            algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                        },
+                        &linked_value,
+                    )?,
+                );
+                if restore.is_ok() {
+                    let _ = self.forget_cached_object(linked_info.id, YUBIHSM_OPAQUE);
+                }
+            }
+            return Err(error);
+        }
+        self.forget_cached_object(info.id, info.object_type)?;
+        let replaced_id = replaced_metadata
+            .as_ref()
+            .map(|(linked_info, _, _)| linked_info.id);
+        let obsolete = canonical_metadata
+            .into_iter()
+            .filter(|(id, _)| Some(*id) != replaced_id)
+            .collect::<Vec<_>>();
+        self.delete_metadata_objects(&obsolete)?;
+        Ok(detached
+            .as_ref()
+            .map(crate::backed_object::backed_object_unique_id))
     }
 
     fn write_backed_key_metadata(&self, object: &[u8]) -> Result<u16, Error> {
@@ -2584,7 +2746,7 @@ impl YubiHsmSlot {
         Ok(id)
     }
 
-    fn refresh_canonical_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
+    fn refresh_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
         if self
             .session
             .try_borrow()
@@ -2594,10 +2756,10 @@ impl YubiHsmSlot {
         {
             let _ = self.discover_objects(self.session.as_ref())?;
         }
-        self.cached_canonical_storage_objects()
+        self.cached_storage_objects()
     }
 
-    fn cached_canonical_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
+    fn cached_storage_objects(&self) -> Result<Vec<YubiHsmObjectInfo>, Error> {
         let state = self
             .object_cache
             .try_borrow()
@@ -2609,9 +2771,10 @@ impl YubiHsmSlot {
             .filter(|info| {
                 info.object_type == YUBIHSM_OPAQUE
                     && info.algorithm == YUBIHSM_ALGO_OPAQUE_DATA
-                    && yubihsm_metadata_label(&info.label).is_some_and(|(format, _)| {
-                        format == YubiHsmMetadataPhysicalFormat::CanonicalCbor
-                    })
+                    && (info.label.starts_with(YUBIHSM_STORED_OBJECT_LABEL_PREFIX)
+                        || yubihsm_metadata_label(&info.label).is_some_and(|(format, _)| {
+                            format == YubiHsmMetadataPhysicalFormat::CanonicalCbor
+                        }))
             })
             .cloned()
             .collect())
@@ -2623,6 +2786,38 @@ impl YubiHsmSlot {
         } else {
             self.read_object_value_with_public_discovery(info.id, info.object_type)
         }
+    }
+
+    fn write_standalone_storage_object(
+        &self,
+        object: &[u8],
+        reference: &ContentReference,
+        id: u16,
+        domains: u16,
+    ) -> Result<u16, Error> {
+        let mut label = String::from(YUBIHSM_STORED_OBJECT_LABEL_PREFIX);
+        for byte in reference.digest().iter().take(11) {
+            use std::fmt::Write;
+            let _ = write!(label, "{byte:02x}");
+        }
+        let response = send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &YubiHsmCommand::put_object(
+                YubiHsmCommandCode::PutOpaque,
+                &YubiHsmObjectParameters {
+                    id,
+                    label: &label,
+                    domains,
+                    capabilities: [0; 8],
+                    algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
+                },
+                object,
+            )?,
+        )?;
+        let id = parse_yubihsm_object_id(&response)?;
+        self.forget_cached_object(id, YUBIHSM_OPAQUE)?;
+        Ok(id)
     }
 }
 
@@ -2638,7 +2833,7 @@ impl StorageProvider for YubiHsmSlot {
     fn list(&self) -> Result<Vec<ContentReference>, StorageError> {
         let mut references = Vec::new();
         for info in self
-            .refresh_canonical_storage_objects()
+            .refresh_storage_objects()
             .map_err(yubihsm_storage_error)?
         {
             let object = self
@@ -2657,7 +2852,7 @@ impl StorageProvider for YubiHsmSlot {
 
     fn get(&self, reference: &ContentReference) -> Result<Option<Vec<u8>>, StorageError> {
         for info in self
-            .refresh_canonical_storage_objects()
+            .refresh_storage_objects()
             .map_err(yubihsm_storage_error)?
         {
             let object = self
@@ -2673,12 +2868,27 @@ impl StorageProvider for YubiHsmSlot {
     fn put(&self, object: &[u8]) -> Result<ContentReference, StorageError> {
         let record = BackedKeyMetadata::from_cbor(object)
             .map_err(|error| StorageError::Provider(error.to_string()))?;
-        if record.backing().provider() != YUBIHSM_BACKING_PROVIDER {
+        if !matches!(
+            record.backing().provider(),
+            YUBIHSM_BACKING_PROVIDER | crate::backed_object::PUBLIC_KEY_PROVIDER
+        ) {
             return Err(StorageError::Provider(String::from(
-                "YubiHSM storage rejected a non-YubiHSM backing record",
+                "YubiHSM storage rejected an unsupported backing record",
             )));
         }
         let reference = ContentReference::for_object(object);
+        if record.backing().provider() == crate::backed_object::PUBLIC_KEY_PROVIDER {
+            match crate::backed_object::decode_backed_object(self, 0, true, &reference, object)
+                .map_err(|error| StorageError::Provider(format!("{error:?}")))?
+            {
+                Some(_) => {}
+                None => {
+                    return Err(StorageError::Provider(String::from(
+                        "YubiHSM storage rejected an invalid public-key record",
+                    )))
+                }
+            }
+        }
         if self
             .metadata_storage_writes
             .try_borrow()
@@ -2692,7 +2902,7 @@ impl StorageProvider for YubiHsmSlot {
             return Ok(reference);
         }
         for info in self
-            .cached_canonical_storage_objects()
+            .cached_storage_objects()
             .map_err(yubihsm_storage_error)?
         {
             let existing = self
@@ -2702,9 +2912,12 @@ impl StorageProvider for YubiHsmSlot {
                 return Ok(reference);
             }
         }
-        let id = self
-            .write_backed_key_metadata(object)
-            .map_err(yubihsm_storage_error)?;
+        let id = if record.backing().provider() == YUBIHSM_BACKING_PROVIDER {
+            self.write_backed_key_metadata(object)
+        } else {
+            self.write_standalone_storage_object(object, &reference, 0, 0xffff)
+        }
+        .map_err(yubihsm_storage_error)?;
         self.metadata_storage_writes
             .try_borrow_mut()
             .map_err(|_| {
@@ -2732,7 +2945,7 @@ impl StorageProvider for YubiHsmSlot {
             matches.push((id, 0));
         }
         for info in self
-            .cached_canonical_storage_objects()
+            .cached_storage_objects()
             .map_err(yubihsm_storage_error)?
         {
             let object = self
@@ -3164,7 +3377,6 @@ pub(crate) fn parse_yubihsm_pkcs11_metadata(
             return Err(CKR_DATA_INVALID.into());
         }
     }
-    metadata.public = metadata.public_id.is_some() || metadata.public_label.is_some();
     Ok(metadata)
 }
 
@@ -3253,9 +3465,7 @@ pub(crate) fn yubihsm_token_objects_with_generation(
     }];
 
     if (info.object_type == YUBIHSM_ASYMMETRIC_KEY || rsa_wrap_key)
-        && metadata
-            .and_then(YubiHsmPkcs11Metadata::persisted_public_key_info)
-            .is_some()
+        && metadata.is_some_and(YubiHsmPkcs11Metadata::has_public_aspect)
     {
         let public_key = public_key.ok_or(CKR_DEVICE_ERROR)?;
         if public_key.algorithm != info.algorithm {
@@ -3334,14 +3544,7 @@ fn apply_yubihsm_public_projection_metadata(
     metadata: Option<&YubiHsmPkcs11Metadata>,
 ) -> Result<(), Error> {
     let metadata = metadata.ok_or(CKR_DATA_INVALID)?;
-    let expected_key_info = metadata
-        .persisted_public_key_info()
-        .ok_or(CKR_DATA_INVALID)?;
-    if object
-        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
-        .as_deref()
-        != Some(expected_key_info)
-    {
+    if !metadata.has_public_aspect() {
         return Err(CKR_DATA_INVALID.into());
     }
     for (attribute, value) in metadata.public_attributes.iter() {
@@ -3359,7 +3562,11 @@ fn apply_yubihsm_public_projection_metadata(
             (attribute, KeyAttributeValue::Bytes(value))
                 if attribute == u64::from(CKA_PUBLIC_KEY_INFO) =>
             {
-                if value.as_slice() != expected_key_info {
+                if object
+                    .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+                    .as_deref()
+                    != Some(value.as_slice())
+                {
                     return Err(CKR_DATA_INVALID.into());
                 }
             }
@@ -3412,10 +3619,15 @@ fn apply_yubihsm_public_projection_metadata(
             (attribute, KeyAttributeValue::Unsigned(value))
                 if attribute == u64::from(CKA_KEY_GEN_MECHANISM) =>
             {
-                object.key_gen_mechanism = Some(
-                    CK_MECHANISM_TYPE::try_from(*value)
-                        .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                );
+                object.key_gen_mechanism =
+                    if *value == cryptoki_ulong_to_u64(CK_UNAVAILABLE_INFORMATION as CK_ULONG) {
+                        None
+                    } else {
+                        Some(
+                            CK_MECHANISM_TYPE::try_from(*value)
+                                .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                        )
+                    };
             }
             _ => return Err(CKR_DATA_INVALID.into()),
         }
@@ -3423,61 +3635,62 @@ fn apply_yubihsm_public_projection_metadata(
     Ok(())
 }
 
-fn yubihsm_public_projection_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
+fn yubihsm_public_projection_attributes(
+    info: &YubiHsmObjectInfo,
+    object: &TokenObject,
+) -> Result<KeyAttributes, Error> {
     if object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS || !object.token {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
     }
-    let public_key_info = object
-        .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
-        .ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    if object.key_type != yubihsm_key_type(info.algorithm) {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    }
+    let public_object_type =
+        if info.object_type == YUBIHSM_WRAP_KEY && is_yubihsm_rsa(info.algorithm) {
+            YUBIHSM_WRAP_KEY_PUBLIC
+        } else {
+            YUBIHSM_PUBLIC_KEY
+        };
+    let native =
+        yubihsm_capabilities_to_attributes(public_object_type, info.algorithm, &info.capabilities);
+    let algorithm_supported = yubihsm_algorithm_supported(info.algorithm);
     let mut attributes = KeyAttributes::new();
-    for (attribute, value) in [
-        (
-            u64::from(CKA_KEY_TYPE),
-            KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(object.key_type)),
-        ),
-        (
-            u64::from(CKA_LABEL),
-            KeyAttributeValue::Text(object.label.clone()),
-        ),
-        (
-            u64::from(CKA_ID),
-            KeyAttributeValue::Bytes(object.id.clone()),
-        ),
-        (
-            u64::from(CKA_PRIVATE),
-            KeyAttributeValue::Boolean(object.private),
-        ),
+    for (attribute, actual, default) in [
         (
             u64::from(CKA_ENCRYPT),
-            KeyAttributeValue::Boolean(object.encrypt),
+            object.encrypt,
+            algorithm_supported && native.encrypt,
         ),
         (
             u64::from(CKA_VERIFY),
-            KeyAttributeValue::Boolean(object.verify),
+            object.verify,
+            algorithm_supported && native.verify,
         ),
         (
             u64::from(CKA_EXTRACTABLE),
-            KeyAttributeValue::Boolean(object.extractable),
+            object.extractable,
+            native.extractable,
         ),
-        (
-            u64::from(CKA_LOCAL),
-            KeyAttributeValue::Boolean(object.local),
-        ),
-        (
-            u64::from(CKA_PUBLIC_KEY_INFO),
-            KeyAttributeValue::Bytes(public_key_info),
-        ),
+        (u64::from(CKA_LOCAL), object.local, info.origin & 0x01 != 0),
     ] {
-        attributes
-            .insert(attribute, value)
-            .map_err(key_metadata_error)?;
+        if actual != default {
+            attributes
+                .insert(attribute, KeyAttributeValue::Boolean(actual))
+                .map_err(key_metadata_error)?;
+        }
     }
-    if let Some(mechanism) = object.key_gen_mechanism {
+    let native_generation_mechanism = (info.origin & 0x01 != 0)
+        .then(|| yubihsm_key_generation_mechanism(info.algorithm))
+        .flatten();
+    if object.key_gen_mechanism != native_generation_mechanism {
+        let mechanism = object
+            .key_gen_mechanism
+            .map(cryptoki_ulong_to_u64)
+            .unwrap_or_else(|| cryptoki_ulong_to_u64(CK_UNAVAILABLE_INFORMATION as CK_ULONG));
         attributes
             .insert(
                 u64::from(CKA_KEY_GEN_MECHANISM),
-                KeyAttributeValue::Unsigned(cryptoki_ulong_to_u64(mechanism)),
+                KeyAttributeValue::Unsigned(mechanism),
             )
             .map_err(key_metadata_error)?;
     }
@@ -3493,14 +3706,14 @@ pub(crate) fn yubihsm_abi_public_projection_metadata(
         target_type: target.object_type,
         target_id: target.id,
         target_sequence: target.sequence,
-        primary_class: None,
+        primary_class: Some(yubihsm_object_class(target)),
         id: None,
         label: None,
         public: true,
         public_id: (projection.id != target.id.to_be_bytes()).then(|| projection.id.clone()),
         public_label: (projection.label != yubihsm_object_label(target))
             .then(|| projection.label.clone()),
-        public_attributes: yubihsm_public_projection_attributes(projection)?,
+        public_attributes: yubihsm_public_projection_attributes(target, projection)?,
     };
     Ok((
         yubihsm_metadata_label_for_target(target, YubiHsmMetadataPhysicalFormat::CanonicalCbor),
@@ -3536,9 +3749,6 @@ impl Slot for YubiHsmSlot {
     }
     fn native_storage_provider(&self) -> Option<&dyn StorageProvider> {
         Some(self)
-    }
-    fn native_storage_objects_are_backend_managed(&self) -> bool {
-        true
     }
     fn name(&self) -> String {
         self.connector.name()
@@ -3846,6 +4056,9 @@ impl Slot for YubiHsmSlot {
                     attributes: attribute_metadata.clone(),
                 },
             );
+            if info.label.starts_with(YUBIHSM_STORED_OBJECT_LABEL_PREFIX) {
+                continue;
+            }
             let mut discovered_objects = yubihsm_token_objects_with_generation(
                 slot_id,
                 info.clone(),
@@ -4011,9 +4224,11 @@ impl Slot for YubiHsmSlot {
         }
         self.read_object_value_with_public_discovery(id, object_type)
     }
+    #[cfg(test)]
     fn yubihsm_forget_object(&self, id: u16, object_type: u8) -> Result<(), Error> {
         self.forget_cached_object(id, object_type)
     }
+    #[cfg(test)]
     fn yubihsm_owned_metadata_objects(
         &self,
         id: u16,
@@ -4045,6 +4260,13 @@ impl Slot for YubiHsmSlot {
         unique_id: &str,
     ) -> Result<(), Error> {
         self.destroy_public_projection(slot_id, unique_id)
+    }
+    fn yubihsm_destroy_native_object(
+        &self,
+        slot_id: CK_SLOT_ID,
+        unique_id: &str,
+    ) -> Result<Option<String>, Error> {
+        self.destroy_native_object(slot_id, unique_id)
     }
 }
 
