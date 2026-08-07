@@ -216,8 +216,6 @@ impl YubiHsmUsbCandidate {
             manufacturer: manufacturer.unwrap_or_else(|| String::from("Yubico")),
             product: product.unwrap_or_else(|| String::from("YubiHSM")),
             serial: serial.unwrap_or_default(),
-            connection_epoch: 0,
-            connected_once: false,
         })
     }
 }
@@ -294,8 +292,6 @@ pub struct YubiHsmUsbDevice {
     product: String,
     serial: String,
     packet_size: usize,
-    connection_epoch: u64,
-    connected_once: bool,
 }
 
 impl YubiHsmUsbDevice {
@@ -317,10 +313,6 @@ impl YubiHsmUsbDevice {
 
     pub fn version(&self) -> (u8, u8) {
         self.version
-    }
-
-    pub fn connection_epoch(&self) -> u64 {
-        self.connection_epoch
     }
 
     pub fn is_present(&self) -> bool {
@@ -364,10 +356,6 @@ impl YubiHsmUsbDevice {
     }
 
     fn install_interface(&mut self, interface: nusb::Interface) {
-        if self.connected_once {
-            self.connection_epoch = self.connection_epoch.wrapping_add(1);
-        }
-        self.connected_once = true;
         self.interface = Some(interface);
     }
 

@@ -39,11 +39,14 @@ app after the iPhone sleeps or after another app has been active runs the same
 refresh. If iOS terminated the process while it was suspended, the next launch
 initializes a new module instance before refreshing.
 
-The physical iPhone path has been verified against a connector running on a
-Mac across real Mac system sleep. On resume the connector rebuilt its listener,
-USB watcher, registry, and previously managed device handles; bringing the
-long-lived iOS app back to the foreground refreshed its remote slot inventory
-without a preceding `C_Finalize`/`C_Initialize` cycle.
+The smoke app is also the manual client for a connector running on a Mac across
+real Mac system sleep. The connector retains its listener, USB watcher,
+registry, and claimed device handles while macOS is suspended. Bringing the
+long-lived iOS app back to the foreground then refreshes its remote slot
+inventory without a preceding `C_Finalize`/`C_Initialize` cycle once the Mac's
+network interface is reachable again. Recheck this path after changes to
+connector sleep behavior; the separate USB-only test is documented in the
+[connector guide](../../../docs/connector.md#usb-only-sleepwake-test).
 
 Select your development team and a unique bundle identifier in Xcode
 before building for a physical device.

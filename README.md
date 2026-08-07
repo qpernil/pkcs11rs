@@ -256,6 +256,13 @@ identifies one connector service, and each device returned with status
 connector did not claim remain visible as `unclaimed` and are ignored by the
 client. PKCS11RS does not use the legacy single-device endpoints.
 
+System sleep pauses the connector without rebuilding its HTTP listener, USB
+watcher, registry, or claimed YubiHSM handles. A two-minute macOS sleep test
+confirmed that the original claimed handle and a complete release/reacquire
+sequence both answered a cleartext `DeviceInfo` command immediately after
+wake. YubiHSM secure sessions remain subject to the device's independent
+30-second inactivity timeout and must be authenticated again after expiry.
+
 Command request and response bodies are native YubiHSM frames with
 `application/octet-stream`. Each device has an independent asynchronous access
 gate, so only one request at a time reaches a particular YubiHSM while requests

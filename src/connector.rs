@@ -1315,19 +1315,95 @@ fn validate_http_client_identity(
 }
 
 #[derive(Debug)]
-struct HttpConnectorState {
-    connected: std::sync::atomic::AtomicBool,
-    reconnectable: std::sync::atomic::AtomicBool,
+struct HttpConnectorEndpointState {
     connection_epoch: std::sync::atomic::AtomicU64,
-    status_identity: std::sync::Mutex<Option<YubiHsmConnectorStatus>>,
-    agent: std::sync::RwLock<ureq::Agent>,
+    agent: std::sync::RwLock<Option<ureq::Agent>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HttpConnectorEndpoint {
+    url: String,
+    state: Arc<HttpConnectorEndpointState>,
+}
+
+#[derive(Debug)]
+struct HttpConnectorState {
+    connection_epoch: std::sync::atomic::AtomicU64,
+    current: std::sync::RwLock<HttpConnectorDeviceState>,
+}
+
+#[derive(Debug)]
+struct HttpConnectorDeviceState {
+    version: (u8, u8, u8),
+    present: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct HttpConnector {
-    url: String,
+    endpoint: HttpConnectorEndpoint,
+    serial: String,
     serial_path: String,
     state: Arc<HttpConnectorState>,
+}
+
+impl HttpConnectorEndpoint {
+    pub(crate) fn new(url: String) -> Result<Self, Error> {
+        let url = url.trim_end_matches('/').to_owned();
+        if url.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        Ok(Self {
+            url,
+            state: Arc::new(HttpConnectorEndpointState {
+                connection_epoch: std::sync::atomic::AtomicU64::new(0),
+                agent: std::sync::RwLock::new(None),
+            }),
+        })
+    }
+
+    fn install_agent(&self, agent: ureq::Agent) -> Result<(), Error> {
+        *self
+            .state
+            .agent
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))? = Some(agent);
+        Ok(())
+    }
+
+    pub(crate) fn mark_disconnected(&self) {
+        if let Ok(mut current) = self.state.agent.write() {
+            if current.take().is_some() {
+                self.state
+                    .connection_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn request_agent(&self) -> Result<ureq::Agent, Error> {
+        self.current_agent()?.ok_or(CKR_DEVICE_REMOVED.into())
+    }
+
+    fn current_agent(&self) -> Result<Option<ureq::Agent>, Error> {
+        Ok(self
+            .state
+            .agent
+            .read()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .clone())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.state.agent.read().is_ok_and(|agent| agent.is_some())
+    }
+
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn shares_state_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
 }
 
 impl Connector for HttpConnector {
@@ -1342,46 +1418,48 @@ impl Connector for HttpConnector {
     }
     fn major(&self) -> u8 {
         self.state
-            .status_identity
-            .lock()
+            .current
+            .read()
             .ok()
-            .and_then(|identity| identity.as_ref().map(|identity| identity.version.0))
+            .map(|current| current.version.0)
             .unwrap_or(0)
     }
     fn minor(&self) -> u8 {
         self.state
-            .status_identity
-            .lock()
+            .current
+            .read()
             .ok()
-            .and_then(|identity| identity.as_ref().map(|identity| identity.version.1))
+            .map(|current| current.version.1)
             .unwrap_or(0)
     }
     fn firmware_version(&self) -> Option<(u8, u8, u8)> {
         self.state
-            .status_identity
-            .lock()
+            .current
+            .read()
             .ok()
-            .and_then(|identity| identity.as_ref().map(|identity| identity.version))
+            .map(|current| current.version)
     }
     fn connection_epoch(&self) -> u64 {
-        self.state
+        self.endpoint
+            .state
             .connection_epoch
             .load(std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(
+                self.state
+                    .connection_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
     }
     fn is_present(&self) -> bool {
-        self.state
-            .connected
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.endpoint.is_connected()
+            && self
+                .state
+                .current
+                .read()
+                .is_ok_and(|current| current.present)
     }
     fn name(&self) -> String {
-        let serial = self
-            .state
-            .status_identity
-            .lock()
-            .ok()
-            .and_then(|identity| identity.as_ref().map(|identity| identity.serial.clone()))
-            .unwrap_or_else(|| self.serial_path.clone());
-        format!("YubiHSM Connector {} #{serial}", self.url)
+        format!("YubiHSM Connector {} #{}", self.endpoint.url, self.serial)
     }
     fn buffer_size(&self) -> usize {
         YUBIHSM_CONNECTOR_BUFFER_SIZE
@@ -1396,7 +1474,7 @@ impl Connector for HttpConnector {
         let response = agent
             .post(format!(
                 "{}/v1/devices/{}/commands",
-                self.url, self.serial_path
+                self.endpoint.url, self.serial_path
             ))
             .content_type("application/octet-stream")
             .config()
@@ -1432,29 +1510,9 @@ impl Connector for HttpConnector {
         }
         receive_buffer[..received.len()].copy_from_slice(&received);
         log!(2, "http.post({:?}) -> {:?}", send_buffer, received);
-        if !self
-            .state
-            .connected
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            self.state
-                .connection_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
         Ok(&receive_buffer[..received.len()])
     }
     fn refresh(&self) -> Result<(), Error> {
-        if !self
-            .state
-            .connected
-            .load(std::sync::atomic::Ordering::SeqCst)
-            && !self
-                .state
-                .reconnectable
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(CKR_DEVICE_REMOVED.into());
-        }
         match self.status() {
             Ok(status) => self.apply_status(status),
             Err(error) => {
@@ -1467,38 +1525,29 @@ impl Connector for HttpConnector {
 
 impl HttpConnector {
     fn mark_disconnected(&self) {
-        self.state
-            .connected
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.endpoint.mark_disconnected();
     }
 
     fn request_agent(&self) -> Result<ureq::Agent, Error> {
-        self.state
-            .agent
+        let present = self
+            .state
+            .current
             .read()
-            .map(|agent| agent.clone())
-            .map_err(|_| CKR_MUTEX_BAD.into())
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .present;
+        if !present {
+            return Err(CKR_DEVICE_REMOVED.into());
+        }
+        self.endpoint.request_agent()
     }
 
     pub(crate) fn endpoint_identity(&self) -> Result<(String, String), Error> {
-        let serial = self
-            .state
-            .status_identity
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .as_ref()
-            .map(|identity| identity.serial.clone())
-            .ok_or(CKR_DEVICE_ERROR)?;
-        Ok((self.url.clone(), serial))
+        Ok((self.endpoint.url.clone(), self.serial.clone()))
     }
 
-    pub(crate) fn accept_discovered(&self) {
-        self.state
-            .connected
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.state
-            .reconnectable
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    pub(crate) fn shares_endpoint_with(&self, other: &Self) -> bool {
+        self.endpoint.shares_state_with(&other.endpoint)
     }
 
     pub(crate) fn apply_discovered(&self, discovered: &Self) -> Result<(), Error> {
@@ -1507,59 +1556,79 @@ impl HttpConnector {
         if url != discovered_url || serial != discovered_serial {
             return Err(CKR_DEVICE_ERROR.into());
         }
-        let status = discovered
+        if !self.endpoint.shares_state_with(&discovered.endpoint) {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let discovered_current = discovered
             .state
-            .status_identity
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .clone()
-            .ok_or(CKR_DEVICE_ERROR)?;
-        let agent = discovered.request_agent()?;
-        *self
-            .state
-            .agent
-            .write()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))? = agent;
-        self.apply_status(status)
-    }
-
-    fn apply_status(&self, status: YubiHsmConnectorStatus) -> Result<(), Error> {
+            .current
+            .read()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        if !discovered_current.present || !discovered.endpoint.is_connected() {
+            return Err(CKR_DEVICE_REMOVED.into());
+        }
+        let version = discovered_current.version;
+        drop(discovered_current);
         let mut current = self
             .state
-            .status_identity
-            .lock()
+            .current
+            .write()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        let identity_changed = current.as_ref() != Some(&status);
-        *current = Some(status);
+        let version_changed = current.version != version;
+        current.present = true;
+        current.version = version;
         drop(current);
-        let was_connected = self
-            .state
-            .connected
-            .swap(true, std::sync::atomic::Ordering::SeqCst);
-        if !was_connected || identity_changed {
+        if version_changed {
             self.state
                 .connection_epoch
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
-        self.state
-            .reconnectable
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn apply_status(&self, status: YubiHsmConnectorStatus) -> Result<(), Error> {
+        if status.serial != self.serial {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+        let mut current = self
+            .state
+            .current
+            .write()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        if current.version != status.version {
+            current.version = status.version;
+            self.state
+                .connection_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     }
 
     pub(crate) fn mark_discovery_absent(&self) {
-        self.mark_disconnected();
+        if let Ok(mut current) = self.state.current.write() {
+            if current.present {
+                current.present = false;
+                self.state
+                    .connection_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn new(url: String, serial: &str) -> Result<Self, Error> {
-        Self::new_with_tls(
-            url,
+        let endpoint = HttpConnectorEndpoint::new(url)?;
+        endpoint.install_agent(Self::agent(
+            &endpoint.url,
+            &HttpConnectorTlsConfig::default(),
+        ))?;
+        Self::new_with_endpoint(
+            endpoint,
             YubiHsmConnectorStatus {
                 serial: serial.to_owned(),
                 version: (2, 5, 0),
             },
-            &HttpConnectorTlsConfig::default(),
+            false,
         )
     }
 
@@ -1580,27 +1649,38 @@ impl HttpConnector {
         ureq::Agent::new_with_config(config)
     }
 
+    fn new_with_endpoint(
+        endpoint: HttpConnectorEndpoint,
+        identity: YubiHsmConnectorStatus,
+        present: bool,
+    ) -> Result<Self, Error> {
+        if identity.serial.is_empty() {
+            return Err(CKR_ARGUMENTS_BAD.into());
+        }
+        let serial_path = encode_http_path_segment(&identity.serial);
+        Ok(Self {
+            endpoint,
+            serial: identity.serial,
+            serial_path,
+            state: Arc::new(HttpConnectorState {
+                connection_epoch: std::sync::atomic::AtomicU64::new(0),
+                current: std::sync::RwLock::new(HttpConnectorDeviceState {
+                    version: identity.version,
+                    present,
+                }),
+            }),
+        })
+    }
+
+    #[cfg(test)]
     fn new_with_agent(
         url: String,
         identity: YubiHsmConnectorStatus,
         agent: ureq::Agent,
     ) -> Result<Self, Error> {
-        let url = url.trim_end_matches('/').to_owned();
-        if url.is_empty() || identity.serial.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let serial_path = encode_http_path_segment(&identity.serial);
-        Ok(Self {
-            url,
-            serial_path,
-            state: Arc::new(HttpConnectorState {
-                connected: std::sync::atomic::AtomicBool::new(false),
-                reconnectable: std::sync::atomic::AtomicBool::new(false),
-                connection_epoch: std::sync::atomic::AtomicU64::new(0),
-                status_identity: std::sync::Mutex::new(Some(identity)),
-                agent: std::sync::RwLock::new(agent),
-            }),
-        })
+        let endpoint = HttpConnectorEndpoint::new(url)?;
+        endpoint.install_agent(agent)?;
+        Self::new_with_endpoint(endpoint, identity, true)
     }
 
     #[cfg(test)]
@@ -1609,25 +1689,21 @@ impl HttpConnector {
         identity: YubiHsmConnectorStatus,
         tls: &HttpConnectorTlsConfig,
     ) -> Result<Self, Error> {
-        let normalized_url = url.trim_end_matches('/').to_owned();
-        if normalized_url.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let agent = Self::agent(&normalized_url, tls);
-        Self::new_with_agent(normalized_url, identity, agent)
+        let endpoint = HttpConnectorEndpoint::new(url)?;
+        endpoint.install_agent(Self::agent(&endpoint.url, tls))?;
+        Self::new_with_endpoint(endpoint, identity, false)
     }
 
     pub(crate) fn discover_with_tls(
-        url: String,
+        endpoint: &HttpConnectorEndpoint,
         tls: &HttpConnectorTlsConfig,
     ) -> Result<Vec<Self>, Error> {
         use std::collections::HashSet;
 
-        let url = url.trim_end_matches('/').to_owned();
-        if url.is_empty() {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
-        let agent = Self::agent(&url, tls);
+        let url = &endpoint.url;
+        let agent = endpoint
+            .current_agent()?
+            .unwrap_or_else(|| Self::agent(url, tls));
         let mut response = agent.get(format!("{url}/v1/devices")).call()?;
         let received = response
             .body_mut()
@@ -1645,7 +1721,7 @@ impl HttpConnector {
             .devices
             .sort_by(|left, right| left.serial.cmp(&right.serial));
         let mut serials = HashSet::with_capacity(devices.devices.len());
-        let mut connectors = Vec::with_capacity(devices.devices.len());
+        let mut identities = Vec::with_capacity(devices.devices.len());
         for device in devices.devices {
             if device.status != "available" {
                 continue;
@@ -1654,15 +1730,22 @@ impl HttpConnector {
             if !serials.insert(identity.serial.clone()) {
                 return Err(CKR_DEVICE_ERROR.into());
             }
-            connectors.push(Self::new_with_agent(url.clone(), identity, agent.clone())?);
+            identities.push(identity);
         }
-        Ok(connectors)
+        endpoint.install_agent(agent)?;
+        identities
+            .into_iter()
+            .map(|identity| Self::new_with_endpoint(endpoint.clone(), identity, true))
+            .collect()
     }
 
     fn status(&self) -> Result<YubiHsmConnectorStatus, Error> {
         let agent = self.request_agent()?;
         let mut response = agent
-            .get(format!("{}/v1/devices/{}", self.url, self.serial_path))
+            .get(format!(
+                "{}/v1/devices/{}",
+                self.endpoint.url, self.serial_path
+            ))
             .call()?;
         let received = response
             .body_mut()
@@ -1673,15 +1756,7 @@ impl HttpConnector {
         let device: HttpConnectorDevice =
             serde_json::from_slice(&received).map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
         let identity = device.identity()?;
-        let expected_serial = self
-            .state
-            .status_identity
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .as_ref()
-            .map(|identity| identity.serial.clone())
-            .ok_or(CKR_DEVICE_ERROR)?;
-        if identity.serial != expected_serial {
+        if identity.serial != self.serial {
             return Err(CKR_DEVICE_ERROR.into());
         }
         Ok(identity)
@@ -1690,18 +1765,7 @@ impl HttpConnector {
     #[cfg(test)]
     pub(crate) fn connect(&self) -> Result<(), Error> {
         let status = self.status()?;
-        *self
-            .state
-            .status_identity
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))? = Some(status);
-        self.state
-            .connected
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.state
-            .reconnectable
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        self.apply_status(status)
     }
 }
 
@@ -1945,6 +2009,10 @@ mod tests {
         }
     }
 
+    fn http_endpoint(url: String) -> HttpConnectorEndpoint {
+        HttpConnectorEndpoint::new(url).unwrap()
+    }
+
     #[test]
     fn parses_multi_device_connector_identity() {
         let device: HttpConnectorDevice = serde_json::from_slice(
@@ -1985,17 +2053,158 @@ mod tests {
             );
         });
 
-        let connectors = HttpConnector::discover_with_tls(
-            format!("http://{address}"),
-            &HttpConnectorTlsConfig::default(),
-        )
-        .unwrap();
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let connectors =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
         assert_eq!(connectors.len(), 2);
         assert_eq!(connectors[0].serial_path, "12345678");
         assert_eq!((connectors[0].major(), connectors[0].minor()), (2, 4));
         assert_eq!(connectors[1].serial_path, "87654321");
         assert_eq!((connectors[1].major(), connectors[1].minor()), (2, 5));
+        assert!(connectors[0].shares_endpoint_with(&connectors[1]));
+        connectors[0].mark_disconnected();
+        assert!(!connectors[0].is_present());
+        assert!(!connectors[1].is_present());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn repeated_http_discovery_reuses_the_endpoint_connection_pool() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_secs(6)))
+                .unwrap();
+            for close in [false, true] {
+                let request = read_http_request(&mut connection);
+                assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
+                write_http_response(
+                    &mut connection,
+                    br#"{"devices":[{"serial":"12345678","usb_version":"2.5","status":"available"}]}"#,
+                    close,
+                );
+            }
+        });
+
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let first = HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+            .unwrap();
+        let second =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(first[0].shares_endpoint_with(&second[0]));
+        server.join().unwrap();
+    }
+
+    fn assert_http_device_concurrency(serials: &[&str]) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let discovery_body = serde_json::to_vec(&serde_json::json!({
+            "devices": serials
+                .iter()
+                .map(|serial| serde_json::json!({
+                    "serial": serial,
+                    "usb_version": "2.5",
+                    "status": "available"
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+        let mut expected_request_lines = serials
+            .iter()
+            .map(|serial| format!("POST /v1/devices/{serial}/commands HTTP/1.1").into_bytes())
+            .collect::<Vec<_>>();
+        expected_request_lines.sort();
+        let device_count = serials.len();
+        let server = std::thread::spawn(move || {
+            let (mut discovery_connection, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut discovery_connection);
+            assert!(request.starts_with(b"GET /v1/devices HTTP/1.1\r\n"));
+            write_http_response(&mut discovery_connection, &discovery_body, true);
+            drop(discovery_connection);
+
+            listener.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut command_connections = Vec::with_capacity(device_count);
+            while command_connections.len() < device_count {
+                match listener.accept() {
+                    Ok((connection, _)) => {
+                        connection.set_nonblocking(false).unwrap();
+                        connection
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        command_connections.push(connection);
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!(
+                        "{device_count} device commands did not open concurrent HTTP connections: {error}"
+                    ),
+                }
+            }
+
+            let mut request_lines = command_connections
+                .iter_mut()
+                .map(|connection| {
+                    let request = read_http_request(connection);
+                    request[..request
+                        .windows(2)
+                        .position(|value| value == b"\r\n")
+                        .unwrap()]
+                        .to_vec()
+                })
+                .collect::<Vec<_>>();
+            request_lines.sort();
+            assert_eq!(request_lines, expected_request_lines);
+            for connection in &mut command_connections {
+                write_http_response(connection, b"response", true);
+            }
+        });
+
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let connectors =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
+        assert_eq!(connectors.len(), device_count);
+        let barrier = std::sync::Barrier::new(device_count + 1);
+        std::thread::scope(|scope| {
+            let workers = connectors
+                .iter()
+                .map(|connector| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let mut response = [0; 32];
+                        connector
+                            .transmit(b"command", &mut response, Duration::from_secs(1))
+                            .unwrap()
+                            .to_vec()
+                    })
+                })
+                .collect::<Vec<_>>();
+            barrier.wait();
+            for worker in workers {
+                assert_eq!(worker.join().unwrap(), b"response");
+            }
+        });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_endpoint_concurrency_scales_with_device_count() {
+        let serials = ["10000001", "10000002", "10000003", "10000004", "10000005"];
+        for device_count in 2..=serials.len() {
+            assert_http_device_concurrency(&serials[..device_count]);
+        }
     }
 
     #[test]
@@ -2014,7 +2223,7 @@ mod tests {
     fn http_connector_bounds_every_http_request_stage() {
         let connector =
             HttpConnector::new("http://127.0.0.1:12345".to_owned(), "12345678").unwrap();
-        let agent = connector.request_agent().unwrap();
+        let agent = connector.endpoint.request_agent().unwrap();
         let timeouts = agent.config().timeouts();
         assert_eq!(timeouts.global, None);
         assert_eq!(timeouts.resolve, Some(YUBIHSM_CONNECTOR_HTTP_STAGE_TIMEOUT));
@@ -2050,13 +2259,16 @@ mod tests {
         )
         .unwrap();
         let slot_connector = connector.clone();
-        connector.accept_discovered();
 
         let fresh_agent =
             ureq::Agent::new_with_config(ureq::Agent::config_builder().max_redirects(2).build());
-        let discovered =
-            HttpConnector::new_with_agent(url, http_identity("12345678", (2, 5, 0)), fresh_agent)
-                .unwrap();
+        connector.endpoint.install_agent(fresh_agent).unwrap();
+        let discovered = HttpConnector::new_with_endpoint(
+            connector.endpoint.clone(),
+            http_identity("12345678", (2, 5, 0)),
+            true,
+        )
+        .unwrap();
         connector.apply_discovered(&discovered).unwrap();
 
         assert_eq!(
@@ -2079,7 +2291,7 @@ mod tests {
             &tls,
         )
         .unwrap();
-        let https_agent = https.request_agent().unwrap();
+        let https_agent = https.endpoint.request_agent().unwrap();
         assert!(https_agent.config().tls_config().client_cert().is_some());
         assert!(https_agent.config().https_only());
         assert_eq!(https_agent.config().max_redirects(), 0);
@@ -2090,7 +2302,7 @@ mod tests {
             &tls,
         )
         .unwrap();
-        let http_agent = http.request_agent().unwrap();
+        let http_agent = http.endpoint.request_agent().unwrap();
         assert!(http_agent.config().tls_config().client_cert().is_none());
         assert!(!http_agent.config().https_only());
         assert_eq!(http_agent.config().max_redirects(), 0);
@@ -2131,7 +2343,7 @@ mod tests {
             &tls,
         )
         .unwrap();
-        let https_agent = https.request_agent().unwrap();
+        let https_agent = https.endpoint.request_agent().unwrap();
         assert!(https_agent.config().tls_config().client_cert().is_none());
         assert!(matches!(
             https_agent.config().tls_config().root_certs(),
@@ -2172,9 +2384,8 @@ mod tests {
             );
         });
 
-        let connectors =
-            HttpConnector::discover_with_tls(format!("https://127.0.0.1:{}", address.port()), &tls)
-                .unwrap();
+        let endpoint = http_endpoint(format!("https://127.0.0.1:{}", address.port()));
+        let connectors = HttpConnector::discover_with_tls(&endpoint, &tls).unwrap();
         assert_eq!(connectors.len(), 1);
         server.join().unwrap();
     }
@@ -2200,11 +2411,8 @@ mod tests {
             let mut byte = [0];
             assert!(connection.read(&mut byte).is_err());
         });
-        assert!(HttpConnector::discover_with_tls(
-            format!("https://127.0.0.1:{}", address.port()),
-            tls,
-        )
-        .is_err());
+        let endpoint = http_endpoint(format!("https://127.0.0.1:{}", address.port()));
+        assert!(HttpConnector::discover_with_tls(&endpoint, tls).is_err());
         server.join().unwrap();
     }
 
@@ -2268,25 +2476,15 @@ mod tests {
             write_http_response(&mut connection, b"\x83\x00\x01\x42", true);
         });
 
-        let mut connectors = HttpConnector::discover_with_tls(
-            format!("http://{address}"),
-            &HttpConnectorTlsConfig::default(),
-        )
-        .unwrap();
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let mut connectors =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
         assert_eq!(connectors.len(), 1);
         let connector = connectors.pop().unwrap();
         connector.connect().unwrap();
         assert!(connector.is_present());
-        assert_eq!(
-            connector
-                .state
-                .status_identity
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|status| status.serial.as_str()),
-            Some("12345678")
-        );
+        assert_eq!(connector.serial, "12345678");
         assert_eq!((connector.major(), connector.minor()), (2, 5));
         connector.refresh().unwrap();
         let mut response = [0; 32];
@@ -2325,38 +2523,24 @@ mod tests {
                     b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
                     br#"{"serial":"11111111","usb_version":"2.6","status":"available"}"#.as_slice(),
                 ),
-                (
-                    b"GET /v1/devices/11111111 HTTP/1.1\r\n".as_slice(),
-                    br#"{"serial":"11111111","usb_version":"2.6","status":"available"}"#.as_slice(),
-                ),
             ]
             .into_iter()
             .enumerate()
             {
                 let request = read_http_request(&mut connection);
                 assert!(request.starts_with(path));
-                write_http_response(&mut connection, identity, index == 4);
+                write_http_response(&mut connection, identity, index == 3);
             }
         });
 
-        let mut connectors = HttpConnector::discover_with_tls(
-            format!("http://{address}"),
-            &HttpConnectorTlsConfig::default(),
-        )
-        .unwrap();
+        let endpoint = http_endpoint(format!("http://{address}"));
+        let mut connectors =
+            HttpConnector::discover_with_tls(&endpoint, &HttpConnectorTlsConfig::default())
+                .unwrap();
         let connector = connectors.pop().unwrap();
         connector.connect().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
-        assert_eq!(
-            connector
-                .state
-                .status_identity
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|status| status.serial.as_str()),
-            Some("11111111")
-        );
+        assert_eq!(connector.serial, "11111111");
 
         connector.refresh().unwrap();
         assert_eq!(connector.connection_epoch(), 0);
@@ -2364,27 +2548,22 @@ mod tests {
         connector.refresh().unwrap();
         assert_eq!(connector.connection_epoch(), 1);
         {
-            let status = connector.state.status_identity.lock().unwrap();
-            let status = status.as_ref().unwrap();
-            assert_eq!(status.serial, "11111111");
-            assert_eq!(status.version, (2, 6, 0));
+            let current = connector.state.current.read().unwrap();
+            assert_eq!(current.version, (2, 6, 0));
         }
 
         connector.mark_disconnected();
         assert!(!connector.is_present());
-        connector.refresh().unwrap();
+        connector
+            .endpoint
+            .install_agent(HttpConnector::agent(
+                connector.endpoint.url(),
+                &HttpConnectorTlsConfig::default(),
+            ))
+            .unwrap();
         assert!(connector.is_present());
         assert_eq!(connector.connection_epoch(), 2);
-        assert_eq!(
-            connector
-                .state
-                .status_identity
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|status| status.serial.as_str()),
-            Some("11111111")
-        );
+        assert_eq!(connector.serial, "11111111");
         server.join().unwrap();
     }
 

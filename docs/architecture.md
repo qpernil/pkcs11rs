@@ -189,10 +189,13 @@ discard stale derived properties.
 USB and HTTP are connector implementations behind the same backend boundary.
 Each configured HTTP service URL is discovered through `/v1/devices`; every
 returned serial becomes its own slot and routes commands through that serial's
-endpoint. Transport recovery or a version change for that serial advances a
-connection epoch. The YubiHSM slot observes that epoch and clears device-bound
-object, metadata, attestation, inferred authentication-algorithm, and
-public-discovery state.
+endpoint. All slots from one configured service entry share its HTTP agent and
+connection pool, while duplicate configuration entries remain independent.
+Endpoint transport recovery advances a shared connection epoch; individual
+device disappearance or version changes advance device state separately. The
+YubiHSM slot observes the combined epoch and clears device-bound object,
+metadata, attestation, inferred authentication-algorithm, and public-discovery
+state.
 
 YubiHSM Auth applet connectors are shared with YubiHSM slots through
 synchronized provider handles. Credential selectors identify the target
@@ -221,11 +224,11 @@ connector slots remain available to the provider.
 The daemon is currently a private-network component, not a public security
 boundary. It implements TLS and optional mTLS, bounded request bodies and
 global in-flight admission, firmware-aware frame validation, serial routing,
-per-device serialization, hot-plug discovery, and service reconstruction after
-system suspend. It deliberately has no complete-handler deadline that could
-race an active USB command. Device-aware client authorization, accepted TCP
-connection limits, per-client fairness, and handle reopening after an uncertain
-USB failure remain future work. See the
+per-device serialization, hot-plug discovery, and preservation of its listener
+and claimed USB handles across system suspend. It deliberately has no
+complete-handler deadline that could race an active USB command. Device-aware
+client authorization, accepted TCP connection limits, per-client fairness, and
+handle reopening after an uncertain USB failure remain future work. See the
 [connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
 for the authoritative status.
 
