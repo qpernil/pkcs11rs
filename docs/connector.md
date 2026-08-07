@@ -87,9 +87,11 @@ Ownership behavior has also been verified with two physical YubiHSMs:
 YubiHSM secure sessions are separate from USB transport state. The device
 expires a secure session after 30 seconds without a session command and then
 returns error `0x03` (`invalid session`). Real sleep cannot be bridged by a
-host keepalive. A logged-in client must therefore discard the expired session
-and authenticate again after a sufficiently long sleep; retaining the HTTP and
-USB transports does not retain an expired secure session. See Yubico's
+host keepalive. By default, a logged-in client therefore discards the expired
+session and becomes logged out after a sufficiently long sleep. The optional
+`yubihsm.recreate_sessions` setting authenticates again and replays one command
+only after the explicit invalid-session response; retaining the HTTP and USB
+transports alone does not retain an expired secure session. See Yubico's
 [Session documentation](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-intro-core-concepts.html#session).
 
 ### USB-only sleep/wake test

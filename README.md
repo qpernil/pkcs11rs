@@ -413,15 +413,9 @@ every `C_GetSlotList`: a newly attached serial gets a slot, detaching it marks
 that slot absent, and reattaching the same serial refreshes the existing slot's
 transport even if the operating system assigned a different USB device ID.
 
-Disable only direct YubiHSM USB discovery while retaining other local
-discovery and configured remote slots:
-
-```sh
-export PKCS11RS_YUBIHSM_USB=0
-```
-
-The setting defaults to `1`. Any value other than `0` or `1` makes
-`C_Initialize` return `CKR_ARGUMENTS_BAD`.
+Direct YubiHSM USB discovery follows `PKCS11RS_HARDWARE_DISCOVERY`, together
+with the other local hardware discovery mechanisms. Configured remote slots
+remain enabled when local hardware discovery is disabled.
 
 Optionally expose YubiHSM public objects before PKCS #11 login with one
 low-privilege discovery Authentication Key:
@@ -692,10 +686,13 @@ own environment-variable gate; the FIDO2 tests are documented in
 are documented in their backend guides.
 
 Running an ignored hardware test also requires the selected device, its
-platform driver, and access permissions. PC/SC-backed tests require the
-platform smart-card service (`pcscd` on Linux). Direct YubiHSM USB tests on
-Windows use the default WinUSB binding for the YubiHSM interface. These
-requirements do not apply to the default `cargo test` run.
+platform driver, and access permissions. The Rust hardware-test harness
+explicitly enables local hardware discovery and ignores ordinary
+`PKCS11RS_YUBIHSM_URLS`, so YubiHSM hardware tests use direct USB rather than a
+configured HTTP connector. PC/SC-backed tests require the platform smart-card
+service (`pcscd` on Linux). Direct YubiHSM USB tests on Windows use the default
+WinUSB binding for the YubiHSM interface. These requirements do not apply to
+the default `cargo test` run.
 
 The read-only FIDO cross-interface diagnostic deliberately overlaps HID and
 CCID operations on the same serial-numbered YubiKey and reports whether the
@@ -720,6 +717,39 @@ slot must be a directly attached USB device:
 cargo test direct_yubihsm_usb_slot_reports_metadata \
   -- --ignored --nocapture
 ```
+
+The direct-hardware lifecycle test covers finalize-before-initialize, repeated
+initialize and finalize calls, a cycle that discovers a YubiHSM, and three
+immediate initialize/finalize cycles with no intervening PKCS #11 operation:
+
+```sh
+cargo test direct_hardware_survives_initialize_finalize_orderings \
+  -- --ignored --nocapture
+```
+
+The non-mutating session-expiry test enables session recreation, logs in with a
+direct YubiHSM Authentication Key, waits 35 seconds without sending a device
+command, and verifies that the next random-generation command recreates the
+expired secure session while the PKCS #11 session remains logged in:
+
+```sh
+cargo test recreates_expired_yubihsm_session_on_hardware \
+  -- --ignored --nocapture
+```
+
+The complementary default-policy test opens two PKCS #11 sessions, lets their
+shared YubiHSM secure session expire, and verifies that the expiry failure logs
+the entire slot out so both PKCS #11 sessions become public sessions:
+
+```sh
+cargo test expired_yubihsm_session_logs_out_every_pkcs11_session_on_hardware \
+  -- --ignored --nocapture
+```
+
+It uses authentication key `0001` and password `password` by default. Override
+them with `PKCS11RS_TEST_YUBIHSM_ADMIN_ID` and
+`PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`; select one device with
+`PKCS11RS_TEST_YUBIHSM_SOURCE` when more than one is present.
 
 The destructive-path YubiHSM RSA wrapping test is separately gated. It uses
 auto-assigned object IDs, generates an exportable P-256 target and RSA-2048

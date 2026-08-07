@@ -2,17 +2,17 @@ use super::*;
 use crate::{
     configured_yubihsm_public_discovery_credential,
     key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
-    parse_yubihsm_pkcs11_metadata, KeyMaterial, Slot, TokenObject, YubiHsmDiscoveryCache,
-    YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole, YubiHsmSlot, CKA_LABEL,
-    CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE,
-    CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER,
-    CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, CK_KEY_TYPE,
-    CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO, YUBIHSM_ALGO_AES128,
-    YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192, YUBIHSM_ALGO_AES256,
-    YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_OPAQUE_DATA,
-    YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048, YUBIHSM_ALGO_RSA_3072,
-    YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY, YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE,
-    YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
+    parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command, KeyMaterial, Slot, TokenObject,
+    YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
+    YubiHsmSlot, CKA_LABEL, CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA,
+    CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER,
+    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
+    CKR_USER_NOT_LOGGED_IN, CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
+    YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
+    YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+    YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
+    YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY,
+    YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
 };
 use std::sync::Arc;
 use std::{
@@ -128,6 +128,8 @@ pub(crate) struct ProtocolPeer {
     x25519_private_keys: RefCell<HashMap<u16, [u8; 32]>>,
     corrupt_card_cryptogram: Cell<bool>,
     corrupt_response_mac: std::rc::Rc<Cell<bool>>,
+    expire_next_session_message: Cell<bool>,
+    fail_next_session_message: Cell<bool>,
     authenticate_payload: Vec<u8>,
     closed_sessions: Cell<usize>,
     connection_epoch: Cell<u64>,
@@ -182,6 +184,8 @@ impl ProtocolPeer {
             x25519_private_keys: RefCell::new(x25519_private_keys),
             corrupt_card_cryptogram: Cell::new(false),
             corrupt_response_mac: std::rc::Rc::new(Cell::new(false)),
+            expire_next_session_message: Cell::new(false),
+            fail_next_session_message: Cell::new(false),
             authenticate_payload: Vec::new(),
             closed_sessions: Cell::new(0),
             connection_epoch: Cell::new(0),
@@ -536,6 +540,13 @@ impl ProtocolPeer {
     }
 
     fn session_message(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
+        if self.fail_next_session_message.replace(false) {
+            return Err(std::io::Error::other("injected transport failure").into());
+        }
+        if self.expire_next_session_message.replace(false) {
+            *self.session.borrow_mut() = None;
+            return Frame::new(COMMAND_ERROR, vec![0x03]).map(|frame| frame.encode());
+        }
         let mut session_slot = self.session.borrow_mut();
         let session = session_slot.as_mut().ok_or(CKR_DEVICE_ERROR)?;
         let exchange = session.peer_exchange(request, |command, data| {
@@ -4659,7 +4670,7 @@ fn authenticates_asymmetrically_and_exchanges_encrypted_session_messages() {
     let trust = TestTrustEntry::new();
     let peer = ProtocolPeer::new();
     peer.use_asymmetric_authentication(1);
-    let (mut session, algorithm) = SecureSession::authenticate_direct(
+    let (mut session, algorithm, _) = SecureSession::authenticate_direct(
         &peer,
         1,
         PASSWORD,
@@ -4686,7 +4697,7 @@ fn direct_authentication_probes_symmetric_then_caches_asymmetric() {
     let peer = ProtocolPeer::new();
     peer.use_asymmetric_authentication(1);
 
-    let (mut session, algorithm) =
+    let (mut session, algorithm, _) =
         SecureSession::authenticate_direct(&peer, 1, PASSWORD, Some(&trust.prefix), None).unwrap();
     assert_eq!(algorithm, DirectAuthenticationAlgorithm::Asymmetric);
     assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
@@ -4695,7 +4706,7 @@ fn direct_authentication_probes_symmetric_then_caches_asymmetric() {
         .unwrap();
 
     peer.commands.borrow_mut().clear();
-    let (mut session, algorithm) = SecureSession::authenticate_direct(
+    let (mut session, algorithm, _) = SecureSession::authenticate_direct(
         &peer,
         1,
         PASSWORD,
@@ -4756,6 +4767,120 @@ fn direct_login_reuses_the_detected_authentication_algorithm() {
     Slot::login(&mut slot, b"0001password").unwrap();
     assert_eq!(create_session_payload_lengths(&peer), [67, 10]);
     Slot::logout(&mut slot).unwrap();
+}
+
+#[test]
+fn expired_user_session_logs_out_by_default() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(peer.create_session_count(), 1);
+
+    peer.expire_next_session_message.set(true);
+    assert!(matches!(
+        send_yubihsm_secure_command(
+            peer.as_ref(),
+            slot.session.as_ref(),
+            &Command::get_storage_info(),
+        ),
+        Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as crate::CK_RV
+    ));
+
+    assert_eq!(peer.create_session_count(), 1);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetStorageInfo), 0);
+    assert!(!Slot::login_is_active(&slot));
+    assert!(!Slot::backend_session_is_active(&slot));
+}
+
+#[test]
+fn opted_in_symmetric_session_recreates_and_replays_once() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
+    slot.recreate_sessions = true;
+    Slot::login(&mut slot, b"0001password").unwrap();
+
+    peer.expire_next_session_message.set(true);
+    assert_eq!(
+        send_yubihsm_secure_command(
+            peer.as_ref(),
+            slot.session.as_ref(),
+            &Command::get_storage_info(),
+        )
+        .unwrap(),
+        [0xaa, 0xbb, 0xcc]
+    );
+
+    assert_eq!(peer.create_session_count(), 2);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetStorageInfo), 1);
+    assert!(Slot::login_is_active(&slot));
+    assert!(Slot::backend_session_is_active(&slot));
+}
+
+#[test]
+fn opted_in_asymmetric_session_recreates_from_static_shared_secret() {
+    let peer = Rc::new(ProtocolPeer::new());
+    peer.use_asymmetric_authentication(1);
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
+    slot.recreate_sessions = true;
+    Slot::login(&mut slot, b"0001password").unwrap();
+    assert_eq!(create_session_payload_lengths(&peer), [10, 67]);
+
+    peer.expire_next_session_message.set(true);
+    send_yubihsm_secure_command(
+        peer.as_ref(),
+        slot.session.as_ref(),
+        &Command::get_storage_info(),
+    )
+    .unwrap();
+
+    assert_eq!(create_session_payload_lengths(&peer), [10, 67, 67]);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetStorageInfo), 1);
+    assert!(Slot::login_is_active(&slot));
+}
+
+#[test]
+fn opted_in_hsmauth_session_invokes_the_credential_again() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let providers = Arc::new(crate::HsmAuthProviderRegistry::new(vec![
+        symmetric_hsmauth_provider("12345678"),
+    ]));
+    let mut slot = YubiHsmSlot::with_hsmauth_providers(peer.clone(), (2, 4, 1), vec![], providers);
+    slot.recreate_sessions = true;
+    Slot::login(&mut slot, b":0001default key@12345678:password").unwrap();
+
+    peer.expire_next_session_message.set(true);
+    send_yubihsm_secure_command(
+        peer.as_ref(),
+        slot.session.as_ref(),
+        &Command::get_storage_info(),
+    )
+    .unwrap();
+
+    assert_eq!(peer.create_session_count(), 2);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetStorageInfo), 1);
+    assert!(Slot::login_is_active(&slot));
+}
+
+#[test]
+fn transport_failure_never_recreates_or_replays() {
+    let peer = Rc::new(ProtocolPeer::new());
+    let mut slot = YubiHsmSlot::new(peer.clone(), (2, 4, 1), vec![]);
+    slot.recreate_sessions = true;
+    Slot::login(&mut slot, b"0001password").unwrap();
+
+    peer.fail_next_session_message.set(true);
+    assert!(matches!(
+        send_yubihsm_secure_command(
+            peer.as_ref(),
+            slot.session.as_ref(),
+            &Command::get_storage_info(),
+        ),
+        Err(Error::Io(_))
+    ));
+
+    assert_eq!(peer.create_session_count(), 1);
+    assert_eq!(inner_command_count(&peer, CommandCode::GetStorageInfo), 0);
+    assert!(!Slot::login_is_active(&slot));
 }
 
 #[test]

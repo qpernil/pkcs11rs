@@ -54,7 +54,7 @@ a public key or CA certificate.
   },
   "yubihsm": {
     "urls": ["https://connector.example:12345"],
-    "usb": true,
+    "recreate_sessions": false,
     "public_discovery": "0001password",
     "device_trust_prefix": "/var/lib/pkcs11rs/trusted-yubihsm-",
     "tls": {
@@ -100,6 +100,11 @@ be a supported SCP03 security-level bit combination. The detailed SCP rules
 remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
 rules in [SCP11 configuration](scp11.md).
 
+`hardware.discovery` controls every local hardware discovery mechanism,
+including direct YubiHSM USB. It does not affect explicitly configured
+`yubihsm.urls`. `yubihsm.recreate_sessions` defaults to `false`; its security
+and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
+
 ## Environment mapping
 
 | JSON field | Environment fallback |
@@ -111,7 +116,7 @@ rules in [SCP11 configuration](scp11.md).
 | `storage.fido2_compatibility` | `PKCS11RS_FIDO2_STORAGE` |
 | `software.slots` | `PKCS11RS_SOFTWARE_SLOTS` and each slot's `PKCS11RS_SOFTWARE_DISCOVERY_<HEXNAME>` |
 | `yubihsm.urls` | `PKCS11RS_YUBIHSM_URLS` |
-| `yubihsm.usb` | `PKCS11RS_YUBIHSM_USB` |
+| `yubihsm.recreate_sessions` | `PKCS11RS_YUBIHSM_RECREATE_SESSIONS` |
 | `yubihsm.public_discovery` | `PKCS11RS_YUBIHSM_DISCOVERY` |
 | `yubihsm.device_trust_prefix` | `PKCS11RS_YUBIHSM_DEVICE_TRUST_PREFIX` |
 | `yubihsm.tls.client_certificate_bundle` | `PKCS11RS_YUBIHSM_TLS_CLIENT_CERTIFICATE_BUNDLE` |

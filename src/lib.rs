@@ -212,9 +212,11 @@ use yubihsm::{
     parse_object_list as parse_yubihsm_object_list, Command as YubiHsmCommand,
     CommandCode as YubiHsmCommandCode,
     DelegatedObjectParameters as YubiHsmDelegatedObjectParameters,
-    DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm, ObjectInfo as YubiHsmObjectInfo,
-    ObjectParameters as YubiHsmObjectParameters, PublicKey as YubiHsmPublicKey,
-    RsaWrapParameters as YubiHsmRsaWrapParameters, SecureSession as YubiHsmSecureSession,
+    DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm,
+    DirectAuthenticationMaterial as YubiHsmDirectAuthenticationMaterial,
+    ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
+    PublicKey as YubiHsmPublicKey, RsaWrapParameters as YubiHsmRsaWrapParameters,
+    SecureSession as YubiHsmSecureSession,
 };
 
 #[allow(dead_code)]

@@ -31,7 +31,6 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         ],
         "yubihsm": [
             "urls": [url],
-            "usb": false,
         ],
     ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])

@@ -167,6 +167,54 @@ pub fn get_info_reports_cryptoki_3_2() {
 }
 
 #[test]
+pub fn initialize_finalize_orderings_and_empty_cycles_are_stable() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_CRYPTOKI_NOT_INITIALIZED as CK_RV
+    );
+
+    for _ in 0..3 {
+        assert_eq!(
+            crate::api::C_Initialize(::std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Finalize(::std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+    }
+
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Finalize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 pub fn initialize_accepts_json_reserved_configuration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

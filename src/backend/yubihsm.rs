@@ -368,6 +368,7 @@ pub(crate) struct YubiHsmSlot {
     pub(crate) connector: Rc<dyn Connector>,
     pub(crate) session: Rc<RefCell<YubiHsmSessionState>>,
     pub(crate) public_discovery_config: Option<Arc<YubiHsmPublicDiscoveryConfig>>,
+    pub(crate) recreate_sessions: bool,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) object_cache: RefCell<YubiHsmObjectCache>,
     pub(crate) version: (u8, u8, u8),
@@ -400,7 +401,62 @@ pub(crate) enum YubiHsmSessionState {
     Active {
         session: YubiHsmSecureSession,
         role: YubiHsmSessionRole,
+        reauthentication: Option<Box<YubiHsmSessionReauthentication>>,
     },
+}
+
+pub(crate) enum YubiHsmSessionReauthentication {
+    Direct {
+        authkey_id: u16,
+        material: YubiHsmDirectAuthenticationMaterial,
+    },
+    HsmAuth {
+        authkey_id: u16,
+        provider: HsmAuthProvider,
+        password: Zeroizing<Vec<u8>>,
+    },
+}
+
+impl std::fmt::Debug for YubiHsmSessionReauthentication {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct {
+                authkey_id,
+                material,
+            } => fmt
+                .debug_struct("Direct")
+                .field("authkey_id", &format_args!("{authkey_id:04x}"))
+                .field("material", material)
+                .finish(),
+            Self::HsmAuth {
+                authkey_id,
+                provider,
+                ..
+            } => fmt
+                .debug_struct("HsmAuth")
+                .field("authkey_id", &format_args!("{authkey_id:04x}"))
+                .field("credential", &provider.credential.label)
+                .field("source", &provider.source_identifier())
+                .field("password", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+impl YubiHsmSessionReauthentication {
+    fn authenticate(&self, connector: &dyn Connector) -> Result<YubiHsmSecureSession, Error> {
+        match self {
+            Self::Direct {
+                authkey_id,
+                material,
+            } => material.authenticate(connector, *authkey_id),
+            Self::HsmAuth {
+                authkey_id,
+                provider,
+                password,
+            } => provider.authenticate(connector, *authkey_id, password),
+        }
+    }
 }
 
 impl YubiHsmSessionState {
@@ -993,6 +1049,7 @@ impl YubiHsmSlot {
             connector,
             session: Rc::new(RefCell::new(YubiHsmSessionState::LoggedOut)),
             public_discovery_config: None,
+            recreate_sessions: false,
             pinentry: Arc::new(pinentry::Pinentry::unconfigured()),
             object_cache: RefCell::new(YubiHsmObjectCache::default()),
             version,
@@ -1338,10 +1395,10 @@ impl YubiHsmSlot {
         &self,
         authkey_id: u16,
         password: &[u8],
-    ) -> Result<YubiHsmSecureSession, Error> {
+    ) -> Result<(YubiHsmSecureSession, YubiHsmSessionReauthentication), Error> {
         self.synchronize_caches()?;
         let cached_algorithm = self.cached_authentication_algorithm(authkey_id)?;
-        let (session, algorithm) = YubiHsmSecureSession::authenticate_direct(
+        let (session, algorithm, material) = YubiHsmSecureSession::authenticate_direct(
             self.connector.as_ref(),
             authkey_id,
             password,
@@ -1367,14 +1424,20 @@ impl YubiHsmSlot {
             }
             None => entry.inferred_authentication_algorithm = Some(algorithm),
         }
-        Ok(session)
+        Ok((
+            session,
+            YubiHsmSessionReauthentication::Direct {
+                authkey_id,
+                material,
+            },
+        ))
     }
 
     fn authenticate_login(
         &self,
         username: &[u8],
         password: &[u8],
-    ) -> Result<(YubiHsmSecureSession, u16), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
         self.authenticate_parsed_login(parse_yubihsm_login_username(username)?, password)
     }
 
@@ -1382,7 +1445,7 @@ impl YubiHsmSlot {
         &self,
         login: YubiHsmLoginUsername<'_>,
         password: &[u8],
-    ) -> Result<(YubiHsmSecureSession, u16), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
         match login {
             YubiHsmLoginUsername::HsmAuth(login) => {
                 if password.len() > 16 {
@@ -1424,14 +1487,23 @@ impl YubiHsmSlot {
                         self.connector.name(),
                         login.authkey_id
                     );
-                    Ok((session, login.authkey_id))
+                    Ok((
+                        session,
+                        login.authkey_id,
+                        YubiHsmSessionReauthentication::HsmAuth {
+                            authkey_id: login.authkey_id,
+                            provider: provider.clone(),
+                            password: Zeroizing::new(password.to_vec()),
+                        },
+                    ))
                 })
             }
             YubiHsmLoginUsername::Direct(authkey_id) => {
                 if !(8..=64).contains(&password.len()) {
                     return Err(CKR_PIN_INCORRECT.into());
                 }
-                Ok((self.authenticate_direct(authkey_id, password)?, authkey_id))
+                let (session, reauthentication) = self.authenticate_direct(authkey_id, password)?;
+                Ok((session, authkey_id, reauthentication))
             }
         }
     }
@@ -1439,7 +1511,7 @@ impl YubiHsmSlot {
     fn authenticate_public_discovery(
         &self,
         config: &YubiHsmPublicDiscoveryConfig,
-    ) -> Result<(YubiHsmSecureSession, u16), Error> {
+    ) -> Result<(YubiHsmSecureSession, u16, YubiHsmSessionReauthentication), Error> {
         let title = format!("Public discovery on {}", self.label());
         let description = match config.login() {
             YubiHsmLoginUsername::Direct(authkey_id) => {
@@ -1535,7 +1607,9 @@ impl YubiHsmSlot {
                 .map_err(|_| Error::from(CKR_CANT_LOCK))?;
             state.discovery.authkey_domains()
         };
-        let (session, authkey_id) = match self.authenticate_public_discovery(config) {
+        let (session, authkey_id, reauthentication) = match self
+            .authenticate_public_discovery(config)
+        {
             Ok(authenticated) => authenticated,
             Err(error) => {
                 log!(
@@ -1566,6 +1640,7 @@ impl YubiHsmSlot {
         *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
             session,
             role: YubiHsmSessionRole::PublicDiscovery,
+            reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
         };
         log!(
             2,
@@ -1979,7 +2054,7 @@ impl YubiHsmSlot {
         );
         let session = self.authenticate_public_discovery(config);
         let session = match session {
-            Ok((session, _)) => session,
+            Ok((session, _, reauthentication)) => (session, reauthentication),
             Err(error) => {
                 log!(
                     1,
@@ -1996,6 +2071,7 @@ impl YubiHsmSlot {
             "YubiHSM public discovery authenticated on {}",
             self.connector.name()
         );
+        let (session, reauthentication) = session;
         let session = RefCell::new(Some(session));
         let discovery: Result<(Vec<TokenObject>, u16), Error> = (|| {
             let info = self.authentication_key_info(&session, config.authkey_id)?;
@@ -2034,6 +2110,7 @@ impl YubiHsmSlot {
                 *active = YubiHsmSessionState::Active {
                     session: retained_session,
                     role: YubiHsmSessionRole::PublicDiscovery,
+                    reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
                 };
                 log!(
                     2,
@@ -2734,15 +2811,53 @@ impl YubiHsmSessionCell for RefCell<YubiHsmSessionState> {
         command: &YubiHsmCommand,
     ) -> Result<Vec<u8>, Error> {
         let mut state = self.try_borrow_mut()?;
-        let (session, role) = match &mut *state {
-            YubiHsmSessionState::Active { session, role } => (session, *role),
-            YubiHsmSessionState::LoggedOut | YubiHsmSessionState::InvalidatedUser => {
+        let (mut session, role, reauthentication) = match std::mem::take(&mut *state) {
+            YubiHsmSessionState::Active {
+                session,
+                role,
+                reauthentication,
+            } => (session, role, reauthentication),
+            inactive => {
+                *state = inactive;
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
         };
-        YubiHsmSecureSession::validate_command(connector, command)?;
-        let result = session.send_command(connector, command);
-        if !session.is_valid() {
+        if let Err(error) = YubiHsmSecureSession::validate_command(connector, command) {
+            *state = YubiHsmSessionState::Active {
+                session,
+                role,
+                reauthentication,
+            };
+            return Err(error);
+        }
+        let mut result = session.send_command(connector, command);
+        let expired = matches!(
+            result,
+            Err(Error::Generic(rv)) if rv == CKR_SESSION_CLOSED as CK_RV
+        );
+        if expired {
+            if let Some(recipe) = reauthentication.as_ref() {
+                log!(
+                    2,
+                    "YubiHSM secure session expired on {}; recreating it once",
+                    connector.name()
+                );
+                match recipe.authenticate(connector) {
+                    Ok(mut replacement) => {
+                        result = replacement.send_command(connector, command);
+                        session = replacement;
+                    }
+                    Err(error) => result = Err(error),
+                }
+            }
+        }
+        if session.is_valid() {
+            *state = YubiHsmSessionState::Active {
+                session,
+                role,
+                reauthentication,
+            };
+        } else {
             *state = match role {
                 YubiHsmSessionRole::User => YubiHsmSessionState::InvalidatedUser,
                 YubiHsmSessionRole::PublicDiscovery => YubiHsmSessionState::LoggedOut,
@@ -3522,7 +3637,8 @@ impl Slot for YubiHsmSlot {
     fn login_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), Error> {
         let _ = self.close_active_session("pre-login");
         self.clear_cached_private_objects()?;
-        let (session, authkey_id) = self.authenticate_login(username, password)?;
+        let (session, authkey_id, reauthentication) =
+            self.authenticate_login(username, password)?;
         let session = RefCell::new(Some(session));
         let discovery_domains = {
             let state = self
@@ -3553,6 +3669,7 @@ impl Slot for YubiHsmSlot {
         *self.session.try_borrow_mut()? = YubiHsmSessionState::Active {
             session: session.into_inner().ok_or(CKR_DEVICE_ERROR)?,
             role: YubiHsmSessionRole::User,
+            reauthentication: self.recreate_sessions.then(|| Box::new(reauthentication)),
         };
         for cache in self
             .attestation_cache
