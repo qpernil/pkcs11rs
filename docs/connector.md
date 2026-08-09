@@ -59,7 +59,13 @@ normal termination behavior without a connector-specific kill-signal override.
 Opening and claiming a device happens during initial discovery or a hot-plug
 event. A failed initial open or claim is logged as `unclaimed` and intentionally
 not retried while the device remains attached; it may belong to another local
-application. A failed command does not proactively reopen its USB handle.
+application. An actual USB transport failure returns without replaying the
+possibly executed command and discards the uncertain handle. The next request
+for that device enumerates the same transient USB ID, verifies its serial,
+opens a fresh handle, and claims the interface before submitting its command.
+Reopening remains inside the per-device gate, so it cannot race another command
+for that HSM. A malformed or oversized frame rejected before USB submission
+does not invalidate a healthy handle.
 
 ### Verified sleep/wake behavior
 
@@ -244,7 +250,8 @@ that can trigger hardware failures in some firmware versions.
 
 The server never automatically retries a command. This is important for
 non-idempotent operations whose outcome may be unknown after a transport
-timeout.
+timeout. A transport failure invalidates the USB handle; a later request may
+reopen the same identified device, but the failed command is never replayed.
 
 ## Legacy protocol
 
@@ -387,13 +394,6 @@ The following work remains before the connector should be considered suitable
 for direct public-Internet exposure. A deployment may place equivalent controls
 in a dedicated front proxy, but device-aware authorization and USB safety must
 remain fail-closed in the connector itself.
-
-### Protocol and USB safety
-
-- After a USB transport failure, return the failure without replaying the
-  command, discard the uncertain handle, and reopen it for a subsequent
-  request. Automatic replay is unsafe because a mutating command may already
-  have executed.
 
 ### Resource and denial-of-service controls
 

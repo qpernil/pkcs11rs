@@ -242,12 +242,15 @@ remain available to the provider.
 The daemon is currently a private-network component, not a public security
 boundary. It implements TLS and optional mTLS, bounded request bodies and
 global in-flight admission, firmware-aware frame validation, serial routing,
-per-device serialization, hot-plug discovery, and preservation of its listener
-and claimed USB handles across system suspend. It deliberately has no
-complete-handler deadline that could race an active USB command. Device-aware
-client authorization, accepted TCP connection limits, per-client fairness, and
-handle reopening after an uncertain USB failure remain future work. See the
-[connector deployment boundary and Internet-readiness checklist](connector.md#deployment-boundary)
+per-device serialization, hot-plug discovery, preservation of its listener and
+claimed USB handles across system suspend, and recovery after an uncertain USB
+failure. A failed command is never replayed; its handle is discarded and a
+later request reopens the same transient USB device, verifies its serial, and
+claims it inside the per-device gate before submitting a new command. The
+daemon deliberately has no complete-handler deadline that could race an active
+USB command. Device-aware client authorization, accepted TCP connection limits,
+and per-client fairness remain future work. See the [connector deployment
+boundary and Internet-readiness checklist](connector.md#deployment-boundary)
 for the authoritative status.
 
 ## Failure boundaries
