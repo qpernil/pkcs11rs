@@ -1,9 +1,9 @@
 # CCID applet configuration
 
-CCID discovery uses native PC/SC unless `C_Initialize` receives a host reader
-enumerator through `PKCS11RS_INITIALIZE_ARGS_V1`. Both providers feed the same
-reader reconciliation and applet-probing path. The following applets are
-probed by default:
+CCID discovery uses native PC/SC on desktop platforms and native
+CryptoTokenKit on iOS. Both platform implementations feed the same reader
+reconciliation and applet-probing path. The following applets are probed by
+default:
 
 | Applet | Default AID | AID override |
 | --- | --- | --- |
@@ -13,8 +13,8 @@ probed by default:
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
 | FIDO2 | `A0 00 00 06 47 2F 00 01` | `PKCS11RS_FIDO2_AID` |
 
-Set `PKCS11RS_HARDWARE_DISCOVERY=0` to skip native PC/SC context creation or a
-configured host enumerator and all CCID reader and applet probes. This global
+Set `PKCS11RS_HARDWARE_DISCOVERY=0` to skip native PC/SC or CryptoTokenKit
+discovery and all CCID reader and applet probes. This global
 local-discovery switch also skips native USB/HID discovery, but does not affect
 configured software slots or opt-in remote YubiHSM HTTP(S) connectors.
 
@@ -34,17 +34,26 @@ replacement card does not make an established reader morph into a different
 set of slots. Reinitialization is required only when the caller wants to forget
 that stable inventory and probe a known reader name as entirely new.
 
-## Host-provided readers
+## Native iOS readers
 
-`PKCS11RS_INITIALIZE_ARGS_V1` can supply an enumerator for platforms without
-native PC/SC access. The enumerator is called once during every
-`C_GetSlotList` and calls the Rust-provided sink once for each current reader,
-including a stable UTF-8 name, ATR, APDU size limits, transport context, and
-synchronous APDU callback. Supplying this enumerator selects it instead of
-native PC/SC. Omitting a previously registered name marks that reader's slots
-absent; reporting the same name later restores them without changing slot IDs.
-The configuration guide documents the exact
-[`C_Initialize` wrapper ABI](configuration.md#host-ccid-wrapper).
+An iOS build calls CryptoTokenKit directly through Rust Objective-C bindings.
+It obtains the current `TKSmartCardSlotManager` names on every slot-list
+refresh. The connector lazily starts one worker for each reader that contributes
+slots. That worker owns and reuses the reader's `TKSmartCard`, serializes its
+APDUs, and adapts asynchronous session and transmit completions to the
+synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains cached, but
+the current transport opens and ends an exclusive CryptoTokenKit session around
+each raw APDU. A removed card invalidates the retained object; the worker
+resolves a new card by the same reader name when it returns. Objective-C objects
+retained for card I/O stay confined to the worker that created them.
+
+The static XCFramework loads Apple's public CryptoTokenKit framework internally
+before it first enumerates readers. Applications importing `PKCS11RS` need no
+CryptoTokenKit import or linker setting, reader object, callback registration,
+or transport implementation.
+
+This is a smart-card APDU backend, not general USB access. iOS does not expose
+the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 
 ## PC/SC ownership and external daemons
 
@@ -106,7 +115,7 @@ Accepted names are `piv`, `openpgp`, `hsmauth`, `issuer-sd`, and `fido2`. Names 
 case-insensitive and duplicates are ignored.
 
 The YubiKey Management applet is probed during each applet-discovery attempt
-for a native or host-provided reader that has not yet contributed slots. Its
+for a native reader that has not yet contributed slots. Its
 device-wide serial number, firmware version, hardware part number,
 capabilities, and configuration metadata are cached in the shared
 physical-device context and are not exposed as a separate PKCS #11 slot. The
@@ -209,4 +218,4 @@ discovery failures. Debug reports named reader inventories, each applet probe
 and outcome, applet-to-slot registration, retained reader slots, discovery
 phase timing, and every PKCS #11 entry point. Trace adds per-request transport
 and APDU timing. The initialization wrapper can route the same formatted events
-to a host callback, as used by the iOS smoke app.
+to a host logging callback, as used by the iOS smoke app.

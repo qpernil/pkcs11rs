@@ -377,12 +377,12 @@ pub(crate) trait Slot {
         {
             // Public projection is an operation on a private key, independent
             // of whether the backend supports other software public operations.
-            mechanisms.push(
-                software_public_mechanisms()
-                    .into_iter()
-                    .find(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
-                    .expect("software public mechanisms include public projection"),
-            );
+            if let Some(projection) = software_public_mechanisms()
+                .into_iter()
+                .find(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+            {
+                mechanisms.push(projection);
+            }
         }
         if self.supports_software_digest_operations() {
             for software in SOFTWARE_DIGEST_MECHANISMS {

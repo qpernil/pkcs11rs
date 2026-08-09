@@ -14,8 +14,8 @@ bytes. Invalid configuration makes `C_Initialize` return
 software slots.
 
 For a software-focused process, set `PKCS11RS_HARDWARE_DISCOVERY=0`. This
-prevents automatic local USB and HID discovery and both native and
-host-provided CCID discovery without affecting the named software slots.
+prevents automatic local USB, HID, and native CCID discovery without affecting
+the named software slots.
 Explicit `PKCS11RS_YUBIHSM_URLS` HTTP(S) connectors also remain enabled because
 they are opt-in rather than locally discovered. The only accepted
 hardware-discovery values are `0` and `1`.

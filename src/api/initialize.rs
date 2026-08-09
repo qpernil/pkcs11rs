@@ -10,15 +10,12 @@ struct InitializeArgsV1 {
     version: CK_ULONG,
     configuration: *const CK_UTF8CHAR,
     configuration_length: CK_ULONG,
-    hardware_context: *mut std::ffi::c_void,
-    enumerate_ccid_readers: Option<crate::backend::HostCcidEnumerate>,
     log_context: *mut std::ffi::c_void,
     log_event: Option<crate::logging::HostLogEvent>,
 }
 
 pub(super) struct InitializeReserved {
     pub(super) configuration: Option<JsonConfiguration>,
-    pub(super) host_ccid_provider: Option<crate::backend::HostCcidProvider>,
     pub(super) host_log_provider: Option<crate::logging::HostLogProvider>,
 }
 
@@ -48,15 +45,11 @@ pub(super) unsafe fn parse_initialize_reserved(
         let encoded = unsafe { from_raw_parts(arguments.configuration, configuration_length) }?;
         JsonConfiguration::from_bytes(encoded)?
     };
-    let host_ccid_provider = arguments.enumerate_ccid_readers.map(|enumerate| {
-        crate::backend::HostCcidProvider::new(arguments.hardware_context, enumerate)
-    });
     let host_log_provider = arguments
         .log_event
         .map(|event| crate::logging::HostLogProvider::new(arguments.log_context, event));
     Ok(InitializeReserved {
         configuration,
-        host_ccid_provider,
         host_log_provider,
     })
 }
@@ -68,7 +61,6 @@ unsafe fn legacy_reserved(reserved: *mut std::ffi::c_void) -> Result<InitializeR
     };
     Ok(InitializeReserved {
         configuration,
-        host_ccid_provider: None,
         host_log_provider: None,
     })
 }

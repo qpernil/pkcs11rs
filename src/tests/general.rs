@@ -247,19 +247,6 @@ pub fn initialize_accepts_json_reserved_configuration() {
 }
 
 #[cfg(not(feature = "abi-tests"))]
-static HOST_CCID_ENUMERATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(not(feature = "abi-tests"))]
-unsafe extern "C" fn enumerate_no_ccid_readers(
-    _context: *mut std::ffi::c_void,
-    _sink_context: *mut std::ffi::c_void,
-    _add_reader: Option<crate::backend::HostCcidAddReader>,
-) -> CK_RV {
-    HOST_CCID_ENUMERATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    CKR_OK as CK_RV
-}
-
 unsafe extern "C" fn capture_log_event(
     context: *mut std::ffi::c_void,
     _level: CK_ULONG,
@@ -289,20 +276,16 @@ struct TestInitializeArgsV1 {
     version: CK_ULONG,
     configuration: *const CK_UTF8CHAR,
     configuration_length: CK_ULONG,
-    hardware_context: *mut std::ffi::c_void,
-    enumerate_ccid_readers: Option<crate::backend::HostCcidEnumerate>,
     log_context: *mut std::ffi::c_void,
     log_event: Option<crate::logging::HostLogEvent>,
 }
 
 #[cfg(not(feature = "abi-tests"))]
 #[test]
-pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
+pub fn initialize_accepts_magic_wrapped_configuration_and_log_callback() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
-    HOST_CCID_ENUMERATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
-    let configuration =
-        b"{\"version\":1,\"logging\":{\"level\":\"debug\"},\"yubihsm\":{\"urls\":[]}}";
+    let configuration = b"{\"version\":1,\"logging\":{\"level\":\"debug\"},\"hardware\":{\"discovery\":false},\"yubihsm\":{\"urls\":[]}}";
     let logs = std::sync::Mutex::new(Vec::<String>::new());
     let mut extension = TestInitializeArgsV1 {
         magic: crate::api::INITIALIZE_ARGS_MAGIC,
@@ -310,8 +293,6 @@ pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
         version: crate::api::INITIALIZE_ARGS_VERSION,
         configuration: configuration.as_ptr(),
         configuration_length: configuration.len() as CK_ULONG,
-        hardware_context: std::ptr::null_mut(),
-        enumerate_ccid_readers: Some(enumerate_no_ccid_readers),
         log_context: (&logs as *const std::sync::Mutex<Vec<String>>)
             .cast_mut()
             .cast(),
@@ -336,16 +317,8 @@ pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
         CKR_OK as CK_RV
     );
     assert_eq!(
-        HOST_CCID_ENUMERATIONS.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    assert_eq!(
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, std::ptr::null_mut(), &mut count),
         CKR_OK as CK_RV
-    );
-    assert_eq!(
-        HOST_CCID_ENUMERATIONS.load(std::sync::atomic::Ordering::Relaxed),
-        2
     );
     let logs = logs.lock().unwrap();
     assert!(logs.iter().any(|line| line.contains("C_GetSlotList")));
@@ -380,8 +353,6 @@ pub fn initialize_rejects_unknown_magic_wrapper_version() {
         version: crate::api::INITIALIZE_ARGS_VERSION + 1,
         configuration: std::ptr::null(),
         configuration_length: 0,
-        hardware_context: std::ptr::null_mut(),
-        enumerate_ccid_readers: None,
         log_context: std::ptr::null_mut(),
         log_event: None,
     };

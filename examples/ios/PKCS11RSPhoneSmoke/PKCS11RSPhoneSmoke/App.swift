@@ -850,7 +850,6 @@ private final class ModuleInspector {
 
     func inspect(
         configuration: ConnectorConfiguration,
-        smartCardDiscovery: SmartCardReaderDiscovery,
         logBuffer: LogBuffer
     ) -> String {
         if !initialized {
@@ -863,10 +862,6 @@ private final class ModuleInspector {
             )
             extensionArguments.ulVersion = CK_ULONG(PKCS11RS_INITIALIZE_ARGS_VERSION)
             extensionArguments.ulConfigurationLen = CK_ULONG(configuration.json.utf8.count)
-            extensionArguments.pHardwareContext = Unmanaged
-                .passUnretained(smartCardDiscovery)
-                .toOpaque()
-            extensionArguments.enumerateCcidReaders = enumerateCcidReadersCallback
             extensionArguments.pLogContext = Unmanaged.passUnretained(logBuffer).toOpaque()
             extensionArguments.logEvent = logEventCallback
             let initialize = configuration.json.withCString { json in
@@ -994,7 +989,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         qos: .userInitiated
     )
     private let moduleInspector = ModuleInspector()
-    private let smartCardDiscovery = SmartCardReaderDiscovery()
 
     func application(
         _ application: UIApplication,
@@ -1028,7 +1022,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             guard let self else { return }
             let result = moduleInspector.inspect(
                 configuration: configuration,
-                smartCardDiscovery: smartCardDiscovery,
                 logBuffer: logBuffer
             )
             DispatchQueue.main.async {

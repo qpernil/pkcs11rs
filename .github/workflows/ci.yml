@@ -115,11 +115,17 @@ jobs:
         run: |
           brew install pkg-config
 
+      - name: Install iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
       - name: Check generated PKCS #11 bindings
         run: cargo xtask bindings --check
 
       - name: Build dylib
         run: cargo build --locked
+
+      - name: Build iOS XCFramework
+        run: cargo xtask ios --release
 
       - name: Run Rust tests
         run: cargo test --locked

@@ -16,10 +16,11 @@ The minimum supported Rust version is 1.85.
 
 ## Backends
 
-- **YubiKey PIV** over native PC/SC or host-provided CCID, including RSA,
+- **YubiKey PIV** over native CCID (PC/SC on desktop and CryptoTokenKit on
+  iOS), including RSA,
   ECDSA, Ed25519, ECDH/X25519, certificates, metadata, attestation, PIN policy,
   and random generation.
-- **YubiKey OpenPGP** over native PC/SC or host-provided CCID, including
+- **YubiKey OpenPGP** over native CCID, including
   signing, RSA deciphering, ECDH, certificates, OpenPGP PIN KDFs, and random
   generation.
 - **YubiHSM 2** over direct USB or the HTTP YubiHSM Connector, including
@@ -95,10 +96,10 @@ sessions.
 For integrations that can forward provider configuration,
 `CK_C_INITIALIZE_ARGS.pReserved` accepts either a direct NUL-terminated UTF-8
 JSON string or `PKCS11RS_INITIALIZE_ARGS_V1`. The versioned wrapper carries an
-explicit-length JSON value, an optional host CCID enumerator, and an optional
-log callback, which is how the iOS smoke app supplies CryptoTokenKit readers
-and displays live tracing output. pkcs11rs copies the
-configuration during `C_Initialize`; callback functions and their contexts must
+explicit-length JSON value and an optional log callback. The iOS smoke app uses
+the wrapper for configuration and live tracing; iOS CCID discovery and
+transport are native to pkcs11rs through CryptoTokenKit. pkcs11rs copies the
+configuration during `C_Initialize`; the log callback and its context must
 remain valid until `C_Finalize`. Explicit JSON fields take precedence, while
 omitted fields retain the documented environment-variable and built-in
 fallbacks. A null or empty direct string selects environment and built-in defaults.
@@ -119,7 +120,7 @@ exchange lock. PKCS #11 calls targeting different applet slots may overlap
 while working with their independent slot and session state, but their card
 interactions cannot: each applet selection or complete APDU exchange on one
 reader holds the shared physical-reader gate. Different YubiHSMs and different
-native or host-provided CCID readers can execute concurrently. When Yubico's
+native CCID readers can execute concurrently. When Yubico's
 device-information commands report the same physical serial over HID and CCID,
 pkcs11rs additionally prevents its own HID and CCID operations from
 overlapping. HID remains shared with other HID clients; no exclusive HID lock
@@ -136,6 +137,7 @@ locking, session ownership, transport sharing, and cache boundaries.
 | Linux | The complete hardware-independent Rust and Python suites run in GitHub Actions. |
 | Windows | Rust tests, Python ABI tests, and OASIS profile cases run with warnings denied on a native Windows runner. |
 | macOS | The `.dylib`, Rust tests, Python ABI tests, OASIS profile cases, Clippy, generated bindings, and synthetic ABI backend are checked in GitHub Actions. |
+| iOS | Release device and Apple Silicon Simulator libraries are packaged as an XCFramework in GitHub Actions. Local CCID access uses CryptoTokenKit directly from Rust. |
 | MSRV | An all-features build is checked with Rust 1.85. |
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
 | Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. The Python smoke test covers production slot and token metadata. |
@@ -215,15 +217,21 @@ when invoking the command to override it.
 The command also includes an iOS umbrella header with the platform macros
 required by the standard PKCS #11 headers and a Clang module map, allowing a
 Swift target that links the XCFramework to use `import PKCS11RS`. The artifact
-omits the desktop native USB, HID, and PC/SC transports. An embedding app may
-still supply local CCID readers through `PKCS11RS_INITIALIZE_ARGS_V1`; software
-slots and configured remote YubiHSM HTTP connectors also remain available.
+omits the desktop native USB, HID, and PC/SC transports. It contains an
+iOS-native CCID provider that loads Apple's public CryptoTokenKit framework
+internally when reader discovery first runs. An embedding app therefore needs
+no CryptoTokenKit linker setting, callbacks, or platform transport code.
+CryptoTokenKit provides smart-card APDU transport; this backend does not expose
+general USB interfaces or bulk endpoints to pkcs11rs.
+Software slots and configured remote YubiHSM HTTP connectors also remain
+available.
 
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
-linking the XCFramework from Swift, enumerating local CryptoTokenKit smart-card
-readers, forwarding their APDUs through the host CCID callbacks, and configuring
-a remote YubiHSM connector. Both the callback and versioned JSON configuration
-are passed through `CK_C_INITIALIZE_ARGS.pReserved`. The app also uses the
+linking the XCFramework from Swift while pkcs11rs itself enumerates local
+CryptoTokenKit smart-card readers and transmits their APDUs. The app passes
+only the versioned JSON configuration and log callback through
+`CK_C_INITIALIZE_ARGS.pReserved`; it contains no CryptoTokenKit or CCID
+transport code. The app also uses the
 pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
 library-owned canonical `CKM_*` string for a recognized mechanism or null for
 an unknown value. Parallel helpers provide canonical `CKR_*`, `CKO_*`, `CKK_*`,
@@ -328,8 +336,8 @@ Disable all automatic local hardware discovery with:
 export PKCS11RS_HARDWARE_DISCOVERY=0
 ```
 
-This skips direct YubiHSM USB, native FIDO HID, and native or host-provided
-CCID reader discovery, including PIV, OpenPGP, YubiHSM Auth, Issuer SD, and
+This skips direct YubiHSM USB, native FIDO HID, and native CCID reader
+discovery, including PIV, OpenPGP, YubiHSM Auth, Issuer SD, and
 FIDO2 applets.
 It does not disable named software slots or URLs explicitly configured through
 `PKCS11RS_YUBIHSM_URLS`; remote HTTP(S) connectors are already opt-in. The
@@ -519,10 +527,10 @@ with compatible hardware. See [Named software slots](docs/software.md) and
 
 The default CCID discovery set contains PIV, OpenPGP, YubiHSM Auth, Issuer SD,
 and FIDO2. Each selectable applet is exposed as its own PKCS #11 slot. Native
-builds enumerate readers through PC/SC unless the host supplies a CCID
-enumerator during `C_Initialize`.
+builds enumerate readers through PC/SC on desktop platforms and CryptoTokenKit
+on iOS.
 
-Every `C_GetSlotList` enumerates the current native or host-provided reader
+Every `C_GetSlotList` enumerates the current native reader
 names. A reader is probed for its configured applets until it contributes at
 least one slot, so a new reader or a card inserted into a previously empty
 reader can append slots without reinitializing the module. Once a reader name
