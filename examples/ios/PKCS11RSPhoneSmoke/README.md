@@ -6,11 +6,23 @@ The extension contains the versioned JSON configuration and a host CCID reader
 enumerator plus a tracing log callback. While discovery runs, the app displays
 live pkcs11rs logs, follows the newest entry, and leaves that view selected when
 discovery completes. The Log/Inventory control provides access to both
-scrollable views. For every
-present slot the inventory also enumerates the mechanisms with
-`C_GetMechanismList`, queries their key-size ranges and flags with
-`C_GetMechanismInfo`, and displays names returned by
-`PKCS11RS_GetMechanismName`.
+scrollable views. For every present slot the inventory opens a read-only public
+session, enumerates every visible object with `C_FindObjects`, and displays its
+handle, class, label, ID, and key type when available. Object class and key type
+names come from the `PKCS11RS_GetObjectClassName` and
+`PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
+their algorithm, remaining password retries, and touch policy.
+
+After every public object inventory is complete, the app lists all discovered
+YubiHSM Auth credentials and selects the first one. It builds an unambiguous
+`C_LoginUser` username as `:1234<label>@<source>`, where `1234` is the target
+YubiHSM Authentication Key ID and the source is the owning YubiKey serial (or
+slot description when no serial is available), then supplies the prototype
+credential password `password`. The app probes that login on every token. Only
+the YubiHSM backend supports the entry point; other slot kinds return
+`CKR_FUNCTION_NOT_SUPPORTED` before using the password. After a successful
+login, the app enumerates the objects again as an authenticated user, logs out,
+and closes the session.
 
 The app does not enumerate or register readers before `C_Initialize`.
 `C_Initialize` retains the enumerator and its context in the module. During
@@ -49,8 +61,10 @@ registration and retention, deduplication decisions, phase timing, and each
 PKCS #11 call with its outcome and duration. Connector payloads and responses,
 per-request transport and APDU timing, and session state remain reserved for
 `trace`.
-Enumeration and inspection do not authenticate, change configuration, or
-modify objects on the key.
+The app does not change configuration or modify objects on the key. Its
+explicit YubiHSM Auth inspection login authenticates but remains read-only.
+Private objects that require login are absent from the public-session view and
+may appear in the authenticated view.
 
 This path requires a physical iPhone or iPad with a CCID-enabled key attached
 directly or through a USB-C adapter. A Simulator cannot expose that USB reader.
@@ -70,6 +84,14 @@ The app defaults to `http://192.168.1.169:12345`. Override that URL with the
 variable is only an input to this smoke-test UI; the module itself receives the
 URL through the JSON passed to `C_Initialize`.
 
+For prototype discovery, the app also passes `yubihsm.public_discovery` as
+`0001password`: authentication object ID `0001` followed by the default
+password `password`. This discovery credential lets pkcs11rs authenticate to
+each YubiHSM and expose the public objects visible in that credential's domains
+before an ordinary PKCS #11 login. Change the literal in the smoke JSON when
+the target YubiHSM does not use the factory-development credential. Do not ship
+or commit a production credential in application source.
+
 The smoke app calls `C_Initialize` once, enumerates local readers during every
 `C_GetSlotList`, and calls `C_Finalize` only when the app terminates. Readers
 first attached after initialization append their configured application slots.
@@ -78,12 +100,12 @@ no token until that reader returns. The client initially supplies room for ten
 slots and retries
 with the returned required count only on `CKR_BUFFER_TOO_SMALL`, so an ordinary
 refresh needs one slot-list call and one connector inventory request. It uses
-the same PKCS #11 buffer contract with room for one hundred mechanisms per
-slot. This exercises the normal long-lived client lifecycle and connector
-recovery rather than rebuilding the module on every refresh. Returning to the
-app after the iPhone sleeps or after another app has been active runs the same
-refresh. If iOS terminated the process while it was suspended, the next launch
-initializes a new module instance before refreshing.
+the same PKCS #11 buffer contract while enumerating objects. This exercises the
+normal long-lived client lifecycle and connector recovery rather than
+rebuilding the module on every refresh. Returning to the app after the iPhone
+sleeps or after another app has been active runs the same refresh. If iOS
+terminated the process while it was suspended, the next launch initializes a
+new module instance before refreshing.
 
 The smoke app is also the manual client for a connector running on a Mac across
 real Mac system sleep. The connector retains its listener, USB watcher,
