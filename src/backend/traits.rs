@@ -294,6 +294,9 @@ pub(crate) trait Slot {
     fn supports_software_public_operations(&self) -> bool {
         true
     }
+    fn supports_public_projection(&self) -> bool {
+        true
+    }
     fn supports_software_private_operations(&self) -> bool {
         false
     }
@@ -364,12 +367,22 @@ pub(crate) trait Slot {
                         flags |= software.flags & CKF_VERIFY as CK_FLAGS;
                     }
                     existing.flags |= flags;
-                } else if software.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY {
-                    // Public projection is itself an operation on a private
-                    // key, rather than a public-key cryptographic mechanism.
-                    mechanisms.push(software);
                 }
             }
+        }
+        if self.supports_public_projection()
+            && !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+        {
+            // Public projection is an operation on a private key, independent
+            // of whether the backend supports other software public operations.
+            mechanisms.push(
+                software_public_mechanisms()
+                    .into_iter()
+                    .find(|mechanism| mechanism.type_ == CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+                    .expect("software public mechanisms include public projection"),
+            );
         }
         if self.supports_software_digest_operations() {
             for software in SOFTWARE_DIGEST_MECHANISMS {

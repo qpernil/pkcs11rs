@@ -200,6 +200,9 @@ impl Slot for HsmAuthSlot {
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::HsmAuth)
     }
+    fn supports_public_projection(&self) -> bool {
+        false
+    }
     fn name(&self) -> String {
         format!("{} YubiHSM Auth", self.connector.name())
     }
@@ -594,6 +597,9 @@ impl Slot for IssuerSecurityDomainSlot {
     }
     fn kind(&self) -> SlotKind {
         SlotKind::Ccid(CcidApplication::IssuerSecurityDomain)
+    }
+    fn supports_public_projection(&self) -> bool {
+        false
     }
     fn name(&self) -> String {
         format!("{} Issuer SD", self.connector.name())
