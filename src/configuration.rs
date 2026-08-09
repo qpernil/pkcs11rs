@@ -1,4 +1,5 @@
 use crate::{
+    logging::LogLevel,
     scp03::{parse_hex, validate_security_level},
     CcidApplication, CcidConfiguration, Error, CKR_ARGUMENTS_BAD,
 };
@@ -16,7 +17,8 @@ pub(crate) const MAX_CONFIGURATION_STRING_BYTES: usize = 64 * 1024;
 #[serde(deny_unknown_fields)]
 pub(crate) struct JsonConfiguration {
     version: u32,
-    debug: Option<u8>,
+    #[serde(default)]
+    logging: JsonLoggingConfiguration,
     pinentry: Option<String>,
     #[serde(default)]
     hardware: JsonHardwareConfiguration,
@@ -32,6 +34,12 @@ pub(crate) struct JsonConfiguration {
     scp03: JsonScp03Configuration,
     #[serde(default)]
     scp11: JsonScp11Configuration,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonLoggingConfiguration {
+    level: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -191,7 +199,7 @@ impl SecureChannelConfiguration {
 }
 
 pub(crate) struct ModuleConfiguration {
-    pub(crate) debug_level: u8,
+    pub(crate) logging_level: Option<LogLevel>,
     pub(crate) pinentry: Option<OsString>,
     pub(crate) hardware_discovery: bool,
     pub(crate) token_storage: Option<OsString>,
@@ -296,17 +304,12 @@ impl ModuleConfiguration {
         mut environment: impl FnMut(&str) -> Result<Option<OsString>, Error>,
     ) -> Result<Self, Error> {
         let explicit = explicit.unwrap_or_default();
-        let debug_level = match explicit.debug {
-            Some(value) => value,
-            None => environment_text("PKCS11RS_DEBUG", &mut environment)?
-                .as_deref()
-                .map(parse_u8_decimal)
-                .transpose()?
-                .unwrap_or(0),
+        let logging_level = match explicit.logging.level {
+            Some(level) => Some(LogLevel::parse(&level).ok_or(CKR_ARGUMENTS_BAD)?),
+            None => environment_text("PKCS11RS_LOG", &mut environment)?
+                .map(|level| LogLevel::parse(&level).ok_or(CKR_ARGUMENTS_BAD))
+                .transpose()?,
         };
-        if debug_level > 2 {
-            return Err(CKR_ARGUMENTS_BAD.into());
-        }
 
         let hardware_discovery = explicit
             .hardware
@@ -409,7 +412,7 @@ impl ModuleConfiguration {
         )?;
 
         Ok(Self {
-            debug_level,
+            logging_level,
             pinentry: resolve_os(explicit.pinentry, "PKCS11RS_PINENTRY", &mut environment)?,
             hardware_discovery,
             token_storage: resolve_os(
@@ -725,10 +728,6 @@ fn parse_byte(value: &str) -> Result<u8, Error> {
         .map_err(|_| CKR_ARGUMENTS_BAD.into())
 }
 
-fn parse_u8_decimal(value: &str) -> Result<u8, Error> {
-    value.parse().map_err(|_| CKR_ARGUMENTS_BAD.into())
-}
-
 fn environment_switch(
     name: &str,
     environment: &mut impl FnMut(&str) -> Result<Option<OsString>, Error>,
@@ -796,13 +795,13 @@ mod tests {
         let configuration = resolve(
             None,
             &[
-                ("PKCS11RS_DEBUG", "2"),
+                ("PKCS11RS_LOG", "trace"),
                 ("PKCS11RS_HARDWARE_DISCOVERY", "0"),
                 ("PKCS11RS_YUBIHSM_URLS", "http://one/,http://two"),
             ],
         )
         .unwrap();
-        assert_eq!(configuration.debug_level, 2);
+        assert_eq!(configuration.logging_level, Some(LogLevel::Trace));
         assert!(!configuration.hardware_discovery);
         assert!(!configuration.yubihsm_recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://one", "http://two"]);
@@ -815,7 +814,7 @@ mod tests {
             Some(json(
                 r#"{
                     "version": 1,
-                    "debug": 1,
+                    "logging": {"level": "warn"},
                     "yubihsm": {
                         "urls": ["http://json/"],
                         "recreate_sessions": true
@@ -824,14 +823,14 @@ mod tests {
                 }"#,
             )),
             &[
-                ("PKCS11RS_DEBUG", "2"),
+                ("PKCS11RS_LOG", "trace"),
                 ("PKCS11RS_HARDWARE_DISCOVERY", "0"),
                 ("PKCS11RS_YUBIHSM_URLS", "http://environment"),
                 ("PKCS11RS_YUBIHSM_RECREATE_SESSIONS", "0"),
             ],
         )
         .unwrap();
-        assert_eq!(configuration.debug_level, 1);
+        assert_eq!(configuration.logging_level, Some(LogLevel::Warn));
         assert!(!configuration.hardware_discovery);
         assert!(configuration.yubihsm_recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://json"]);

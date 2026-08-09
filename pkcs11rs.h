@@ -125,6 +125,22 @@ typedef CK_RV (*PKCS11RS_ENUMERATE_CCID_READERS)(
   PKCS11RS_ADD_CCID_READER addReader
 );
 
+#define PKCS11RS_LOG_ERROR 1UL
+#define PKCS11RS_LOG_WARN  2UL
+#define PKCS11RS_LOG_INFO  3UL
+#define PKCS11RS_LOG_DEBUG 4UL
+#define PKCS11RS_LOG_TRACE 5UL
+
+/* pTarget identifies the tracing target and is not repeated in pMessage. */
+typedef void (*PKCS11RS_LOG_EVENT)(
+  void *pLogContext,
+  CK_ULONG ulLevel,
+  const CK_UTF8CHAR *pTarget,
+  CK_ULONG ulTargetLen,
+  const CK_UTF8CHAR *pMessage,
+  CK_ULONG ulMessageLen
+);
+
 #define PKCS11RS_INITIALIZE_ARGS_MAGIC 0x50313150UL
 #define PKCS11RS_INITIALIZE_ARGS_VERSION 1UL
 
@@ -146,6 +162,8 @@ typedef struct PKCS11RS_INITIALIZE_ARGS_V1 {
   CK_ULONG ulConfigurationLen;
   void *pHardwareContext;
   PKCS11RS_ENUMERATE_CCID_READERS enumerateCcidReaders;
+  void *pLogContext;
+  PKCS11RS_LOG_EVENT logEvent;
 } PKCS11RS_INITIALIZE_ARGS_V1;
 
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {

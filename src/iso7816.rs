@@ -47,6 +47,15 @@ fn transmit_with_capabilities<C: Connector + ?Sized>(
     command: &CommandApdu,
     capabilities: ApduCapabilities,
 ) -> Result<ResponseApdu, Error> {
+    let operation = crate::logging::Operation::trace(tracing::trace_span!(
+        target: "pkcs11rs::transport",
+        "iso7816.transmit",
+        connector = %connector.name(),
+        instruction = command.ins,
+        request_bytes = command.data.len(),
+        expected_response_bytes = command.le.unwrap_or_default()
+    ));
+    let _entered = operation.enter();
     let mut command = command.clone();
     let mut response = transmit_command(connector, &command, capabilities)?;
     if response.status & 0xff00 == 0x6c00 {

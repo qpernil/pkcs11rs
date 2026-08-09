@@ -21,6 +21,9 @@ private func connectorConfiguration() -> ConnectorConfiguration {
 
     let object: [String: Any] = [
         "version": 1,
+        "logging": [
+            "level": "debug",
+        ],
         "yubihsm": [
             "urls": [url],
         ],
@@ -46,12 +49,172 @@ private func mechanismName(_ mechanism: CK_MECHANISM_TYPE) -> String {
     return String(format: "Unknown mechanism 0x%08llX", UInt64(mechanism))
 }
 
+private final class LogBuffer {
+    private let lock = NSLock()
+    private var observer: (([String]) -> Void)?
+    private var pendingLines = [String]()
+    private var deliveryScheduled = false
+
+    func observe(_ observer: @escaping ([String]) -> Void) {
+        lock.lock()
+        self.observer = observer
+        lock.unlock()
+    }
+
+    func append(_ line: String) {
+        lock.lock()
+        pendingLines.append(line)
+        let shouldSchedule = !deliveryScheduled
+        deliveryScheduled = true
+        lock.unlock()
+        if shouldSchedule {
+            DispatchQueue.main.async { [weak self] in
+                self?.deliver()
+            }
+        }
+    }
+
+    private func deliver() {
+        lock.lock()
+        let lines = pendingLines
+        pendingLines.removeAll(keepingCapacity: true)
+        deliveryScheduled = false
+        let observer = observer
+        lock.unlock()
+        if !lines.isEmpty {
+            observer?(lines)
+        }
+    }
+}
+
+private let logEventCallback: PKCS11RS_LOG_EVENT = {
+    context,
+    _,
+    _,
+    _,
+    message,
+    messageLength in
+    guard let context else { return }
+    let count = Int(messageLength)
+    guard count == 0 || message != nil else { return }
+    let line = count == 0
+        ? ""
+        : String(decoding: UnsafeBufferPointer(start: message, count: count), as: UTF8.self)
+    Unmanaged<LogBuffer>.fromOpaque(context).takeUnretainedValue().append(line)
+}
+
+private final class InspectionViewController: UIViewController {
+    private let selector = UISegmentedControl(items: ["Log", "Inventory"])
+    private let statusLabel = UILabel()
+    private let inventoryView = UITextView()
+    private let logView = UITextView()
+    private var refreshStartedAt: Date?
+    private var refreshTimer: Timer?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+        selector.selectedSegmentIndex = 0
+        selector.addTarget(self, action: #selector(selectionChanged), for: .valueChanged)
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = .secondaryLabel
+        statusLabel.isHidden = true
+        view.addSubview(statusLabel)
+
+        for textView in [inventoryView, logView] {
+            textView.translatesAutoresizingMaskIntoConstraints = false
+            textView.backgroundColor = .systemBackground
+            textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+            textView.isEditable = false
+            textView.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 20, right: 12)
+            view.addSubview(textView)
+        }
+        selector.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(selector)
+        NSLayoutConstraint.activate([
+            selector.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            selector.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            selector.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.8),
+            statusLabel.topAnchor.constraint(equalTo: selector.bottomAnchor, constant: 6),
+            statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            inventoryView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
+            inventoryView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            inventoryView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            inventoryView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            logView.topAnchor.constraint(equalTo: inventoryView.topAnchor),
+            logView.leadingAnchor.constraint(equalTo: inventoryView.leadingAnchor),
+            logView.trailingAnchor.constraint(equalTo: inventoryView.trailingAnchor),
+            logView.bottomAnchor.constraint(equalTo: inventoryView.bottomAnchor),
+        ])
+        selectionChanged()
+    }
+
+    func beginRefresh(connector: String) {
+        appendLogs(["\n—— Refresh: \(connector) ——"])
+        selector.selectedSegmentIndex = 0
+        selectionChanged()
+        refreshTimer?.invalidate()
+        refreshStartedAt = Date()
+        updateRefreshStatus()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
+            [weak self] _ in
+            self?.updateRefreshStatus()
+        }
+    }
+
+    func appendLogs(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        let separator = logView.textStorage.length == 0 ? "" : "\n"
+        let text = separator + lines.joined(separator: "\n")
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.paragraphSpacing = 8
+        logView.textStorage.append(NSAttributedString(
+            string: text,
+            attributes: [
+                .font: logView.font as Any,
+                .foregroundColor: UIColor.label,
+                .paragraphStyle: paragraphStyle,
+            ]
+        ))
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let length = self.logView.textStorage.length
+            guard length > 0 else { return }
+            self.logView.layoutManager.ensureLayout(for: self.logView.textContainer)
+            self.logView.scrollRangeToVisible(NSRange(location: length - 1, length: 1))
+        }
+    }
+
+    func showInventory(_ inventory: String) {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        refreshStartedAt = nil
+        statusLabel.isHidden = true
+        inventoryView.text = inventory
+    }
+
+    private func updateRefreshStatus() {
+        guard let refreshStartedAt else { return }
+        let seconds = max(0, Int(Date().timeIntervalSince(refreshStartedAt)))
+        statusLabel.text = "Working… \(seconds)s"
+        statusLabel.isHidden = false
+    }
+
+    @objc private func selectionChanged() {
+        let showsInventory = selector.selectedSegmentIndex == 1
+        inventoryView.isHidden = !showsInventory
+        logView.isHidden = showsInventory
+    }
+}
+
 private final class ModuleInspector {
     private var initialized = false
 
     func inspect(
         configuration: ConnectorConfiguration,
-        smartCardDiscovery: SmartCardReaderDiscovery
+        smartCardDiscovery: SmartCardReaderDiscovery,
+        logBuffer: LogBuffer
     ) -> String {
         if !initialized {
             var arguments = CK_C_INITIALIZE_ARGS()
@@ -67,6 +230,8 @@ private final class ModuleInspector {
                 .passUnretained(smartCardDiscovery)
                 .toOpaque()
             extensionArguments.enumerateCcidReaders = enumerateCcidReadersCallback
+            extensionArguments.pLogContext = Unmanaged.passUnretained(logBuffer).toOpaque()
+            extensionArguments.logEvent = logEventCallback
             let initialize = configuration.json.withCString { json in
                 extensionArguments.pConfiguration = UnsafeRawPointer(json)
                     .assumingMemoryBound(to: CK_UTF8CHAR.self)
@@ -191,7 +356,8 @@ private final class ModuleInspector {
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
-    private var textView: UITextView?
+    private let controller = InspectionViewController()
+    private let logBuffer = LogBuffer()
     private let inspectionQueue = DispatchQueue(
         label: "com.qpernil.PKCS11RSSmoke.inspection",
         qos: .userInitiated
@@ -203,19 +369,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        let textView = UITextView()
-        textView.backgroundColor = .systemBackground
-        textView.font = .monospacedSystemFont(ofSize: 15, weight: .regular)
-        textView.isEditable = false
-        textView.textContainerInset = UIEdgeInsets(top: 64, left: 20, bottom: 20, right: 20)
-
-        let controller = UIViewController()
-        controller.view = textView
         let window = UIWindow(frame: UIScreen.main.bounds)
         window.rootViewController = controller
         window.makeKeyAndVisible()
         self.window = window
-        self.textView = textView
+        logBuffer.observe { [weak controller] lines in
+            controller?.appendLogs(lines)
+        }
 
         return true
     }
@@ -232,15 +392,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
     private func refresh() {
         let configuration = connectorConfiguration()
-        textView?.text = "Inspecting local USB-C CCID readers…"
+        controller.beginRefresh(connector: configuration.url)
         inspectionQueue.async { [weak self] in
             guard let self else { return }
             let result = moduleInspector.inspect(
                 configuration: configuration,
-                smartCardDiscovery: smartCardDiscovery
+                smartCardDiscovery: smartCardDiscovery,
+                logBuffer: logBuffer
             )
             DispatchQueue.main.async {
-                self.textView?.text = result
+                self.controller.showInventory(result)
             }
         }
     }

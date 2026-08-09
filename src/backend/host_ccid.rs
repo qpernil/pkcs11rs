@@ -54,6 +54,10 @@ impl HostCcidProvider {
     }
 
     pub(crate) fn enumerate(self) -> Result<Vec<HostCcidRegistration>, Error> {
+        let _operation = crate::logging::Operation::info(tracing::info_span!(
+            target: "pkcs11rs::discovery",
+            "host_ccid.enumerate"
+        ));
         let mut registrations = Vec::new();
         let result = unsafe {
             (self.enumerate)(
@@ -271,6 +275,14 @@ impl Connector for HostCcidConnector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "host_ccid.transmit",
+            reader = %self.registration.reader_name,
+            request_bytes = send_buffer.len(),
+            timeout_ms = timeout.as_millis() as u64
+        ));
+        let _entered = operation.enter();
         let command_length =
             CK_ULONG::try_from(send_buffer.len()).map_err(|_| CKR_DATA_LEN_RANGE)?;
         let mut response_length =

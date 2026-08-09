@@ -27,6 +27,7 @@ ffi_entry_point! {
                 None => match ModuleContext::new_with_configuration_and_host_ccid(
                     configuration,
                     initialization.host_ccid_provider,
+                    initialization.host_log_provider,
                 ) {
                     Ok(context) => {
                         *guard = Some(context);
@@ -47,6 +48,7 @@ fn validate_initialize_args(
         return Ok(super::host_ccid::InitializeReserved {
             configuration: None,
             host_ccid_provider: None,
+            host_log_provider: None,
         });
     }
 

@@ -35,6 +35,7 @@ use std::{
     path::PathBuf,
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
+    time::Instant,
 };
 use zeroize::Zeroizing;
 
@@ -252,7 +253,7 @@ pub(crate) fn configured_yubihsm_http_tls(
 // The registry lock protects lazy discovery and session-handle routing; slot
 // operations release it before taking an individual SlotContext lock.
 pub(crate) struct ModuleContext {
-    pub(crate) debug_level: u8,
+    pub(crate) logging: Option<tracing::Dispatch>,
     pub(crate) hardware_discovery: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
@@ -287,6 +288,7 @@ struct EnumeratedCcidReader {
 
 struct CcidReaderInventoryEntry {
     host_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
+    slot_ids: Vec<CK_SLOT_ID>,
 }
 
 // Mutable token state shared by every PKCS #11 session opened on this slot.
@@ -827,17 +829,21 @@ impl ModuleContext {
     pub(crate) fn new_with_configuration(
         configuration: ModuleConfiguration,
     ) -> Result<ModuleContext, Error> {
-        Self::new_with_configuration_and_host_ccid(configuration, None)
+        Self::new_with_configuration_and_host_ccid(configuration, None, None)
     }
 
     #[allow(unused_mut)]
     pub(crate) fn new_with_configuration_and_host_ccid(
         configuration: ModuleConfiguration,
         host_ccid_provider: Option<HostCcidProvider>,
+        host_log_provider: Option<crate::logging::HostLogProvider>,
     ) -> Result<ModuleContext, Error> {
         #[cfg(feature = "abi-tests")]
         let _ = (configuration.yubihsm_public_discovery.as_ref(),);
-        let debug_level = configuration.debug_level;
+        let logging =
+            crate::logging::configured_dispatch(configuration.logging_level, host_log_provider);
+        let module_logging = logging.clone();
+        let _logging_guard = logging.as_ref().map(tracing::dispatcher::set_default);
         let pinentry = Arc::new(pinentry::Pinentry::from_configuration(
             configuration.pinentry,
         )?);
@@ -894,7 +900,7 @@ impl ModuleContext {
         let secure_channels = Arc::new(configuration.secure_channels);
         let hsmauth_providers = Arc::new(HsmAuthProviderRegistry::default());
         let mut context = ModuleContext {
-            debug_level,
+            logging: module_logging,
             hardware_discovery,
             software_slots,
             software_discovery_pins,
@@ -1719,6 +1725,16 @@ impl SlotContext {
 
 impl ModuleContext {
     fn enumerate_ccid_readers(&self) -> Result<Vec<EnumeratedCcidReader>, Error> {
+        let provider = if self.host_ccid_provider.is_some() {
+            "host"
+        } else {
+            "pcsc"
+        };
+        let _operation = crate::logging::Operation::new(tracing::debug_span!(
+            target: "pkcs11rs::discovery",
+            "ccid.enumerate_readers",
+            provider
+        ));
         if !self.hardware_discovery {
             return Ok(Vec::new());
         }
@@ -1770,6 +1786,11 @@ impl ModuleContext {
         reader_state: Arc<PcscReaderState>,
         ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
+        let _operation = crate::logging::Operation::info(tracing::info_span!(
+            target: "pkcs11rs::discovery",
+            "ccid.probe_reader",
+            reader = %base_connector.name()
+        ));
         base_connector.refresh()?;
         let reader_name = base_connector.name();
         match YubiKeyClient.discover(base_connector.as_ref()) {
@@ -1785,19 +1806,27 @@ impl ModuleContext {
                     },
                 )?;
             }
-            Err(error) => log!(
-                2,
-                "YubiKey Management device-information discovery failed on {}: {:?}",
-                reader_name,
-                error
+            Err(error) => tracing::trace!(
+                target: "pkcs11rs::discovery",
+                reader = %reader_name,
+                ?error,
+                "YubiKey management metadata not available"
             ),
         }
 
         let mut reader_slots = Vec::new();
         let mut reader_fido_slots = Vec::new();
+        let mut discovered_applications = Vec::new();
         let mut next_reader_slot_id = slot_contexts.next_slot_id().ok_or(CKR_DEVICE_ERROR)?;
         for configuration in self.ccid_configurations.clone() {
             let application_label = ccid_application_label(configuration.application);
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                reader = %reader_name,
+                application = application_label,
+                "CCID applet probe started"
+            );
+            let applet_started = Instant::now();
             let slot_id = next_reader_slot_id;
             next_reader_slot_id = next_reader_slot_id.checked_add(1).ok_or(CKR_DEVICE_ERROR)?;
             let application_aid = self
@@ -1805,15 +1834,32 @@ impl ModuleContext {
                 .for_application(configuration.application)
                 .to_vec();
             if let Err(error) = select_application(base_connector.as_ref(), &application_aid) {
-                log!(
-                    1,
-                    "CCID application AID selection for {} on {}: {:?}",
-                    application_label,
-                    reader_name,
-                    error
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    reader = %reader_name,
+                    application = application_label,
+                    outcome = "not present or unavailable",
+                    elapsed_us = applet_started.elapsed().as_micros() as u64,
+                    "CCID applet probe completed"
+                );
+                tracing::trace!(
+                    target: "pkcs11rs::discovery",
+                    reader = %reader_name,
+                    application = application_label,
+                    ?error,
+                    "CCID application not present"
                 );
                 continue;
             }
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                reader = %reader_name,
+                application = application_label,
+                outcome = "present",
+                elapsed_us = applet_started.elapsed().as_micros() as u64,
+                "CCID applet probe completed"
+            );
+            discovered_applications.push(application_label.to_owned());
             reader_state.set_selected_application(&application_aid)?;
             let application_connector = PcscAppletConnector::new_configured(
                 base_connector.clone(),
@@ -1854,7 +1900,12 @@ impl ModuleContext {
                                 log!(1, "YubiHSM Auth provider registration: {:?}", error);
                             }
                         }
-                        Err(error) => log!(2, "YubiHSM Auth credential discovery: {:?}", error),
+                        Err(error) => tracing::debug!(
+                            target: "pkcs11rs::discovery",
+                            reader = %reader_name,
+                            ?error,
+                            "YubiHSM Auth credential discovery failed"
+                        ),
                     }
                     Box::new(hsmauth_slot)
                 }
@@ -1899,7 +1950,13 @@ impl ModuleContext {
                 match slot.token_objects(slot_id) {
                     Ok(objects) => objects,
                     Err(error) => {
-                        log!(2, "CCID object discovery: {:?}", error);
+                        tracing::debug!(
+                            target: "pkcs11rs::discovery",
+                            reader = %reader_name,
+                            application = application_label,
+                            ?error,
+                            "CCID object discovery failed"
+                        );
                         slot.set_discovery_error(&error);
                         Vec::new()
                     }
@@ -1921,6 +1978,13 @@ impl ModuleContext {
             self.token_storage.as_ref(),
             self.fido_storage.as_ref(),
         )?;
+        tracing::debug!(
+            target: "pkcs11rs::discovery",
+            reader = %reader_name,
+            applications = ?discovered_applications,
+            slots = ?inserted_slot_ids,
+            "CCID reader slots registered"
+        );
         for (key, slot_id, secure_channel) in reader_fido_slots {
             if inserted_slot_ids.contains(&slot_id) {
                 ccid_fido_slots.insert(key, (slot_id, secure_channel));
@@ -1937,6 +2001,12 @@ impl ModuleContext {
         let readers = match self.enumerate_ccid_readers() {
             Ok(readers) => readers,
             Err(error) => {
+                tracing::info!(
+                    target: "pkcs11rs::discovery",
+                    readers = ?Vec::<String>::new(),
+                    outcome = "failed",
+                    "CCID reader discovery completed"
+                );
                 log!(1, "CCID reader enumeration failed: {:?}", error);
                 return Ok(HashMap::new());
             }
@@ -1945,17 +2015,29 @@ impl ModuleContext {
             .iter()
             .map(|reader| reader.connector.name())
             .collect::<HashSet<_>>();
+        let mut enumerated_reader_names = reader_names.iter().cloned().collect::<Vec<_>>();
+        enumerated_reader_names.sort();
+        tracing::info!(
+            target: "pkcs11rs::discovery",
+            readers = ?enumerated_reader_names,
+            "CCID reader discovery completed"
+        );
         let mut inventory = self
             .ccid_readers
             .lock()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         for (name, reader) in inventory.iter() {
+            let present = reader_names.contains(name);
             if let Some(presence) = &reader.host_presence {
-                presence.store(
-                    reader_names.contains(name),
-                    std::sync::atomic::Ordering::Release,
-                );
+                presence.store(present, std::sync::atomic::Ordering::Release);
             }
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                reader = %name,
+                slots = ?reader.slot_ids,
+                present,
+                "CCID registered reader reconciled"
+            );
         }
 
         let mut ccid_devices = HashMap::new();
@@ -1985,6 +2067,7 @@ impl ModuleContext {
                         name,
                         CcidReaderInventoryEntry {
                             host_presence: reader.host_presence,
+                            slot_ids,
                         },
                     );
                 }
@@ -2078,6 +2161,11 @@ impl ModuleContext {
         #[cfg(not(feature = "native-hardware"))]
         let _ = ccid_devices;
         #[cfg(feature = "native-hardware")]
+        tracing::info!(
+            target: "pkcs11rs::discovery",
+            "FIDO HID device discovery started"
+        );
+        #[cfg(feature = "native-hardware")]
         let hid_descriptors = if self.hardware_discovery {
             match enumerate_fido_devices() {
                 Ok(descriptors) => descriptors,
@@ -2090,7 +2178,14 @@ impl ModuleContext {
             Vec::new()
         };
         #[cfg(feature = "native-hardware")]
+        tracing::info!(
+            target: "pkcs11rs::discovery",
+            devices = ?hid_descriptors.iter().map(|descriptor| descriptor.name()).collect::<Vec<_>>(),
+            "FIDO HID device discovery completed"
+        );
+        #[cfg(feature = "native-hardware")]
         for descriptor in hid_descriptors {
+            let descriptor_name = descriptor.name();
             let io = match descriptor.open() {
                 Ok(io) => io,
                 Err(error) => {
@@ -2146,10 +2241,10 @@ impl ModuleContext {
             };
             let (device, shares_ccid_gate) = hid_device_context(&ccid_devices, identity);
             if shares_ccid_gate {
-                log!(
-                    2,
-                    "FIDO HID endpoint {} shares the physical-device operation gate with CCID",
-                    descriptor.name()
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    device = %descriptor_name,
+                    "FIDO HID endpoint shares the physical-device operation gate with CCID"
                 );
             }
             let endpoint = Rc::new(HidFidoEndpoint::new(
@@ -2161,28 +2256,34 @@ impl ModuleContext {
             ));
             let hid_slot = Fido2Slot::new_with_endpoint(endpoint);
             if let Some(key) = hid_slot.physical_device_key() {
-                log!(2, "FIDO HID physical-device candidate: {:?}", key);
                 match resolve_fido_duplicate(&ccid_fido_slots, &key) {
                     FidoDuplicateResolution::KeepSecuredCcid(ccid_slot_id) => {
-                        log!(
-                            2,
-                            "FIDO HID endpoint {:?} omitted in favor of explicitly secured CCID slot {}",
-                            key,
-                            ccid_slot_id
+                        tracing::debug!(
+                            target: "pkcs11rs::discovery",
+                            device = %descriptor_name,
+                            ccid_slot_id,
+                            outcome = "omitted in favor of secured CCID",
+                            "FIDO HID slot reconciliation completed"
                         );
                         continue;
                     }
                     FidoDuplicateResolution::ReplaceCcidWithHid(ccid_slot_id) => {
                         slot_contexts.remove(&ccid_slot_id);
                         ccid_fido_slots.remove(&key);
-                        log!(
-                            2,
-                            "FIDO CCID slot {} replaced by the native HID endpoint for {:?}",
+                        tracing::debug!(
+                            target: "pkcs11rs::discovery",
+                            device = %descriptor_name,
                             ccid_slot_id,
-                            key
+                            outcome = "replaced duplicate CCID slot",
+                            "FIDO HID slot reconciliation completed"
                         );
                     }
-                    FidoDuplicateResolution::Independent => {}
+                    FidoDuplicateResolution::Independent => tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        device = %descriptor_name,
+                        outcome = "independent",
+                        "FIDO HID slot reconciliation completed"
+                    ),
                 }
             }
             let mut slot = Box::new(hid_slot) as Box<dyn Slot>;
@@ -2209,7 +2310,13 @@ impl ModuleContext {
                     Vec::new()
                 }
             };
-            if let Err(error) = slot_contexts.insert_slot_contexts(
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                device = %descriptor_name,
+                slot_id,
+                "FIDO HID slot registration started"
+            );
+            match slot_contexts.insert_slot_contexts(
                 vec![(slot_id, slot, token_objects)],
                 self.handles.clone(),
                 self.pinentry.clone(),
@@ -2217,7 +2324,23 @@ impl ModuleContext {
                 self.token_storage.as_ref(),
                 self.fido_storage.as_ref(),
             ) {
-                log!(1, "FIDO HID slot context registration: {:?}", error);
+                Ok(_) => tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    device = %descriptor_name,
+                    slot_id,
+                    outcome = "registered",
+                    "FIDO HID slot registration completed"
+                ),
+                Err(error) => {
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        device = %descriptor_name,
+                        slot_id,
+                        outcome = "failed",
+                        "FIDO HID slot registration completed"
+                    );
+                    log!(1, "FIDO HID slot context registration: {:?}", error);
+                }
             }
         }
         let yubihsm_slot_ids = slot_contexts
@@ -2353,16 +2476,37 @@ impl ModuleContext {
                 .discovered_slots
                 .iter()
                 .filter(|(identity, _)| identity.source == *source)
-                .map(|(_, registration)| registration.clone())
+                .map(|(identity, registration)| (identity.clone(), registration.clone()))
                 .collect::<Vec<_>>()
         };
-        for registration in registrations {
+        for (identity, registration) in registrations {
             registration.backend.mark_absent();
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                provider = source.provider,
+                endpoint = %source.endpoint,
+                device = %identity.provider_slot_id,
+                slot_id = registration.slot_id,
+                outcome = "absent; slot retained",
+                "YubiHSM device reconciled"
+            );
         }
         Ok(())
     }
 
     fn reconcile_discovery_snapshot(&self, snapshot: DiscoverySnapshot) -> Result<(), Error> {
+        let discovered_devices = snapshot
+            .candidates
+            .iter()
+            .map(|candidate| candidate.identity().provider_slot_id.clone())
+            .collect::<Vec<_>>();
+        tracing::info!(
+            target: "pkcs11rs::discovery",
+            provider = snapshot.source.provider,
+            endpoint = %snapshot.source.endpoint,
+            devices = ?discovered_devices,
+            "YubiHSM device discovery completed"
+        );
         let discovered_identities = snapshot
             .candidates
             .iter()
@@ -2383,18 +2527,55 @@ impl ModuleContext {
         for (identity, registration) in &registrations {
             if !discovered_identities.contains(identity) {
                 registration.backend.mark_absent();
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    provider = snapshot.source.provider,
+                    endpoint = %snapshot.source.endpoint,
+                    device = %identity.provider_slot_id,
+                    slot_id = registration.slot_id,
+                    outcome = "absent; slot retained",
+                    "YubiHSM device reconciled"
+                );
             }
         }
         for candidate in snapshot.candidates {
-            if let Some(registration) = registrations.get(candidate.identity()) {
+            let identity = candidate.identity().clone();
+            if let Some(registration) = registrations.get(&identity) {
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    provider = snapshot.source.provider,
+                    endpoint = %snapshot.source.endpoint,
+                    device = %identity.provider_slot_id,
+                    slot_id = registration.slot_id,
+                    "YubiHSM slot refresh started"
+                );
                 if let Err(error) = registration.backend.apply_candidate(candidate) {
                     registration.backend.mark_absent();
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        provider = snapshot.source.provider,
+                        endpoint = %snapshot.source.endpoint,
+                        device = %identity.provider_slot_id,
+                        slot_id = registration.slot_id,
+                        outcome = "failed; slot marked absent",
+                        "YubiHSM slot refresh completed"
+                    );
                     log!(
                         1,
                         "{} discovery at {} could not refresh slot {}: {error:?}",
                         snapshot.source.provider,
                         snapshot.source.endpoint,
                         registration.slot_id
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        provider = snapshot.source.provider,
+                        endpoint = %snapshot.source.endpoint,
+                        device = %identity.provider_slot_id,
+                        slot_id = registration.slot_id,
+                        outcome = "present",
+                        "YubiHSM slot refresh completed"
                     );
                 }
                 continue;
@@ -2405,6 +2586,14 @@ impl ModuleContext {
                 .map_err(|_| Error::from(CKR_MUTEX_BAD))?
                 .next_slot_id()
                 .ok_or(CKR_DEVICE_ERROR)?;
+            tracing::debug!(
+                target: "pkcs11rs::discovery",
+                provider = snapshot.source.provider,
+                endpoint = %snapshot.source.endpoint,
+                device = %identity.provider_slot_id,
+                slot_id,
+                "YubiHSM slot initialization started"
+            );
             match self.prepare_discovered_slot(slot_id, candidate) {
                 Ok(prepared) => {
                     let mut slot_contexts = self
@@ -2422,13 +2611,33 @@ impl ModuleContext {
                     slot_contexts
                         .discovered_slots
                         .insert(prepared.identity, prepared.registration);
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        provider = snapshot.source.provider,
+                        endpoint = %snapshot.source.endpoint,
+                        device = %identity.provider_slot_id,
+                        slot_id,
+                        outcome = "registered",
+                        "YubiHSM slot initialization completed"
+                    );
                 }
-                Err(error) => log!(
-                    1,
-                    "{} discovery at {} could not initialize a slot: {error:?}",
-                    snapshot.source.provider,
-                    snapshot.source.endpoint
-                ),
+                Err(error) => {
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        provider = snapshot.source.provider,
+                        endpoint = %snapshot.source.endpoint,
+                        device = %identity.provider_slot_id,
+                        slot_id,
+                        outcome = "failed",
+                        "YubiHSM slot initialization completed"
+                    );
+                    log!(
+                        1,
+                        "{} discovery at {} could not initialize a slot: {error:?}",
+                        snapshot.source.provider,
+                        snapshot.source.endpoint
+                    );
+                }
             }
         }
         Ok(())
@@ -2436,6 +2645,12 @@ impl ModuleContext {
 
     fn refresh_http_yubihsm_discovery(&self) -> Result<(), Error> {
         for (endpoint_index, configured_url) in self.yubihsm_urls.iter().enumerate() {
+            let _operation = crate::logging::Operation::info(tracing::info_span!(
+                target: "pkcs11rs::discovery",
+                "yubihsm.refresh_http_endpoint",
+                endpoint_index,
+                endpoint = %configured_url
+            ));
             let source = DiscoverySourceIdentity::configured_http_yubihsm(endpoint_index);
             let candidate_endpoint = HttpConnectorEndpoint::new(configured_url.clone())?;
             let endpoint = {
@@ -2458,6 +2673,14 @@ impl ModuleContext {
                 Ok(connectors) => connectors,
                 Err(error) => {
                     endpoint.mark_disconnected();
+                    tracing::info!(
+                        target: "pkcs11rs::discovery",
+                        provider = HTTP_YUBIHSM_DISCOVERY_PROVIDER,
+                        endpoint = %configured_url,
+                        devices = ?Vec::<String>::new(),
+                        outcome = "failed",
+                        "YubiHSM device discovery completed"
+                    );
                     log!(
                         1,
                         "YubiHSM connector discovery refresh at {configured_url}: {error:?}"
@@ -2485,6 +2708,10 @@ impl ModuleContext {
 
     #[cfg(feature = "native-hardware")]
     fn refresh_usb_yubihsm_discovery(&self) -> Result<(), Error> {
+        let _operation = crate::logging::Operation::info(tracing::info_span!(
+            target: "pkcs11rs::discovery",
+            "yubihsm.refresh_usb"
+        ));
         if !self.hardware_discovery {
             return Ok(());
         }
@@ -2493,6 +2720,14 @@ impl ModuleContext {
             Ok(candidates) => candidates,
             Err(error) => {
                 self.mark_discovery_source_absent(&source)?;
+                tracing::info!(
+                    target: "pkcs11rs::discovery",
+                    provider = USB_YUBIHSM_DISCOVERY_PROVIDER,
+                    endpoint = %source.endpoint,
+                    devices = ?Vec::<String>::new(),
+                    outcome = "failed",
+                    "YubiHSM device discovery completed"
+                );
                 log!(1, "YubiHSM USB discovery refresh: {error}");
                 return Ok(());
             }
@@ -2532,6 +2767,10 @@ impl ModuleContext {
     }
 
     fn refresh_registered_slots(&self) -> Result<(), Error> {
+        let _operation = crate::logging::Operation::new(tracing::debug_span!(
+            target: "pkcs11rs::discovery",
+            "slots.refresh_registered"
+        ));
         let refreshable_slots = {
             let slot_contexts = self
                 .slot_contexts
@@ -2558,6 +2797,10 @@ impl ModuleContext {
 
     #[cfg(not(feature = "abi-tests"))]
     fn refresh_ccid_discovery(&self) -> Result<(), Error> {
+        let _operation = crate::logging::Operation::info(tracing::info_span!(
+            target: "pkcs11rs::discovery",
+            "ccid.refresh"
+        ));
         let mut slot_contexts = self
             .slot_contexts
             .write()
@@ -2574,6 +2817,11 @@ impl ModuleContext {
 
     #[allow(unreachable_code)]
     pub(crate) fn refresh_discovery_after_init(&self, initialized: bool) -> Result<(), Error> {
+        let _operation = crate::logging::Operation::info(tracing::info_span!(
+            target: "pkcs11rs::discovery",
+            "module.refresh_discovery",
+            initialized
+        ));
         let _refresh = self
             .discovery_refresh
             .lock()
@@ -2800,7 +3048,7 @@ mod discovery_tests {
     #[cfg(not(feature = "abi-tests"))]
     fn connector_test_context(url: String) -> ModuleContext {
         let mut configuration = ModuleConfiguration::resolve(None).unwrap();
-        configuration.debug_level = 0;
+        configuration.logging_level = Some(crate::logging::LogLevel::Off);
         configuration.pinentry = None;
         configuration.hardware_discovery = false;
         configuration.token_storage = None;
@@ -3112,7 +3360,7 @@ mod discovery_tests {
     fn disabled_local_discovery_without_explicit_slots_yields_zero_slots() {
         let configuration = ModuleConfiguration::resolve(None).unwrap();
         let context = ModuleContext {
-            debug_level: 0,
+            logging: None,
             hardware_discovery: false,
             software_slots: Vec::new(),
             software_discovery_pins: HashMap::new(),

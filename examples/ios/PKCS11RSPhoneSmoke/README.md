@@ -3,8 +3,11 @@
 This small UIKit application links the generated `PKCS11RS.xcframework` and
 passes `PKCS11RS_INITIALIZE_ARGS_V1` through `CK_C_INITIALIZE_ARGS.pReserved`.
 The extension contains the versioned JSON configuration and a host CCID reader
-enumerator. The app displays the module, slot, and token metadata returned by
-PKCS #11. For every present slot it also enumerates the mechanisms with
+enumerator plus a tracing log callback. While discovery runs, the app displays
+live pkcs11rs logs, follows the newest entry, and leaves that view selected when
+discovery completes. The Log/Inventory control provides access to both
+scrollable views. For every
+present slot the inventory also enumerates the mechanisms with
 `C_GetMechanismList`, queries their key-size ranges and flags with
 `C_GetMechanismInfo`, and displays names returned by
 `PKCS11RS_GetMechanismName`.
@@ -36,10 +39,18 @@ transmit APIs, waits off the main thread, copies the response into Rust's
 caller-owned buffer, and then returns the PKCS #11 status. The app retains every
 reader callback context for the lifetime of the module.
 
-The UI displays only the PKCS #11 module and slot inventory returned after
-initialization. It does not display reader metadata, enumeration status, or
-per-APDU transport diagnostics. Enumeration itself sends no APDUs and does not
-authenticate, change configuration, or modify objects on the key.
+The log callback copies each synchronous Rust event and coalesces any burst into
+one update on the next main-loop turn without reentering PKCS #11. Actual events
+therefore appear continuously without flooding the UI queue. A separate elapsed
+`Working…` indicator continues updating during long calls that naturally emit
+no intermediate events. The smoke JSON requests the `debug` level, which adds
+named reader and device inventories, each applet probe and outcome, stable slot
+registration and retention, deduplication decisions, phase timing, and each
+PKCS #11 call with its outcome and duration. Connector payloads and responses,
+per-request transport and APDU timing, and session state remain reserved for
+`trace`.
+Enumeration and inspection do not authenticate, change configuration, or
+modify objects on the key.
 
 This path requires a physical iPhone or iPad with a CCID-enabled key attached
 directly or through a USB-C adapter. A Simulator cannot expose that USB reader.

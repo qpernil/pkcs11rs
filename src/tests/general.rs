@@ -219,7 +219,8 @@ pub fn initialize_accepts_json_reserved_configuration() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     let mut configuration =
-        b"{\"version\":1,\"debug\":1,\"hardware\":{\"discovery\":false}}\0".to_vec();
+        b"{\"version\":1,\"logging\":{\"level\":\"warn\"},\"hardware\":{\"discovery\":false}}\0"
+            .to_vec();
     let mut init_args = CK_C_INITIALIZE_ARGS {
         CreateMutex: None,
         DestroyMutex: None,
@@ -236,7 +237,7 @@ pub fn initialize_accepts_json_reserved_configuration() {
     {
         let module = crate::lock_context_read().unwrap();
         let context = module.as_ref().unwrap();
-        assert_eq!(context.debug_level, 1);
+        assert!(context.logging.is_some());
         assert!(!context.hardware_discovery);
     }
     assert_eq!(
@@ -259,6 +260,28 @@ unsafe extern "C" fn enumerate_no_ccid_readers(
     CKR_OK as CK_RV
 }
 
+unsafe extern "C" fn capture_log_event(
+    context: *mut std::ffi::c_void,
+    _level: CK_ULONG,
+    _target: *const CK_UTF8CHAR,
+    _target_length: CK_ULONG,
+    message: *const CK_UTF8CHAR,
+    message_length: CK_ULONG,
+) {
+    let Some(logs) = (unsafe { context.cast::<std::sync::Mutex<Vec<String>>>().as_ref() }) else {
+        return;
+    };
+    let Ok(length) = usize::try_from(message_length) else {
+        return;
+    };
+    let Ok(message) = (unsafe { crate::from_raw_parts(message, length) }) else {
+        return;
+    };
+    logs.lock()
+        .unwrap()
+        .push(String::from_utf8_lossy(message).into_owned());
+}
+
 #[repr(C)]
 struct TestInitializeArgsV1 {
     magic: CK_ULONG,
@@ -268,6 +291,8 @@ struct TestInitializeArgsV1 {
     configuration_length: CK_ULONG,
     hardware_context: *mut std::ffi::c_void,
     enumerate_ccid_readers: Option<crate::backend::HostCcidEnumerate>,
+    log_context: *mut std::ffi::c_void,
+    log_event: Option<crate::logging::HostLogEvent>,
 }
 
 #[cfg(not(feature = "abi-tests"))]
@@ -276,7 +301,9 @@ pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
     HOST_CCID_ENUMERATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
-    let configuration = b"{\"version\":1,\"debug\":1,\"yubihsm\":{\"urls\":[]}}";
+    let configuration =
+        b"{\"version\":1,\"logging\":{\"level\":\"debug\"},\"yubihsm\":{\"urls\":[]}}";
+    let logs = std::sync::Mutex::new(Vec::<String>::new());
     let mut extension = TestInitializeArgsV1 {
         magic: crate::api::INITIALIZE_ARGS_MAGIC,
         size: std::mem::size_of::<TestInitializeArgsV1>() as CK_ULONG,
@@ -285,6 +312,10 @@ pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
         configuration_length: configuration.len() as CK_ULONG,
         hardware_context: std::ptr::null_mut(),
         enumerate_ccid_readers: Some(enumerate_no_ccid_readers),
+        log_context: (&logs as *const std::sync::Mutex<Vec<String>>)
+            .cast_mut()
+            .cast(),
+        log_event: Some(capture_log_event),
     };
     let mut init_args = CK_C_INITIALIZE_ARGS {
         CreateMutex: None,
@@ -316,6 +347,23 @@ pub fn initialize_accepts_magic_wrapped_configuration_and_ccid_enumerator() {
         HOST_CCID_ENUMERATIONS.load(std::sync::atomic::Ordering::Relaxed),
         2
     );
+    let logs = logs.lock().unwrap();
+    assert!(logs.iter().any(|line| line.contains("C_GetSlotList")));
+    assert!(logs
+        .iter()
+        .any(|line| { line.contains("PKCS #11 call returned") && line.contains("C_GetSlotList") }));
+    assert!(logs
+        .iter()
+        .filter(|line| line.contains("PKCS #11 call"))
+        .all(|line| !line.contains("pkcs11rs::ffi")));
+    assert!(logs.iter().any(|line| {
+        line.contains("CCID reader discovery completed")
+            && !line.contains("C_GetSlotList")
+            && !line.contains("module.refresh_discovery")
+            && !line.contains("ccid.refresh")
+            && !line.contains("ccid.enumerate_readers")
+    }));
+    drop(logs);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
         CKR_OK as CK_RV
@@ -334,6 +382,8 @@ pub fn initialize_rejects_unknown_magic_wrapper_version() {
         configuration_length: 0,
         hardware_context: std::ptr::null_mut(),
         enumerate_ccid_readers: None,
+        log_context: std::ptr::null_mut(),
+        log_event: None,
     };
     let mut init_args = CK_C_INITIALIZE_ARGS {
         CreateMutex: None,

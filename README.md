@@ -95,12 +95,13 @@ sessions.
 For integrations that can forward provider configuration,
 `CK_C_INITIALIZE_ARGS.pReserved` accepts either a direct NUL-terminated UTF-8
 JSON string or `PKCS11RS_INITIALIZE_ARGS_V1`. The versioned wrapper carries an
-explicit-length JSON value and an optional host CCID enumerator, which is how
-the iOS smoke app supplies CryptoTokenKit readers. pkcs11rs copies the
+explicit-length JSON value, an optional host CCID enumerator, and an optional
+log callback, which is how the iOS smoke app supplies CryptoTokenKit readers
+and displays live tracing output. pkcs11rs copies the
 configuration during `C_Initialize`; callback functions and their contexts must
 remain valid until `C_Finalize`. Explicit JSON fields take precedence, while
 omitted fields retain the documented environment-variable and built-in
-fallbacks. A null or empty direct string selects the legacy fallback behavior.
+fallbacks. A null or empty direct string selects environment and built-in defaults.
 For compatibility with providers such as OpenSSL, a nonempty direct string
 whose first non-whitespace character is not `{` is accepted as opaque
 application data and ignored; JSON-looking input is validated strictly. See
@@ -536,8 +537,9 @@ pkcs11rs opens PC/SC cards with `SCARD_SHARE_EXCLUSIVE` and does not currently
 use PC/SC transactions. A reader already held by another process therefore
 contributes no new CCID applet slots on that listing. On macOS this
 commonly includes GnuPG `scdaemon`; native FIDO HID discovery is independent
-and may still expose the authenticator. `PKCS11RS_DEBUG=1` logs the reader name
-when it cannot be opened, while level `2` also logs successful reader opens.
+and may still expose the authenticator. `PKCS11RS_LOG=warn` logs reader-open
+failures, `debug` adds successful discovery and phase timing, and `trace` adds
+per-request transport timing.
 See [CCID applet configuration](docs/ccid.md#pcsc-ownership-and-external-daemons)
 for the exact `scdaemon` configuration boundary.
 
@@ -585,15 +587,16 @@ Detailed configuration:
 
 ## Diagnostics
 
-`PKCS11RS_DEBUG` is read during `C_Initialize`:
-
-| Value | Output |
-| --- | --- |
-| unset or `0` | Disabled |
-| `1` | Initialization and applet-discovery failures |
-| `2` | API and transport diagnostics |
-
-Other values cause `C_Initialize` to return `CKR_ARGUMENTS_BAD`.
+`logging.level` in initialization JSON, or its `PKCS11RS_LOG` environment
+fallback, accepts `off`, `error`, `warn`, `info`, `debug`, or `trace`. An
+explicit level writes through the initialization-wrapper callback when one is
+present and otherwise to standard error. With neither a configured level nor a
+callback, pkcs11rs installs no subscriber and participates in an ambient Rust
+`tracing` subscriber. Debug output explains named reader/device discovery,
+applet outcomes, slot registration and retention, deduplication decisions,
+phase durations, and every PKCS #11 entry point with its return value and
+duration. Trace output adds API state diagnostics and per-request connector,
+APDU, and transport timing.
 
 ## Testing
 
