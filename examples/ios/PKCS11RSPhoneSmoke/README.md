@@ -1,14 +1,13 @@
 # PKCS11RS iPhone smoke test
 
 This small UIKit application links the generated `PKCS11RS.xcframework` and
-passes `PKCS11RS_INITIALIZE_ARGS_V1` through `CK_C_INITIALIZE_ARGS.pReserved`.
-The extension contains the versioned JSON configuration and tracing log
-callback. The application contains no CryptoTokenKit import, CCID reader
-objects, or transport callbacks; the iOS build of pkcs11rs discovers and uses
-CryptoTokenKit readers itself. While discovery runs, the app displays
-live pkcs11rs logs, follows the newest entry, and leaves that view selected when
-discovery completes. The Log/Inventory control provides access to both
-scrollable views. For every present slot the inventory opens a read-only public
+passes its NUL-terminated JSON configuration directly through
+`CK_C_INITIALIZE_ARGS.pReserved`. The application contains no CryptoTokenKit
+import, CCID reader objects, transport callbacks, or logging callbacks; the iOS
+build of pkcs11rs discovers and uses CryptoTokenKit readers and writes tracing
+events to Apple Unified Logging itself. The app shows an elapsed working
+indicator during discovery and then its scrollable inventory. For every
+present slot the inventory opens a read-only public
 session, enumerates every visible object with `C_FindObjects`, and displays its
 handle, class, label, ID, and key type when available. Object class and key type
 names come from the `PKCS11RS_GetObjectClassName` and
@@ -42,12 +41,13 @@ login, the app enumerates the objects again as an authenticated user, logs out,
 and closes the session.
 
 An unreachable configured YubiHSM endpoint is an isolated discovery failure:
-pkcs11rs records the failed endpoint and its outcome in Log, omits any remote
-token that is not currently present, and continues returning the persistent
-software token and available local CCID slots. A failure querying one returned
-slot is likewise reported on that slot without aborting the remaining
-inventory. Foregrounding the app retries remote discovery, so recovery does not
-require reinitializing the module or recreating the software token.
+pkcs11rs records the failed endpoint and its outcome in Unified Logging, omits
+any remote token that is not currently present, and continues returning the
+persistent software token and available local CCID slots. A failure querying
+one returned slot is likewise reported on that slot without aborting the
+remaining inventory. Foregrounding the app retries remote discovery, so
+recovery does not require reinitializing the module or recreating the software
+token.
 
 The app does not enumerate or register readers before `C_Initialize`. During
 every `C_GetSlotList`, normal hardware discovery asks the Rust-native iOS
@@ -71,15 +71,17 @@ iOS provider adapts each synchronous transport request to CryptoTokenKit's
 asynchronous session and transmit APIs and copies the completed response into
 the PKCS #11 caller's buffer. The per-reader worker confines CryptoTokenKit
 card I/O to one thread, serializes APDUs, and reuses its non-exclusive
-`TKSmartCard`. The current transport begins and ends an exclusive
-CryptoTokenKit session around each raw APDU. This provides CCID/APDU transport,
-not access to arbitrary USB interfaces or bulk endpoints.
+`TKSmartCard`. The app uses a default-QoS serial inspection queue so its
+synchronous PKCS #11 calls match the worker and blocking networking work while
+remaining off the main thread. The current transport begins and ends an
+exclusive CryptoTokenKit session around each raw APDU. This provides CCID/APDU
+transport, not access to arbitrary USB interfaces or bulk endpoints.
 
-The log callback copies each synchronous Rust event and coalesces any burst into
-one update on the next main-loop turn without reentering PKCS #11. Actual events
-therefore appear continuously without flooding the UI queue. A separate elapsed
-`Working…` indicator continues updating during long calls that naturally emit
-no intermediate events. The smoke JSON requests the `debug` level, which adds
+The smoke JSON requests the `debug` level, so pkcs11rs writes directly to Apple
+Unified Logging under subsystem `com.nilssoncrypto.pkcs11rs`; Rust tracing
+targets become log categories. View the live records in Xcode's console or in
+the macOS Console app with the device selected. The elapsed `Working…`
+indicator continues updating during long calls. Debug logging adds
 named reader and device inventories, each applet probe and outcome, stable slot
 registration and retention, deduplication decisions, phase timing, and each
 PKCS #11 call with its outcome and duration. Connector payloads and responses,

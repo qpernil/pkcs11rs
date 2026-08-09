@@ -94,20 +94,16 @@ Searches and active cryptographic operations belong to their individual
 sessions.
 
 For integrations that can forward provider configuration,
-`CK_C_INITIALIZE_ARGS.pReserved` accepts either a direct NUL-terminated UTF-8
-JSON string or `PKCS11RS_INITIALIZE_ARGS_V1`. The versioned wrapper carries an
-explicit-length JSON value and an optional log callback. The iOS smoke app uses
-the wrapper for configuration and live tracing; iOS CCID discovery and
-transport are native to pkcs11rs through CryptoTokenKit. pkcs11rs copies the
-configuration during `C_Initialize`; the log callback and its context must
-remain valid until `C_Finalize`. Explicit JSON fields take precedence, while
-omitted fields retain the documented environment-variable and built-in
-fallbacks. A null or empty direct string selects environment and built-in defaults.
+`CK_C_INITIALIZE_ARGS.pReserved` accepts a direct NUL-terminated UTF-8 JSON
+string. pkcs11rs reads the configuration during `C_Initialize` and does not
+retain its pointer. Explicit JSON fields take precedence, while omitted fields
+retain the documented environment-variable and built-in fallbacks. A null or
+empty string selects environment and built-in defaults.
 For compatibility with providers such as OpenSSL, a nonempty direct string
 whose first non-whitespace character is not `{` is accepted as opaque
 application data and ignored; JSON-looking input is validated strictly. See
 [Initialization configuration](docs/configuration.md) for the complete schema,
-wrapper ABI, validation rules, and C examples. `C_Finalize` still requires its
+validation rules, and C examples. `C_Finalize` still requires its
 reserved argument to be null.
 
 Initialization and finalization are nonblocking lifecycle transitions. They
@@ -229,9 +225,9 @@ available.
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
 linking the XCFramework from Swift while pkcs11rs itself enumerates local
 CryptoTokenKit smart-card readers and transmits their APDUs. The app passes
-only the versioned JSON configuration and log callback through
-`CK_C_INITIALIZE_ARGS.pReserved`; it contains no CryptoTokenKit or CCID
-transport code. The app also uses the
+only a direct JSON configuration string through
+`CK_C_INITIALIZE_ARGS.pReserved`; it contains no CryptoTokenKit, CCID
+transport, or logging callback code. The app also uses the
 pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
 library-owned canonical `CKM_*` string for a recognized mechanism or null for
 an unknown value. Parallel helpers provide canonical `CKR_*`, `CKO_*`, `CKK_*`,
@@ -597,10 +593,9 @@ Detailed configuration:
 
 `logging.level` in initialization JSON, or its `PKCS11RS_LOG` environment
 fallback, accepts `off`, `error`, `warn`, `info`, `debug`, or `trace`. An
-explicit level writes through the initialization-wrapper callback when one is
-present and otherwise to standard error. With neither a configured level nor a
-callback, pkcs11rs installs no subscriber and participates in an ambient Rust
-`tracing` subscriber. Debug output explains named reader/device discovery,
+explicit level writes to Apple Unified Logging on iOS and standard error on
+other platforms. With no configured level, pkcs11rs installs no subscriber and
+participates in an ambient Rust `tracing` subscriber. Debug output explains named reader/device discovery,
 applet outcomes, slot registration and retention, deduplication decisions,
 phase durations, and every PKCS #11 entry point with its return value and
 duration. Trace output adds API state diagnostics and per-request connector,

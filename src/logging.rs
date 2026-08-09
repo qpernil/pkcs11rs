@@ -1,11 +1,7 @@
-use crate::{CK_RV, CK_ULONG, CK_UTF8CHAR};
-use std::{
-    ffi::c_void,
-    io::{self, Write},
-    time::Instant,
-};
+use crate::CK_RV;
+use std::{io, time::Instant};
 use tracing::{Dispatch, Level, Span};
-use tracing_subscriber::fmt::{format::FmtSpan, MakeWriter};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LogLevel {
@@ -42,149 +38,30 @@ impl LogLevel {
     }
 }
 
-pub(crate) type HostLogEvent = unsafe extern "C" fn(
-    context: *mut c_void,
-    level: CK_ULONG,
-    target: *const CK_UTF8CHAR,
-    target_length: CK_ULONG,
-    message: *const CK_UTF8CHAR,
-    message_length: CK_ULONG,
-);
-
-#[derive(Clone, Copy)]
-pub(crate) struct HostLogProvider {
-    context: usize,
-    event: HostLogEvent,
-}
-
-impl HostLogProvider {
-    pub(crate) fn new(context: *mut c_void, event: HostLogEvent) -> Self {
-        Self {
-            context: context as usize,
-            event,
-        }
-    }
-}
-
-impl std::fmt::Debug for HostLogProvider {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("HostLogProvider")
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
-struct HostMakeWriter {
-    provider: HostLogProvider,
-}
-
-struct HostWriter {
-    provider: HostLogProvider,
-    level: CK_ULONG,
-    target: String,
-    message: Vec<u8>,
-}
-
-impl<'writer> MakeWriter<'writer> for HostMakeWriter {
-    type Writer = HostWriter;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        HostWriter {
-            provider: self.provider,
-            level: log_level(Level::TRACE),
-            target: "pkcs11rs".to_owned(),
-            message: Vec::new(),
-        }
-    }
-
-    fn make_writer_for(&'writer self, metadata: &tracing::Metadata<'_>) -> Self::Writer {
-        HostWriter {
-            provider: self.provider,
-            level: log_level(*metadata.level()),
-            target: metadata.target().to_owned(),
-            message: Vec::new(),
-        }
-    }
-}
-
-impl Write for HostWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.message.extend_from_slice(buffer);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Drop for HostWriter {
-    fn drop(&mut self) {
-        while self
-            .message
-            .last()
-            .is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
-        {
-            self.message.pop();
-        }
-        if self.message.is_empty() {
-            return;
-        }
-        let Ok(target_length) = CK_ULONG::try_from(self.target.len()) else {
-            return;
-        };
-        let Ok(message_length) = CK_ULONG::try_from(self.message.len()) else {
-            return;
-        };
-        unsafe {
-            (self.provider.event)(
-                self.provider.context as *mut c_void,
-                self.level,
-                self.target.as_ptr(),
-                target_length,
-                self.message.as_ptr(),
-                message_length,
-            );
-        }
-    }
-}
-
-const fn log_level(level: Level) -> CK_ULONG {
-    match level {
-        Level::ERROR => 1,
-        Level::WARN => 2,
-        Level::INFO => 3,
-        Level::DEBUG => 4,
-        Level::TRACE => 5,
-    }
-}
-
-pub(crate) fn configured_dispatch(
-    level: Option<LogLevel>,
-    host: Option<HostLogProvider>,
-) -> Option<Dispatch> {
-    let level = match (level, host) {
-        (None, None) => return None,
-        (None, Some(_)) => LogLevel::Trace,
-        (Some(level), _) => level,
-    };
+pub(crate) fn configured_dispatch(level: Option<LogLevel>) -> Option<Dispatch> {
+    let level = level?;
     if level == LogLevel::Off {
         return Some(Dispatch::new(tracing::subscriber::NoSubscriber::default()));
     }
     let max_level = level.filter();
     let span_events = FmtSpan::NONE;
-    match host {
-        Some(provider) => Some(Dispatch::new(
+    #[cfg(target_os = "ios")]
+    {
+        Some(Dispatch::new(
             tracing_subscriber::fmt()
                 .with_max_level(max_level)
                 .with_ansi(false)
                 .with_target(false)
+                .with_level(false)
+                .without_time()
                 .with_span_events(span_events)
-                .with_writer(HostMakeWriter { provider })
+                .with_writer(crate::apple::logging::AppleMakeWriter)
                 .finish(),
-        )),
-        None => Some(Dispatch::new(
+        ))
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Some(Dispatch::new(
             tracing_subscriber::fmt()
                 .with_max_level(max_level)
                 .with_ansi(false)
@@ -192,7 +69,7 @@ pub(crate) fn configured_dispatch(
                 .with_span_events(span_events)
                 .with_writer(io::stderr)
                 .finish(),
-        )),
+        ))
     }
 }
 

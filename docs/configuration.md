@@ -1,10 +1,8 @@
 # Initialization configuration
 
 pkcs11rs accepts a versioned JSON configuration through
-`CK_C_INITIALIZE_ARGS.pReserved`. The reserved pointer may be either the
-direct JSON string described below or the magic-tagged
-`PKCS11RS_INITIALIZE_ARGS_V1` wrapper. The wrapper additionally carries a log
-callback. Both forms use the same PKCS #11 C ABI on iOS, macOS, Linux, and
+`CK_C_INITIALIZE_ARGS.pReserved`. The pointer is the direct JSON string
+described below and uses the same PKCS #11 C ABI on iOS, macOS, Linux, and
 Windows.
 
 In the direct form, the value must be a NUL-terminated UTF-8 string whose
@@ -173,77 +171,32 @@ The application owns `config` and only needs to keep it alive until
 a `CK_C_INITIALIZE_ARGS` structure, continues to use environment variables and
 defaults exactly as before.
 
-## Versioned initialization wrapper
-
-When `pReserved` begins with `PKCS11RS_INITIALIZE_ARGS_MAGIC`, pkcs11rs reads a
-`PKCS11RS_INITIALIZE_ARGS_V1` instead of a direct string. `ulSize` must equal
-the size of the complete version-one structure and `ulVersion` must equal
-`PKCS11RS_INITIALIZE_ARGS_VERSION`; an invalid size or version returns
-`CKR_ARGUMENTS_BAD`. `pConfiguration` contains exactly
-`ulConfigurationLen` UTF-8 bytes and need not be NUL-terminated. The length is
-limited to 64 KiB. A zero length supplies no explicit JSON configuration.
-
-```c
-static void log_event(
-    void *log_context,
-    CK_ULONG level,
-    const CK_UTF8CHAR *target,
-    CK_ULONG target_length,
-    const CK_UTF8CHAR *message,
-    CK_ULONG message_length);
-
-static const CK_UTF8CHAR config[] =
-    "{\"version\":1,\"hardware\":{\"discovery\":true},"
-    "\"yubihsm\":{\"urls\":[]}}";
-
-PKCS11RS_INITIALIZE_ARGS_V1 extension = {0};
-extension.ulMagic = PKCS11RS_INITIALIZE_ARGS_MAGIC;
-extension.ulSize = sizeof(extension);
-extension.ulVersion = PKCS11RS_INITIALIZE_ARGS_VERSION;
-extension.pConfiguration = config;
-extension.ulConfigurationLen = sizeof(config) - 1;
-extension.pLogContext = NULL; /* Or an application-owned log sink. */
-extension.logEvent = log_event;
-
-CK_C_INITIALIZE_ARGS args = {0};
-args.flags = CKF_OS_LOCKING_OK;
-args.pReserved = &extension;
-
-CK_RV rv = C_Initialize(&args);
-```
-
-The wrapper and configuration bytes only need to remain alive through
-`C_Initialize`. The log callback and its context must remain valid until
-`C_Finalize`. It may run on any thread making a PKCS #11 call and must support
-that calling model.
-
-`logEvent` receives synchronous, formatted tracing events and must copy any
-bytes it retains before returning. It must not reenter PKCS #11. Levels use the
-`PKCS11RS_LOG_*` constants in `pkcs11rs.h`; the callback remains valid until
-`C_Finalize`. The JSON or environment log level filters events before the
-callback. With a callback and no explicit level, all levels are delivered so
-the host can filter them.
-
 When `hardware.discovery` is true, desktop builds enumerate CCID readers with
 PC/SC and iOS builds use CryptoTokenKit. If it is false, native local hardware
 discovery does not run.
 
-If the reserved pointer does not contain the exact magic value, pkcs11rs uses
-the direct-string interpretation. The declarations in
-[`pkcs11rs.h`](../pkcs11rs.h) are the authoritative C ABI.
-
 ## Diagnostics
 
 `logging.level` and its `PKCS11RS_LOG` fallback accept `off`, `error`, `warn`,
-`info`, `debug`, or `trace`. An explicit level with no host callback installs a
-module-local formatter writing to standard error. A host callback receives the
-same module-local formatted events. If neither a level nor callback is
-configured, pkcs11rs installs no subscriber and its events flow to an ambient
-`tracing` subscriber when the Rust host has one.
+`info`, `debug`, or `trace`. An explicit level installs a module-local
+subscriber. It writes to Apple Unified Logging on iOS and standard error on
+other platforms. If no level is configured, pkcs11rs installs no subscriber
+and its events flow to an ambient `tracing` subscriber when the Rust host has
+one.
 
-The host callback receives the tracing target separately from the formatted
-message; the message does not repeat the target. Module-local standard-error
-output retains its target prefix.
+On iOS the subsystem is `com.nilssoncrypto.pkcs11rs`, and each Rust tracing
+target is used as the Unified Logging category. Rust `trace` and `debug` map to
+Apple `debug`, `info` maps to `info`, `warn` maps to `default`, and `error` maps
+to `error`; ordinary errors are not promoted to Apple `fault`. Unified Logging
+already records timestamp, level, subsystem, and category, so the formatted
+message does not repeat them. Diagnostic text is submitted as public data so
+it remains useful in Console and Xcode.
+
+The iOS emitter has no C compiler or host callback dependency. It calls the
+system logging ABI directly from Rust and reproduces Clang's fixed
+`%{public}s` argument encoding for `_os_log_impl`. That encoded-buffer entry
+point is an Apple implementation ABI rather than a documented source API; the
+encoding is deliberately confined to the iOS logging adapter.
 
 Debug output explains discovery results and slot inventory: named readers and
 devices, applet probes and outcomes, stable slot registration, presence and

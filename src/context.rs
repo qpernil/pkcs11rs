@@ -812,23 +812,13 @@ impl std::fmt::Debug for SessionContext {
 }
 
 impl ModuleContext {
-    #[cfg(all(test, not(feature = "abi-tests")))]
     #[allow(unused_mut)]
     pub(crate) fn new_with_configuration(
         configuration: ModuleConfiguration,
     ) -> Result<ModuleContext, Error> {
-        Self::new_with_configuration_and_log(configuration, None)
-    }
-
-    #[allow(unused_mut)]
-    pub(crate) fn new_with_configuration_and_log(
-        configuration: ModuleConfiguration,
-        host_log_provider: Option<crate::logging::HostLogProvider>,
-    ) -> Result<ModuleContext, Error> {
         #[cfg(feature = "abi-tests")]
         let _ = (configuration.yubihsm_public_discovery.as_ref(),);
-        let logging =
-            crate::logging::configured_dispatch(configuration.logging_level, host_log_provider);
+        let logging = crate::logging::configured_dispatch(configuration.logging_level);
         let module_logging = logging.clone();
         let _logging_guard = logging.as_ref().map(tracing::dispatcher::set_default);
         let pinentry = Arc::new(pinentry::Pinentry::from_configuration(

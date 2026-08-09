@@ -79,44 +79,6 @@ CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetProfileIdName)(
   CK_PROFILE_ID value
 );
 
-#define PKCS11RS_LOG_ERROR 1UL
-#define PKCS11RS_LOG_WARN  2UL
-#define PKCS11RS_LOG_INFO  3UL
-#define PKCS11RS_LOG_DEBUG 4UL
-#define PKCS11RS_LOG_TRACE 5UL
-
-/* pTarget identifies the tracing target and is not repeated in pMessage. */
-typedef void (*PKCS11RS_LOG_EVENT)(
-  void *pLogContext,
-  CK_ULONG ulLevel,
-  const CK_UTF8CHAR *pTarget,
-  CK_ULONG ulTargetLen,
-  const CK_UTF8CHAR *pMessage,
-  CK_ULONG ulMessageLen
-);
-
-#define PKCS11RS_INITIALIZE_ARGS_MAGIC 0x50313150UL
-#define PKCS11RS_INITIALIZE_ARGS_VERSION 1UL
-
-/*
- * Optional versioned value for CK_C_INITIALIZE_ARGS.pReserved. When pReserved
- * begins with PKCS11RS_INITIALIZE_ARGS_MAGIC, pkcs11rs reads this wrapper;
- * otherwise it retains the existing interpretation of pReserved as a direct
- * NUL-terminated JSON configuration string. Native builds use PC/SC for CCID
- * discovery on desktop platforms and CryptoTokenKit on iOS. The JSON
- * configuration and this structure only need to live through C_Initialize;
- * the log callback context must live until C_Finalize.
- */
-typedef struct PKCS11RS_INITIALIZE_ARGS_V1 {
-  CK_ULONG ulMagic;
-  CK_ULONG ulSize;
-  CK_ULONG ulVersion;
-  const CK_UTF8CHAR *pConfiguration;
-  CK_ULONG ulConfigurationLen;
-  void *pLogContext;
-  PKCS11RS_LOG_EVENT logEvent;
-} PKCS11RS_INITIALIZE_ARGS_V1;
-
 typedef struct CKM_YUBICO_AES_CCM_WRAP_PARAMS {
   CK_ULONG format;
 } CKM_YUBICO_AES_CCM_WRAP_PARAMS;

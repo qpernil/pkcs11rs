@@ -1,7 +1,4 @@
 mod ccid;
-#[cfg(target_os = "ios")]
-#[path = "cryptotokenkit.rs"]
-mod ccid_provider;
 #[cfg(not(target_os = "ios"))]
 #[path = "pcsc.rs"]
 mod ccid_provider;
@@ -13,11 +10,14 @@ mod software;
 mod traits;
 mod yubihsm;
 
+#[cfg(target_os = "ios")]
+pub(crate) use crate::apple::cryptotokenkit::{CcidProvider, CcidReader};
 pub(crate) use ccid::{
     ccid_application_label, default_ccid_applications, parse_ccid_application,
     parse_ccid_application_list, parse_secure_channel, CcidApplication, CcidConfiguration,
     HsmAuthSlot, IssuerSecurityDomainSlot, SecureChannelProtocol,
 };
+#[cfg(not(target_os = "ios"))]
 pub(crate) use ccid_provider::{CcidProvider, CcidReader};
 pub(crate) use crypto::{
     digest_for_hash_mechanism, ec_curve_from_parameters, ec_curve_parameters, ec_parameters,
