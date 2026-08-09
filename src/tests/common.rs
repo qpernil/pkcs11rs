@@ -6887,7 +6887,7 @@ impl crate::Slot for ConcurrentSlot {
     fn product(&self) -> &str {
         match self.kind {
             crate::SlotKind::Synthetic => "Synthetic token",
-            crate::SlotKind::Software => "Software",
+            crate::SlotKind::Software => "Software token",
             crate::SlotKind::YubiHsm => "YubiHSM",
             crate::SlotKind::Ccid(crate::CcidApplication::Piv) => "PIV",
             crate::SlotKind::Ccid(crate::CcidApplication::OpenPgp) => "OpenPGP",

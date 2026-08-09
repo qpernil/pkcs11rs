@@ -1449,7 +1449,10 @@ class Pkcs11AbiTests(unittest.TestCase):
                     named_slots[label] = slot_id
                     self.assertEqual(
                         token_info.flags,
-                        CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED,
+                        CKF_RNG
+                        | CKF_LOGIN_REQUIRED
+                        | CKF_USER_PIN_INITIALIZED
+                        | CKF_TOKEN_INITIALIZED,
                     )
                     self.assertEqual(token_info.ulMinPinLen, 8)
                     self.assertEqual(token_info.ulMaxPinLen, 1024)

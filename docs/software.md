@@ -22,16 +22,18 @@ hardware-discovery values are `0` and `1`.
 
 Each entry creates a separate slot context with separate object handles and
 sessions. The name is reported as `CK_TOKEN_INFO.label`; the slot description
-is `pkcs11rs software slot: <name>`. The token model is `Software`, the
+is `pkcs11rs software slot: <name>`. The token model is `Software token`, the
 manufacturer is `pkcs11rs`, and its deterministic serial is `SOFTWARE`
 followed by the zero-padded configuration-list ordinal.
 `CK_SLOT_INFO.flags` contains only `CKF_TOKEN_PRESENT`; it never contains
 `CKF_HW_SLOT`. Mechanism flags never contain `CKF_HW`.
 
-The token reports `CKF_RNG | CKF_LOGIN_REQUIRED`. `C_InitToken` sets
-`CKF_TOKEN_INITIALIZED`; the first `C_InitPIN` separately sets
-`CKF_USER_PIN_INITIALIZED`. Software tokens have no protected authentication
-path. PINs contain 8–1024 UTF-8 bytes.
+The token reports `CKF_RNG | CKF_LOGIN_REQUIRED`. Without persistent storage,
+it also reports both `CKF_TOKEN_INITIALIZED` and `CKF_USER_PIN_INITIALIZED`
+because its ephemeral PIN gate is ready immediately. With storage, a fresh
+token reports neither flag: `C_InitToken` sets `CKF_TOKEN_INITIALIZED`, and the
+first `C_InitPIN` separately sets `CKF_USER_PIN_INITIALIZED`. Software tokens
+have no protected authentication path. PINs contain 8–1024 UTF-8 bytes.
 
 ## Login and PIN initialization
 
