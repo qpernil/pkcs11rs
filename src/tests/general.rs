@@ -758,10 +758,16 @@ fn passive_ccid_slots_do_not_repeat_presence_select() {
     let hsmauth_aid = crate::hsmauth::AID.to_vec();
     let mut hsmauth = crate::HsmAuthSlot::new(connector(), hsmauth_aid);
     assert!(crate::Slot::init_slot(&mut hsmauth).is_ok());
+    assert!(!crate::Slot::mechanisms(&hsmauth)
+        .iter()
+        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
 
     let issuer_sd_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
     let mut issuer_sd = crate::IssuerSecurityDomainSlot::new(connector(), issuer_sd_aid);
     assert!(crate::Slot::init_slot(&mut issuer_sd).is_ok());
+    assert!(!crate::Slot::mechanisms(&issuer_sd)
+        .iter()
+        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
 }
 
 #[test]
@@ -1444,7 +1450,7 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
             .iter()
             .any(|mechanism| mechanism.type_ == unsupported.type_));
     }
-    assert!(mechanisms
+    assert!(!mechanisms
         .iter()
         .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
     for private_only in [
