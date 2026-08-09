@@ -2,8 +2,10 @@
 
 This small UIKit application links the generated `PKCS11RS.xcframework` and
 passes `PKCS11RS_INITIALIZE_ARGS_V1` through `CK_C_INITIALIZE_ARGS.pReserved`.
-The extension contains the versioned JSON configuration and a host CCID reader
-enumerator plus a tracing log callback. While discovery runs, the app displays
+The extension contains the versioned JSON configuration and tracing log
+callback. The application contains no CryptoTokenKit import, CCID reader
+objects, or transport callbacks; the iOS build of pkcs11rs discovers and uses
+CryptoTokenKit readers itself. While discovery runs, the app displays
 live pkcs11rs logs, follows the newest entry, and leaves that view selected when
 discovery completes. The Log/Inventory control provides access to both
 scrollable views. For every present slot the inventory opens a read-only public
@@ -47,20 +49,16 @@ slot is likewise reported on that slot without aborting the remaining
 inventory. Foregrounding the app retries remote discovery, so recovery does not
 require reinitializing the module or recreating the software token.
 
-The app does not enumerate or register readers before `C_Initialize`.
-`C_Initialize` retains the enumerator and its context in the module. During
-every `C_GetSlotList`, normal hardware discovery invokes
-`enumerateCcidReadersCallback`. Swift then reads the current
-`TKSmartCardSlotManager` inventory and calls the Rust-provided reader sink once
-per reader with its name, ATR, APDU sizes, callback context, and
-`hostCcidTransmitCallback`. The reader objects are retained until the module is
-finalized.
+The app does not enumerate or register readers before `C_Initialize`. During
+every `C_GetSlotList`, normal hardware discovery asks the Rust-native iOS
+provider for the current `TKSmartCardSlotManager` inventory. pkcs11rs reads each
+reader's name, ATR, and APDU limits directly. A reader that contributes slots
+gets one lazy Rust worker that resolves and reuses its `TKSmartCard`.
 
 The smoke configuration leaves `hardware.discovery` at its default of `true`.
-That setting is the policy gate for both native and host-provided hardware
-discovery. A native desktop build without a host enumerator uses PC/SC. A build
-initialized with a host enumerator uses that provider for CCID readers. Both
-providers feed the same Rust reader loop and configured CCID slot discovery.
+That setting is the policy gate for native hardware discovery. A desktop build
+uses PC/SC and an iOS build uses CryptoTokenKit. Both feed the same Rust reader
+loop and configured CCID slot discovery.
 
 A configured application becomes a slot only when its AID can be selected. The
 result uses the existing PIV, OpenPGP, YubiHSM Auth, Issuer Security Domain, or
@@ -68,11 +66,14 @@ FIDO2-over-CCID slot implementation; no applet logic is implemented in Swift.
 YubiKey FIDO2 normally uses its separate FIDO interface and therefore does not
 become a CCID slot unless the configured FIDO2 AID is actually selectable.
 
-The PKCS #11 inspection runs on a background queue. The callback adapts each
-synchronous Rust transport request to CryptoTokenKit's asynchronous session and
-transmit APIs, waits off the main thread, copies the response into Rust's
-caller-owned buffer, and then returns the PKCS #11 status. The app retains every
-reader callback context for the lifetime of the module.
+The PKCS #11 inspection runs on a background queue. Inside pkcs11rs, the native
+iOS provider adapts each synchronous transport request to CryptoTokenKit's
+asynchronous session and transmit APIs and copies the completed response into
+the PKCS #11 caller's buffer. The per-reader worker confines CryptoTokenKit
+card I/O to one thread, serializes APDUs, and reuses its non-exclusive
+`TKSmartCard`. The current transport begins and ends an exclusive
+CryptoTokenKit session around each raw APDU. This provides CCID/APDU transport,
+not access to arbitrary USB interfaces or bulk endpoints.
 
 The log callback copies each synchronous Rust event and coalesces any burst into
 one update on the next main-loop turn without reentering PKCS #11. Actual events

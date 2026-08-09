@@ -45,7 +45,7 @@ pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --show-info
 ```
 
 Set `PKCS11RS_HARDWARE_DISCOVERY=0` to disable native FIDO HID discovery and
-the FIDO probe over either native or host-provided CCID, along with all other
+the FIDO probe over native CCID, along with all other
 automatic local hardware discovery.
 
 A FIDO2 slot is created when the FIDO AID can be selected. As with the other

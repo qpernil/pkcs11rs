@@ -1119,6 +1119,18 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
 
 #[cfg(feature = "native-hardware")]
 impl PcscConnector {
+    pub(crate) fn new(reader: std::ffi::CString, context: pcsc::Context) -> Self {
+        Self {
+            reader,
+            context,
+            state: Arc::new(Default::default()),
+        }
+    }
+
+    pub(crate) fn reader_state(&self) -> Arc<PcscReaderState> {
+        self.state.clone()
+    }
+
     fn _reconnect(&self) -> Result<(), Error> {
         let mut state = self
             .state

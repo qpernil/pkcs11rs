@@ -79,52 +79,6 @@ CK_DECLARE_FUNCTION(const char *, PKCS11RS_GetProfileIdName)(
   CK_PROFILE_ID value
 );
 
-/*
- * Host CCID transport used by PKCS11RS_ENUMERATE_CCID_READERS. It is invoked
- * synchronously on a PKCS #11 calling thread. pulResponseLen initially holds
- * the response capacity and must be replaced with the bytes written or the
- * required capacity when returning CKR_BUFFER_TOO_SMALL.
- */
-typedef CK_RV (*PKCS11RS_HOST_CCID_TRANSMIT)(
-  void *pContext,
-  const CK_BYTE *pCommand,
-  CK_ULONG ulCommandLen,
-  CK_BYTE *pResponse,
-  CK_ULONG *pulResponseLen,
-  CK_ULONG ulTimeoutMilliseconds
-);
-
-/*
- * Reader sink supplied by pkcs11rs to a host enumerator. Reader metadata is
- * copied before the call returns. pContext and transmit must remain valid for
- * the initialized module's lifetime.
- */
-typedef CK_RV (*PKCS11RS_ADD_CCID_READER)(
-  void *pSinkContext,
-  const CK_UTF8CHAR *pReaderName,
-  CK_ULONG ulReaderNameLen,
-  const CK_BYTE *pAtr,
-  CK_ULONG ulAtrLen,
-  CK_ULONG ulMaxInputLen,
-  CK_ULONG ulMaxOutputLen,
-  void *pContext,
-  PKCS11RS_HOST_CCID_TRANSMIT transmit
-);
-
-/*
- * Synchronously enumerate the host's current CCID readers by invoking
- * addReader once for each reader. pkcs11rs invokes this once during every
- * C_GetSlotList hardware-discovery refresh. pSinkContext and addReader are
- * valid only for that invocation and must not be retained. The callback and
- * pHardwareContext must remain valid for the initialized module's lifetime and
- * support PKCS #11 calling threads.
- */
-typedef CK_RV (*PKCS11RS_ENUMERATE_CCID_READERS)(
-  void *pHardwareContext,
-  void *pSinkContext,
-  PKCS11RS_ADD_CCID_READER addReader
-);
-
 #define PKCS11RS_LOG_ERROR 1UL
 #define PKCS11RS_LOG_WARN  2UL
 #define PKCS11RS_LOG_INFO  3UL
@@ -148,11 +102,10 @@ typedef void (*PKCS11RS_LOG_EVENT)(
  * Optional versioned value for CK_C_INITIALIZE_ARGS.pReserved. When pReserved
  * begins with PKCS11RS_INITIALIZE_ARGS_MAGIC, pkcs11rs reads this wrapper;
  * otherwise it retains the existing interpretation of pReserved as a direct
- * NUL-terminated JSON configuration string. A host CCID enumerator selects
- * host-provided CCID discovery; otherwise a native build uses PC/SC. Both
- * providers feed the same CCID slot-discovery path. The JSON configuration and
- * this structure only need to live through C_Initialize; callback contexts
- * must live until C_Finalize.
+ * NUL-terminated JSON configuration string. Native builds use PC/SC for CCID
+ * discovery on desktop platforms and CryptoTokenKit on iOS. The JSON
+ * configuration and this structure only need to live through C_Initialize;
+ * the log callback context must live until C_Finalize.
  */
 typedef struct PKCS11RS_INITIALIZE_ARGS_V1 {
   CK_ULONG ulMagic;
@@ -160,8 +113,6 @@ typedef struct PKCS11RS_INITIALIZE_ARGS_V1 {
   CK_ULONG ulVersion;
   const CK_UTF8CHAR *pConfiguration;
   CK_ULONG ulConfigurationLen;
-  void *pHardwareContext;
-  PKCS11RS_ENUMERATE_CCID_READERS enumerateCcidReaders;
   void *pLogContext;
   PKCS11RS_LOG_EVENT logEvent;
 } PKCS11RS_INITIALIZE_ARGS_V1;

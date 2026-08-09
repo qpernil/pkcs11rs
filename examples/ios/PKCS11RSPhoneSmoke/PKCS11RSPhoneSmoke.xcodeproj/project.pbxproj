@@ -10,7 +10,6 @@
 		100000000000000000000001 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* App.swift */; };
 		100000000000000000000002 /* PKCS11RS.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* PKCS11RS.xcframework */; };
 		100000000000000000000003 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* Assets.xcassets */; };
-		100000000000000000000004 /* SmartCardTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* SmartCardTransport.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -19,7 +18,6 @@
 		200000000000000000000003 /* PKCS11RSPhoneSmoke.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PKCS11RSPhoneSmoke.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		200000000000000000000005 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		200000000000000000000006 /* SmartCardTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartCardTransport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -47,7 +45,6 @@
 			isa = PBXGroup;
 			children = (
 				200000000000000000000001 /* App.swift */,
-				200000000000000000000006 /* SmartCardTransport.swift */,
 				200000000000000000000004 /* Info.plist */,
 				200000000000000000000005 /* Assets.xcassets */,
 			);
@@ -132,7 +129,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000001 /* App.swift in Sources */,
-				100000000000000000000004 /* SmartCardTransport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -17,15 +17,15 @@ use crate::{
 use crate::{
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad, BackendSession, CcidApplication,
-    CcidConfiguration, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
-    HostCcidConnector, HostCcidProvider, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
+    CcidConfiguration, CcidProvider, CcidReader, Connector, CryptOperation, DigestOperation, Error,
+    Fido2Slot, FindOperation, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
     HttpConnectorEndpoint, HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration,
     OpenPgpSlot, PcscAppletConnector, PcscReaderState, PivSlot, SecureChannelConfiguration,
     SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot, TokenObject,
     YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
 };
 #[cfg(feature = "native-hardware")]
-use crate::{HidFidoEndpoint, PcscConnector, UsbConnector};
+use crate::{HidFidoEndpoint, UsbConnector};
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial, ABI_TEST_SLOT_ID};
 #[cfg(any(test, feature = "abi-tests"))]
@@ -257,10 +257,8 @@ pub(crate) struct ModuleContext {
     pub(crate) hardware_discovery: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
-    host_ccid_provider: Option<HostCcidProvider>,
     ccid_readers: Mutex<HashMap<String, CcidReaderInventoryEntry>>,
-    #[cfg(feature = "native-hardware")]
-    pub(crate) pcsc: Option<pcsc::Context>,
+    ccid_provider: CcidProvider,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
     yubihsm_http_endpoints: Mutex<HashMap<usize, HttpConnectorEndpoint>>,
@@ -280,14 +278,8 @@ pub(crate) struct ModuleContext {
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
-struct EnumeratedCcidReader {
-    connector: SharedConnector,
-    reader_state: Arc<PcscReaderState>,
-    host_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
-}
-
 struct CcidReaderInventoryEntry {
-    host_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
+    inventory_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
     slot_ids: Vec<CK_SLOT_ID>,
 }
 
@@ -700,10 +692,6 @@ impl std::fmt::Debug for ModuleContext {
             .try_read()
             .ok()
             .map(|contexts| contexts.keys().copied().collect::<Vec<_>>());
-        #[cfg(feature = "native-hardware")]
-        let pcsc = self.pcsc.as_ref().map(|_| "Context { .. }");
-        #[cfg(not(feature = "native-hardware"))]
-        let pcsc: Option<&str> = None;
         fmt.debug_struct("ModuleContext")
             .field("hardware_discovery", &self.hardware_discovery)
             .field("software_slots", &self.software_slots)
@@ -711,7 +699,7 @@ impl std::fmt::Debug for ModuleContext {
                 "software_public_discovery",
                 &self.software_discovery_pins.keys().collect::<Vec<_>>(),
             )
-            .field("pcsc", &pcsc)
+            .field("ccid_provider", &self.ccid_provider)
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field("yubihsm_recreate_sessions", &self.yubihsm_recreate_sessions)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
@@ -829,13 +817,12 @@ impl ModuleContext {
     pub(crate) fn new_with_configuration(
         configuration: ModuleConfiguration,
     ) -> Result<ModuleContext, Error> {
-        Self::new_with_configuration_and_host_ccid(configuration, None, None)
+        Self::new_with_configuration_and_log(configuration, None)
     }
 
     #[allow(unused_mut)]
-    pub(crate) fn new_with_configuration_and_host_ccid(
+    pub(crate) fn new_with_configuration_and_log(
         configuration: ModuleConfiguration,
-        host_ccid_provider: Option<HostCcidProvider>,
         host_log_provider: Option<crate::logging::HostLogProvider>,
     ) -> Result<ModuleContext, Error> {
         #[cfg(feature = "abi-tests")]
@@ -904,22 +891,8 @@ impl ModuleContext {
             hardware_discovery,
             software_slots,
             software_discovery_pins,
-            host_ccid_provider,
             ccid_readers: Mutex::new(HashMap::new()),
-            #[cfg(all(feature = "native-hardware", feature = "abi-tests"))]
-            pcsc: None,
-            #[cfg(all(feature = "native-hardware", not(feature = "abi-tests")))]
-            pcsc: if hardware_discovery && host_ccid_provider.is_none() {
-                match pcsc::Context::establish(pcsc::Scope::System) {
-                    Ok(context) => Some(context),
-                    Err(e) => {
-                        log!(1, "pcsc::Context::establish: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            },
+            ccid_provider: CcidProvider::new(hardware_discovery),
             yubihsm_urls,
             yubihsm_http_tls,
             yubihsm_http_endpoints: Mutex::new(HashMap::new()),
@@ -1724,59 +1697,14 @@ impl SlotContext {
 }
 
 impl ModuleContext {
-    fn enumerate_ccid_readers(&self) -> Result<Vec<EnumeratedCcidReader>, Error> {
-        let provider = if self.host_ccid_provider.is_some() {
-            "host"
-        } else {
-            "pcsc"
-        };
+    fn enumerate_ccid_readers(&self) -> Result<Vec<CcidReader>, Error> {
+        let provider = self.ccid_provider.name();
         let _operation = crate::logging::Operation::new(tracing::debug_span!(
             target: "pkcs11rs::discovery",
             "ccid.enumerate_readers",
             provider
         ));
-        if !self.hardware_discovery {
-            return Ok(Vec::new());
-        }
-        if let Some(provider) = self.host_ccid_provider {
-            return provider
-                .enumerate()?
-                .into_iter()
-                .map(|registration| {
-                    let connector = HostCcidConnector::new(registration);
-                    let reader_state = connector.reader_state();
-                    let host_presence = Some(connector.presence());
-                    Ok(EnumeratedCcidReader {
-                        connector: Arc::new(connector) as SharedConnector,
-                        reader_state,
-                        host_presence,
-                    })
-                })
-                .collect();
-        }
-        #[cfg(feature = "native-hardware")]
-        if let Some(context) = self.pcsc.clone() {
-            let readers = context
-                .list_readers_owned()
-                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-            return Ok(readers
-                .into_iter()
-                .map(|reader| {
-                    let connector = PcscConnector {
-                        reader,
-                        context: context.clone(),
-                        state: Arc::new(Default::default()),
-                    };
-                    let reader_state = connector.state.clone();
-                    EnumeratedCcidReader {
-                        connector: Arc::new(connector) as SharedConnector,
-                        reader_state,
-                        host_presence: None,
-                    }
-                })
-                .collect());
-        }
-        Ok(Vec::new())
+        self.ccid_provider.enumerate()
     }
 
     fn insert_ccid_reader_slots(
@@ -2028,7 +1956,7 @@ impl ModuleContext {
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         for (name, reader) in inventory.iter() {
             let present = reader_names.contains(name);
-            if let Some(presence) = &reader.host_presence {
+            if let Some(presence) = &reader.inventory_presence {
                 presence.store(present, std::sync::atomic::Ordering::Release);
             }
             tracing::debug!(
@@ -2066,7 +1994,7 @@ impl ModuleContext {
                     inventory.insert(
                         name,
                         CcidReaderInventoryEntry {
-                            host_presence: reader.host_presence,
+                            inventory_presence: reader.inventory_presence,
                             slot_ids,
                         },
                     );
@@ -3384,9 +3312,8 @@ mod discovery_tests {
             hardware_discovery: false,
             software_slots: Vec::new(),
             software_discovery_pins: HashMap::new(),
-            host_ccid_provider: None,
             ccid_readers: Mutex::new(HashMap::new()),
-            pcsc: None,
+            ccid_provider: CcidProvider::new(false),
             yubihsm_urls: Vec::new(),
             yubihsm_http_tls: HttpConnectorTlsConfig::default(),
             yubihsm_http_endpoints: Mutex::new(HashMap::new()),

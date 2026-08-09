@@ -164,10 +164,9 @@ URL strings remain independent connector entries with independent pools.
 The shared `pkcs11rs-local-hardware` crate exposes both blocking and async
 frontends. The existing PKCS #11 local connector continues to use the blocking
 frontend and contains no Tokio runtime. This daemon enables the `async-tokio`
-frontend. Portable and iOS builds omit the shared hardware crate entirely.
-That does not prevent an iOS embedding app from supplying local CCID readers
-through the host callback ABI documented in
-[Initialization configuration](configuration.md#host-ccid-wrapper).
+frontend. Portable and iOS builds omit the shared hardware crate entirely. An
+iOS build instead discovers and uses local CCID readers directly through
+CryptoTokenKit.
 
 ## Multi-device API
 

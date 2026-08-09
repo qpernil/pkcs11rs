@@ -1,7 +1,12 @@
 mod ccid;
+#[cfg(target_os = "ios")]
+#[path = "cryptotokenkit.rs"]
+mod ccid_provider;
+#[cfg(not(target_os = "ios"))]
+#[path = "pcsc.rs"]
+mod ccid_provider;
 mod crypto;
 mod ctap;
-mod host_ccid;
 mod openpgp;
 mod piv;
 mod software;
@@ -13,6 +18,7 @@ pub(crate) use ccid::{
     parse_ccid_application_list, parse_secure_channel, CcidApplication, CcidConfiguration,
     HsmAuthSlot, IssuerSecurityDomainSlot, SecureChannelProtocol,
 };
+pub(crate) use ccid_provider::{CcidProvider, CcidReader};
 pub(crate) use crypto::{
     digest_for_hash_mechanism, ec_curve_from_parameters, ec_curve_parameters, ec_parameters,
     ecdsa_der_to_raw, encode_rsa_pss, mgf1, mgf_digest, openpgp_ec_coordinate_length,
@@ -27,9 +33,6 @@ pub(crate) use ctap::CcidCtapTransport;
 #[cfg(feature = "native-hardware")]
 pub(crate) use ctap::HidFidoEndpoint;
 pub(crate) use ctap::{project_cose_public_key, Fido2Slot};
-#[cfg(all(test, not(feature = "abi-tests")))]
-pub(crate) use host_ccid::HostCcidAddReader;
-pub(crate) use host_ccid::{HostCcidConnector, HostCcidEnumerate, HostCcidProvider};
 pub(crate) use openpgp::{openpgp_signature_requires_context_specific_login, OpenPgpSlot};
 pub(crate) use piv::{
     piv_algorithm_from_certificate, piv_ec_parameters, piv_effective_pin_policy,

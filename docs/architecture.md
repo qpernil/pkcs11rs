@@ -65,7 +65,7 @@ URLs remain independent. Direct YubiHSM USB inventory uses the device serial;
 reattachment replaces the transport behind the existing slot even when the OS
 assigns a new USB device ID. Inventory requests and new-slot HSM initialization
 run without holding the slot-registry write lock; only registry snapshots and
-final insertion use it. PC/SC or host-provided CCID reader inventory is
+final insertion use it. Native PC/SC or iOS CryptoTokenKit reader inventory is
 enumerated on every listing, so new reader names can append applet slots.
 Existing PC/SC and HID slots refresh their transports on every listing. Native
 HID provider-wide new-device inventory is still created only during module
@@ -110,8 +110,8 @@ test-slot branch.
 
 ## CCID applet topology
 
-One physical native or host-provided CCID reader has one shared
-`PcscReaderState`. Every selected applet gets a separate logical PKCS #11 slot
+One physical native CCID reader has one shared `PcscReaderState`. Every
+selected applet gets a separate logical PKCS #11 slot
 and a slot-local connector facade, while all facades share:
 
 - the card connection and complete APDU-exchange lock;
@@ -127,8 +127,8 @@ reselect its applet when it next accesses the card. Selecting an applet
 invalidates a secure channel belonging to another AID; the next protected
 exchange reselects its AID and establishes the appropriate channel.
 
-Native PC/SC and a host-provided enumerator both produce the same internal
-reader records. The UTF-8 reader name is the stable inventory key. Every
+Native PC/SC and native iOS CryptoTokenKit produce the same internal reader
+records. The UTF-8 reader name is the stable inventory key. Every
 `C_GetSlotList` enumerates the current names and probes any name that has not
 yet contributed a slot. New readers and cards inserted into previously empty
 readers can therefore append applet slots. Once a reader has contributed
@@ -136,6 +136,15 @@ slots, its applet topology and slot IDs are stable for the module lifetime.
 Removal marks those slots absent, return of the same name reconnects them, and
 a replacement card does not morph the registry into another applet set. See
 [CCID applet configuration](ccid.md).
+
+The native iOS connector starts a worker lazily for each retained reader. The
+worker confines its retained `TKSmartCard` and all of that card's session and
+transmit operations to one thread, reuses the card while it remains valid, and
+serializes APDU requests. Retaining that card object does not claim exclusive
+access; the current transport begins and ends a CryptoTokenKit session for each
+raw APDU. Reader enumeration itself still uses the current
+`TKSmartCardSlotManager` inventory on every slot-list refresh. CryptoTokenKit
+provides smart-card APDU transport rather than general USB bulk access.
 
 ## FIDO transports
 
@@ -226,10 +235,9 @@ process that loads the PKCS #11 library. The daemon enables the optional
 `async-tokio` frontend. Both frontends share device construction, connection
 state, endpoints, complete-write checks, dynamic zero-length-packet decisions,
 and response copying; only waiting for USB completion differs. Portable builds
-and the iOS XCFramework omit the native local-hardware crate. An embedding host
-can still inject CCID reader enumeration and APDU transport through
-`PKCS11RS_INITIALIZE_ARGS_V1`, while remote HTTP(S) connector slots remain
-available to the provider.
+and the iOS XCFramework omit the native local-hardware crate. The iOS build has
+a native CryptoTokenKit CCID provider, while remote HTTP(S) connector slots
+remain available to the provider.
 
 The daemon is currently a private-network component, not a public security
 boundary. It implements TLS and optional mTLS, bounded request bodies and

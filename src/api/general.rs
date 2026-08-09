@@ -24,9 +24,8 @@ ffi_entry_point! {
         match lock_context_write() {
             Ok(mut guard) => match guard.as_mut() {
                 Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
-                None => match ModuleContext::new_with_configuration_and_host_ccid(
+                None => match ModuleContext::new_with_configuration_and_log(
                     configuration,
-                    initialization.host_ccid_provider,
                     initialization.host_log_provider,
                 ) {
                     Ok(context) => {
@@ -43,17 +42,16 @@ ffi_entry_point! {
 
 fn validate_initialize_args(
     init_args: CK_VOID_PTR,
-) -> Result<super::host_ccid::InitializeReserved, CK_RV> {
+) -> Result<super::initialize::InitializeReserved, CK_RV> {
     if init_args.is_null() {
-        return Ok(super::host_ccid::InitializeReserved {
+        return Ok(super::initialize::InitializeReserved {
             configuration: None,
-            host_ccid_provider: None,
             host_log_provider: None,
         });
     }
 
     let args = unsafe { _as_ref(init_args.cast::<CK_C_INITIALIZE_ARGS>()) }?;
-    let initialization = unsafe { super::host_ccid::parse_initialize_reserved(args.pReserved) }
+    let initialization = unsafe { super::initialize::parse_initialize_reserved(args.pReserved) }
         .map_err(CK_RV::from)?;
 
     let callbacks = [

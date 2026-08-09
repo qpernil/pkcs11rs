@@ -225,7 +225,7 @@ pub(crate) fn ffi_call(function: &'static str, operation: impl FnOnce() -> CK_RV
             tracing::debug!(
                 target: "pkcs11rs::ffi",
                 function,
-                return_value = result as u64,
+                return_value = result,
                 elapsed_us = started.elapsed().as_micros() as u64,
                 "PKCS #11 call returned"
             );
@@ -238,7 +238,7 @@ pub(crate) fn ffi_call(function: &'static str, operation: impl FnOnce() -> CK_RV
                 tracing::debug!(
                     target: "pkcs11rs::ffi",
                     function,
-                    return_value = result as u64,
+                    return_value = result,
                     elapsed_us = started.elapsed().as_micros() as u64,
                     "PKCS #11 call returned"
                 );

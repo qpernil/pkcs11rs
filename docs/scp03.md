@@ -1,8 +1,8 @@
 # SCP03 configuration
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL=scp03` to use SCP03 for the selected CCID
-applet. The reader may come from native PC/SC or a host-provided CCID
-transport. See [`ccid.md`](ccid.md) for the default applet list, allowlist, AID
+applet over the native CCID transport. See [`ccid.md`](ccid.md) for the
+default applet list, allowlist, AID
 overrides, and shared-slot behavior.
 
 For the Issuer SD, the selected AID is the Secure Domain used for

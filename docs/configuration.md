@@ -3,9 +3,9 @@
 pkcs11rs accepts a versioned JSON configuration through
 `CK_C_INITIALIZE_ARGS.pReserved`. The reserved pointer may be either the
 direct JSON string described below or the magic-tagged
-`PKCS11RS_INITIALIZE_ARGS_V1` wrapper. The wrapper additionally carries a host
-CCID reader enumerator and log callback for platforms such as iOS. Both forms
-use the same PKCS #11 C ABI on iOS, macOS, Linux, and Windows.
+`PKCS11RS_INITIALIZE_ARGS_V1` wrapper. The wrapper additionally carries a log
+callback. Both forms use the same PKCS #11 C ABI on iOS, macOS, Linux, and
+Windows.
 
 In the direct form, the value must be a NUL-terminated UTF-8 string whose
 terminator occurs within the first 64 KiB. pkcs11rs reads the string only during
@@ -105,8 +105,8 @@ remain documented in [SCP03 configuration](scp03.md), and SCP11 trust and OCE
 rules in [SCP11 configuration](scp11.md).
 
 `hardware.discovery` controls every local hardware discovery mechanism,
-including direct YubiHSM USB, native FIDO HID, native PC/SC, and a
-host-provided CCID enumerator. It does not affect explicitly configured
+including direct YubiHSM USB, native FIDO HID, native PC/SC, and iOS
+CryptoTokenKit. It does not affect explicitly configured
 `yubihsm.urls`. `yubihsm.recreate_sessions` defaults to `false`; its security
 and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 
@@ -173,7 +173,7 @@ The application owns `config` and only needs to keep it alive until
 a `CK_C_INITIALIZE_ARGS` structure, continues to use environment variables and
 defaults exactly as before.
 
-## Host CCID wrapper
+## Versioned initialization wrapper
 
 When `pReserved` begins with `PKCS11RS_INITIALIZE_ARGS_MAGIC`, pkcs11rs reads a
 `PKCS11RS_INITIALIZE_ARGS_V1` instead of a direct string. `ulSize` must equal
@@ -184,11 +184,6 @@ the size of the complete version-one structure and `ulVersion` must equal
 limited to 64 KiB. A zero length supplies no explicit JSON configuration.
 
 ```c
-static CK_RV enumerate_ccid_readers(
-    void *hardware_context,
-    void *sink_context,
-    PKCS11RS_ADD_CCID_READER add_reader);
-
 static void log_event(
     void *log_context,
     CK_ULONG level,
@@ -207,8 +202,6 @@ extension.ulSize = sizeof(extension);
 extension.ulVersion = PKCS11RS_INITIALIZE_ARGS_VERSION;
 extension.pConfiguration = config;
 extension.ulConfigurationLen = sizeof(config) - 1;
-extension.pHardwareContext = NULL; /* Or an application-owned context. */
-extension.enumerateCcidReaders = enumerate_ccid_readers;
 extension.pLogContext = NULL; /* Or an application-owned log sink. */
 extension.logEvent = log_event;
 
@@ -220,10 +213,9 @@ CK_RV rv = C_Initialize(&args);
 ```
 
 The wrapper and configuration bytes only need to remain alive through
-`C_Initialize`. The enumerator function, `pHardwareContext`, every reader
-transport function, and every per-reader context passed to `add_reader` must
-remain valid until `C_Finalize`. Callbacks may run on any thread making a PKCS
-#11 call and must support that calling model.
+`C_Initialize`. The log callback and its context must remain valid until
+`C_Finalize`. It may run on any thread making a PKCS #11 call and must support
+that calling model.
 
 `logEvent` receives synchronous, formatted tracing events and must copy any
 bytes it retains before returning. It must not reenter PKCS #11. Levels use the
@@ -232,19 +224,13 @@ bytes it retains before returning. It must not reenter PKCS #11. Levels use the
 callback. With a callback and no explicit level, all levels are delivered so
 the host can filter them.
 
-When `hardware.discovery` is true, the enumerator is invoked once during every
-`C_GetSlotList`. It calls `add_reader` once for each current reader and supplies
-a stable UTF-8 reader name, ATR, maximum input and output APDU lengths,
-transport context, and `PKCS11RS_HOST_CCID_TRANSMIT` function. Reader names are
-the inventory identity: new names append slots, an omitted known name marks its
-slots absent, and reporting that name again restores those same slots. When a
-host enumerator is present it is used instead of native PC/SC. If
-`hardware.discovery` is false, neither host enumeration nor native local
-hardware discovery runs.
+When `hardware.discovery` is true, desktop builds enumerate CCID readers with
+PC/SC and iOS builds use CryptoTokenKit. If it is false, native local hardware
+discovery does not run.
 
 If the reserved pointer does not contain the exact magic value, pkcs11rs uses
-the direct-string interpretation. The callback typedefs and field
-declarations in [`pkcs11rs.h`](../pkcs11rs.h) are the authoritative C ABI.
+the direct-string interpretation. The declarations in
+[`pkcs11rs.h`](../pkcs11rs.h) are the authoritative C ABI.
 
 ## Diagnostics
 
