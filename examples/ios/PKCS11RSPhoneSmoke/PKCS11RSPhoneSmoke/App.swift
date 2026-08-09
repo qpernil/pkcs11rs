@@ -8,6 +8,14 @@ private let objectFindBatchCapacity = 64
 private let objectAttributeBufferCapacity = 1024
 private let yubiHsmAuthenticationKeyID = "1234"
 private let yubiHsmAuthPassword = "password"
+private let softwareTokenName = "iPhone smoke"
+private let softwareTokenModel = "Software token"
+private let softwareTokenPIN = "password"
+private let softwareX25519Label = "iPhone smoke X25519"
+private let softwareX25519ID = Array("iphone-smoke-x25519".utf8)
+private let x25519Parameters: [UInt8] = [
+    0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+]
 private let ckaYubicoHsmAuthAlgorithm =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5901)
 private let ckaYubicoHsmAuthRetries =
@@ -62,6 +70,7 @@ private struct SlotInventory {
 
 private struct ConnectorConfiguration {
     let url: String
+    let tokenStoragePath: String
     let json: String
 }
 
@@ -72,11 +81,26 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         ?? defaults.string(forKey: connectorURLKey)
         ?? fallbackConnectorURL
     defaults.set(url, forKey: connectorURLKey)
+    let tokenStoragePath = FileManager.default.urls(
+        for: .applicationSupportDirectory,
+        in: .userDomainMask
+    )[0]
+        .appendingPathComponent("pkcs11rs-smoke", isDirectory: true)
+        .path
 
     let object: [String: Any] = [
         "version": 1,
         "logging": [
             "level": "debug",
+        ],
+        "storage": [
+            "tokens": tokenStoragePath,
+        ],
+        "software": [
+            "slots": [[
+                "name": softwareTokenName,
+                "discovery_pin": softwareTokenPIN,
+            ]],
         ],
         "yubihsm": [
             "urls": [url],
@@ -86,6 +110,7 @@ private func connectorConfiguration() -> ConnectorConfiguration {
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     return ConnectorConfiguration(
         url: url,
+        tokenStoragePath: tokenStoragePath,
         json: String(decoding: data, as: UTF8.self)
     )
 }
@@ -300,6 +325,279 @@ private func objectInventory(
         lines: lines,
         credentials: inspections.compactMap(\.credential)
     )
+}
+
+private func softwareTokenLabel() -> [UInt8] {
+    var label = [UInt8](repeating: 0x20, count: 32)
+    let name = Array(softwareTokenName.utf8.prefix(label.count))
+    label.replaceSubrange(0..<name.count, with: name)
+    return label
+}
+
+private func login(
+    session: CK_SESSION_HANDLE,
+    userType: CK_USER_TYPE,
+    pin: String
+) -> CK_RV {
+    var bytes = Array(pin.utf8)
+    return bytes.withUnsafeMutableBufferPointer { buffer in
+        C_Login(
+            session,
+            userType,
+            buffer.baseAddress,
+            CK_ULONG(buffer.count)
+        )
+    }
+}
+
+private func initializeSoftwareToken(slot: CK_SLOT_ID) -> CK_RV {
+    var pin = Array(softwareTokenPIN.utf8)
+    var label = softwareTokenLabel()
+    return pin.withUnsafeMutableBufferPointer { pinBuffer in
+        label.withUnsafeMutableBufferPointer { labelBuffer in
+            C_InitToken(
+                slot,
+                pinBuffer.baseAddress,
+                CK_ULONG(pinBuffer.count),
+                labelBuffer.baseAddress
+            )
+        }
+    }
+}
+
+private func initializeSoftwareUserPIN(session: CK_SESSION_HANDLE) -> CK_RV {
+    var pin = Array(softwareTokenPIN.utf8)
+    return pin.withUnsafeMutableBufferPointer { buffer in
+        C_InitPIN(session, buffer.baseAddress, CK_ULONG(buffer.count))
+    }
+}
+
+private func findSoftwareX25519PrivateKey(
+    session: CK_SESSION_HANDLE
+) -> (result: CK_RV, object: CK_OBJECT_HANDLE?) {
+    var objectClass = CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
+    var keyType = CK_KEY_TYPE(CKK_EC_MONTGOMERY)
+    var identifier = softwareX25519ID
+    var attributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 3)
+    let initialize = withUnsafeMutablePointer(to: &objectClass) { classPointer in
+        withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+            identifier.withUnsafeMutableBytes { identifierBuffer in
+                attributes[0].type = CK_ATTRIBUTE_TYPE(CKA_CLASS)
+                attributes[0].pValue = UnsafeMutableRawPointer(classPointer)
+                attributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_OBJECT_CLASS>.size)
+                attributes[1].type = CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE)
+                attributes[1].pValue = UnsafeMutableRawPointer(keyTypePointer)
+                attributes[1].ulValueLen = CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
+                attributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                attributes[2].pValue = identifierBuffer.baseAddress
+                attributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                return attributes.withUnsafeMutableBufferPointer { buffer in
+                    C_FindObjectsInit(
+                        session,
+                        buffer.baseAddress,
+                        CK_ULONG(buffer.count)
+                    )
+                }
+            }
+        }
+    }
+    guard initialize == CKR_OK else {
+        return (initialize, nil)
+    }
+
+    var object = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var count = CK_ULONG()
+    let find = C_FindObjects(session, &object, 1, &count)
+    let finalize = C_FindObjectsFinal(session)
+    guard find == CKR_OK else {
+        return (find, nil)
+    }
+    guard finalize == CKR_OK else {
+        return (finalize, nil)
+    }
+    return (CK_RV(CKR_OK), count == 0 ? nil : object)
+}
+
+private func generateSoftwareX25519KeyPair(
+    session: CK_SESSION_HANDLE
+) -> (result: CK_RV, publicKey: CK_OBJECT_HANDLE, privateKey: CK_OBJECT_HANDLE) {
+    var token = CK_BBOOL(CK_TRUE)
+    var derive = CK_BBOOL(CK_TRUE)
+    var parameters = x25519Parameters
+    var identifier = softwareX25519ID
+    var label = Array(softwareX25519Label.utf8)
+    var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var mechanism = CK_MECHANISM(
+        mechanism: CK_MECHANISM_TYPE(CKM_EC_MONTGOMERY_KEY_PAIR_GEN),
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
+        withUnsafeMutablePointer(to: &derive) { derivePointer in
+            parameters.withUnsafeMutableBytes { parameterBuffer in
+                identifier.withUnsafeMutableBytes { identifierBuffer in
+                    label.withUnsafeMutableBytes { labelBuffer in
+                        var publicAttributes = [CK_ATTRIBUTE](
+                            repeating: CK_ATTRIBUTE(),
+                            count: 4
+                        )
+                        publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                        publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                        publicAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        publicAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                        publicAttributes[1].pValue = labelBuffer.baseAddress
+                        publicAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                        publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                        publicAttributes[2].pValue = identifierBuffer.baseAddress
+                        publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                        publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_EC_PARAMS)
+                        publicAttributes[3].pValue = parameterBuffer.baseAddress
+                        publicAttributes[3].ulValueLen = CK_ULONG(parameterBuffer.count)
+
+                        var privateAttributes = [CK_ATTRIBUTE](
+                            repeating: CK_ATTRIBUTE(),
+                            count: 4
+                        )
+                        privateAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                        privateAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                        privateAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        privateAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                        privateAttributes[1].pValue = labelBuffer.baseAddress
+                        privateAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                        privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                        privateAttributes[2].pValue = identifierBuffer.baseAddress
+                        privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                        privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_DERIVE)
+                        privateAttributes[3].pValue = UnsafeMutableRawPointer(derivePointer)
+                        privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+
+                        return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
+                            privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
+                                C_GenerateKeyPair(
+                                    session,
+                                    &mechanism,
+                                    publicBuffer.baseAddress,
+                                    CK_ULONG(publicBuffer.count),
+                                    privateBuffer.baseAddress,
+                                    CK_ULONG(privateBuffer.count),
+                                    &publicKey,
+                                    &privateKey
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return (result, publicKey, privateKey)
+}
+
+private func softwareObjectInventory(
+    slot: CK_SLOT_ID,
+    tokenInfo: CK_TOKEN_INFO
+) -> ObjectInventory {
+    var lines = ["", "Persistent software token \(softwareTokenName.debugDescription):"]
+    let tokenInitialized = tokenInfo.flags & CK_FLAGS(CKF_TOKEN_INITIALIZED) != 0
+    let userPINInitialized = tokenInfo.flags & CK_FLAGS(CKF_USER_PIN_INITIALIZED) != 0
+    if !tokenInitialized {
+        let initialize = initializeSoftwareToken(slot: slot)
+        guard initialize == CKR_OK else {
+            lines.append("  C_InitToken failed: \(initialize)")
+            return ObjectInventory(lines: lines, credentials: [])
+        }
+        lines.append("  initialized persistent token")
+    }
+
+    var session = CK_SESSION_HANDLE()
+    let open = C_OpenSession(
+        slot,
+        CK_FLAGS(CKF_SERIAL_SESSION | CKF_RW_SESSION),
+        nil,
+        nil,
+        &session
+    )
+    guard open == CKR_OK else {
+        lines.append("  C_OpenSession failed: \(open)")
+        return ObjectInventory(lines: lines, credentials: [])
+    }
+
+    var failure: String?
+    if !tokenInitialized || !userPINInitialized {
+        let soLogin = login(
+            session: session,
+            userType: CK_USER_TYPE(CKU_SO),
+            pin: softwareTokenPIN
+        )
+        if soLogin != CKR_OK {
+            failure = "C_Login(CKU_SO) failed: \(soLogin)"
+        } else {
+            let initializePIN = initializeSoftwareUserPIN(session: session)
+            if initializePIN == CKR_OK {
+                lines.append("  initialized user PIN")
+            } else {
+                failure = "C_InitPIN failed: \(initializePIN)"
+            }
+            let logout = C_Logout(session)
+            if logout != CKR_OK, failure == nil {
+                failure = "C_Logout(CKU_SO) failed: \(logout)"
+            }
+        }
+    }
+
+    var userLoggedIn = false
+    if failure == nil {
+        let userLogin = login(
+            session: session,
+            userType: CK_USER_TYPE(CKU_USER),
+            pin: softwareTokenPIN
+        )
+        if userLogin == CKR_OK {
+            userLoggedIn = true
+        } else {
+            failure = "C_Login(CKU_USER) failed: \(userLogin)"
+        }
+    }
+
+    if failure == nil {
+        let found = findSoftwareX25519PrivateKey(session: session)
+        if found.result != CKR_OK {
+            failure = "X25519 key search failed: \(found.result)"
+        } else if found.object != nil {
+            lines.append("  X25519 keypair already present")
+        } else {
+            let generated = generateSoftwareX25519KeyPair(session: session)
+            if generated.result == CKR_OK {
+                lines.append(
+                    "  generated X25519 keypair: public \(generated.publicKey), private \(generated.privateKey)"
+                )
+            } else {
+                failure = "C_GenerateKeyPair(X25519) failed: \(generated.result)"
+            }
+        }
+    }
+
+    var inventory = if let failure {
+        ObjectInventory(lines: ["", "Objects: skipped after \(failure)"], credentials: [])
+    } else {
+        objectInventory(session: session, title: "Objects (authenticated software session)")
+    }
+    if let failure {
+        lines.append("  \(failure)")
+    }
+    if userLoggedIn {
+        let logout = C_Logout(session)
+        if logout != CKR_OK {
+            inventory.lines.append("  C_Logout failed: \(logout)")
+        }
+    }
+    let close = C_CloseSession(session)
+    if close != CKR_OK {
+        inventory.lines.append("  C_CloseSession failed: \(close)")
+    }
+    inventory.lines.insert(contentsOf: lines, at: 0)
+    return inventory
 }
 
 private func publicObjectInventory(
@@ -614,6 +912,7 @@ private final class ModuleInspector {
             "Library: \(paddedString(info.libraryDescription)) \(info.libraryVersion.major).\(info.libraryVersion.minor)",
             "Configuration: C_Initialize JSON",
             "Connector: \(configuration.url)",
+            "Token storage: \(configuration.tokenStoragePath)",
             "",
             "Token-present slots: \(count)",
         ]
@@ -630,14 +929,20 @@ private final class ModuleInspector {
             }
             let description = paddedString(slotInfo.slotDescription)
             let tokenLabel = paddedString(tokenInfo.label)
+            let tokenModel = paddedString(tokenInfo.model)
             let serial = paddedString(tokenInfo.serialNumber)
             let source = serial.isEmpty ? description : serial
+            let managesSoftwareToken = tokenModel == softwareTokenModel
+                && tokenLabel == softwareTokenName
+            let objects = managesSoftwareToken
+                ? softwareObjectInventory(slot: slot, tokenInfo: tokenInfo)
+                : publicObjectInventory(slot: slot, source: source)
             slotInventories.append(SlotInventory(
                 slot: slot,
                 description: description,
                 tokenLabel: tokenLabel,
                 serial: serial,
-                objects: publicObjectInventory(slot: slot, source: source)
+                objects: objects
             ))
         }
 

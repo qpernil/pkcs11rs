@@ -3074,6 +3074,26 @@ mod discovery_tests {
 
     #[cfg(not(feature = "abi-tests"))]
     #[test]
+    fn unavailable_http_yubihsm_does_not_hide_local_software_slots() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut context = connector_test_context(format!("http://{address}"));
+        context.software_slots.push(String::from("offline smoke"));
+        context.init().unwrap();
+        context.refresh_discovery().unwrap();
+
+        let slots = context.slot_contexts.read().unwrap();
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            slots.values().next().unwrap().lock().unwrap().slot.kind(),
+            SlotKind::Software
+        );
+    }
+
+    #[cfg(not(feature = "abi-tests"))]
+    #[test]
     fn repeated_http_discovery_preserves_slots_and_presence() {
         struct Interaction {
             request_line: &'static [u8],

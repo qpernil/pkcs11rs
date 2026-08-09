@@ -13,6 +13,21 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+The JSON also configures a persistent software token named `iPhone smoke` and
+places its storage below the app's Application Support directory. On first use,
+the app recognizes exactly that owned slot by its `Software token` model and
+`iPhone smoke` label, then uses the standard `CKF_TOKEN_INITIALIZED` and
+`CKF_USER_PIN_INITIALIZED` flags to decide whether `C_InitToken` or the SO
+login/`C_InitPIN` sequence is needed. Both profiles use the prototype PIN
+`password`. These initialization calls are never applied to discovered
+hardware. Before enumerating the software token's objects, the app logs in and
+searches for a private `CKK_EC_MONTGOMERY` key with the stable ID
+`iphone-smoke-x25519`. If it is absent, the app generates an X25519 keypair
+with both objects marked as token objects. It then enumerates the authenticated
+software session so both halves of the keypair appear in Inventory. Later
+refreshes and process launches find the persisted private key and do not
+generate another pair.
+
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials and selects the first one. It builds an unambiguous
 `C_LoginUser` username as `:1234<label>@<source>`, where `1234` is the target
@@ -23,6 +38,14 @@ the YubiHSM backend supports the entry point; other slot kinds return
 `CKR_FUNCTION_NOT_SUPPORTED` before using the password. After a successful
 login, the app enumerates the objects again as an authenticated user, logs out,
 and closes the session.
+
+An unreachable configured YubiHSM endpoint is an isolated discovery failure:
+pkcs11rs records the failed endpoint and its outcome in Log, omits any remote
+token that is not currently present, and continues returning the persistent
+software token and available local CCID slots. A failure querying one returned
+slot is likewise reported on that slot without aborting the remaining
+inventory. Foregrounding the app retries remote discovery, so recovery does not
+require reinitializing the module or recreating the software token.
 
 The app does not enumerate or register readers before `C_Initialize`.
 `C_Initialize` retains the enumerator and its context in the module. During
@@ -61,10 +84,12 @@ registration and retention, deduplication decisions, phase timing, and each
 PKCS #11 call with its outcome and duration. Connector payloads and responses,
 per-request transport and APDU timing, and session state remain reserved for
 `trace`.
-The app does not change configuration or modify objects on the key. Its
-explicit YubiHSM Auth inspection login authenticates but remains read-only.
-Private objects that require login are absent from the public-session view and
-may appear in the authenticated view.
+The app does not modify objects on attached hardware. Its explicit YubiHSM Auth
+inspection login authenticates but remains read-only. Private hardware objects
+that require login are absent from the public-session view and may appear in
+the authenticated view. The named software slot is the deliberate exception:
+the app initializes it when necessary and creates the one persistent X25519
+keypair described above.
 
 This path requires a physical iPhone or iPad with a CCID-enabled key attached
 directly or through a USB-C adapter. A Simulator cannot expose that USB reader.
