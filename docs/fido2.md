@@ -39,7 +39,7 @@ to the FIDO smart-card application and enable diagnostics:
 
 ```sh
 export PKCS11RS_CCID_APPLICATIONS=fido2
-export PKCS11RS_DEBUG=2
+export PKCS11RS_LOG=trace
 pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --list-slots
 pkcs11-tool --module ./target/debug/libpkcs11rs.dylib --show-info
 ```

@@ -87,6 +87,14 @@ pub(crate) trait Connector {
     }
 
     fn send(&self, send_buffer: &[u8], timeout: Duration) -> Result<Vec<u8>, Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "connector.send",
+            connector = %self.name(),
+            request_bytes = send_buffer.len(),
+            timeout_ms = timeout.as_millis() as u64
+        ));
+        let _entered = operation.enter();
         let mut receive_buffer = vec![0u8; self.buffer_size()];
         let slice = self.transmit(send_buffer, &mut receive_buffer, timeout)?;
         let len = slice.len();
@@ -853,6 +861,14 @@ impl Connector for UsbConnector {
         receive_buffer: &'a mut [u8],
         timeout: Duration,
     ) -> Result<&'a [u8], Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "usb.transmit",
+            connector = %self.name(),
+            request_bytes = send_buffer.len(),
+            timeout_ms = timeout.as_millis() as u64
+        ));
+        let _entered = operation.enter();
         let mut state = self.state.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
         match state
             .device
@@ -972,6 +988,13 @@ impl Connector for PcscConnector {
         receive_buffer: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "pcsc.transmit",
+            connector = %self.name(),
+            request_bytes = send_buffer.len()
+        ));
+        let _entered = operation.enter();
         let state = self
             .state
             .transport
@@ -1022,7 +1045,10 @@ fn detect_pcsc_apdu_capabilities(card: &pcsc::Card) -> ApduCapabilities {
         return ApduCapabilities::SHORT_ONLY;
     };
     if pcsc_transport_is_nfc(card, status.atr()) {
-        log!(2, "PCSC transport detected as NFC; using short APDUs");
+        tracing::debug!(
+            target: "pkcs11rs::discovery",
+            "PCSC transport detected as NFC; using short APDUs"
+        );
         return ApduCapabilities::SHORT_ONLY;
     }
     let card_capabilities = crate::iso7816::atr_apdu_capabilities(status.atr());
@@ -1456,6 +1482,14 @@ impl Connector for HttpConnector {
         receive_buffer: &'a mut [u8],
         _timeout: Duration,
     ) -> Result<&'a [u8], Error> {
+        let operation = crate::logging::Operation::trace(tracing::trace_span!(
+            target: "pkcs11rs::transport",
+            "http.command",
+            endpoint = %self.endpoint.url,
+            serial = %self.serial,
+            request_bytes = send_buffer.len()
+        ));
+        let _entered = operation.enter();
         let agent = self.request_agent()?;
         let response = agent
             .post(format!(
@@ -1687,6 +1721,11 @@ impl HttpConnector {
         use std::collections::HashSet;
 
         let url = &endpoint.url;
+        let _operation = crate::logging::Operation::new(tracing::debug_span!(
+            target: "pkcs11rs::discovery",
+            "http.discover_yubihsm",
+            endpoint = %url
+        ));
         let agent = endpoint
             .current_agent()?
             .unwrap_or_else(|| Self::agent(url, tls));
@@ -1726,6 +1765,12 @@ impl HttpConnector {
     }
 
     fn status(&self) -> Result<YubiHsmConnectorStatus, Error> {
+        let _operation = crate::logging::Operation::new(tracing::debug_span!(
+            target: "pkcs11rs::discovery",
+            "http.yubihsm_status",
+            endpoint = %self.endpoint.url,
+            serial = %self.serial
+        ));
         let agent = self.request_agent()?;
         let mut response = agent
             .get(format!(

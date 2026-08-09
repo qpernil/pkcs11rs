@@ -1456,6 +1456,8 @@ dependencies = [
  "signature 3.0.0",
  "spki 0.8.0",
  "subtle",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
  "ureq",
  "x25519-dalek",

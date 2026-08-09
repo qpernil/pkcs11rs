@@ -108,21 +108,10 @@ where
     divisor != T::from(0) && value % divisor == T::from(0)
 }
 
-fn debug_enabled(level: u8) -> bool {
-    MODULE_CONTEXT
-        .try_read()
-        .ok()
-        .and_then(|module| module.as_ref().map(|context| context.debug_level >= level))
-        .unwrap_or(false)
-}
-
 /// Emit diagnostic output when the configured level includes the message.
 macro_rules! log {
-    ($level:literal, $($arg:tt)*) => {
-        if crate::debug_enabled($level) {
-            eprintln!($($arg)*);
-        }
-    };
+    (1, $($arg:tt)*) => {{ tracing::warn!($($arg)*) }};
+    (2, $($arg:tt)*) => {{ tracing::trace!($($arg)*) }};
 }
 
 macro_rules! ffi_entry_point {
@@ -130,7 +119,7 @@ macro_rules! ffi_entry_point {
         $(#[$attribute])*
         #[no_mangle]
         pub extern "C" fn $name($($arg: $typ),*) -> CK_RV {
-            crate::ffi_boundary(|| $body)
+            crate::logging::ffi_call(stringify!($name), || crate::ffi_boundary(|| $body))
         }
     };
 }
@@ -139,6 +128,7 @@ pub mod error;
 use error::*;
 
 mod configuration;
+mod logging;
 use configuration::{
     JsonConfiguration, ModuleConfiguration, ReservedConfiguration, Scp03KeyMaterialConfiguration,
     SecureChannelConfiguration,

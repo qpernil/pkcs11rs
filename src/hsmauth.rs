@@ -127,7 +127,11 @@ pub(crate) struct Client;
 
 impl Client {
     pub(crate) fn discover(&self, connector: &dyn Connector) -> Result<Info, Error> {
-        log!(2, "YubiHSM Auth discovery started on {}", connector.name());
+        tracing::debug!(
+            target: "pkcs11rs::discovery",
+            connector = %connector.name(),
+            "YubiHSM Auth discovery started"
+        );
         let version = self.get_version(connector)?;
         let management_key_retries = self.get_management_key_retries(connector)?;
         let mut credentials = self.list_credentials(connector)?;
@@ -136,14 +140,13 @@ impl Client {
                 credential.public_key = Some(self.get_public_key(connector, &credential.label)?);
             }
         }
-        log!(
-            2,
-            "YubiHSM Auth discovery found version {}.{}.{}, {} management-key retries, and {} credentials",
-            version.0,
-            version.1,
-            version.2,
+        tracing::debug!(
+            target: "pkcs11rs::discovery",
+            connector = %connector.name(),
+            version = %format_args!("{}.{}.{}", version.0, version.1, version.2),
             management_key_retries,
-            credentials.len()
+            credentials = credentials.len(),
+            "YubiHSM Auth discovery completed"
         );
         for credential in &credentials {
             log!(

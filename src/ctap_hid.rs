@@ -443,6 +443,14 @@ fn exchange(
     payload: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>, ExchangeError> {
+    let operation = crate::logging::Operation::trace(tracing::trace_span!(
+        target: "pkcs11rs::transport",
+        "ctap_hid.exchange",
+        command,
+        request_bytes = payload.len(),
+        timeout_ms = timeout.as_millis() as u64
+    ));
+    let _entered = operation.enter();
     write_message(io, channel, command, payload).map_err(ExchangeError::Other)?;
     read_message(io, channel, command, timeout)
 }

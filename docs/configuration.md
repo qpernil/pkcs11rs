@@ -1,11 +1,11 @@
 # Initialization configuration
 
 pkcs11rs accepts a versioned JSON configuration through
-`CK_C_INITIALIZE_ARGS.pReserved`. The reserved pointer may be either the legacy
+`CK_C_INITIALIZE_ARGS.pReserved`. The reserved pointer may be either the
 direct JSON string described below or the magic-tagged
 `PKCS11RS_INITIALIZE_ARGS_V1` wrapper. The wrapper additionally carries a host
-CCID reader enumerator for platforms such as iOS. Both forms use the same PKCS
-#11 C ABI on iOS, macOS, Linux, and Windows.
+CCID reader enumerator and log callback for platforms such as iOS. Both forms
+use the same PKCS #11 C ABI on iOS, macOS, Linux, and Windows.
 
 In the direct form, the value must be a NUL-terminated UTF-8 string whose
 terminator occurs within the first 64 KiB. pkcs11rs reads the string only during
@@ -37,7 +37,9 @@ a public key or CA certificate.
 ```json
 {
   "version": 1,
-  "debug": 1,
+  "logging": {
+    "level": "info"
+  },
   "pinentry": "pinentry-mac",
   "hardware": {
     "discovery": true
@@ -112,7 +114,7 @@ and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 
 | JSON field | Environment fallback |
 | --- | --- |
-| `debug` | `PKCS11RS_DEBUG` |
+| `logging.level` | `PKCS11RS_LOG` |
 | `pinentry` | `PKCS11RS_PINENTRY` |
 | `hardware.discovery` | `PKCS11RS_HARDWARE_DISCOVERY` |
 | `storage.tokens` | `PKCS11RS_TOKEN_STORAGE` |
@@ -174,8 +176,8 @@ defaults exactly as before.
 ## Host CCID wrapper
 
 When `pReserved` begins with `PKCS11RS_INITIALIZE_ARGS_MAGIC`, pkcs11rs reads a
-`PKCS11RS_INITIALIZE_ARGS_V1` instead of a direct string. `ulSize` must cover
-the complete version-one structure and `ulVersion` must equal
+`PKCS11RS_INITIALIZE_ARGS_V1` instead of a direct string. `ulSize` must equal
+the size of the complete version-one structure and `ulVersion` must equal
 `PKCS11RS_INITIALIZE_ARGS_VERSION`; an invalid size or version returns
 `CKR_ARGUMENTS_BAD`. `pConfiguration` contains exactly
 `ulConfigurationLen` UTF-8 bytes and need not be NUL-terminated. The length is
@@ -186,6 +188,14 @@ static CK_RV enumerate_ccid_readers(
     void *hardware_context,
     void *sink_context,
     PKCS11RS_ADD_CCID_READER add_reader);
+
+static void log_event(
+    void *log_context,
+    CK_ULONG level,
+    const CK_UTF8CHAR *target,
+    CK_ULONG target_length,
+    const CK_UTF8CHAR *message,
+    CK_ULONG message_length);
 
 static const CK_UTF8CHAR config[] =
     "{\"version\":1,\"hardware\":{\"discovery\":true},"
@@ -199,6 +209,8 @@ extension.pConfiguration = config;
 extension.ulConfigurationLen = sizeof(config) - 1;
 extension.pHardwareContext = NULL; /* Or an application-owned context. */
 extension.enumerateCcidReaders = enumerate_ccid_readers;
+extension.pLogContext = NULL; /* Or an application-owned log sink. */
+extension.logEvent = log_event;
 
 CK_C_INITIALIZE_ARGS args = {0};
 args.flags = CKF_OS_LOCKING_OK;
@@ -213,6 +225,13 @@ transport function, and every per-reader context passed to `add_reader` must
 remain valid until `C_Finalize`. Callbacks may run on any thread making a PKCS
 #11 call and must support that calling model.
 
+`logEvent` receives synchronous, formatted tracing events and must copy any
+bytes it retains before returning. It must not reenter PKCS #11. Levels use the
+`PKCS11RS_LOG_*` constants in `pkcs11rs.h`; the callback remains valid until
+`C_Finalize`. The JSON or environment log level filters events before the
+callback. With a callback and no explicit level, all levels are delivered so
+the host can filter them.
+
 When `hardware.discovery` is true, the enumerator is invoked once during every
 `C_GetSlotList`. It calls `add_reader` once for each current reader and supplies
 a stable UTF-8 reader name, ATR, maximum input and output APDU lengths,
@@ -223,6 +242,28 @@ host enumerator is present it is used instead of native PC/SC. If
 `hardware.discovery` is false, neither host enumeration nor native local
 hardware discovery runs.
 
-If the reserved pointer does not contain the exact magic value, pkcs11rs keeps
-the legacy direct-string interpretation. The callback typedefs and field
+If the reserved pointer does not contain the exact magic value, pkcs11rs uses
+the direct-string interpretation. The callback typedefs and field
 declarations in [`pkcs11rs.h`](../pkcs11rs.h) are the authoritative C ABI.
+
+## Diagnostics
+
+`logging.level` and its `PKCS11RS_LOG` fallback accept `off`, `error`, `warn`,
+`info`, `debug`, or `trace`. An explicit level with no host callback installs a
+module-local formatter writing to standard error. A host callback receives the
+same module-local formatted events. If neither a level nor callback is
+configured, pkcs11rs installs no subscriber and its events flow to an ambient
+`tracing` subscriber when the Rust host has one.
+
+The host callback receives the tracing target separately from the formatted
+message; the message does not repeat the target. Module-local standard-error
+output retains its target prefix.
+
+Debug output explains discovery results and slot inventory: named readers and
+devices, applet probes and outcomes, stable slot registration, presence and
+deduplication decisions, and phase timing. Every exported PKCS #11 call emits
+debug-level entry and return events with its duration and return value. Trace
+adds API state diagnostics and per-request connector, CCID, APDU, PC/SC, USB,
+and CTAP HID timing. Existing warnings and diagnostics use the corresponding
+standard tracing levels. New events do not include PINs, key material,
+plaintext, or raw APDU contents.

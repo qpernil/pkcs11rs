@@ -150,7 +150,7 @@ the primary CTAP version is included in the PKCS #11 slot description and
 token label. The device manufacturer, model, serial number, hardware version,
 and firmware version use the shared YubiKey metadata. Set
 `PKCS11RS_CCID_APPLICATIONS=fido2` to restrict the CCID applet probe; it does
-not disable native FIDO HID discovery. Set `PKCS11RS_DEBUG=2` to print the
+not disable native FIDO HID discovery. Set `PKCS11RS_LOG=trace` to print the
 complete reported versions, extensions, AAGUID, options, maximum message size,
 PIN/UV protocols, and transports.
 
@@ -203,14 +203,10 @@ Protocol-specific key and certificate configuration is documented in
 
 ## Diagnostics
 
-`PKCS11RS_DEBUG` is read once during `C_Initialize` and accepts a numeric
-log level:
-
-- unset or `0`: no diagnostic output;
-- `1`: initialization and applet-discovery failures, including the PC/SC
-  reader name when a reader cannot be opened;
-- `2`: all diagnostic output, including successful PC/SC reader opens, API
-  calls, and transport tracing.
-
-Other values are invalid and cause `C_Initialize` to return
-`CKR_ARGUMENTS_BAD`.
+`PKCS11RS_LOG` is read once during `C_Initialize` and accepts `off`, `error`,
+`warn`, `info`, `debug`, or `trace`. Warnings include reader and applet
+discovery failures. Debug reports named reader inventories, each applet probe
+and outcome, applet-to-slot registration, retained reader slots, discovery
+phase timing, and every PKCS #11 entry point. Trace adds per-request transport
+and APDU timing. The initialization wrapper can route the same formatted events
+to a host callback, as used by the iOS smoke app.
