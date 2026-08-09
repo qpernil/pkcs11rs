@@ -41,11 +41,12 @@ It obtains the current `TKSmartCardSlotManager` names on every slot-list
 refresh. The connector lazily starts one worker for each reader that contributes
 slots. That worker owns and reuses the reader's `TKSmartCard`, serializes its
 APDUs, and adapts asynchronous session and transmit completions to the
-synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains cached, but
-the current transport opens and ends an exclusive CryptoTokenKit session around
-each raw APDU. A removed card invalidates the retained object; the worker
-resolves a new card by the same reader name when it returns. Objective-C objects
-retained for card I/O stay confined to the worker that created them.
+synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains
+cached, but the current transport opens and ends an exclusive CryptoTokenKit
+session around each raw APDU. A removed card invalidates the retained object;
+the worker resolves a new card by the same reader name when it returns.
+Objective-C objects retained for card I/O stay confined to the worker that
+created them.
 
 The static XCFramework loads Apple's public CryptoTokenKit framework internally
 before it first enumerates readers. Applications importing `PKCS11RS` need no
@@ -217,5 +218,5 @@ Protocol-specific key and certificate configuration is documented in
 discovery failures. Debug reports named reader inventories, each applet probe
 and outcome, applet-to-slot registration, retained reader slots, discovery
 phase timing, and every PKCS #11 entry point. Trace adds per-request transport
-and APDU timing. The initialization wrapper can route the same formatted events
-to a host logging callback, as used by the iOS smoke app.
+and APDU timing. On iOS these events go directly to Apple Unified Logging when
+a log level is configured.

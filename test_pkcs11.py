@@ -8392,7 +8392,7 @@ fn main() {
             environment["PKCS11RS_HARDWARE_DISCOVERY"] = "0"
 
             def run_openssl(
-                configured_init_args: str | None,
+                configured_init_args: str,
             ) -> subprocess.CompletedProcess[str]:
                 lines = [
                     "openssl_conf = openssl_init",
@@ -8412,8 +8412,7 @@ fn main() {
                     f"module = {provider}",
                     f"pkcs11_module = {library_path()}",
                 ]
-                if configured_init_args is not None:
-                    lines.append(f"init_args = {configured_init_args}")
+                lines.append(f"init_args = {configured_init_args}")
                 lines.extend(["debug_level = 7", "activate = 1", ""])
                 config.write_text("\n".join(lines))
                 return subprocess.run(
@@ -8426,26 +8425,11 @@ fn main() {
                     timeout=20,
                 )
 
-            baseline = run_openssl(None)
             result = run_openssl(init_args)
 
         self.assertEqual(
-            baseline.returncode,
-            0,
-            baseline.stdout + baseline.stderr,
-        )
-        self.assertNotIn(
-            "C_Initialize received opaque pReserved data",
-            baseline.stderr,
-        )
-        self.assertEqual(
             result.returncode,
             0,
-            result.stdout + result.stderr,
-        )
-        self.assertIn(
-            "C_Initialize received opaque pReserved data",
-            result.stderr,
             result.stdout + result.stderr,
         )
 

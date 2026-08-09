@@ -23,7 +23,6 @@ macro_rules! non_session_unsupported_stub {
 mod crypt;
 mod general;
 mod hsmauth;
-mod initialize;
 mod interfaces;
 mod key;
 mod object;
@@ -40,9 +39,6 @@ pub use key::*;
 pub use object::*;
 pub use session::*;
 pub use wrap::*;
-
-#[cfg(test)]
-pub(crate) use initialize::{INITIALIZE_ARGS_MAGIC, INITIALIZE_ARGS_VERSION};
 
 #[cfg(test)]
 pub(crate) use hsmauth::*;

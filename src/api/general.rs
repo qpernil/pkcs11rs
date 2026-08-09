@@ -13,21 +13,18 @@ ffi_entry_point! {
         init_args: CK_VOID_PTR,
     ) -> CK_RV {
         log!(2, "C_Initialize called with {:?}", init_args);
-        let initialization = match validate_initialize_args(init_args) {
-            Ok(initialization) => initialization,
+        let explicit_configuration = match validate_initialize_args(init_args) {
+            Ok(configuration) => configuration,
             Err(rv) => return rv,
         };
-        let configuration = match ModuleConfiguration::resolve(initialization.configuration) {
+        let configuration = match ModuleConfiguration::resolve(explicit_configuration) {
             Ok(configuration) => configuration,
             Err(error) => return error.into(),
         };
         match lock_context_write() {
             Ok(mut guard) => match guard.as_mut() {
                 Some(_) => CKR_CRYPTOKI_ALREADY_INITIALIZED as CK_RV,
-                None => match ModuleContext::new_with_configuration_and_log(
-                    configuration,
-                    initialization.host_log_provider,
-                ) {
+                None => match ModuleContext::new_with_configuration(configuration) {
                     Ok(context) => {
                         *guard = Some(context);
                         CKR_OK as CK_RV
@@ -40,19 +37,17 @@ ffi_entry_point! {
     }
 }
 
-fn validate_initialize_args(
-    init_args: CK_VOID_PTR,
-) -> Result<super::initialize::InitializeReserved, CK_RV> {
+fn validate_initialize_args(init_args: CK_VOID_PTR) -> Result<Option<JsonConfiguration>, CK_RV> {
     if init_args.is_null() {
-        return Ok(super::initialize::InitializeReserved {
-            configuration: None,
-            host_log_provider: None,
-        });
+        return Ok(None);
     }
 
     let args = unsafe { _as_ref(init_args.cast::<CK_C_INITIALIZE_ARGS>()) }?;
-    let initialization = unsafe { super::initialize::parse_initialize_reserved(args.pReserved) }
-        .map_err(CK_RV::from)?;
+    let configuration =
+        match unsafe { JsonConfiguration::from_reserved(args.pReserved) }.map_err(CK_RV::from)? {
+            ReservedConfiguration::Empty | ReservedConfiguration::Opaque => None,
+            ReservedConfiguration::Json(configuration) => Some(*configuration),
+        };
 
     let callbacks = [
         args.CreateMutex.is_some(),
@@ -75,7 +70,7 @@ fn validate_initialize_args(
         return Err(CKR_CANT_LOCK as CK_RV);
     }
 
-    Ok(initialization)
+    Ok(configuration)
 }
 
 ffi_entry_point! {

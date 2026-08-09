@@ -127,6 +127,8 @@ macro_rules! ffi_entry_point {
 pub mod error;
 use error::*;
 
+#[cfg(target_os = "ios")]
+mod apple;
 mod configuration;
 mod logging;
 use configuration::{
