@@ -5,7 +5,7 @@ use zeroize::Zeroizing;
 
 const SOFTWARE_SLOT_DESCRIPTION_PREFIX: &str = "pkcs11rs software slot: ";
 const SOFTWARE_MANUFACTURER: &str = "pkcs11rs";
-const SOFTWARE_MODEL: &str = "Software";
+const SOFTWARE_MODEL: &str = "Software token";
 
 pub(crate) struct SoftwareSlot {
     name: String,
@@ -237,7 +237,9 @@ impl Slot for SoftwareSlot {
                     info.flags |= CKF_USER_PIN_INITIALIZED as CK_FLAGS;
                 }
             }
-            None => info.flags |= CKF_TOKEN_INITIALIZED as CK_FLAGS,
+            None => {
+                info.flags |= (CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED) as CK_FLAGS;
+            }
             Some(_) => {}
         }
         info.ulMaxSessionCount = CK_EFFECTIVELY_INFINITE as CK_ULONG;
@@ -445,9 +447,11 @@ mod tests {
         slot.get_token_info(&mut token_info).unwrap();
         assert_eq!(
             token_info.flags,
-            (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS
+            (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED)
+                as CK_FLAGS
         );
         assert_eq!(&token_info.label[..b"signing".len()], b"signing");
+        assert_eq!(&token_info.model, b"Software token  ");
         assert_eq!(&token_info.serialNumber, b"SOFTWARE00000003");
         assert_eq!(token_info.ulMinPinLen, 8);
         assert_eq!(token_info.ulMaxPinLen, 1024);
