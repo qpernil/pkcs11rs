@@ -13,7 +13,9 @@ use std::io::{Read, Write};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-pub(crate) const PIV_AID: [u8; 5] = [0xa0, 0x00, 0x00, 0x03, 0x08];
+pub(crate) const PIV_AID: [u8; 11] = [
+    0xa0, 0x00, 0x00, 0x03, 0x08, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+];
 pub(crate) const ORIGIN_GENERATED: u8 = 1;
 pub(crate) const ORIGIN_IMPORTED: u8 = 2;
 

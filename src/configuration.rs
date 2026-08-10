@@ -31,6 +31,8 @@ pub(crate) struct JsonConfiguration {
     #[serde(default)]
     ccid: JsonCcidConfiguration,
     #[serde(default)]
+    nfc: JsonNfcConfiguration,
+    #[serde(default)]
     scp03: JsonScp03Configuration,
     #[serde(default)]
     scp11: JsonScp11Configuration,
@@ -94,6 +96,12 @@ struct JsonCcidConfiguration {
     secure_channel: Option<String>,
     #[serde(default)]
     aids: JsonCcidAidConfiguration,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonNfcConfiguration {
+    discovery: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -215,6 +223,7 @@ pub(crate) struct ModuleConfiguration {
     pub(crate) yubihsm_tls_ca_certificate_bundle: Option<OsString>,
     pub(crate) ccid_configurations: Vec<CcidConfiguration>,
     pub(crate) ccid_aids: CcidAidConfiguration,
+    pub(crate) nfc_discovery: bool,
     pub(crate) secure_channels: SecureChannelConfiguration,
 }
 
@@ -404,6 +413,15 @@ impl ModuleConfiguration {
             )?,
         };
 
+        let nfc_discovery = explicit
+            .nfc
+            .discovery
+            .or(environment_switch(
+                "PKCS11RS_NFC_DISCOVERY",
+                &mut environment,
+            )?)
+            .unwrap_or(false);
+
         let scp03 = resolve_scp03(explicit.scp03, &mut environment)?;
         let scp11 = resolve_scp11(
             explicit.scp11,
@@ -457,6 +475,7 @@ impl ModuleConfiguration {
             )?,
             ccid_configurations,
             ccid_aids,
+            nfc_discovery,
             secure_channels: SecureChannelConfiguration { scp03, scp11 },
         })
     }
@@ -805,6 +824,7 @@ mod tests {
         assert!(!configuration.hardware_discovery);
         assert!(!configuration.yubihsm_recreate_sessions);
         assert_eq!(configuration.yubihsm_urls, ["http://one", "http://two"]);
+        assert!(!configuration.nfc_discovery);
         assert_eq!(configuration.secure_channels.scp03.security_level, 0x33);
     }
 
@@ -819,7 +839,8 @@ mod tests {
                         "urls": ["http://json/"],
                         "recreate_sessions": true
                     },
-                    "ccid": {"applications": ["hsmauth"]}
+                    "ccid": {"applications": ["hsmauth"]},
+                    "nfc": {"discovery": true}
                 }"#,
             )),
             &[
@@ -833,6 +854,7 @@ mod tests {
         assert_eq!(configuration.logging_level, Some(LogLevel::Warn));
         assert!(!configuration.hardware_discovery);
         assert!(configuration.yubihsm_recreate_sessions);
+        assert!(configuration.nfc_discovery);
         assert_eq!(configuration.yubihsm_urls, ["http://json"]);
         assert_eq!(configuration.ccid_configurations.len(), 1);
         assert_eq!(

@@ -23,10 +23,8 @@ unsafe extern "C" {
 
 const APPLE_LOG_SUBSYSTEM: &[u8] = b"com.nilssoncrypto.pkcs11rs\0";
 
-// Clang places constant os_log format strings in this Mach-O section. The
-// format and buffer below reproduce os_log_with_type(log, type,
+// The format and buffer below reproduce os_log_with_type(log, type,
 // "%{public}s", message) without requiring Clang at build time.
-#[link_section = "__TEXT,__oslogstring"]
 static APPLE_LOG_PUBLIC_STRING_FORMAT: [u8; 11] = *b"%{public}s\0";
 
 const _: () = assert!(std::mem::size_of::<usize>() == 8);

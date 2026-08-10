@@ -100,6 +100,24 @@ impl HsmAuthProviderRegistry {
         Ok(())
     }
 
+    #[cfg(target_os = "ios")]
+    pub(crate) fn remove_device(
+        &self,
+        device: &Arc<crate::device::DeviceContext>,
+    ) -> Result<(), Error> {
+        self.providers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+            .retain(|provider| {
+                provider
+                    .connector
+                    .as_ref()
+                    .device_context()
+                    .is_none_or(|candidate| !Arc::ptr_eq(&candidate, device))
+            });
+        Ok(())
+    }
+
     fn with_provider<T>(
         &self,
         login: &HsmAuthLogin<'_>,

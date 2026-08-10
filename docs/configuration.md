@@ -76,6 +76,9 @@ a public key or CA certificate.
       "fido2": "a0000006472f0001"
     }
   },
+  "nfc": {
+    "discovery": false
+  },
   "scp03": {
     "bmk": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
     "key_version": 1,
@@ -108,6 +111,18 @@ CryptoTokenKit. It does not affect explicitly configured
 `yubihsm.urls`. `yubihsm.recreate_sessions` defaults to `false`; its security
 and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 
+On iOS, `nfc.discovery` opts into one NFC card request during the first
+`C_GetSlotList` after initialization. It defaults to `false`. Successful
+discovery registers stable, applet-specific tokens that remain logically
+present for the module lifetime; later operations request the same physical
+card again when needed. Cancellation or an unrecognized card is an isolated
+discovery miss and does not fail slot listing or retry automatically.
+After an operation, the NFC session remains idle until the card is removed,
+the user cancels, or another operation reuses it. This field has no effect on
+other platforms. Because PKCS #11 is synchronous, the first `C_GetSlotList`
+blocks until the NFC request completes; applications must make that call away
+from their main UI thread.
+
 ## Environment mapping
 
 | JSON field | Environment fallback |
@@ -132,6 +147,7 @@ and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
 | `ccid.aids.hsmauth` | `PKCS11RS_HSMAUTH_AID` |
 | `ccid.aids.issuer_sd` | `PKCS11RS_ISSUER_SD_AID` |
 | `ccid.aids.fido2` | `PKCS11RS_FIDO2_AID` |
+| `nfc.discovery` | `PKCS11RS_NFC_DISCOVERY` |
 | `scp03.bmk` | `PKCS11RS_SCP03_BMK` |
 | `scp03.enc_key` | `PKCS11RS_SCP03_ENC_KEY` |
 | `scp03.mac_key` | `PKCS11RS_SCP03_MAC_KEY` |
