@@ -368,6 +368,10 @@ impl Client {
     }
 
     #[allow(dead_code)]
+    // PKCS #11 C_SetPIN cannot identify which credential to change when a
+    // YubiHSM Auth slot exposes multiple labels. Retain this label-addressed
+    // operation for a future self-service extension instead of mapping it to
+    // the slot-wide PIN API.
     pub(crate) fn change_credential_password(
         &self,
         connector: &dyn Connector,

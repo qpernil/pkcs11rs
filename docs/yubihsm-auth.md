@@ -608,6 +608,12 @@ The YubiHSM Auth slot uses `C_Login` roles as follows:
   is retained in zeroizing per-slot memory until logout, device removal,
   application reset, or module finalization.
 
+`C_SetPIN` is intentionally unsupported on YubiHSM Auth slots. A slot can
+expose multiple credential labels, while the PKCS #11 operation is slot-wide
+and has no credential selector. Use the proprietary label-addressed
+administration functions below for credential passwords, or the management
+password function for the applet-wide management key.
+
 With pinentry configured, `C_Login` with `CKU_SO`, a null PIN pointer, and zero
 PIN length obtains the management password through pinentry. `CKU_USER` never
 prompts because it has no PIN of its own.

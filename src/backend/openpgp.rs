@@ -181,9 +181,6 @@ impl Slot for OpenPgpSlot {
     fn refresh(&self) -> Result<(), Error> {
         self.connector.refresh()
     }
-    fn set_applet_present(&self, present: bool) {
-        self.connector.set_applet_present(present);
-    }
     fn set_discovery_error(&self, error: &Error) {
         self.connector.set_discovery_error(error);
     }

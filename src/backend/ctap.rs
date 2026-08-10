@@ -96,8 +96,6 @@ pub(crate) trait FidoEndpoint: std::fmt::Debug {
         Ok(())
     }
     fn clear(&self) {}
-    #[allow(dead_code)]
-    fn set_applet_present(&self, _present: bool) {}
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
     fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession>;
@@ -193,10 +191,6 @@ impl FidoEndpoint for CcidFidoEndpoint {
 
     fn clear(&self) {
         self.connector.clear_secure_channel();
-    }
-
-    fn set_applet_present(&self, present: bool) {
-        self.connector.set_applet_present(present);
     }
 
     fn set_discovery_error(&self, error: &Error) {
@@ -745,10 +739,6 @@ impl Slot for Fido2Slot {
 
     fn refresh(&self) -> Result<(), Error> {
         self.endpoint.refresh()
-    }
-
-    fn set_applet_present(&self, present: bool) {
-        self.endpoint.set_applet_present(present);
     }
 
     fn set_discovery_error(&self, error: &Error) {

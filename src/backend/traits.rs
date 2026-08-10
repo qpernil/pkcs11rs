@@ -216,8 +216,6 @@ pub(crate) trait Slot {
     fn refresh(&self) -> Result<(), Error> {
         Ok(())
     }
-    #[allow(dead_code)]
-    fn set_applet_present(&self, _present: bool) {}
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
     fn clear_session(&mut self) {}

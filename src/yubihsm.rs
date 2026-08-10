@@ -1000,11 +1000,6 @@ fn parse_p256_public_key(encoded: &[u8]) -> Result<P256PublicKey, Error> {
     P256PublicKey::from_sec1_bytes(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 
-#[allow(dead_code)]
-fn device_public_key(connector: &dyn Connector) -> Result<P256PublicKey, Error> {
-    parse_p256_public_key(&device_public_key_bytes(connector)?)
-}
-
 fn trusted_device_public_key(
     connector: &dyn Connector,
     trust_prefix: Option<&std::ffi::OsStr>,
