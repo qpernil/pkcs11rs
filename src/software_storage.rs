@@ -431,7 +431,7 @@ impl SoftwareTokenStore {
         ) {
             Ok(plaintext) => plaintext,
             Err(Error::Generic(rv)) if rv == CKR_ENCRYPTED_DATA_INVALID as crate::CK_RV => {
-                return Err(CKR_PIN_INCORRECT.into())
+                return Err(CKR_PIN_INCORRECT.into());
             }
             Err(error) => return Err(error),
         };

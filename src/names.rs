@@ -7,7 +7,7 @@ use crate::{
 use std::ffi::{c_char, CStr};
 
 macro_rules! constant_name {
-    ($value:expr, $type:ty; $($constant:ident),+ $(,)?) => {
+    ($value:expr_2021, $type:ty; $($constant:ident),+ $(,)?) => {
         match $value {
             $(candidate if candidate == $constant as $type => {
                 // Each input is a Rust identifier, so its stringified form
@@ -408,7 +408,7 @@ fn profile_id_name(value: CK_PROFILE_ID) -> Option<&'static CStr> {
 
 macro_rules! export_name_function {
     ($function:ident, $type:ty, $lookup:ident) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $function(value: $type) -> *const c_char {
             $lookup(value).map_or(std::ptr::null(), CStr::as_ptr)
         }

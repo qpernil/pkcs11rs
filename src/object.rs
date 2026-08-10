@@ -138,7 +138,7 @@ impl SoftwarePrivateKeyMaterial {
 
     pub(crate) fn public_key(&self) -> Result<PublicKeyMaterial, Error> {
         macro_rules! weierstrass {
-            ($key:expr, $curve:expr) => {{
+            ($key:expr_2021, $curve:expr_2021) => {{
                 let encoded =
                     elliptic_curve::sec1::ToSec1Point::to_sec1_point(&$key.public_key(), false);
                 let public_key = encoded

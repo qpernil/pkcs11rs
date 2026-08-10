@@ -79,7 +79,10 @@ jobs:
             pkg-config
 
       - name: Check minimum supported Rust version
-        run: cargo check --locked --all-features
+        run: cargo check --locked --workspace --all-features
+
+      - name: Check binding generator minimum supported Rust version
+        run: cargo check --locked --manifest-path xtask/Cargo.toml
 
   dependency-policy:
     runs-on: ubuntu-latest

@@ -332,7 +332,7 @@ fn decode_pem_certificates(encoded: &[u8]) -> Result<Vec<Vec<u8>>, String> {
             (None, _) => {
                 return Err(
                     "only CERTIFICATE blocks and surrounding whitespace are allowed".to_owned(),
-                )
+                );
             }
             (Some(value), "-----END CERTIFICATE-----") => {
                 let decoded = STANDARD
@@ -345,7 +345,7 @@ fn decode_pem_certificates(encoded: &[u8]) -> Result<Vec<Vec<u8>>, String> {
                 base64 = None;
             }
             (Some(_), value) if value.starts_with("-----") || value.is_empty() => {
-                return Err("malformed CERTIFICATE block".to_owned())
+                return Err("malformed CERTIFICATE block".to_owned());
             }
             (Some(base64), value) => base64.push_str(value),
         }

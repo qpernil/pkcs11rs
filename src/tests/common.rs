@@ -431,7 +431,9 @@ fn assert_advertised_sha512_multipart(slot_id: CK_SLOT_ID, session: CK_SESSION_H
     );
     assert_eq!(
         output.to_vec(),
-        test_hex("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+        test_hex(
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        )
     );
 }
 
@@ -7860,7 +7862,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     };
 
     macro_rules! assert_stub {
-        ($name:literal, $call:expr) => {
+        ($name:literal, $call:expr_2021) => {
             assert_eq!($call, expected, "{} should validate session state", $name);
         };
     }

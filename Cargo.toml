@@ -1,7 +1,7 @@
 [package]
 name = "pkcs11rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 description = "PKCS #11 provider for YubiKey CCID and FIDO HID applications and YubiHSM devices"
 readme = "README.md"
@@ -19,7 +19,7 @@ members = [
 ]
 default-members = [".", "crates/pkcs11rs-connector", "tools/pkcs11rs-tool"]
 exclude = ["xtask"]
-resolver = "2"
+resolver = "3"
 
 [lib]
 crate-type = ["cdylib", "staticlib"]

@@ -96,7 +96,7 @@ fn software_sign(
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
     macro_rules! sign_ecdsa {
-        ($key:expr, $curve:ty, $signature:ty) => {{
+        ($key:expr_2021, $curve:ty, $signature:ty) => {{
             let digest = piv_hash_mechanism(mechanism)
                 .map(|digest| hash(digest, data).map(|value| value.to_vec()))
                 .transpose()?
