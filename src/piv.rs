@@ -32,7 +32,6 @@ const INS_GET_METADATA: u8 = 0xf7;
 const INS_MOVE_KEY: u8 = 0xf6;
 const INS_ATTEST: u8 = 0xf9;
 const INS_SET_MANAGEMENT_KEY: u8 = 0xff;
-const INS_SET_PIN_RETRIES: u8 = 0xfa;
 const MANAGEMENT_KEY_REFERENCE: u8 = 0x9b;
 const STATUS_SUCCESS: u16 = 0x9000;
 const CERTIFICATE_UNCOMPRESSED: u8 = 0;
@@ -198,10 +197,6 @@ impl Slot {
         &Self::ALL
     }
 
-    pub(crate) fn from_id(id: u8) -> Option<Self> {
-        Self::ALL.iter().copied().find(|slot| *slot as u8 == id)
-    }
-
     pub(crate) fn cka_id(self) -> u8 {
         match self {
             Self::Authentication => 1,
@@ -234,10 +229,6 @@ impl Slot {
 
     pub(crate) fn from_cka_id(id: u8) -> Option<Self> {
         Self::ALL.iter().copied().find(|slot| slot.cka_id() == id)
-    }
-
-    pub(crate) fn is_retired(self) -> bool {
-        (Self::Retired1 as u8..=Self::Retired20 as u8).contains(&(self as u8))
     }
 
     pub(crate) fn certificate_object(self) -> u32 {
@@ -724,6 +715,10 @@ fn find_der_extension(input: &[u8], oid: &[u8]) -> Result<Option<Vec<u8>>, Error
     scan(input, content, end, oid)
 }
 
+// Attestation requires a device round trip for every key. Keep policy extraction
+// available for callers that already have an attestation certificate, but do not
+// use it during normal slot discovery: GET METADATA supplies policy directly and
+// stored certificates provide the public-key fallback without attesting each key.
 pub(crate) fn parse_attestation_metadata(certificate: &[u8]) -> Result<Metadata, Error> {
     let policy = find_der_extension(certificate, YUBICO_PIV_USAGE_POLICY_OID)?;
     let (pin_policy, touch_policy) = match policy {
@@ -839,25 +834,6 @@ impl Client {
         request[..old_value.len()].copy_from_slice(old_value);
         request[8..8 + new_value.len()].copy_from_slice(new_value);
         self.command(connector, instruction, 0, reference, &request)?;
-        Ok(())
-    }
-
-    pub(crate) fn set_pin_retries(
-        &self,
-        connector: &dyn Connector,
-        pin_retries: u8,
-        puk_retries: u8,
-    ) -> Result<(), Error> {
-        if pin_retries == 0 || puk_retries == 0 {
-            return Err(CKR_DATA_INVALID.into());
-        }
-        self.command(
-            connector,
-            INS_SET_PIN_RETRIES,
-            pin_retries,
-            puk_retries,
-            &[],
-        )?;
         Ok(())
     }
 
@@ -1121,25 +1097,6 @@ impl Client {
         }
         self.command(connector, INS_MOVE_KEY, to as u8, from as u8, &[])?;
         Ok(())
-    }
-
-    pub(crate) fn certificate(
-        &self,
-        connector: &dyn Connector,
-        slot: Slot,
-    ) -> Result<Vec<u8>, Error> {
-        self.certificate_and_data(connector, slot)
-            .map(|(certificate, _)| certificate)
-    }
-
-    pub(crate) fn certificate_and_data(
-        &self,
-        connector: &dyn Connector,
-        slot: Slot,
-    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-        let object = self.get_data(connector, slot.certificate_object())?;
-        let certificate = decode_certificate_object(&object)?;
-        Ok((certificate, object))
     }
 
     pub(crate) fn attestation(

@@ -42,8 +42,6 @@ pub(crate) trait Connector {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn set_applet_present(&self, _present: bool) {}
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
 
@@ -52,11 +50,6 @@ pub(crate) trait Connector {
     }
 
     fn clear_secure_channel(&self) {}
-
-    #[allow(dead_code)]
-    fn secure_channel_is_active(&self) -> bool {
-        false
-    }
 
     fn security_domain_put_scp03_key_set(
         &self,
@@ -574,16 +567,6 @@ impl Connector for PcscAppletConnector {
         })
     }
 
-    fn set_applet_present(&self, present: bool) {
-        let _ = self.state.with_operation(|| {
-            self.set_applet_presence(present);
-            if !present {
-                self.clear_secure_channel_locked()?;
-            }
-            Ok(())
-        });
-    }
-
     fn set_discovery_error(&self, error: &Error) {
         self.record_discovery_error(error);
     }
@@ -610,18 +593,6 @@ impl Connector for PcscAppletConnector {
         let _ = self
             .state
             .with_operation(|| self.clear_secure_channel_locked());
-    }
-
-    fn secure_channel_is_active(&self) -> bool {
-        if self.protocol.is_none() || !self.enabled() {
-            return false;
-        }
-        self.state
-            .with_operation(|| {
-                let state = self.state.secure_channel()?;
-                Ok(state.application_aid == self.application_aid && state.session.is_some())
-            })
-            .unwrap_or(false)
     }
 
     fn security_domain_put_scp03_key_set(

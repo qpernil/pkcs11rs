@@ -423,15 +423,6 @@ impl Client {
         self.read_or_generate_key(connector, key_ref, algorithm, false)
     }
 
-    pub(crate) fn generate_key_pair(
-        &self,
-        connector: &dyn Connector,
-        key_ref: KeyRef,
-        algorithm: Algorithm,
-    ) -> Result<PublicKey, Error> {
-        self.read_or_generate_key(connector, key_ref, algorithm, true)
-    }
-
     pub(crate) fn generate_key_pair_if_empty(
         &self,
         connector: &dyn Connector,
@@ -1025,14 +1016,6 @@ impl Client {
             },
         )?;
         Ok(())
-    }
-
-    pub(crate) fn import_private_key(
-        &self,
-        connector: &dyn Connector,
-        private_key_template: &[u8],
-    ) -> Result<(), Error> {
-        self.put_data_odd(connector, 0x3f, 0xff, private_key_template)
     }
 
     pub(crate) fn import_private_key_if_empty(

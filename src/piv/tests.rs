@@ -211,7 +211,6 @@ fn changes_and_unblocks_piv_pin_references() {
         response(&[], STATUS_SUCCESS),
         response(&[], STATUS_SUCCESS),
         response(&[], STATUS_SUCCESS),
-        response(&[], STATUS_SUCCESS),
     ]);
     Client.change_pin(&connector, b"123456", b"654321").unwrap();
     Client
@@ -220,12 +219,10 @@ fn changes_and_unblocks_piv_pin_references() {
     Client
         .unblock_pin(&connector, b"87654321", b"123456")
         .unwrap();
-    Client.set_pin_retries(&connector, 5, 4).unwrap();
     let commands = connector.commands.borrow();
     assert_eq!(&commands[0][..4], &[0, INS_CHANGE_REFERENCE, 0, 0x80]);
     assert_eq!(&commands[1][..4], &[0, INS_CHANGE_REFERENCE, 0, 0x81]);
     assert_eq!(&commands[2][..4], &[0, INS_RESET_RETRY, 0, 0x80]);
-    assert_eq!(commands[3], [0, INS_SET_PIN_RETRIES, 5, 4, 0]);
     assert_eq!(&commands[0][5..13], b"123456\xff\xff");
     assert_eq!(&commands[0][13..21], b"654321\xff\xff");
 }
@@ -330,10 +327,11 @@ fn parses_metadata_and_certificate_objects() {
     assert_eq!(parsed.pin_policy, Some(2));
     assert_eq!(parsed.touch_policy, Some(3));
     assert_eq!(parsed.origin, Some(1));
+    let certificate_data = Client
+        .get_data(&connector, Slot::Authentication.certificate_object())
+        .unwrap();
     assert_eq!(
-        Client
-            .certificate(&connector, Slot::Authentication)
-            .unwrap(),
+        decode_certificate_object(&certificate_data).unwrap(),
         [0x30, 0x01, 0x00]
     );
 }
@@ -492,8 +490,6 @@ fn enumerates_all_piv_slots_and_certificate_objects() {
     assert_eq!(Slot::Retired20.cka_id(), 24);
     assert_eq!(Slot::Attestation.cka_id(), 25);
     assert_eq!(Slot::from_cka_id(2), Some(Slot::Signature));
-    assert!(Slot::Retired10.is_retired());
-    assert!(!Slot::Attestation.is_retired());
 }
 
 #[test]

@@ -667,7 +667,7 @@ fn key_destructive_apdus_are_classified_before_transport() {
 }
 
 #[test]
-fn public_key_reads_work_but_key_generation_and_import_are_prohibited() {
+fn public_key_reads_do_not_issue_key_mutation_commands() {
     let mut public_key = encode_tlv(0x81, &[0x11; 128]).unwrap();
     public_key.extend_from_slice(&encode_tlv(0x82, &[0x01, 0x00, 0x01]).unwrap());
     let public_key = encode_tlv(0x7f49, &public_key).unwrap();
@@ -686,19 +686,6 @@ fn public_key_reads_work_but_key_generation_and_import_are_prohibited() {
             Algorithm::Rsa { bits: 1024 },
         )
         .unwrap();
-    assert!(matches!(
-        Client.generate_key_pair(
-            &connector,
-            KeyRef::Attestation,
-            Algorithm::Rsa { bits: 1024 },
-        ),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
-    ));
-    assert!(matches!(
-        Client.import_private_key(&connector, &[0x4d, 0x01, 0x00]),
-        Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
-    ));
-
     let commands = connector.commands.borrow();
     assert_eq!(commands[0], [0, 0x47, 0x81, 0, 2, 0xb6, 0, 0]);
     assert_eq!(
