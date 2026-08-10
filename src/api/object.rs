@@ -1332,6 +1332,26 @@ fn build_imported_key_material(
             KeyMaterial::Public(PublicKeyMaterial::Rsa(key))
         }
         (class, key_type)
+            if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && key_type == CKK_EC as CK_KEY_TYPE =>
+        {
+            let parameters = components
+                .remove(&(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let encoded_point = components
+                .remove(&(CKA_EC_POINT as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            let point =
+                der_octet_string_value(&encoded_point).ok_or(CKR_ATTRIBUTE_VALUE_INVALID)?;
+            let curve = ec_curve_from_parameters(&parameters)
+                .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
+            crate::validate_ec_public_point(curve, point)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+            KeyMaterial::Public(PublicKeyMaterial::Ec {
+                parameters: parameters.to_vec(),
+                public_key: point[1..].to_vec(),
+            })
+        }
+        (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
                 && key_type == CKK_RSA as CK_KEY_TYPE =>
         {

@@ -3596,6 +3596,102 @@ fn yubihsm_create_object_uses_auto_allocated_sparse_metadata() {
 }
 
 #[test]
+fn yubihsm_create_object_persists_standalone_ec_public_key() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    const SLOT_ID: CK_SLOT_ID = 99;
+    let (slot, commands, _, _trust) = crate::yubihsm::tests::make_yubihsm_test_slot();
+    install_test_slot_with_backend(SLOT_ID, slot);
+
+    let mut session = 0;
+    assert_eq!(
+        crate::api::C_OpenSession(
+            SLOT_ID,
+            (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+            std::ptr::null_mut(),
+            None,
+            &mut session,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut pin = *b"0001password";
+    assert_eq!(
+        crate::api::C_Login(
+            session,
+            CKU_USER as CK_USER_TYPE,
+            pin.as_mut_ptr(),
+            pin.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_EC as CK_KEY_TYPE;
+    let mut token = CK_TRUE as CK_BBOOL;
+    let mut id = [0x12, 0x34];
+    let mut label = b"pkcs11rs-asymmetric".to_vec();
+    let mut parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+    let mut point = crate::der_octet_string(&HSMAUTH_TEST_PUBLIC_KEY).unwrap();
+    let mut template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+        bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+        bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters),
+        bytes_attribute(CKA_EC_POINT as CK_ATTRIBUTE_TYPE, &mut point),
+    ];
+    let mut public = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+    assert_eq!(
+        crate::api::C_CreateObject(
+            session,
+            template.as_mut_ptr(),
+            template.len() as CK_ULONG,
+            &mut public,
+        ),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        find_yubihsm_object(
+            session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            &id,
+            "pkcs11rs-asymmetric"
+        ),
+        [public]
+    );
+    assert_eq!(
+        read_bytes_attribute(session, public, CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+        point
+    );
+    assert!(
+        commands
+            .borrow()
+            .iter()
+            .any(|(command, _)| *command == crate::yubihsm::CommandCode::PutOpaque as u8)
+    );
+
+    with_test_slot_context(SLOT_ID, |context| {
+        context.refresh_slot_token_objects(SLOT_ID).unwrap();
+    });
+    assert_eq!(
+        find_yubihsm_object(
+            session,
+            CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            &id,
+            "pkcs11rs-asymmetric"
+        ),
+        [public]
+    );
+    assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+    finalize_for_test();
+}
+
+#[test]
 fn yubihsm_destroy_leaves_legacy_metadata_companions_untouched() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

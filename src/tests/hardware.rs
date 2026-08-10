@@ -35,12 +35,20 @@ mod hardware_provisioning {
     const DEFAULT_ADMIN_ID: &str = "0001";
     const DEFAULT_ADMIN_PASSWORD: &str = "password";
     const AUTHENTICATION_KEY_DOMAINS: u16 = 0xffff;
+    const REUSE_HSMAUTH_CREDENTIAL_ENV: &str = "PKCS11RS_TEST_REUSE_ASYMMETRIC_HSMAUTH_CREDENTIAL";
 
     fn direct_hardware_configuration() -> crate::ModuleConfiguration {
         let mut configuration = crate::ModuleConfiguration::resolve(None)
             .expect("failed to resolve hardware configuration");
         configuration.hardware_discovery = true;
         configuration.yubihsm_urls.clear();
+        configuration
+    }
+
+    fn all_yubihsm_configuration() -> crate::ModuleConfiguration {
+        let mut configuration = crate::ModuleConfiguration::resolve(None)
+            .expect("failed to resolve hardware configuration");
+        configuration.hardware_discovery = true;
         configuration
     }
 
@@ -111,6 +119,203 @@ mod hardware_provisioning {
             "multiple {kind} devices matched; set {selector_name} to the full endpoint name"
         );
         connector
+    }
+
+    fn with_ccid_operation<T>(
+        connector: &dyn crate::Connector,
+        operation: impl FnOnce() -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let device = connector.device_context();
+        let _operation = device
+            .as_ref()
+            .map(|device| device.lock_operation(crate::device::DeviceOperationKind::Ccid))
+            .transpose()?;
+        operation()
+    }
+
+    fn find_public_key_companions(
+        session: CK_SESSION_HANDLE,
+        id: &[u8],
+        label: &str,
+    ) -> Vec<CK_OBJECT_HANDLE> {
+        let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+        let mut id = id.to_vec();
+        let mut label = label.as_bytes().to_vec();
+        let mut template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id),
+            bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label),
+        ];
+        assert_eq!(
+            crate::api::C_FindObjectsInit(
+                session,
+                template.as_mut_ptr(),
+                template.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut objects = Vec::new();
+        loop {
+            let mut batch = [CK_INVALID_HANDLE as CK_OBJECT_HANDLE; 8];
+            let mut count = 0;
+            assert_eq!(
+                crate::api::C_FindObjects(
+                    session,
+                    batch.as_mut_ptr(),
+                    batch.len() as CK_ULONG,
+                    &mut count,
+                ),
+                CKR_OK as CK_RV
+            );
+            if count == 0 {
+                break;
+            }
+            objects.extend_from_slice(&batch[..count as usize]);
+        }
+        assert_eq!(crate::api::C_FindObjectsFinal(session), CKR_OK as CK_RV);
+        objects
+    }
+
+    fn provision_public_key_companions(
+        authkey_id: u16,
+        label: &str,
+        public_point: &[u8],
+        admin_id: u16,
+        admin_password: &str,
+        expected_targets: usize,
+        yubihsm_urls: &[String],
+    ) {
+        finalize_for_test();
+        assert_eq!(
+            initialize_with_configuration(serde_json::json!({
+                "version": 1,
+                "hardware": {"discovery": true},
+                "yubihsm": {
+                    "urls": yubihsm_urls,
+                    "public_discovery": format!("{admin_id:04x}{admin_password}")
+                }
+            })),
+            CKR_OK as CK_RV
+        );
+        let slots = crate::with_context(|context| {
+            context.init()?;
+            context.refresh_discovery()?;
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            Ok(slot_contexts
+                .iter()
+                .filter_map(|(slot_id, child)| {
+                    let child = child.lock().ok()?;
+                    (child.slot.kind() == crate::SlotKind::YubiHsm && child.slot.is_present())
+                        .then_some((*slot_id, child.slot.name().to_owned()))
+                })
+                .collect::<Vec<_>>())
+        })
+        .expect("failed to rediscover YubiHSM slots for companion provisioning");
+        assert_eq!(
+            slots.len(),
+            expected_targets,
+            "YubiHSM target count changed before companion provisioning"
+        );
+
+        let id = authkey_id.to_be_bytes();
+        let point = crate::der_octet_string(public_point)
+            .expect("failed to DER-encode the YubiHSM Auth public key");
+        let parameters = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+        for (slot, target) in slots {
+            let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+            assert_eq!(
+                crate::api::C_OpenSession(
+                    slot,
+                    (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                    std::ptr::null_mut(),
+                    None,
+                    &mut session,
+                ),
+                CKR_OK as CK_RV,
+                "failed to open YubiHSM {target:?} for companion provisioning"
+            );
+            login_hardware_session(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                &format!("{admin_id:04x}{admin_password}"),
+            );
+            for existing in find_public_key_companions(session, &id, label) {
+                assert_eq!(
+                    crate::api::C_DestroyObject(session, existing),
+                    CKR_OK as CK_RV,
+                    "failed to remove the previous public-key companion from {target:?}"
+                );
+            }
+
+            let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+            let mut key_type = CKK_EC as CK_KEY_TYPE;
+            let mut token = CK_TRUE as CK_BBOOL;
+            let mut id_value = id;
+            let mut label_value = label.as_bytes().to_vec();
+            let mut parameters_value = parameters;
+            let mut point_value = point.clone();
+            let mut template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+                scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+                bytes_attribute(CKA_ID as CK_ATTRIBUTE_TYPE, &mut id_value),
+                bytes_attribute(CKA_LABEL as CK_ATTRIBUTE_TYPE, &mut label_value),
+                bytes_attribute(CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE, &mut parameters_value),
+                bytes_attribute(CKA_EC_POINT as CK_ATTRIBUTE_TYPE, &mut point_value),
+            ];
+            let mut object = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_CreateObject(
+                    session,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut object,
+                ),
+                CKR_OK as CK_RV,
+                "failed to persist the public-key companion on {target:?}"
+            );
+            assert_eq!(
+                read_bytes_attribute(session, object, CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
+                point
+            );
+            assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+            assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+
+            let mut public_session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+            assert_eq!(
+                crate::api::C_OpenSession(
+                    slot,
+                    CKF_SERIAL_SESSION as CK_FLAGS,
+                    std::ptr::null_mut(),
+                    None,
+                    &mut public_session,
+                ),
+                CKR_OK as CK_RV
+            );
+            let discovered = find_public_key_companions(public_session, &id, label);
+            assert_eq!(
+                discovered.len(),
+                1,
+                "public discovery did not expose exactly one companion on {target:?}"
+            );
+            assert_eq!(
+                read_bytes_attribute(
+                    public_session,
+                    discovered[0],
+                    CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+                ),
+                point,
+                "public discovery returned the wrong companion key on {target:?}"
+            );
+            assert_eq!(crate::api::C_CloseSession(public_session), CKR_OK as CK_RV);
+            eprintln!(
+                "persisted public-key companion for Authentication Key {authkey_id:04x} on {target:?}"
+            );
+        }
+        finalize_for_test();
     }
 
     fn select_yubihsm_slot() -> CK_SLOT_ID {
@@ -1107,7 +1312,7 @@ mod hardware_provisioning {
     }
 
     #[test]
-    #[ignore = "provisions persistent keys on a live YubiKey and YubiHSM"]
+    #[ignore = "provisions persistent keys on a live YubiKey and all discovered YubiHSMs"]
     fn provisions_asymmetric_hsmauth_credential_on_yubihsm() {
         provision_asymmetric_hsmauth_credential(HsmAuthProvisioningCase {
             enable_env: ENABLE_ENV,
@@ -1119,7 +1324,7 @@ mod hardware_provisioning {
     }
 
     #[test]
-    #[ignore = "provisions persistent touch-required keys on a live YubiKey and YubiHSM"]
+    #[ignore = "provisions persistent touch-required keys on a live YubiKey and all discovered YubiHSMs"]
     fn provisions_touch_required_asymmetric_hsmauth_credential_on_yubihsm() {
         provision_asymmetric_hsmauth_credential(HsmAuthProvisioningCase {
             enable_env: TOUCH_ENABLE_ENV,
@@ -1165,6 +1370,7 @@ mod hardware_provisioning {
             !label.is_empty() && label.len() <= 40,
             "label must be 1..=40 bytes"
         );
+        let reuse_credential = std::env::var(REUSE_HSMAUTH_CREDENTIAL_ENV).as_deref() == Ok("1");
         let credential_password = crate::Zeroizing::new(environment(
             "PKCS11RS_TEST_HSMAUTH_CREDENTIAL_PASSWORD",
             DEFAULT_CREDENTIAL_PASSWORD,
@@ -1190,35 +1396,55 @@ mod hardware_provisioning {
             "YubiHSM admin password must be 8..=64 bytes"
         );
 
-        let configuration = direct_hardware_configuration();
+        let configuration = all_yubihsm_configuration();
+        let yubihsm_urls = configuration.yubihsm_urls.clone();
         let context = crate::ModuleContext::new_with_configuration(configuration)
             .expect("failed to create hardware context");
         context.init().unwrap();
         context.refresh_discovery().unwrap();
-        let slot_contexts = context.slot_contexts.read().unwrap();
-        let hsmauth = select_connector(
-            slot_contexts
-                .values()
-                .filter_map(|child| child.lock().ok()?.slot.hsmauth_provisioning_connector())
-                .collect(),
-            "PKCS11RS_TEST_HSMAUTH_SOURCE",
-            "YubiHSM Auth applet",
-        );
-        let yubihsm = select_connector(
-            slot_contexts
+        let (hsmauth, mut yubihsms) = {
+            let slot_contexts = context.slot_contexts.read().unwrap();
+            let hsmauth = select_connector(
+                slot_contexts
+                    .values()
+                    .filter_map(|child| child.lock().ok()?.slot.hsmauth_provisioning_connector())
+                    .collect(),
+                "PKCS11RS_TEST_HSMAUTH_SOURCE",
+                "YubiHSM Auth applet",
+            );
+            let yubihsms = slot_contexts
                 .values()
                 .filter_map(|child| child.lock().ok()?.slot.yubihsm_provisioning_connector())
-                .collect(),
-            "PKCS11RS_TEST_YUBIHSM_SOURCE",
-            "YubiHSM",
+                .collect::<Vec<_>>();
+            (hsmauth, yubihsms)
+        };
+        assert!(
+            !yubihsms.is_empty(),
+            "no configured or locally attached YubiHSM was discovered"
         );
+        yubihsms.sort_by_key(|connector| connector.name());
+        for pair in yubihsms.windows(2) {
+            assert_ne!(
+                pair[0].name(),
+                pair[1].name(),
+                "the same YubiHSM endpoint was discovered more than once"
+            );
+        }
 
-        let credentials = crate::HsmAuthClient
-            .list_credentials(hsmauth.as_ref())
-            .expect("failed to list YubiHSM Auth credentials");
+        let credentials = with_ccid_operation(hsmauth.as_ref(), || {
+            crate::HsmAuthClient.list_credentials(hsmauth.as_ref())
+        })
+        .expect("failed to list YubiHSM Auth credentials");
         let existing_credential = credentials
             .into_iter()
             .find(|credential| credential.label == label);
+        if reuse_credential {
+            assert!(
+                existing_credential.is_some(),
+                "{}=1 requires an existing YubiHSM Auth credential named {label:?}",
+                REUSE_HSMAUTH_CREDENTIAL_ENV
+            );
+        }
         if let Some(credential) = &existing_credential {
             assert_eq!(
                 credential.algorithm,
@@ -1231,51 +1457,9 @@ mod hardware_provisioning {
             );
         }
 
-        let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
-            yubihsm.as_ref(),
-            admin_id,
-            admin_password.as_bytes(),
-            None,
-            None,
-        )
-        .expect("failed to authenticate to the YubiHSM provisioning key");
-        let existing_key = (|| -> Result<Option<crate::YubiHsmObjectInfo>, crate::Error> {
-            let response = admin_session.send_command(
-                yubihsm.as_ref(),
-                &crate::YubiHsmCommand::list_objects(&[
-                    crate::yubihsm::ObjectFilter::Id(authkey_id),
-                    crate::yubihsm::ObjectFilter::Type(crate::YUBIHSM_AUTHENTICATION_KEY),
-                ])?,
-            )?;
-            let entries = crate::parse_yubihsm_object_list(&response)?;
-            match entries.as_slice() {
-                [] => Ok(None),
-                [entry] => crate::YubiHsmObjectInfo::parse(&admin_session.send_command(
-                    yubihsm.as_ref(),
-                    &crate::YubiHsmCommand::get_object_info(entry.id, entry.object_type),
-                )?)
-                .map(Some),
-                _ => Err(crate::CKR_DEVICE_ERROR.into()),
-            }
-        })();
-        let preflight_close =
-            admin_session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
-        let existing_key = existing_key
-            .expect("failed to query the target YubiHSM authentication-key ID and metadata");
-        preflight_close.expect("failed to close the YubiHSM preflight session");
-        if let Some(info) = &existing_key {
-            assert_eq!(
-                info.label, label,
-                "target YubiHSM object ID has another label"
-            );
-            assert_eq!(
-                info.algorithm,
-                crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
-                "target YubiHSM object is not an asymmetric P-256 authentication key"
-            );
-        }
-
-        if existing_key.is_some() {
+        let mut existing_keys = Vec::with_capacity(yubihsms.len());
+        for yubihsm in &yubihsms {
+            let target = yubihsm.name();
             let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
                 yubihsm.as_ref(),
                 admin_id,
@@ -1283,7 +1467,69 @@ mod hardware_provisioning {
                 None,
                 None,
             )
-            .expect("failed to reopen the YubiHSM provisioning session for cleanup");
+            .unwrap_or_else(|error| {
+                panic!("failed to authenticate to YubiHSM {target:?} for preflight: {error:?}")
+            });
+            let existing_key = (|| -> Result<Option<crate::YubiHsmObjectInfo>, crate::Error> {
+                let response = admin_session.send_command(
+                    yubihsm.as_ref(),
+                    &crate::YubiHsmCommand::list_objects(&[
+                        crate::yubihsm::ObjectFilter::Id(authkey_id),
+                        crate::yubihsm::ObjectFilter::Type(crate::YUBIHSM_AUTHENTICATION_KEY),
+                    ])?,
+                )?;
+                let entries = crate::parse_yubihsm_object_list(&response)?;
+                match entries.as_slice() {
+                    [] => Ok(None),
+                    [entry] => crate::YubiHsmObjectInfo::parse(&admin_session.send_command(
+                        yubihsm.as_ref(),
+                        &crate::YubiHsmCommand::get_object_info(entry.id, entry.object_type),
+                    )?)
+                    .map(Some),
+                    _ => Err(crate::CKR_DEVICE_ERROR.into()),
+                }
+            })();
+            let preflight_close = admin_session
+                .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
+            let existing_key = existing_key.unwrap_or_else(|error| {
+                panic!(
+                    "failed to query authentication-key ID {authkey_id:04x} on YubiHSM {target:?}: {error:?}"
+                )
+            });
+            preflight_close.unwrap_or_else(|error| {
+                panic!("failed to close the preflight session on YubiHSM {target:?}: {error:?}")
+            });
+            if let Some(info) = &existing_key {
+                assert_eq!(
+                    info.label, label,
+                    "YubiHSM {target:?} object ID {authkey_id:04x} has another label"
+                );
+                assert_eq!(
+                    info.algorithm,
+                    crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
+                    "YubiHSM {target:?} object ID {authkey_id:04x} is not an asymmetric P-256 authentication key"
+                );
+            }
+            existing_keys.push(existing_key.is_some());
+        }
+
+        for (yubihsm, existing_key) in yubihsms.iter().zip(existing_keys) {
+            if !existing_key {
+                continue;
+            }
+            let target = yubihsm.name();
+            let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                yubihsm.as_ref(),
+                admin_id,
+                admin_password.as_bytes(),
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to reopen YubiHSM {target:?} provisioning session for cleanup: {error:?}"
+                )
+            });
             let deletion = admin_session
                 .send_command(
                     yubihsm.as_ref(),
@@ -1301,32 +1547,47 @@ mod hardware_provisioning {
                 });
             let cleanup_close = admin_session
                 .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
-            deletion.expect("failed to delete the prior YubiHSM authentication key");
-            cleanup_close.expect("failed to close the YubiHSM cleanup session");
-            eprintln!("deleted prior YubiHSM authentication key {authkey_id:04x}");
+            deletion.unwrap_or_else(|error| {
+                panic!(
+                    "failed to delete authentication key {authkey_id:04x} from YubiHSM {target:?}: {error:?}"
+                )
+            });
+            cleanup_close.unwrap_or_else(|error| {
+                panic!("failed to close the cleanup session on YubiHSM {target:?}: {error:?}")
+            });
+            eprintln!("deleted prior YubiHSM authentication key {authkey_id:04x} from {target:?}");
         }
 
-        if existing_credential.is_some() {
-            crate::HsmAuthClient
-                .delete_credential(hsmauth.as_ref(), management_key.as_slice(), &label)
-                .expect("failed to delete the prior YubiHSM Auth credential");
+        if existing_credential.is_some() && !reuse_credential {
+            with_ccid_operation(hsmauth.as_ref(), || {
+                crate::HsmAuthClient.delete_credential(
+                    hsmauth.as_ref(),
+                    management_key.as_slice(),
+                    &label,
+                )
+            })
+            .expect("failed to delete the prior YubiHSM Auth credential");
             eprintln!("deleted prior YubiHSM Auth credential {label:?}");
         }
 
-        crate::HsmAuthClient
-            .put_asymmetric_credential(
-                hsmauth.as_ref(),
-                management_key.as_slice(),
-                &label,
-                None,
-                credential_password.as_bytes(),
-                case.touch_required,
-            )
+        if !reuse_credential {
+            with_ccid_operation(hsmauth.as_ref(), || {
+                crate::HsmAuthClient.put_asymmetric_credential(
+                    hsmauth.as_ref(),
+                    management_key.as_slice(),
+                    &label,
+                    None,
+                    credential_password.as_bytes(),
+                    case.touch_required,
+                )
+            })
             .expect("failed to generate the YubiHSM Auth asymmetric credential");
-        let public_key = crate::HsmAuthClient
-            .get_public_key(hsmauth.as_ref(), &label)
-            .expect("failed to read the generated YubiHSM Auth public key");
-        let public_key = public_key
+        }
+        let public_point = with_ccid_operation(hsmauth.as_ref(), || {
+            crate::HsmAuthClient.get_public_key(hsmauth.as_ref(), &label)
+        })
+        .expect("failed to read the generated YubiHSM Auth public key");
+        let public_key = public_point
             .strip_prefix(&[0x04])
             .expect("YubiHSM Auth returned a non-SEC1 P-256 public key");
         assert_eq!(public_key.len(), 64);
@@ -1347,62 +1608,106 @@ mod hardware_provisioning {
             public_key,
         )
         .expect("failed to encode the asymmetric authentication key");
-        let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
-            yubihsm.as_ref(),
-            admin_id,
-            admin_password.as_bytes(),
-            None,
-            None,
-        )
-        .expect("failed to reopen the YubiHSM provisioning session");
-        let installed = (|| -> Result<(u16, crate::YubiHsmObjectInfo), crate::Error> {
-            let installed_id = admin_session
-                .send_command(yubihsm.as_ref(), &command)
-                .and_then(|response| crate::parse_yubihsm_object_id(&response))?;
-            let info = admin_session
-                .send_command(
-                    yubihsm.as_ref(),
-                    &crate::YubiHsmCommand::get_object_info(
-                        installed_id,
-                        crate::YUBIHSM_AUTHENTICATION_KEY,
-                    ),
+        for yubihsm in &yubihsms {
+            let target = yubihsm.name();
+            let (mut admin_session, _, _) = crate::YubiHsmSecureSession::authenticate_direct(
+                yubihsm.as_ref(),
+                admin_id,
+                admin_password.as_bytes(),
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| {
+                panic!("failed to reopen YubiHSM {target:?} provisioning session: {error:?}")
+            });
+            let installed = (|| -> Result<(u16, crate::YubiHsmObjectInfo), crate::Error> {
+                let installed_id = admin_session
+                    .send_command(yubihsm.as_ref(), &command)
+                    .and_then(|response| crate::parse_yubihsm_object_id(&response))?;
+                let info = admin_session
+                    .send_command(
+                        yubihsm.as_ref(),
+                        &crate::YubiHsmCommand::get_object_info(
+                            installed_id,
+                            crate::YUBIHSM_AUTHENTICATION_KEY,
+                        ),
+                    )
+                    .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))?;
+                Ok((installed_id, info))
+            })();
+            let provisioning_close = admin_session
+                .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
+            let (installed_id, installed_info) = installed.unwrap_or_else(|error| {
+                panic!(
+                    "failed to install authentication key {authkey_id:04x} in YubiHSM {target:?}: {error:?}"
                 )
-                .and_then(|response| crate::YubiHsmObjectInfo::parse(&response))?;
-            Ok((installed_id, info))
-        })();
-        let provisioning_close =
-            admin_session.send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session());
-        let (installed_id, installed_info) =
-            installed.expect("failed to install the asymmetric authentication key in the YubiHSM");
-        provisioning_close.expect("failed to close the YubiHSM provisioning session");
-        assert_eq!(installed_id, authkey_id);
-        assert_eq!(installed_info.domains, AUTHENTICATION_KEY_DOMAINS);
+            });
+            provisioning_close.unwrap_or_else(|error| {
+                panic!("failed to close the provisioning session on YubiHSM {target:?}: {error:?}")
+            });
+            assert_eq!(installed_id, authkey_id);
+            assert_eq!(installed_info.domains, AUTHENTICATION_KEY_DOMAINS);
+            eprintln!("installed YubiHSM authentication key {authkey_id:04x} in {target:?}");
+        }
 
-        let info = crate::HsmAuthClient
-            .discover(hsmauth.as_ref())
-            .expect("failed to rediscover the generated YubiHSM Auth credential");
+        let info = with_ccid_operation(hsmauth.as_ref(), || {
+            crate::HsmAuthClient.discover(hsmauth.as_ref())
+        })
+        .expect("failed to rediscover the generated YubiHSM Auth credential");
         let credential = info
             .credentials
             .into_iter()
             .find(|credential| credential.label == label)
             .expect("generated YubiHSM Auth credential was not rediscovered");
         assert_eq!(credential.touch_required, case.touch_required);
-        let mut session = crate::HsmAuthProvider {
+        let provider = crate::HsmAuthProvider {
             connector: hsmauth.into(),
             credential,
             version: info.version,
             trust_prefix: None,
             source: String::new(),
+        };
+        for yubihsm in &yubihsms {
+            let target = yubihsm.name();
+            let mut session = provider
+                .authenticate(yubihsm.as_ref(), authkey_id, credential_password.as_bytes())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the provisioned asymmetric YubiHSM Auth pair could not authenticate to {target:?}: {error:?}"
+                    )
+                });
+            session
+                .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to close the verification session on YubiHSM {target:?}: {error:?}"
+                    )
+                });
+            eprintln!("verified YubiHSM Auth authentication to {target:?}");
         }
-        .authenticate(yubihsm.as_ref(), authkey_id, credential_password.as_bytes())
-        .expect("the provisioned asymmetric YubiHSM Auth pair could not authenticate");
-        session
-            .send_command(yubihsm.as_ref(), &crate::YubiHsmCommand::close_session())
-            .expect("failed to close the verification session");
+
+        let target_count = yubihsms.len();
+        drop(provider);
+        drop(yubihsms);
+        drop(context);
+        provision_public_key_companions(
+            authkey_id,
+            &label,
+            &public_point,
+            admin_id,
+            admin_password.as_str(),
+            target_count,
+            &yubihsm_urls,
+        );
 
         eprintln!(
-            "provisioned persistent YubiHSM Auth credential {label:?} (touch required {}) and YubiHSM authentication key {authkey_id:04x}",
-            case.touch_required
+            "provisioned {} YubiHSM Auth credential {label:?} (touch required {}) with authentication key {authkey_id:04x} and public-key companion on {target_count} YubiHSM(s)",
+            if reuse_credential {
+                "existing"
+            } else {
+                "persistent"
+            },
+            case.touch_required,
         );
     }
 }
