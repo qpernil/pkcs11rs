@@ -1020,7 +1020,7 @@ pub(crate) fn require_key_mechanism(
 
 /// Return the library-owned, NUL-terminated symbolic name for a mechanism
 /// recognized by this PKCS11RS build, or NULL for an unknown value.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn PKCS11RS_GetMechanismName(
     type_: CK_MECHANISM_TYPE,
 ) -> *const std::os::raw::c_char {

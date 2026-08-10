@@ -1,7 +1,7 @@
 [package]
 name = "pkcs11rs-connector"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 default-run = "pkcs11rs-connector"
 description = "Asynchronous multi-device HTTP(S) gateway for locally attached YubiHSMs"

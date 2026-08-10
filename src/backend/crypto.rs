@@ -661,7 +661,7 @@ fn verify_generic_ecdsa(
 }
 
 macro_rules! verify_rustcrypto_ecdsa {
-    ($curve:ty, $public_key:expr, $digest:expr, $signature:expr) => {{
+    ($curve:ty, $public_key:expr_2021, $digest:expr_2021, $signature:expr_2021) => {{
         let mut encoded_public_key = Vec::with_capacity(1 + $public_key.len());
         encoded_public_key.push(0x04);
         encoded_public_key.extend_from_slice($public_key);

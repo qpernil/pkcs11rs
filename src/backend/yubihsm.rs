@@ -2885,7 +2885,7 @@ impl StorageProvider for YubiHsmSlot {
                 None => {
                     return Err(StorageError::Provider(String::from(
                         "YubiHSM storage rejected an invalid public-key record",
-                    )))
+                    )));
                 }
             }
         }

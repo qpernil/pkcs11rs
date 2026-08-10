@@ -94,11 +94,10 @@ fn set_pin(
             with_pin(new_pin, new_len, |new_pin| {
                 ctx.reconcile_login_state(slot_id);
                 let role = ctx.login_role(slot_id);
-                let result = match role {
+                match role {
                     Some(LoginRole::So) => ctx._get_slot_mut(slot_id)?.set_so_pin(old_pin, new_pin),
                     _ => ctx._get_slot_mut(slot_id)?.set_pin(old_pin, new_pin),
-                };
-                result
+                }
             })
         })
     })

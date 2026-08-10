@@ -125,18 +125,26 @@ impl EnvironmentGuard {
             })
             .collect::<Vec<_>>();
         for (name, _) in &configured {
-            env::remove_var(name);
+            // SAFETY: The xtask is single-threaded, and this guard is created before
+            // loading the tested library, so no other thread can access the process
+            // environment while it is changed here.
+            unsafe { env::remove_var(name) };
         }
-        env::set_var("PKCS11RS_HARDWARE_DISCOVERY", "0");
+        // SAFETY: See the loop above.
+        unsafe { env::set_var("PKCS11RS_HARDWARE_DISCOVERY", "0") };
         Self(configured)
     }
 }
 
 impl Drop for EnvironmentGuard {
     fn drop(&mut self) {
-        env::remove_var("PKCS11RS_HARDWARE_DISCOVERY");
+        // SAFETY: The guard is declared before the loaded library, so it is dropped
+        // after that library and its finalized worker threads. The xtask itself
+        // remains single-threaded while restoring the environment.
+        unsafe { env::remove_var("PKCS11RS_HARDWARE_DISCOVERY") };
         for (name, value) in self.0.drain(..) {
-            env::set_var(name, value);
+            // SAFETY: See the comment above.
+            unsafe { env::set_var(name, value) };
         }
     }
 }

@@ -230,13 +230,13 @@ impl PreviewSignRegistration {
                 2 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate registration schema version",
-                    ))
+                    ));
                 }
                 3 if rp_id.is_none() => rp_id = Some(decoder.str()?.to_owned()),
                 3 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate registration relying-party ID",
-                    ))
+                    ));
                 }
                 4 if client_data_hash.is_none() => {
                     client_data_hash = Some(copy_array::<CLIENT_DATA_HASH_LENGTH>(
@@ -247,13 +247,13 @@ impl PreviewSignRegistration {
                 4 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate registration client-data hash",
-                    ))
+                    ));
                 }
                 5 if response.is_none() => response = Some(decoder.bytes()?.to_vec()),
                 5 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate makeCredential response",
-                    ))
+                    ));
                 }
                 6 if serial.is_none() => serial = Some(decoder.str()?.to_owned()),
                 6 => return Err(PreviewSignError::Malformed("duplicate token serial hint")),
@@ -467,7 +467,7 @@ impl PreviewSignDerivedKeyRecord {
                 2 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate derived-key schema version",
-                    ))
+                    ));
                 }
                 3 if registration.is_none() => {
                     registration = Some(decode_content_reference(&mut decoder, encoded)?)
@@ -475,7 +475,7 @@ impl PreviewSignDerivedKeyRecord {
                 3 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate registration reference",
-                    ))
+                    ));
                 }
                 4 if algorithm.is_none() => algorithm = Some(decoder.i64()?),
                 4 => return Err(PreviewSignError::Malformed("duplicate signing algorithm")),
@@ -483,13 +483,13 @@ impl PreviewSignDerivedKeyRecord {
                 5 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate derived verification key",
-                    ))
+                    ));
                 }
                 6 if arguments.is_none() => arguments = Some(decoder.bytes()?.to_vec()),
                 6 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate derived signing arguments",
-                    ))
+                    ));
                 }
                 7 if label.is_none() => label = Some(decoder.str()?.to_owned()),
                 7 => return Err(PreviewSignError::Malformed("duplicate derived-key label")),
@@ -620,7 +620,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
             1 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate makeCredential attestation format",
-                ))
+                ));
             }
             2 if authenticator_data.is_none() => {
                 authenticator_data = Some(decoder.bytes()?.to_vec())
@@ -628,7 +628,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
             2 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate makeCredential authenticator data",
-                ))
+                ));
             }
             3 if !attestation_statement => {
                 require_map_value(
@@ -640,7 +640,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
             3 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate makeCredential attestation statement",
-                ))
+                ));
             }
             6 if unsigned_extension_output.is_none() => {
                 unsigned_extension_output = Some(parse_named_extension(
@@ -652,7 +652,7 @@ fn parse_make_credential_response(data: &[u8]) -> Result<RegistrationMaterial, P
             6 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate makeCredential unsigned extension output",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -789,7 +789,7 @@ fn parse_signing_key_attestation_object(data: &[u8]) -> Result<AttestedKey, Prev
             1 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate signing-key attestation format",
-                ))
+                ));
             }
             2 if authenticator_data.is_none() => {
                 authenticator_data = Some(decoder.bytes()?.to_vec())
@@ -797,7 +797,7 @@ fn parse_signing_key_attestation_object(data: &[u8]) -> Result<AttestedKey, Prev
             2 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate signing-key authenticator data",
-                ))
+                ));
             }
             3 if !attestation_statement => {
                 require_map_value(
@@ -809,7 +809,7 @@ fn parse_signing_key_attestation_object(data: &[u8]) -> Result<AttestedKey, Prev
             3 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate signing-key attestation statement",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -845,7 +845,7 @@ fn parse_registration_algorithm(data: &[u8]) -> Result<i64, PreviewSignError> {
             3 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate previewSign signing algorithm",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -873,7 +873,7 @@ fn parse_registration_policy(data: &[u8]) -> Result<PreviewSignPolicy, PreviewSi
             4 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate previewSign signing policy",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -901,7 +901,7 @@ fn parse_unsigned_registration_output(data: &[u8]) -> Result<Vec<u8>, PreviewSig
             7 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate previewSign signing-key attestation",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }

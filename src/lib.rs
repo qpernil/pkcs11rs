@@ -117,7 +117,7 @@ macro_rules! log {
 macro_rules! ffi_entry_point {
     ($(#[$attribute:meta])* pub fn $name:ident ( $($arg:ident : $typ:ty),* $(,)? ) -> CK_RV $body:block) => {
         $(#[$attribute])*
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn $name($($arg: $typ),*) -> CK_RV {
             crate::logging::ffi_call(stringify!($name), || crate::ffi_boundary(|| $body))
         }

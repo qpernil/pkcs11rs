@@ -1357,7 +1357,7 @@ fn parse_preview_sign_assertion_response(data: &[u8]) -> Result<Vec<u8>, CtapErr
             2 => {
                 return Err(CtapError::Malformed(
                     "duplicate assertion authenticator data",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -1530,7 +1530,7 @@ fn parse_attested_credential_public_key(
             1 | 3 | -1 | -2 | -3 => {
                 return Err(CtapError::Malformed(
                     "duplicate credential public-key field",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -1602,7 +1602,7 @@ fn verify_packed_attestation(
                 certificates = Some(chain);
             }
             "alg" | "sig" | "x5c" => {
-                return Err(CtapError::Malformed("duplicate packed attestation field"))
+                return Err(CtapError::Malformed("duplicate packed attestation field"));
             }
             _ => decoder.skip()?,
         }
@@ -1869,7 +1869,7 @@ fn parse_credential_response(
             0x0a if cred_protect.is_none() => cred_protect = Some(decoder.u64()?),
             0x0c if third_party_payment.is_none() => third_party_payment = Some(decoder.bool()?),
             0x06 | 0x07 | 0x08 | 0x09 | 0x0a | 0x0c => {
-                return Err(CtapError::Malformed("duplicate credential response field"))
+                return Err(CtapError::Malformed("duplicate credential response field"));
             }
             _ => decoder.skip()?,
         }
@@ -1917,7 +1917,7 @@ fn parse_user_entity(decoder: &mut Decoder<'_>) -> Result<UserEntity, CtapError>
                 display_name = Some(decoder.str()?.to_owned())
             }
             "id" | "name" | "displayName" => {
-                return Err(CtapError::Malformed("duplicate user entity field"))
+                return Err(CtapError::Malformed("duplicate user entity field"));
             }
             _ => decoder.skip()?,
         }
@@ -1940,7 +1940,7 @@ fn parse_credential_descriptor(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, Cta
             "type" | "id" => {
                 return Err(CtapError::Malformed(
                     "duplicate credential descriptor field",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }

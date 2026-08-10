@@ -78,13 +78,13 @@ impl ArkgP256PublicSeed {
                 1 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate ARKG public-seed key type",
-                    ))
+                    ));
                 }
                 3 if algorithm.is_none() => algorithm = Some(decoder.i64()?),
                 3 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate ARKG public-seed algorithm",
-                    ))
+                    ));
                 }
                 -1 if blinding_public_key.is_none() => {
                     blinding_public_key = Some(parse_ec2_public_key(&mut decoder)?)
@@ -92,7 +92,7 @@ impl ArkgP256PublicSeed {
                 -1 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate ARKG blinding public key",
-                    ))
+                    ));
                 }
                 -2 if kem_public_key.is_none() => {
                     kem_public_key = Some(parse_ec2_public_key(&mut decoder)?)
@@ -102,7 +102,7 @@ impl ArkgP256PublicSeed {
                 -3 => {
                     return Err(PreviewSignError::Malformed(
                         "duplicate ARKG derived-key algorithm",
-                    ))
+                    ));
                 }
                 _ => decoder.skip()?,
             }
@@ -297,13 +297,13 @@ fn parse_ec2_public_key(decoder: &mut Decoder<'_>) -> Result<PublicKey, PreviewS
             -2 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate ARKG EC2 x-coordinate",
-                ))
+                ));
             }
             -3 if y.is_none() => y = Some(copy_coordinate(decoder.bytes()?)?),
             -3 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate ARKG EC2 y-coordinate",
-                ))
+                ));
             }
             _ => decoder.skip()?,
         }
@@ -545,12 +545,12 @@ fn validate_verification_key(encoded: &[u8]) -> Result<(), PreviewSignError> {
             1 | 3 | -1 | -2 | -3 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate derived verification-key field",
-                ))
+                ));
             }
             _ => {
                 return Err(PreviewSignError::Malformed(
                     "unknown derived verification-key field",
-                ))
+                ));
             }
         }
     }
@@ -605,12 +605,12 @@ fn validate_signing_arguments(encoded: &[u8]) -> Result<(), PreviewSignError> {
             3 | -1 | -2 => {
                 return Err(PreviewSignError::Malformed(
                     "duplicate derived signing-argument field",
-                ))
+                ));
             }
             _ => {
                 return Err(PreviewSignError::Malformed(
                     "unknown derived signing-argument field",
-                ))
+                ));
             }
         }
     }

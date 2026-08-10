@@ -774,7 +774,7 @@ impl Client {
             KeyRef::Authentication => (INS_INTERNAL_AUTHENTICATE, 0, 0),
             KeyRef::Signature => (INS_PSO, 0x9e, 0x9a),
             KeyRef::Decipher | KeyRef::Attestation => {
-                return Err(crate::CKR_KEY_FUNCTION_NOT_PERMITTED.into())
+                return Err(crate::CKR_KEY_FUNCTION_NOT_PERMITTED.into());
             }
         };
         let response = self.transmit(
