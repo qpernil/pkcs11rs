@@ -1,5 +1,9 @@
 use super::*;
+#[cfg(feature = "native-hardware")]
+use crate::device::DeviceOperationLifecycle;
 use crate::device::{DeviceContext, DeviceIdentity};
+#[cfg(feature = "native-hardware")]
+use std::sync::{OnceLock, Weak, mpsc};
 
 pub(crate) type SharedConnector = Arc<dyn Connector + Send + Sync>;
 
@@ -97,18 +101,57 @@ pub(crate) trait Connector {
 }
 
 #[derive(Debug, Default)]
+struct SmartCardTransactionState {
+    application_aid: Vec<u8>,
+    session: Option<Scp03Session>,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct SecureChannelState {
-    pub(crate) application_aid: Vec<u8>,
-    pub(crate) session: Option<Scp03Session>,
+    transaction: Option<SmartCardTransactionState>,
     pub(crate) validated_scp11_keys: HashMap<Scp11CertificateCacheKey, Vec<u8>>,
     pub(crate) connection_epoch: u64,
 }
 
 impl SecureChannelState {
+    fn begin_transaction(&mut self) -> Result<(), Error> {
+        if self.transaction.is_some() {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
+        self.transaction = Some(SmartCardTransactionState::default());
+        Ok(())
+    }
+
+    fn end_transaction(&mut self) {
+        self.transaction = None;
+    }
+
+    fn transaction(&self) -> Result<&SmartCardTransactionState, Error> {
+        self.transaction
+            .as_ref()
+            .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
+    }
+
+    fn transaction_mut(&mut self) -> Result<&mut SmartCardTransactionState, Error> {
+        #[cfg(test)]
+        if self.transaction.is_none() {
+            self.begin_transaction()?;
+        }
+        self.transaction
+            .as_mut()
+            .ok_or_else(|| Error::from(CKR_DEVICE_ERROR))
+    }
+
+    fn clear_transaction_selection(&mut self) {
+        if let Some(transaction) = &mut self.transaction {
+            transaction.session = None;
+            transaction.application_aid.clear();
+        }
+    }
+
     fn synchronize_connection(&mut self, connection_epoch: u64) {
         if self.connection_epoch != connection_epoch {
-            self.session = None;
-            self.application_aid.clear();
+            self.clear_transaction_selection();
             self.validated_scp11_keys.clear();
             self.connection_epoch = connection_epoch;
         }
@@ -121,7 +164,7 @@ impl SecureChannelState {
 
 #[cfg(feature = "native-hardware")]
 struct PcscTransportState {
-    card: Option<pcsc::Card>,
+    present: bool,
     apdu_capabilities: ApduCapabilities,
     connection_epoch: u64,
 }
@@ -130,7 +173,7 @@ struct PcscTransportState {
 impl std::fmt::Debug for PcscTransportState {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         fmt.debug_struct("PcscTransportState")
-            .field("card", &self.card.as_ref().map(|_| "Card"))
+            .field("present", &self.present)
             .field("apdu_capabilities", &self.apdu_capabilities)
             .field("connection_epoch", &self.connection_epoch)
             .finish()
@@ -141,7 +184,7 @@ impl std::fmt::Debug for PcscTransportState {
 impl Default for PcscTransportState {
     fn default() -> Self {
         Self {
-            card: None,
+            present: false,
             apdu_capabilities: ApduCapabilities::SHORT_ONLY,
             connection_epoch: 0,
         }
@@ -190,20 +233,25 @@ impl PcscReaderState {
     pub(crate) fn set_selected_application(&self, application_aid: &[u8]) -> Result<(), Error> {
         self.with_operation(|| {
             let mut state = self.secure_channel()?;
-            state.session = None;
-            state.application_aid = application_aid.to_vec();
+            let transaction = state.transaction_mut()?;
+            transaction.session = None;
+            transaction.application_aid = application_aid.to_vec();
             Ok(())
         })
     }
 
-    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
-    pub(crate) fn invalidate_selected_application(&self) -> Result<(), Error> {
+    pub(crate) fn begin_transaction(&self) -> Result<(), Error> {
         self.with_operation(|| {
             let mut state = self.secure_channel()?;
-            state.session = None;
-            state.application_aid.clear();
-            Ok(())
+            state.begin_transaction()
         })
+    }
+
+    pub(crate) fn end_transaction(&self) {
+        let _ = self.with_operation(|| {
+            self.secure_channel()?.end_transaction();
+            Ok(())
+        });
     }
 
     #[cfg(test)]
@@ -213,8 +261,10 @@ impl PcscReaderState {
             #[cfg(feature = "native-hardware")]
             transport: Mutex::new(PcscTransportState::default()),
             secure_channel: Mutex::new(SecureChannelState {
-                application_aid,
-                session: Some(session),
+                transaction: Some(SmartCardTransactionState {
+                    application_aid,
+                    session: Some(session),
+                }),
                 ..SecureChannelState::default()
             }),
             device: Arc::new(DeviceContext::new(DeviceIdentity::unknown(
@@ -333,14 +383,13 @@ impl PcscAppletConnector {
         let mut state = self.state.secure_channel()?;
         let connection_epoch = self.base.connection_epoch();
         state.synchronize_connection(connection_epoch);
-        if state.application_aid != self.application_aid {
-            state.session = None;
-            state.application_aid.clear();
+        if state.transaction_mut()?.application_aid != self.application_aid {
+            state.clear_transaction_selection();
             select_application(self.base.as_ref(), &self.application_aid)?;
-            state.application_aid = self.application_aid.clone();
+            state.transaction_mut()?.application_aid = self.application_aid.clone();
         }
 
-        if self.protocol.is_none() || !self.enabled() || state.session.is_some() {
+        if self.protocol.is_none() || !self.enabled() || state.transaction()?.session.is_some() {
             return Ok(());
         }
 
@@ -361,13 +410,13 @@ impl PcscAppletConnector {
         let established = match established {
             Ok(established) => established,
             Err(error) => {
-                state.session = None;
-                state.application_aid.clear();
+                state.clear_transaction_selection();
                 return Err(error);
             }
         };
-        state.application_aid = self.application_aid.clone();
-        state.session = Some(established);
+        let transaction = state.transaction_mut()?;
+        transaction.application_aid = self.application_aid.clone();
+        transaction.session = Some(established);
         Ok(())
     }
 
@@ -418,11 +467,14 @@ impl PcscAppletConnector {
             return self.base.send_apdu(command);
         }
         let mut state = self.state.secure_channel()?;
-        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let channel = state
+            .transaction_mut()?
+            .session
+            .as_mut()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit(self.base.as_ref(), command);
         if result.is_err() {
-            state.session = None;
-            state.application_aid.clear();
+            state.clear_transaction_selection();
         }
         result
     }
@@ -433,11 +485,14 @@ impl PcscAppletConnector {
             return crate::iso7816::transmit_short(self.base.as_ref(), command);
         }
         let mut state = self.state.secure_channel()?;
-        let channel = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        let channel = state
+            .transaction_mut()?
+            .session
+            .as_mut()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
         let result = channel.transmit_short(self.base.as_ref(), command);
         if result.is_err() {
-            state.session = None;
-            state.application_aid.clear();
+            state.clear_transaction_selection();
         }
         result
     }
@@ -445,9 +500,12 @@ impl PcscAppletConnector {
     fn clear_secure_channel_locked(&self) -> Result<(), Error> {
         self.set_enabled(false);
         let mut state = self.state.secure_channel()?;
-        if state.application_aid == self.application_aid {
-            state.session = None;
-            state.application_aid.clear();
+        if state
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| transaction.application_aid == self.application_aid)
+        {
+            state.clear_transaction_selection();
         }
         Ok(())
     }
@@ -562,8 +620,9 @@ impl Connector for PcscAppletConnector {
             match select_application(self.base.as_ref(), &self.application_aid) {
                 Ok(()) => {
                     let mut state = self.state.secure_channel()?;
-                    state.session = None;
-                    state.application_aid = self.application_aid.clone();
+                    let transaction = state.transaction_mut()?;
+                    transaction.session = None;
+                    transaction.application_aid = self.application_aid.clone();
                     self.set_applet_presence(true);
                     self.forget_discovery_error();
                     Ok(())
@@ -617,7 +676,11 @@ impl Connector for PcscAppletConnector {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;
-            let session = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+            let session = state
+                .transaction_mut()?
+                .session
+                .as_mut()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
             if session.static_dek()?.len() != 16 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
@@ -629,8 +692,7 @@ impl Connector for PcscAppletConnector {
                 keys,
             );
             if result.is_err() {
-                state.session = None;
-                state.application_aid.clear();
+                state.clear_transaction_selection();
             }
             result
         })
@@ -647,15 +709,19 @@ impl Connector for PcscAppletConnector {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;
+            let session = state
+                .transaction_mut()?
+                .session
+                .as_mut()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
             let result = SecurityDomainClient.delete_scp03_key_set(
                 self.base.as_ref(),
-                state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?,
+                session,
                 kvn,
                 delete_last,
             );
             if result.is_err() {
-                state.session = None;
-                state.application_aid.clear();
+                state.clear_transaction_selection();
             }
             result
         })
@@ -671,7 +737,11 @@ impl Connector for PcscAppletConnector {
                 return Err(CKR_USER_NOT_LOGGED_IN.into());
             }
             let mut state = self.state.secure_channel()?;
-            let session = state.session.as_mut().ok_or(CKR_USER_NOT_LOGGED_IN)?;
+            let session = state
+                .transaction_mut()?
+                .session
+                .as_mut()
+                .ok_or(CKR_USER_NOT_LOGGED_IN)?;
             let prepared = SecurityDomainClient.prepare_scp11_administration(session, operation)?;
             let result = SecurityDomainClient.execute_scp11_administration(
                 self.base.as_ref(),
@@ -681,8 +751,7 @@ impl Connector for PcscAppletConnector {
             if result.is_ok() {
                 state.invalidate_scp11_certificates();
             } else {
-                state.session = None;
-                state.application_aid.clear();
+                state.clear_transaction_selection();
             }
             result
         })
@@ -885,8 +954,95 @@ pub(crate) fn usb_bcd_version(raw: u16) -> (u8, u8) {
 #[cfg(feature = "native-hardware")]
 pub(crate) struct PcscConnector {
     pub(crate) reader: std::ffi::CString,
-    pub(crate) context: pcsc::Context,
+    context: pcsc::Context,
     pub(crate) state: Arc<PcscReaderState>,
+    worker: Arc<OnceLock<Result<PcscWorker, CK_RV>>>,
+}
+
+#[cfg(feature = "native-hardware")]
+enum PcscWorkerRequest {
+    BeginOperation {
+        reply: mpsc::SyncSender<Result<(), CK_RV>>,
+    },
+    EndOperation {
+        reply: mpsc::SyncSender<Result<(), pcsc::Error>>,
+    },
+    Refresh {
+        reply: mpsc::SyncSender<Result<PcscRefresh, pcsc::Error>>,
+    },
+    Transmit {
+        command: Vec<u8>,
+        reply: mpsc::SyncSender<Result<Vec<u8>, pcsc::Error>>,
+    },
+}
+
+#[cfg(feature = "native-hardware")]
+struct PcscWorker {
+    requests: mpsc::Sender<PcscWorkerRequest>,
+}
+
+#[cfg(feature = "native-hardware")]
+#[derive(Clone, Copy)]
+struct PcscRefresh {
+    apdu_capabilities: ApduCapabilities,
+    connection_epoch: u64,
+}
+
+#[cfg(feature = "native-hardware")]
+struct PcscLifecycle {
+    reader: std::ffi::CString,
+    context: pcsc::Context,
+    worker: Arc<OnceLock<Result<PcscWorker, CK_RV>>>,
+    reader_state: Weak<PcscReaderState>,
+}
+
+#[cfg(feature = "native-hardware")]
+impl std::fmt::Debug for PcscLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PcscLifecycle")
+            .field("reader", &self.reader)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "native-hardware")]
+impl PcscLifecycle {
+    fn worker(&self) -> Result<&PcscWorker, Error> {
+        self.worker
+            .get_or_init(|| PcscWorker::spawn(self.reader.clone(), self.context.clone()))
+            .as_ref()
+            .map_err(|error| Error::from(*error))
+    }
+}
+
+#[cfg(feature = "native-hardware")]
+impl DeviceOperationLifecycle for PcscLifecycle {
+    fn enter(&self, _message: &str) -> Result<(), Error> {
+        let reader_state = self.reader_state.upgrade().ok_or(CKR_DEVICE_ERROR)?;
+        reader_state.begin_transaction()?;
+        if let Err(error) = self.worker().and_then(PcscWorker::begin_operation) {
+            reader_state.end_transaction();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn exit(&self) {
+        if let Ok(worker) = self.worker() {
+            if let Err(error) = worker.end_operation() {
+                tracing::debug!(
+                    target: "pkcs11rs::transport",
+                    reader = %self.reader.to_string_lossy(),
+                    ?error,
+                    "failed to end PC/SC transaction"
+                );
+            }
+        }
+        if let Some(reader_state) = self.reader_state.upgrade() {
+            reader_state.end_transaction();
+        }
+    }
 }
 
 #[cfg(feature = "native-hardware")]
@@ -895,13 +1051,8 @@ impl std::fmt::Debug for PcscConnector {
         fmt.debug_struct("PcscConnector")
             .field("reader", &self.reader)
             .field(
-                "card",
-                &self
-                    .state
-                    .transport
-                    .lock()
-                    .ok()
-                    .and_then(|state| state.card.as_ref().map(|_| "Card")),
+                "present",
+                &self.state.transport.lock().ok().map(|state| state.present),
             )
             .finish_non_exhaustive()
     }
@@ -948,10 +1099,7 @@ impl Connector for PcscConnector {
             .unwrap_or(0)
     }
     fn is_present(&self) -> bool {
-        self.state
-            .transport
-            .lock()
-            .is_ok_and(|state| state.card.is_some())
+        self.state.transport.lock().is_ok_and(|state| state.present)
     }
     fn buffer_size(&self) -> usize {
         pcsc::MAX_BUFFER_SIZE_EXTENDED
@@ -976,47 +1124,38 @@ impl Connector for PcscConnector {
             request_bytes = send_buffer.len()
         ));
         let _entered = operation.enter();
-        let state = self
-            .state
-            .transport
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        match state.card.as_ref() {
-            Some(card) => {
-                let received = card.transmit(send_buffer, receive_buffer)?;
-                log!(
-                    2,
-                    "pcsc.transmit({} bytes) -> {} bytes",
-                    send_buffer.len(),
-                    received.len()
-                );
-                Ok(received)
-            }
-            None => Err(Error::from(pcsc::Error::NoSmartcard)),
+        let received = self.worker()?.transmit(send_buffer)?;
+        if received.len() > receive_buffer.len() {
+            return Err(CKR_DEVICE_MEMORY.into());
         }
+        receive_buffer[..received.len()].copy_from_slice(&received);
+        log!(
+            2,
+            "pcsc.transmit({} bytes) -> {} bytes",
+            send_buffer.len(),
+            received.len()
+        );
+        Ok(&receive_buffer[..received.len()])
     }
     fn refresh(&self) -> Result<(), Error> {
+        let refreshed = self.worker()?.refresh();
         let mut state = self
             .state
             .transport
             .lock()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        if let Some(card) = state.card.as_ref() {
-            if card.status2_owned().is_ok() {
-                state.apdu_capabilities = detect_pcsc_apdu_capabilities(card);
-                return Ok(());
+        match refreshed {
+            Ok(refreshed) => {
+                state.present = true;
+                state.apdu_capabilities = refreshed.apdu_capabilities;
+                state.connection_epoch = refreshed.connection_epoch;
+                Ok(())
+            }
+            Err(error) => {
+                state.present = false;
+                Err(error)
             }
         }
-        state.card = None;
-        let card = self.context.connect(
-            &self.reader,
-            pcsc::ShareMode::Exclusive,
-            pcsc::Protocols::T0 | pcsc::Protocols::T1,
-        )?;
-        state.apdu_capabilities = detect_pcsc_apdu_capabilities(&card);
-        state.card = Some(card);
-        state.connection_epoch = state.connection_epoch.wrapping_add(1);
-        Ok(())
     }
 }
 
@@ -1101,10 +1240,25 @@ fn yubikey_atr_is_nfc(atr: &[u8]) -> bool {
 #[cfg(feature = "native-hardware")]
 impl PcscConnector {
     pub(crate) fn new(reader: std::ffi::CString, context: pcsc::Context) -> Self {
+        let worker = Arc::new(OnceLock::new());
+        let state = Arc::new_cyclic(|reader_state| {
+            let lifecycle = Arc::new(PcscLifecycle {
+                reader: reader.clone(),
+                context: context.clone(),
+                worker: worker.clone(),
+                reader_state: reader_state.clone(),
+            });
+            let device = Arc::new(DeviceContext::with_lifecycle(
+                DeviceIdentity::unknown("Yubico", reader.to_string_lossy()),
+                lifecycle,
+            ));
+            PcscReaderState::new(device)
+        });
         Self {
             reader,
             context,
-            state: Arc::new(Default::default()),
+            state,
+            worker,
         }
     }
 
@@ -1112,30 +1266,239 @@ impl PcscConnector {
         self.state.clone()
     }
 
-    fn _reconnect(&self) -> Result<(), Error> {
-        let mut state = self
-            .state
-            .transport
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        match state.card.as_mut() {
-            Some(card) => card
-                .reconnect(
-                    pcsc::ShareMode::Exclusive,
-                    pcsc::Protocols::T0 | pcsc::Protocols::T1,
-                    pcsc::Disposition::ResetCard,
-                )
-                .map_err(|e| e.into()),
-            None => Err(Error::from(pcsc::Error::NoSmartcard)),
+    fn worker(&self) -> Result<&PcscWorker, Error> {
+        self.worker
+            .get_or_init(|| PcscWorker::spawn(self.reader.clone(), self.context.clone()))
+            .as_ref()
+            .map_err(|error| Error::from(*error))
+    }
+}
+
+#[cfg(feature = "native-hardware")]
+impl PcscWorker {
+    fn spawn(reader: std::ffi::CString, context: pcsc::Context) -> Result<Self, CK_RV> {
+        let (requests, receiver) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("pkcs11rs-pcsc".to_owned())
+            .spawn(move || run_pcsc_worker(reader, context, receiver))
+            .map_err(|_| CKR_HOST_MEMORY as CK_RV)?;
+        Ok(Self { requests })
+    }
+
+    fn begin_operation(&self) -> Result<(), Error> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.requests
+            .send(PcscWorkerRequest::BeginOperation { reply })
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        receiver
+            .recv()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .map_err(Error::from)
+    }
+
+    fn end_operation(&self) -> Result<(), Error> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.requests
+            .send(PcscWorkerRequest::EndOperation { reply })
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        receiver
+            .recv()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .map_err(Error::from)
+    }
+
+    fn refresh(&self) -> Result<PcscRefresh, Error> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.requests
+            .send(PcscWorkerRequest::Refresh { reply })
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        receiver
+            .recv()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .map_err(Error::from)
+    }
+
+    fn transmit(&self, command: &[u8]) -> Result<Vec<u8>, Error> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.requests
+            .send(PcscWorkerRequest::Transmit {
+                command: command.to_vec(),
+                reply,
+            })
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        receiver
+            .recv()
+            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+            .map_err(Error::from)
+    }
+}
+
+#[cfg(feature = "native-hardware")]
+enum PcscTransactionOutcome {
+    OperationActive,
+    OperationEnded,
+    Shutdown,
+}
+
+#[cfg(feature = "native-hardware")]
+fn run_pcsc_worker(
+    reader: std::ffi::CString,
+    context: pcsc::Context,
+    receiver: mpsc::Receiver<PcscWorkerRequest>,
+) {
+    let mut card = None;
+    let mut connection_epoch = 0u64;
+    let mut operation_active = false;
+
+    while let Ok(request) = receiver.recv() {
+        match request {
+            PcscWorkerRequest::BeginOperation { reply } => {
+                let result = if operation_active {
+                    Err(CKR_OPERATION_ACTIVE as CK_RV)
+                } else {
+                    operation_active = true;
+                    Ok(())
+                };
+                let _ = reply.try_send(result);
+            }
+            PcscWorkerRequest::EndOperation { reply } => {
+                operation_active = false;
+                let _ = reply.try_send(Ok(()));
+            }
+            PcscWorkerRequest::Refresh { reply } => {
+                let result = refresh_pcsc_card(&mut card, &context, &reader, &mut connection_epoch);
+                let _ = reply.try_send(result);
+            }
+            PcscWorkerRequest::Transmit { command, reply } => {
+                let Some(current) = card.as_mut() else {
+                    let _ = reply.try_send(Err(pcsc::Error::NoSmartcard));
+                    continue;
+                };
+                if !operation_active {
+                    let _ = reply.try_send(transmit_pcsc_once(current, &command));
+                    continue;
+                }
+
+                let transaction = match current.transaction() {
+                    Ok(transaction) => transaction,
+                    Err(error) => {
+                        let _ = reply.try_send(Err(error));
+                        continue;
+                    }
+                };
+                match run_pcsc_transaction(transaction, command, reply, &receiver, connection_epoch)
+                {
+                    PcscTransactionOutcome::OperationActive => {}
+                    PcscTransactionOutcome::OperationEnded => operation_active = false,
+                    PcscTransactionOutcome::Shutdown => break,
+                }
+            }
         }
     }
-    fn _disconnect(&self) -> Result<(), Error> {
-        self.state
-            .transport
-            .lock()
-            .map_err(|_| Error::from(CKR_MUTEX_BAD))?
-            .card = None;
-        Ok(())
+}
+
+#[cfg(feature = "native-hardware")]
+fn refresh_pcsc_card(
+    card: &mut Option<pcsc::Card>,
+    context: &pcsc::Context,
+    reader: &std::ffi::CStr,
+    connection_epoch: &mut u64,
+) -> Result<PcscRefresh, pcsc::Error> {
+    if let Some(current) = card.as_ref() {
+        if current.status2_owned().is_ok() {
+            return Ok(PcscRefresh {
+                apdu_capabilities: detect_pcsc_apdu_capabilities(current),
+                connection_epoch: *connection_epoch,
+            });
+        }
+    }
+
+    *card = None;
+    let connected = context.connect(
+        reader,
+        pcsc::ShareMode::Shared,
+        pcsc::Protocols::T0 | pcsc::Protocols::T1,
+    )?;
+    *connection_epoch = connection_epoch.wrapping_add(1);
+    let refreshed = PcscRefresh {
+        apdu_capabilities: detect_pcsc_apdu_capabilities(&connected),
+        connection_epoch: *connection_epoch,
+    };
+    *card = Some(connected);
+    Ok(refreshed)
+}
+
+#[cfg(feature = "native-hardware")]
+fn transmit_pcsc(card: &pcsc::Card, command: &[u8]) -> Result<Vec<u8>, pcsc::Error> {
+    let mut response = vec![0u8; pcsc::MAX_BUFFER_SIZE_EXTENDED];
+    let received = card.transmit(command, &mut response)?;
+    let length = received.len();
+    response.truncate(length);
+    Ok(response)
+}
+
+#[cfg(feature = "native-hardware")]
+fn transmit_pcsc_once(card: &mut pcsc::Card, command: &[u8]) -> Result<Vec<u8>, pcsc::Error> {
+    let transaction = card.transaction()?;
+    let result = transmit_pcsc(&transaction, command);
+    let ended = transaction
+        .end(pcsc::Disposition::LeaveCard)
+        .map_err(|(_, error)| error);
+    match result {
+        Ok(response) => ended.map(|()| response),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(feature = "native-hardware")]
+fn run_pcsc_transaction(
+    transaction: pcsc::Transaction<'_>,
+    first_command: Vec<u8>,
+    first_reply: mpsc::SyncSender<Result<Vec<u8>, pcsc::Error>>,
+    receiver: &mpsc::Receiver<PcscWorkerRequest>,
+    connection_epoch: u64,
+) -> PcscTransactionOutcome {
+    let first = transmit_pcsc(&transaction, &first_command);
+    let first_failed = first.is_err();
+    let _ = first_reply.try_send(first);
+    if first_failed {
+        drop(transaction);
+        return PcscTransactionOutcome::OperationActive;
+    }
+
+    loop {
+        match receiver.recv() {
+            Ok(PcscWorkerRequest::BeginOperation { reply }) => {
+                let _ = reply.try_send(Err(CKR_OPERATION_ACTIVE as CK_RV));
+            }
+            Ok(PcscWorkerRequest::EndOperation { reply }) => {
+                let result = transaction
+                    .end(pcsc::Disposition::LeaveCard)
+                    .map_err(|(_, error)| error);
+                let _ = reply.try_send(result);
+                return PcscTransactionOutcome::OperationEnded;
+            }
+            Ok(PcscWorkerRequest::Refresh { reply }) => {
+                let result = transaction.status2_owned().map(|_| PcscRefresh {
+                    apdu_capabilities: detect_pcsc_apdu_capabilities(&transaction),
+                    connection_epoch,
+                });
+                let _ = reply.try_send(result);
+            }
+            Ok(PcscWorkerRequest::Transmit { command, reply }) => {
+                let result = transmit_pcsc(&transaction, &command);
+                let failed = result.is_err();
+                let _ = reply.try_send(result);
+                if failed {
+                    drop(transaction);
+                    return PcscTransactionOutcome::OperationActive;
+                }
+            }
+            Err(_) => {
+                drop(transaction);
+                return PcscTransactionOutcome::Shutdown;
+            }
+        }
     }
 }
 
@@ -2631,9 +2994,10 @@ mod tests {
     }
 
     #[test]
-    fn operation_boundary_invalidates_selection_but_preserves_scp11_validation() {
+    fn transaction_end_discards_selection_but_preserves_scp11_validation() {
         let state = PcscReaderState::default();
         let key = (0x13, 1, [0x55; 32]);
+        state.begin_transaction().unwrap();
         state.set_selected_application(&[1, 2, 3]).unwrap();
         {
             let mut secure_channel = state.secure_channel().unwrap();
@@ -2642,11 +3006,10 @@ mod tests {
                 .insert(key, vec![0x04; 65]);
         }
 
-        state.invalidate_selected_application().unwrap();
+        state.end_transaction();
 
         let secure_channel = state.secure_channel().unwrap();
-        assert!(secure_channel.application_aid.is_empty());
-        assert!(secure_channel.session.is_none());
+        assert!(secure_channel.transaction.is_none());
         assert!(secure_channel.validated_scp11_keys.contains_key(&key));
     }
 
@@ -2655,7 +3018,10 @@ mod tests {
         let key = (0x13, 1, [0x55; 32]);
         let mut state = SecureChannelState {
             connection_epoch: 7,
-            application_aid: vec![1, 2, 3],
+            transaction: Some(SmartCardTransactionState {
+                application_aid: vec![1, 2, 3],
+                session: None,
+            }),
             ..SecureChannelState::default()
         };
         state.validated_scp11_keys.insert(key, vec![0x04; 65]);
@@ -2669,7 +3035,7 @@ mod tests {
 
         state.synchronize_connection(8);
         assert!(state.validated_scp11_keys.is_empty());
-        assert!(state.application_aid.is_empty());
+        assert!(state.transaction().unwrap().application_aid.is_empty());
         assert_eq!(state.connection_epoch, 8);
     }
 }

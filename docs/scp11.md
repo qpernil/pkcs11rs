@@ -27,13 +27,20 @@ one of:
 - `PKCS11RS_SCP11_SD_CA_CERTIFICATE`: path to one canonical DER X.509 CA
   certificate that authenticates the SD certificate chain.
 
-In factory or configured CA-certificate mode, the module temporarily selects
-the Issuer SD, reads the chain for the configured SCP11 KID/KVN, and reselects
-the target applet. The Rust certificate verifier validates the chain against
-the selected CA, including validity periods and CA constraints, before the leaf
-P-256 key is used for SCP11 authentication. The SCP11 receipt then proves that
-the card owns the matching private key. The module never implicitly trusts a
-certificate obtained from the card.
+In factory or configured CA-certificate mode, the module obtains trust material
+once per connected card and trust policy by temporarily selecting the Issuer
+SD and reading the chain for the configured SCP11 KID/KVN. It validates the
+chain against the selected CA, including validity periods and CA constraints,
+and caches the validated leaf P-256 public key. The module then selects the
+target applet and performs the actual SCP11 handshake there. Later transactions
+reuse the validated public key without selecting the Issuer SD. The cache is
+discarded after reconnection or Security Domain mutation. The module never
+implicitly trusts a certificate obtained from the card.
+
+A future refinement may make this trust-material acquisition an explicit
+reader-discovery step. The current implementation performs it lazily during
+the first secured applet initialization, which normally already occurs during
+discovery, and then relies on the same connection-scoped validated-key cache.
 
 Optional configuration:
 

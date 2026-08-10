@@ -1526,11 +1526,7 @@ mod fido2_hardware {
 
     fn open_pcsc_connector(reader: CString) -> Result<crate::PcscConnector, crate::Error> {
         let context = pcsc::Context::establish(pcsc::Scope::System)?;
-        let connector = crate::PcscConnector {
-            reader,
-            context,
-            state: std::sync::Arc::new(Default::default()),
-        };
+        let connector = crate::PcscConnector::new(reader, context);
         connector.refresh()?;
         Ok(connector)
     }
@@ -1544,11 +1540,7 @@ mod fido2_hardware {
             .into_iter()
             .filter_map(|reader| {
                 let name = reader.to_string_lossy().into_owned();
-                let connector = crate::PcscConnector {
-                    reader: reader.clone(),
-                    context: context.clone(),
-                    state: std::sync::Arc::new(Default::default()),
-                };
+                let connector = crate::PcscConnector::new(reader.clone(), context.clone());
                 connector.refresh().ok()?;
                 let info = crate::YubiKeyClient.discover(&connector).ok()?;
                 let serial = normalize_yubico_serial(info.serial.as_deref()?)?;
@@ -1843,6 +1835,154 @@ mod fido2_hardware {
             Ok(())
         })
         .expect("selected FIDO HID authenticator did not complete authenticatorGetInfo");
+    }
+
+    #[test]
+    #[ignore = "requires a YubiKey exposed through PC/SC"]
+    fn pcsc_shared_connection_blocks_peers_only_during_an_operation() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let context = pcsc::Context::establish(pcsc::Scope::System)
+            .expect("failed to establish PC/SC context");
+        let reader = context
+            .list_readers_owned()
+            .expect("failed to list PC/SC readers")
+            .into_iter()
+            .next()
+            .expect("no PC/SC reader with a card is available");
+        let connector = crate::PcscConnector::new(reader.clone(), context.clone());
+        connector
+            .refresh()
+            .expect("pkcs11rs failed to open a shared PC/SC connection");
+        let peer_context = pcsc::Context::establish(pcsc::Scope::System)
+            .expect("failed to establish the peer PC/SC context");
+        let mut peer = peer_context
+            .connect(
+                &reader,
+                pcsc::ShareMode::Shared,
+                pcsc::Protocols::T0 | pcsc::Protocols::T1,
+            )
+            .expect("a second shared PC/SC connection could not coexist with pkcs11rs");
+
+        let device = connector.device_context().unwrap();
+        let operation = device
+            .lock_operation(crate::device::DeviceOperationKind::Ccid)
+            .expect("failed to enter the pkcs11rs PC/SC operation");
+        CcidProbe::Management
+            .run(&connector)
+            .expect("read-only management probe failed inside the transaction");
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let peer_thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = peer.transaction().map(drop);
+            finished_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "the peer entered a PC/SC transaction before pkcs11rs released its operation"
+        );
+
+        drop(operation);
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the peer remained blocked after pkcs11rs ended its operation")
+            .expect("the peer transaction failed after pkcs11rs released the card");
+        peer_thread.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires two YubiKeys exposed through PC/SC"]
+    fn pcsc_reader_workers_on_different_cards_remain_independent() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let context = pcsc::Context::establish(pcsc::Scope::System)
+            .expect("failed to establish PC/SC context");
+        let readers = context
+            .list_readers_owned()
+            .expect("failed to list PC/SC readers")
+            .into_iter()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(readers.len(), 2, "two PC/SC readers are required");
+
+        let first = crate::PcscConnector::new(readers[0].clone(), context.clone());
+        let second = crate::PcscConnector::new(readers[1].clone(), context.clone());
+        first.refresh().expect("failed to open the first reader");
+        second.refresh().expect("failed to open the second reader");
+
+        let first_device = first.device_context().unwrap();
+        let first_operation = first_device
+            .lock_operation(crate::device::DeviceOperationKind::Ccid)
+            .expect("failed to enter the first reader operation");
+        CcidProbe::Management
+            .run(&first)
+            .expect("the first read-only management probe failed");
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let second_thread = std::thread::spawn(move || {
+            let device = second.device_context().unwrap();
+            let operation = device
+                .lock_operation(crate::device::DeviceOperationKind::Ccid)
+                .expect("failed to enter the second reader operation");
+            let result = CcidProbe::Management.run(&second);
+            drop(operation);
+            finished_tx.send(result).unwrap();
+        });
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second reader was blocked by the first reader's transaction")
+            .expect("the second read-only management probe failed");
+
+        drop(first_operation);
+        second_thread.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires two YubiKeys exposed through PC/SC"]
+    fn one_pcsc_context_allows_transactions_on_different_readers() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let context = pcsc::Context::establish(pcsc::Scope::System)
+            .expect("failed to establish PC/SC context");
+        let readers = context
+            .list_readers_owned()
+            .expect("failed to list PC/SC readers")
+            .into_iter()
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(readers.len(), 2, "two PC/SC readers are required");
+        let mut first = context
+            .connect(
+                &readers[0],
+                pcsc::ShareMode::Shared,
+                pcsc::Protocols::T0 | pcsc::Protocols::T1,
+            )
+            .expect("failed to connect to the first reader");
+        let mut second = context
+            .connect(
+                &readers[1],
+                pcsc::ShareMode::Shared,
+                pcsc::Protocols::T0 | pcsc::Protocols::T1,
+            )
+            .expect("failed to connect to the second reader");
+
+        let first_transaction = first
+            .transaction()
+            .expect("failed to begin the first reader transaction");
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let second_thread = std::thread::spawn(move || {
+            let result = second.transaction().map(drop);
+            finished_tx.send(result).unwrap();
+        });
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the shared context blocked a transaction on another reader")
+            .expect("the second reader transaction failed");
+
+        drop(first_transaction);
+        second_thread.join().unwrap();
     }
 
     #[test]
