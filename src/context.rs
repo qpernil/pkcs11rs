@@ -2911,12 +2911,12 @@ impl ModuleContext {
             let _ = initialized;
             return self.refresh_registered_slots();
         }
+        #[cfg(target_os = "ios")]
+        self.refresh_nfc_discovery()?;
         #[cfg(not(feature = "abi-tests"))]
         if !initialized {
             self.refresh_ccid_discovery()?;
         }
-        #[cfg(target_os = "ios")]
-        self.refresh_nfc_discovery()?;
         #[cfg(feature = "native-hardware")]
         self.refresh_usb_yubihsm_discovery()?;
         self.refresh_http_yubihsm_discovery()?;

@@ -1560,9 +1560,16 @@ fn yubihsm_login_username_encodes_the_authentication_key_and_provider() {
     assert!(login.source.is_none());
     assert_eq!(login.authkey_id, 1);
 
+    let login = crate::parse_hsmauth_username(b":0000default").unwrap();
+    assert_eq!(login.authkey_id, 0);
+
     assert!(matches!(
         crate::parse_yubihsm_login_username(b"00fF").unwrap(),
         crate::YubiHsmLoginUsername::Direct(0xff)
+    ));
+    assert!(matches!(
+        crate::parse_yubihsm_login_username(b"0000").unwrap(),
+        crate::YubiHsmLoginUsername::Direct(0)
     ));
 }
 

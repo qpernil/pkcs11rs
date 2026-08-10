@@ -34,11 +34,11 @@ still identifies the bound YubiKey serial, and serial-guidance messages remain
 stable.
 
 Each device-backed PKCS #11 call holds one CryptoTokenKit smart-card session
-across all of its APDUs. At the start of that transaction, pkcs11rs forgets the
-cached applet selection so the first APDU re-selects the slot's AID before any
+across all of its APDUs. A new transaction begins without selected-applet or
+live secure-channel state, so its first APDU selects the slot's AID before any
 operation command. This prevents another CCID application from changing the
 selected applet between pkcs11rs calls without detection. Configured SCP03 or
-SCP11 channels are consequently re-established after that selection.
+SCP11 channels are established inside the transaction and destroyed with it.
 
 After the NFC UI has closed, tap **Refresh** to repeat the ordinary PKCS #11
 inventory. NFC discovery itself remains latched, but the first operation on a
@@ -70,15 +70,27 @@ refreshes and process launches find the persisted private key and do not
 generate another pair.
 
 After every public object inventory is complete, the app lists all discovered
-YubiHSM Auth credentials and selects the first one. It builds an unambiguous
-`C_LoginUser` username as `:1236<label>@<source>`, where `1236` is the target
-YubiHSM Authentication Key ID and the source is the owning YubiKey serial (or
-slot description when no serial is available), then supplies the prototype
-credential password `password`. The app probes that login on every token. Only
-the YubiHSM backend supports the entry point; other slot kinds return
-`CKR_FUNCTION_NOT_SUPPORTED` before using the password. After a successful
-login, the app enumerates the objects again as an authenticated user, logs out,
-and closes the session.
+YubiHSM Auth credentials and selects the first one. For each YubiHSM slot it
+compares the credential public object's `CKA_EC_POINT` with publicly discovered
+`CKO_PUBLIC_KEY` objects. Exactly one matching object with a two-byte `CKA_ID`
+supplies the explicit Authentication Key ID. The app then builds the
+unambiguous `C_LoginUser` username `:<id><label>@<source>`, where the source is
+the owning YubiKey serial (or slot description when no serial is available),
+and supplies the prototype credential password `password`. Missing or
+ambiguous public-key matches skip login instead of invoking hidden backend
+selection. After a successful login, the app enumerates the objects again as an
+authenticated user, logs out, and closes the session. On iOS the module
+discovers the interactive NFC reader before ordinary USB smart-card readers so
+its UI appears immediately, while still discovering every smart-card
+credential provider before YubiHSM slots. The final display preserves discovery
+order within each group but places YubiHSM slots after software and YubiKey
+applet slots.
+
+If discovery produces no YubiHSM Auth credential over any transport, the
+inventory says so explicitly and notes that an interactive prompt may have been
+canceled, a reader may be unavailable, or a presented token may not support the
+applet. Credential discovery failure remains nonfatal so the app can still
+display its software and YubiHSM slots.
 
 An unreachable configured YubiHSM endpoint is an isolated discovery failure:
 pkcs11rs records the failed endpoint and its outcome in Unified Logging, omits
@@ -189,6 +201,26 @@ once the Mac's network interface is reachable again. Recheck this path after
 changes to connector sleep behavior; the separate USB-only test is documented
 in the
 [connector guide](../../../docs/connector.md#usb-only-sleepwake-test).
+
+## Future Swift client package
+
+The smoke app now exercises enough of the Cryptoki client surface to serve as
+the prototype and first integration test for a separate, vendor-neutral Swift
+Package Manager wrapper. That package should consume the standard PKCS #11 C
+ABI rather than introduce another pkcs11rs-specific ABI. Its initial scope
+should include typed `CK_RV` errors, module initialization ownership, automatic
+two-pass buffer handling, safe attribute templates, scoped sessions, logins,
+searches and multipart operations, and an actor or equivalent executor for
+asynchronous application use. Sensitive inputs such as PINs must have explicit
+buffer lifetimes and cleanup.
+
+The generic package should remain usable with other conforming PKCS #11
+modules. A small optional pkcs11rs extension may provide typed construction of
+named YubiHSM Auth login selectors without moving credential discovery or
+authentication policy out of the standard object and login APIs. Refactoring
+this smoke app onto the wrapper would validate the package against software,
+USB CCID, NFC CryptoTokenKit, and remote YubiHSM slots before presenting it as
+a general client library.
 
 The checked-in Xcode project contains the maintainer's development team for
 automatic signing. Select a different development team in Xcode when building

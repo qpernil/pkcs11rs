@@ -119,11 +119,21 @@ Authentication Key is rejected by the device.
 
 An asymmetric credential in a separate YubiHSM Auth slot can expose its own
 long-term public key, and that key may have been provisioned into a matching
-YubiHSM Authentication Key. It is nevertheless a different slot object.
-pkcs11rs does not copy it into the YubiHSM slot or make the YubiHSM object's
-attributes depend on discovery, login, or lifetime of another slot. A public
-key projection will require the YubiHSM firmware command interface itself to
-make the Authentication Key public half readable.
+YubiHSM Authentication Key. It is nevertheless a different slot object. A
+provisioner can persist the same material on the YubiHSM slot as an ordinary
+standalone `CKO_PUBLIC_KEY`, with its `CKA_ID` set to the Authentication Key
+object ID. Generic YubiHSM object persistence stores that public object in an
+internal opaque record, and public discovery exposes it before user login.
+
+A client can therefore compare the credential and YubiHSM-slot
+`CKA_EC_POINT` values through ordinary `C_FindObjects*` and
+`C_GetAttributeValue` calls, then use the matching public object's `CKA_ID` as
+the explicit Authentication Key ID in `C_LoginUser`. The stored object records
+the relationship established by provisioning; the subsequent authenticated
+session is the final cryptographic verification. pkcs11rs does not perform
+hidden cross-slot matching. If a future YubiHSM firmware version makes the
+Authentication Key public half readable, a native public projection can
+replace the companion without changing the client search.
 
 ## Public object discovery
 
@@ -700,11 +710,15 @@ YubiHSM Auth credential.
 
 The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` and
 `provisions_touch_required_asymmetric_hsmauth_credential_on_yubihsm` tests
-delete their configured test credential and authentication key if they already
-exist, generate a fresh persistent asymmetric credential on a YubiKey, read
-its P-256 public key, install that public key as a YubiHSM authentication key,
-and verify an actual asymmetric session. The second test requires a physical
-touch during authentication. Both leave the newly provisioned pair in place.
+delete their configured test credential and matching authentication key if
+they already exist, generate one fresh persistent asymmetric credential on a
+YubiKey, read its P-256 public key, install that public key as a YubiHSM
+authentication key on every configured or locally discovered YubiHSM, persist
+a companion `CKO_PUBLIC_KEY` with the Authentication Key ID, verify that
+public discovery can read the companion, and verify an actual asymmetric
+session with each HSM.
+The second test requires a physical touch during each authentication. Both
+leave the newly provisioned credential, keys, and companions in place.
 
 Provisioning requires an explicit enable flag and target object ID:
 
@@ -738,10 +752,33 @@ with:
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_ID`
 - `PKCS11RS_TEST_YUBIHSM_ADMIN_PASSWORD`
 
-When multiple devices are attached, select them by serial number or full device
-name with `PKCS11RS_TEST_HSMAUTH_SOURCE` and `PKCS11RS_TEST_YUBIHSM_SOURCE`.
-Before cleanup, an existing YubiHSM object must have the configured label and
-asymmetric authentication algorithm. This prevents an accidentally reused ID
-from deleting an unrelated object. Cleanup occurs only after the explicit
-enable flag and target ID have been validated. The freshly generated keys are
-not deleted, including after a partial provisioning failure.
+Set `PKCS11RS_TEST_REUSE_ASYMMETRIC_HSMAUTH_CREDENTIAL=1` to provision from an
+existing named asymmetric credential instead of deleting and regenerating it.
+For example, an existing credential named `scp11` can be installed on every
+discovered YubiHSM with:
+
+```sh
+PKCS11RS_TEST_PROVISION_ASYMMETRIC_HSMAUTH=1 \
+PKCS11RS_TEST_REUSE_ASYMMETRIC_HSMAUTH_CREDENTIAL=1 \
+PKCS11RS_TEST_HSMAUTH_LABEL=scp11 \
+PKCS11RS_TEST_YUBIHSM_AUTHKEY_ID=1234 \
+cargo test provisions_asymmetric_hsmauth_credential_on_yubihsm -- --ignored --nocapture
+```
+
+The named credential must already exist on the selected YubiHSM Auth applet,
+must be asymmetric P-256, and must have the touch policy expected by the chosen
+test variant. The test never mutates or removes a reused credential.
+
+When multiple YubiKeys are attached, select the credential-bearing key by
+serial number or full device name with `PKCS11RS_TEST_HSMAUTH_SOURCE`. Every
+configured HTTP(S) or locally discovered USB YubiHSM is a provisioning target.
+Before cleanup begins on
+any device, the test authenticates to every target and requires every existing
+object at the configured ID to have the configured label and asymmetric
+authentication algorithm. This prevents an accidentally reused ID from
+deleting an unrelated object and avoids starting a multi-HSM update that fails
+basic preflight on a later target. Cleanup occurs only after the explicit
+enable flag and target ID have been validated. Existing companion public
+objects with the selected label and ID are replaced through ordinary PKCS #11
+object operations. The freshly generated keys are not deleted, including after
+a partial provisioning failure.
