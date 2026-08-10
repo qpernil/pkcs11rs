@@ -1,6 +1,6 @@
 use crate::{
-    scp03, CommandApdu, Connector, Error, ResponseApdu, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR,
+    CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CommandApdu, Connector, Error,
+    ResponseApdu, scp03,
 };
 
 const COMMAND_CHAINING_CLA: u8 = 0x10;

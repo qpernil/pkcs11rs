@@ -1,5 +1,5 @@
 use super::{object::ObjectParameters, protocol::*};
-use crate::{error::Error, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_LEN_RANGE};
+use crate::{CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_LEN_RANGE, error::Error};
 use zeroize::Zeroizing;
 
 impl Command {

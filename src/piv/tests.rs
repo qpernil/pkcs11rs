@@ -166,9 +166,11 @@ fn authenticates_the_piv_management_key_mutually() {
         ]
     );
     assert_eq!(&commands[2][..4], &[0, INS_AUTHENTICATE, 0x03, 0x9b]);
-    assert!(commands[2]
-        .windows(4)
-        .any(|window| window == [0x80, 8, 0x5a, 0x5a]));
+    assert!(
+        commands[2]
+            .windows(4)
+            .any(|window| window == [0x80, 8, 0x5a, 0x5a])
+    );
 }
 
 #[test]
@@ -201,7 +203,9 @@ fn pads_pin_and_reports_retry_failures() {
     assert!(matches!(error, Error::Generic(rv) if rv == CKR_PIN_INCORRECT as crate::CK_RV));
     assert_eq!(
         connector.commands.borrow()[0],
-        [0, 0x20, 0, 0x80, 8, b'1', b'2', b'3', b'4', b'5', b'6', 0xff, 0xff, 0]
+        [
+            0, 0x20, 0, 0x80, 8, b'1', b'2', b'3', b'4', b'5', b'6', 0xff, 0xff, 0
+        ]
     );
 }
 

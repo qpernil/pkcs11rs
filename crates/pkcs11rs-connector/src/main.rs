@@ -3,11 +3,11 @@ mod http_timeout;
 mod registry;
 mod tls;
 
-use api::{router, AppState};
+use api::{AppState, router};
 use clap::Parser;
 use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
-use registry::{spawn_discovery, DeviceRegistry};
+use registry::{DeviceRegistry, spawn_discovery};
 use std::{
     future::Future, io, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
 };
@@ -211,7 +211,7 @@ mod tests {
     use http_body_util::{BodyExt, Full};
     use hyper::{Method, Request, Version};
     use hyper_util::rt::{TokioExecutor, TokioIo};
-    use rustls::{pki_types::ServerName, ClientConfig, RootCertStore};
+    use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
     #[cfg(unix)]
     use std::{
         env,
@@ -229,7 +229,7 @@ mod tests {
         net::TcpStream,
         task::JoinHandle,
     };
-    use tokio_rustls::{client::TlsStream, TlsConnector};
+    use tokio_rustls::{TlsConnector, client::TlsStream};
 
     static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(0);
     const TEST_COMMAND: &[u8] = b"\x03\x00\x07command";

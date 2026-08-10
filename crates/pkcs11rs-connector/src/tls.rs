@@ -1,4 +1,4 @@
-use rustls::{server::WebPkiClientVerifier, RootCertStore, ServerConfig};
+use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use std::{fs::File, io::BufReader, path::Path, sync::Arc};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;

@@ -1,18 +1,18 @@
 use super::*;
 use crate::{
-    configured_yubihsm_public_discovery_credential,
-    key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
-    parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command, KeyMaterial, Slot, TokenObject,
-    YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
-    YubiHsmSlot, CKA_LABEL, CKA_PUBLIC_KEY_INFO, CKK_RSA, CKO_CERTIFICATE, CKO_DATA,
-    CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY, CKO_SECRET_KEY, CKP_BASELINE_PROVIDER,
-    CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN, CKR_FUNCTION_REJECTED,
-    CKR_USER_NOT_LOGGED_IN, CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO,
+    CK_KEY_TYPE, CK_OBJECT_CLASS, CK_PROFILE_ID, CK_TOKEN_INFO, CKA_LABEL, CKA_PUBLIC_KEY_INFO,
+    CKK_RSA, CKO_CERTIFICATE, CKO_DATA, CKO_PRIVATE_KEY, CKO_PROFILE, CKO_PUBLIC_KEY,
+    CKO_SECRET_KEY, CKP_BASELINE_PROVIDER, CKP_EXTENDED_PROVIDER, CKP_PUBLIC_CERTIFICATES_TOKEN,
+    CKR_FUNCTION_REJECTED, CKR_USER_NOT_LOGGED_IN, KeyMaterial, Slot, TokenObject,
     YUBIHSM_ALGO_AES128, YUBIHSM_ALGO_AES128_YUBICO_AUTHENTICATION, YUBIHSM_ALGO_AES192,
     YUBIHSM_ALGO_AES256, YUBIHSM_ALGO_EC_P256, YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
     YUBIHSM_ALGO_OPAQUE_DATA, YUBIHSM_ALGO_OPAQUE_X509_CERTIFICATE, YUBIHSM_ALGO_RSA_2048,
     YUBIHSM_ALGO_RSA_3072, YUBIHSM_ALGO_RSA_4096, YUBIHSM_ASYMMETRIC_KEY,
     YUBIHSM_AUTHENTICATION_KEY, YUBIHSM_OPAQUE, YUBIHSM_SYMMETRIC_KEY, YUBIHSM_WRAP_KEY,
+    YubiHsmDiscoveryCache, YubiHsmObjectKey, YubiHsmPublicDiscoveryConfig, YubiHsmSessionRole,
+    YubiHsmSlot, configured_yubihsm_public_discovery_credential,
+    key_metadata::{BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking},
+    parse_yubihsm_pkcs11_metadata, send_yubihsm_secure_command,
 };
 use std::sync::Arc;
 use std::{
@@ -2164,9 +2164,11 @@ fn mismatched_canonical_public_material_does_not_hide_the_private_key() {
     }
 
     let objects = Slot::token_objects(&slot, 7).unwrap();
-    assert!(objects
-        .iter()
-        .any(|object| object.unique_id == private.unique_id));
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.unique_id == private.unique_id)
+    );
     assert!(!objects.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"persisted-id"
     }));
@@ -2204,10 +2206,12 @@ fn deleting_the_only_public_aspect_leaves_a_canonical_legacy_shadow() {
         })
         .unwrap();
     let record = BackedKeyMetadata::from_cbor(&canonical).unwrap();
-    assert!(record
-        .aspect(u64::from(CKO_PRIVATE_KEY))
-        .unwrap()
-        .is_empty());
+    assert!(
+        record
+            .aspect(u64::from(CKO_PRIVATE_KEY))
+            .unwrap()
+            .is_empty()
+    );
     assert!(record.aspect(u64::from(CKO_PUBLIC_KEY)).is_none());
     assert!(peer.metadata_objects.borrow().contains_key(&101));
 
@@ -2300,12 +2304,13 @@ fn assert_duplicate_legacy_metadata_is_shadowed(public_discovery: bool) {
             .count(),
         1
     );
-    assert!(peer
-        .metadata_objects
-        .borrow()
-        .values()
-        .find(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
-        .is_some_and(|(_, value)| !value.starts_with(b"MDB1")));
+    assert!(
+        peer.metadata_objects
+            .borrow()
+            .values()
+            .find(|(info, _)| info.label == "pkcs11rs metadata 0x01030001")
+            .is_some_and(|(_, value)| !value.starts_with(b"MDB1"))
+    );
     assert!(peer.metadata_objects.borrow().contains_key(&101));
     assert!(peer.metadata_objects.borrow().contains_key(&102));
 }
@@ -2351,14 +2356,16 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
 
     peer.fail_next_put_opaque.set(true);
     let failed_create_start = peer.inner_commands.borrow().len();
-    assert!(Slot::yubihsm_set_attributes(
-        &slot,
-        7,
-        &unique_id,
-        Some(b"failed-create-id"),
-        Some("failed create"),
-    )
-    .is_err());
+    assert!(
+        Slot::yubihsm_set_attributes(
+            &slot,
+            7,
+            &unique_id,
+            Some(b"failed-create-id"),
+            Some("failed create"),
+        )
+        .is_err()
+    );
     let failed_create_commands = peer.inner_commands.borrow();
     let failed_create = &failed_create_commands[failed_create_start..];
     assert_eq!(failed_create.len(), 1);
@@ -2393,14 +2400,16 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
 
     peer.fail_delete_opaque.borrow_mut().insert(canonical_id);
     let failed_delete_start = peer.inner_commands.borrow().len();
-    assert!(Slot::yubihsm_set_attributes(
-        &slot,
-        7,
-        &unique_id,
-        Some(b"failed-delete-id"),
-        Some("failed delete"),
-    )
-    .is_err());
+    assert!(
+        Slot::yubihsm_set_attributes(
+            &slot,
+            7,
+            &unique_id,
+            Some(b"failed-delete-id"),
+            Some("failed delete"),
+        )
+        .is_err()
+    );
     let failed_delete_commands = peer.inner_commands.borrow();
     let failed_delete = &failed_delete_commands[failed_delete_start..];
     assert_eq!(failed_delete[0].0, CommandCode::PutOpaque as u8);
@@ -2492,12 +2501,13 @@ fn assert_invalid_legacy_metadata_is_shadowed(public_discovery: bool) {
     )
     .unwrap();
     assert!(peer.metadata_objects.borrow().contains_key(&101));
-    assert!(peer
-        .metadata_objects
-        .borrow()
-        .values()
-        .any(|(info, value)| info.label == "pkcs11rs metadata 0x01030001"
-            && !value.starts_with(b"MDB1")));
+    assert!(
+        peer.metadata_objects
+            .borrow()
+            .values()
+            .any(|(info, value)| info.label == "pkcs11rs metadata 0x01030001"
+                && !value.starts_with(b"MDB1"))
+    );
     let repaired = Slot::token_objects(&slot, 7).unwrap();
     let private = repaired
         .iter()
@@ -2595,9 +2605,11 @@ fn yubihsm_without_public_discovery_configuration_exposes_provider_profiles_only
             CKP_EXTENDED_PROVIDER as CK_PROFILE_ID,
         ])
     );
-    assert!(objects
-        .iter()
-        .all(|object| object.class == CKO_PROFILE as CK_OBJECT_CLASS));
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class == CKO_PROFILE as CK_OBJECT_CLASS)
+    );
 }
 
 #[test]
@@ -2684,10 +2696,12 @@ fn assert_lazy_cache_lifecycle(public_discovery: bool) {
         exercise_lazy_opaque_value_cache(&slot, &logged_out_opaque),
         b"cached opaque value"
     );
-    assert!(logged_out
-        .iter()
-        .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
-        .all(|object| !object.private));
+    assert!(
+        logged_out
+            .iter()
+            .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+            .all(|object| !object.private)
+    );
     assert_eq!(
         inner_command_count(&peer, CommandCode::GetOpaque),
         reads_before_certificate + usize::from(!public_discovery)
@@ -3004,11 +3018,12 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
     }));
     assert!(!Slot::session_objects(&slot, 7).unwrap().is_empty());
-    assert!(slot
-        .attestation_cache
-        .borrow()
-        .keys()
-        .any(|(key, _)| key.object_type == YUBIHSM_ASYMMETRIC_KEY && key.id == 1));
+    assert!(
+        slot.attestation_cache
+            .borrow()
+            .keys()
+            .any(|(key, _)| key.object_type == YUBIHSM_ASYMMETRIC_KEY && key.id == 1)
+    );
 
     Slot::logout(&mut slot).unwrap();
     let logged_out = Slot::token_objects(&slot, 7).unwrap();
@@ -3016,23 +3031,30 @@ fn assert_logout_clears_private_cache(public_discovery: bool) {
     assert!(!logged_out.iter().any(|object| {
         object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS && object.id == b"shared-id"
     }));
-    assert!(Slot::token_object(&slot, 7, &private.unique_id)
-        .unwrap()
-        .is_none());
-    assert!(!slot
-        .object_metadata
-        .borrow()
-        .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1)));
-    assert!(!slot
-        .object_cache
-        .borrow()
-        .native_objects
-        .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1)));
-    assert!(slot
-        .attestation_cache
-        .borrow()
-        .keys()
-        .all(|(key, _)| key.object_type != YUBIHSM_ASYMMETRIC_KEY || key.id != 1));
+    assert!(
+        Slot::token_object(&slot, 7, &private.unique_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !slot
+            .object_metadata
+            .borrow()
+            .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1))
+    );
+    assert!(
+        !slot
+            .object_cache
+            .borrow()
+            .native_objects
+            .contains_key(&YubiHsmObjectKey::new(YUBIHSM_ASYMMETRIC_KEY, 1))
+    );
+    assert!(
+        slot.attestation_cache
+            .borrow()
+            .keys()
+            .all(|(key, _)| key.object_type != YUBIHSM_ASYMMETRIC_KEY || key.id != 1)
+    );
 
     peer.objects.borrow_mut().clear();
     Slot::login(&mut slot, b"0002password").unwrap();
@@ -3059,16 +3081,20 @@ fn yubihsm_forced_session_clear_removes_private_cached_objects() {
     let peer = Rc::new(ProtocolPeer::new());
     let mut slot = cache_test_slot(peer, false);
     Slot::login(&mut slot, b"0001password").unwrap();
-    assert!(Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .any(|object| object.private));
+    assert!(
+        Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| object.private)
+    );
 
     Slot::clear_session(&mut slot);
-    assert!(Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .all(|object| !object.private));
+    assert!(
+        Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .all(|object| !object.private)
+    );
 }
 
 fn assert_sequence_change_invalidates_cached_value(public_discovery: bool) {
@@ -3094,9 +3120,11 @@ fn assert_sequence_change_invalidates_cached_value(public_discovery: bool) {
         inner_command_count(&peer, CommandCode::GetOpaque),
         reads_before_replacement
     );
-    assert!(!replaced
-        .iter()
-        .any(|object| object.unique_id == initial_unique_id));
+    assert!(
+        !replaced
+            .iter()
+            .any(|object| object.unique_id == initial_unique_id)
+    );
     let replacement = yubihsm_opaque_object(&replaced, 4);
     assert_ne!(replacement.unique_id, initial_unique_id);
     let KeyMaterial::YubiHsm { value, .. } = &replacement.material else {
@@ -3193,17 +3221,19 @@ fn assert_explicit_eviction_removes_cached_object(public_discovery: bool) {
 
     Slot::yubihsm_forget_object(&slot, 4, YUBIHSM_OPAQUE).unwrap();
     Slot::logout(&mut slot).unwrap();
-    assert!(!Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-            object.material,
-            KeyMaterial::YubiHsm {
-                id: 4,
-                object_type: YUBIHSM_OPAQUE,
-                ..
-            }
-        )));
+    assert!(
+        !Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                object.material,
+                KeyMaterial::YubiHsm {
+                    id: 4,
+                    object_type: YUBIHSM_OPAQUE,
+                    ..
+                }
+            ))
+    );
 }
 
 #[test]
@@ -3348,9 +3378,11 @@ fn yubihsm_public_discovery_exposes_all_non_private_objects_without_pkcs_login()
     assert!(!certificate.private);
     assert!(!public_data.private);
     assert!(objects.iter().all(|object| !object.private));
-    assert!(!objects
-        .iter()
-        .any(|object| matches!(object.material, KeyMaterial::YubiHsm { id: 100 | 101, .. })));
+    assert!(
+        !objects
+            .iter()
+            .any(|object| matches!(object.material, KeyMaterial::YubiHsm { id: 100 | 101, .. }))
+    );
     let KeyMaterial::YubiHsm { value, .. } = &certificate.material else {
         panic!("expected a YubiHSM certificate");
     };
@@ -3495,16 +3527,18 @@ fn yubihsm_auth_public_discovery_does_not_retain_prompted_password() {
         Some(config.clone()),
     );
     second_slot.set_pinentry(Arc::new(pinentry.pinentry()));
-    assert!(Slot::token_objects(&second_slot, 9)
-        .unwrap()
-        .iter()
-        .any(|object| {
-            matches!(
-                object.material,
-                KeyMaterial::Profile { profile_id }
-                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-            )
-        }));
+    assert!(
+        Slot::token_objects(&second_slot, 9)
+            .unwrap()
+            .iter()
+            .any(|object| {
+                matches!(
+                    object.material,
+                    KeyMaterial::Profile { profile_id }
+                        if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+                )
+            })
+    );
     assert_eq!(second_peer.create_session_count(), 1);
     assert!(config.configured_password.is_none());
 }
@@ -3619,9 +3653,11 @@ fn legacy_private_key_metadata_does_not_create_a_public_key() {
     let slot = public_discovery_test_slot(peer, public_discovery_credential("password"));
 
     let objects = Slot::token_objects(&slot, 7).unwrap();
-    assert!(objects
-        .iter()
-        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+    );
     assert!(objects.iter().any(|object| matches!(
         object.material,
         KeyMaterial::Profile { profile_id }
@@ -3657,9 +3693,11 @@ fn explicit_public_metadata_mismatch_does_not_withdraw_profile() {
     assert!(objects.iter().any(|object| {
         object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS && object.id == b"shared-id"
     }));
-    assert!(objects
-        .iter()
-        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+    );
 }
 
 #[test]
@@ -3720,12 +3758,16 @@ fn public_certificate_profile_does_not_require_provisioned_certificates() {
         KeyMaterial::Profile { profile_id }
             if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
     )));
-    assert!(objects
-        .iter()
-        .all(|object| object.class != CKO_CERTIFICATE as CK_OBJECT_CLASS));
-    assert!(objects
-        .iter()
-        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class != CKO_CERTIFICATE as CK_OBJECT_CLASS)
+    );
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+    );
 }
 
 #[test]
@@ -3738,48 +3780,56 @@ fn yubihsm_public_discovery_is_conditional_per_slot() {
     let successful = public_discovery_test_slot(successful_peer, credential.clone());
     let failing = public_discovery_test_slot(failing_peer, credential);
 
-    assert!(Slot::token_objects(&successful, 7)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-            object.material,
-            KeyMaterial::Profile { profile_id }
-                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-        )));
-    assert!(!Slot::token_objects(&failing, 8)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-                    object.material,
-                    KeyMaterial::Profile { profile_id }
-                        if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-        )));
+    assert!(
+        Slot::token_objects(&successful, 7)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            ))
+    );
+    assert!(
+        !Slot::token_objects(&failing, 8)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                        object.material,
+                        KeyMaterial::Profile { profile_id }
+                            if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            ))
+    );
 }
 
 fn assert_failed_public_discovery_stays_unprofiled_after_user_login(
     mut slot: YubiHsmSlot,
     expected: YubiHsmDiscoveryCache,
 ) {
-    assert!(!Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-            object.material,
-            KeyMaterial::Profile { profile_id }
-                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-        )));
+    assert!(
+        !Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            ))
+    );
     assert_eq!(slot.object_cache.borrow().discovery, expected);
 
     Slot::login_user(&mut slot, b"0001", PASSWORD).unwrap();
     assert!(Slot::login_is_active(&slot));
-    assert!(!Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-            object.material,
-            KeyMaterial::Profile { profile_id }
-                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-        )));
+    assert!(
+        !Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            ))
+    );
 }
 
 #[test]
@@ -3865,12 +3915,16 @@ fn yubihsm_public_discovery_accepts_standalone_ca_certificates() {
         .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
         .collect::<Vec<_>>();
     assert_eq!(certificates.len(), 2);
-    assert!(certificates
-        .iter()
-        .any(|object| object.label == "standalone CA certificate"));
-    assert!(objects
-        .iter()
-        .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS));
+    assert!(
+        certificates
+            .iter()
+            .any(|object| object.label == "standalone CA certificate")
+    );
+    assert!(
+        objects
+            .iter()
+            .all(|object| object.class != CKO_PUBLIC_KEY as CK_OBJECT_CLASS)
+    );
 }
 
 #[test]
@@ -3881,14 +3935,16 @@ fn yubihsm_public_discovery_requires_get_opaque_without_blocking_user_login() {
     let mut slot =
         public_discovery_test_slot(peer.clone(), public_discovery_credential("password"));
 
-    assert!(!Slot::token_objects(&slot, 7)
-        .unwrap()
-        .iter()
-        .any(|object| matches!(
-            object.material,
-            KeyMaterial::Profile { profile_id }
-                if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
-        )));
+    assert!(
+        !Slot::token_objects(&slot, 7)
+            .unwrap()
+            .iter()
+            .any(|object| matches!(
+                object.material,
+                KeyMaterial::Profile { profile_id }
+                    if profile_id == CKP_PUBLIC_CERTIFICATES_TOKEN as CK_PROFILE_ID
+            ))
+    );
     assert!(Slot::login(&mut slot, b"0002password").is_ok());
     assert!(session_is_active(&slot));
     Slot::logout(&mut slot).unwrap();
@@ -3913,9 +3969,11 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
         .map(|object| object.unique_id.clone())
         .collect::<HashSet<_>>();
     assert_eq!(public_certificate_ids.len(), 1);
-    assert!(public_objects
-        .iter()
-        .any(|object| object.class == CKO_DATA as CK_OBJECT_CLASS));
+    assert!(
+        public_objects
+            .iter()
+            .any(|object| object.class == CKO_DATA as CK_OBJECT_CLASS)
+    );
     assert!(public_objects.iter().all(|object| !object.private));
     let get_opaque_before_login = peer
         .inner_commands
@@ -4057,10 +4115,12 @@ fn yubihsm_user_login_expands_the_public_object_view_without_duplicates() {
             .count(),
         2
     );
-    assert!(logged_out_objects
-        .iter()
-        .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
-        .all(|object| !object.private));
+    assert!(
+        logged_out_objects
+            .iter()
+            .filter(|object| object.class == CKO_CERTIFICATE as CK_OBJECT_CLASS)
+            .all(|object| !object.private)
+    );
     let login_discovered_certificate = yubihsm_opaque_object(&logged_out_objects, 3);
     let KeyMaterial::YubiHsm { value, .. } = &login_discovered_certificate.material else {
         unreachable!();
@@ -5063,9 +5123,11 @@ fn rejects_invalid_response_mac() {
     let mut session =
         SecureSession::authenticate_with_challenge(&peer, 1, PASSWORD, HOST_CHALLENGE).unwrap();
     peer.corrupt_response_mac.set(true);
-    assert!(session
-        .send_command(&peer, &Command::get_storage_info())
-        .is_err());
+    assert!(
+        session
+            .send_command(&peer, &Command::get_storage_info())
+            .is_err()
+    );
     assert!(!session.is_valid());
     let command_count = peer.commands.borrow().len();
     assert!(matches!(

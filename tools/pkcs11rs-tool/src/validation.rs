@@ -11,8 +11,8 @@ use spki::DecodePublicKey;
 use std::{collections::HashSet, path::Path};
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
-    ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage},
     Certificate,
+    ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage},
 };
 
 const CLIENT_AUTH: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.2");
@@ -493,11 +493,11 @@ mod tests {
     };
     use std::{str::FromStr, time::Duration};
     use x509_cert::{
-        builder::{profile::BuilderProfile, Builder, CertificateBuilder},
+        builder::{Builder, CertificateBuilder, profile::BuilderProfile},
         certificate::TbsCertificate,
         ext::{
-            pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages},
             Extension, ToExtension,
+            pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages},
         },
         name::Name,
         serial_number::SerialNumber,
@@ -525,11 +525,13 @@ mod tests {
             _issuer_key: spki::SubjectPublicKeyInfoRef<'_>,
             tbs: &TbsCertificate,
         ) -> x509_cert::builder::Result<Vec<Extension>> {
-            let mut extensions = vec![BasicConstraints {
-                ca: self.is_ca,
-                path_len_constraint: None,
-            }
-            .to_extension(tbs.subject(), &[])?];
+            let mut extensions = vec![
+                BasicConstraints {
+                    ca: self.is_ca,
+                    path_len_constraint: None,
+                }
+                .to_extension(tbs.subject(), &[])?,
+            ];
             let usages = if self.is_ca {
                 KeyUsages::DigitalSignature | KeyUsages::KeyCertSign | KeyUsages::CRLSign
             } else {
@@ -600,13 +602,15 @@ mod tests {
     fn certificate_collection_rejects_duplicates() {
         let certificate =
             include_bytes!("../../../certificates/yubikey/yubico-attestation-root-1.der").to_vec();
-        assert!(validate(
-            Purpose::CertificateCollection,
-            &[certificate.clone(), certificate],
-            None,
-            None
-        )
-        .is_err());
+        assert!(
+            validate(
+                Purpose::CertificateCollection,
+                &[certificate.clone(), certificate],
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

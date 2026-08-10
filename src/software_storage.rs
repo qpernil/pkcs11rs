@@ -1,21 +1,21 @@
 use crate::{
-    ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto, EcCurve, Error,
-    GcmParameters, KeyMaterial, SoftwarePrivateKeyMaterial, TokenObject, CKR_DATA_INVALID,
-    CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
+    CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
+    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyMaterial, SoftwarePrivateKeyMaterial,
+    TokenObject, ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
 };
 use der::{
+    Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
     asn1::{Any, AnyRef, BmpString, OctetString, OctetStringRef, SetOfVec},
     referenced::RefToOwned,
-    Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
 };
 use minicbor::{Decoder, Encoder};
 use pkcs8::{
+    EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
     pkcs5::pbes2,
     spki::{AlgorithmIdentifierOwned, AlgorithmIdentifierRef, ObjectIdentifier},
-    EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
 };
-use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::RsaPrivateKey;
+use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 #[cfg(unix)]
 use std::fs::File;
 use std::{
@@ -2135,9 +2135,11 @@ mod tests {
             .unwrap();
         original.policy_templates.wrap = Some(wrap_policy);
         let encoded = encode_record("secret storage", &master_key, &original).unwrap();
-        assert!(!encoded
-            .windows(original.label.len())
-            .any(|window| window == original.label.as_bytes()));
+        assert!(
+            !encoded
+                .windows(original.label.len())
+                .any(|window| window == original.label.as_bytes())
+        );
         let decoded = decode_record(
             "secret storage",
             9,
@@ -2168,14 +2170,16 @@ mod tests {
 
         let mut tampered = encoded;
         *tampered.last_mut().unwrap() ^= 1;
-        assert!(decode_record(
-            "secret storage",
-            9,
-            "software-private-test",
-            &master_key,
-            &tampered,
-        )
-        .is_err());
+        assert!(
+            decode_record(
+                "secret storage",
+                9,
+                "software-private-test",
+                &master_key,
+                &tampered,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2290,12 +2294,16 @@ mod tests {
         assert_eq!(stored.label, original.label);
         assert_eq!(stored.id, original.id);
         let on_disk = store.records.get(&reference).unwrap().unwrap();
-        assert!(!on_disk
-            .windows(original.label.len())
-            .any(|window| window == original.label.as_bytes()));
-        assert!(!on_disk
-            .windows(original.id.len())
-            .any(|window| window == original.id));
+        assert!(
+            !on_disk
+                .windows(original.label.len())
+                .any(|window| window == original.label.as_bytes())
+        );
+        assert!(
+            !on_disk
+                .windows(original.id.len())
+                .any(|window| window == original.id)
+        );
         let plaintext = record_plaintext(&store, &key, &on_disk);
         // The entire authenticated plaintext is an ordinary attributed PKCS
         // #8 PrivateKeyInfo/OneAsymmetricKey, suitable for placing inside a
@@ -2304,15 +2312,21 @@ mod tests {
         let info = StoredPrivateKeyInfo::from_der(plaintext.as_ref()).unwrap();
         let attributes = info.attributes.unwrap();
         assert_eq!(attributes.len(), 3);
-        assert!(attributes
-            .iter()
-            .any(|attribute| attribute.oid == oid_value(FRIENDLY_NAME_OID).unwrap()));
-        assert!(attributes
-            .iter()
-            .any(|attribute| attribute.oid == oid_value(LOCAL_KEY_ID_OID).unwrap()));
-        assert!(attributes
-            .iter()
-            .any(|attribute| attribute.oid == pkcs11rs_attributes_oid().unwrap()));
+        assert!(
+            attributes
+                .iter()
+                .any(|attribute| attribute.oid == oid_value(FRIENDLY_NAME_OID).unwrap())
+        );
+        assert!(
+            attributes
+                .iter()
+                .any(|attribute| attribute.oid == oid_value(LOCAL_KEY_ID_OID).unwrap())
+        );
+        assert!(
+            attributes
+                .iter()
+                .any(|attribute| attribute.oid == pkcs11rs_attributes_oid().unwrap())
+        );
 
         drop(key);
         assert!(matches!(
@@ -2416,9 +2430,11 @@ mod tests {
         assert_eq!(provider.get(&reference).unwrap(), Some(logical.clone()));
         for physical in provider.records.list().unwrap() {
             let encoded = provider.records.get(&physical).unwrap().unwrap();
-            assert!(!encoded
-                .windows(b"public marker".len())
-                .any(|window| window == b"public marker"));
+            assert!(
+                !encoded
+                    .windows(b"public marker".len())
+                    .any(|window| window == b"public marker")
+            );
         }
 
         *active.borrow_mut() = None;
@@ -2440,12 +2456,16 @@ mod tests {
             Some(b"wrong discovery password".to_vec()),
         )
         .unwrap();
-        assert!(wrong_discovery_store
-            .login_so(b"correct security officer pin")
-            .is_ok());
-        assert!(wrong_discovery_store
-            .login(b"correct user password")
-            .is_ok());
+        assert!(
+            wrong_discovery_store
+                .login_so(b"correct security officer pin")
+                .is_ok()
+        );
+        assert!(
+            wrong_discovery_store
+                .login(b"correct user password")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2458,9 +2478,11 @@ mod tests {
         let info = StoredPrivateKeyInfo::from_der(encoded.as_ref()).unwrap();
         let attributes = info.attributes.as_ref().unwrap();
         assert_eq!(attributes.len(), 2);
-        assert!(!attributes
-            .iter()
-            .any(|attribute| attribute.oid == oid_value(FRIENDLY_NAME_OID).unwrap()));
+        assert!(
+            !attributes
+                .iter()
+                .any(|attribute| attribute.oid == oid_value(FRIENDLY_NAME_OID).unwrap())
+        );
         let (decoded, _) = decode_stored_private_key_info(encoded.as_ref()).unwrap();
         assert_eq!(decoded.label, non_bmp.label);
         assert_eq!(decoded.id, non_bmp.id);

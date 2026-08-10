@@ -456,7 +456,9 @@ pub fn piv_rsa_signing_encodes_ckm_rsa_pkcs_input() {
     let encoded = crate::encode_pkcs1_v1_5_signature_input(b"abc", 16).unwrap();
     assert_eq!(
         encoded,
-        [0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, b'a', b'b', b'c']
+        [
+            0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, b'a', b'b', b'c'
+        ]
     );
     assert!(crate::encode_pkcs1_v1_5_signature_input(&[0; 6], 16).is_err());
 }
@@ -1488,9 +1490,11 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
         },
     };
 
-    assert!(object
-        .attribute_value(CKA_LABEL as CK_ATTRIBUTE_TYPE)
-        .is_some());
+    assert!(
+        object
+            .attribute_value(CKA_LABEL as CK_ATTRIBUTE_TYPE)
+            .is_some()
+    );
     assert_eq!(
         object.attribute_value(CKA_CERTIFICATE_TYPE as CK_ATTRIBUTE_TYPE),
         Some(crate::ulong_attribute(CKC_X_509 as CK_ULONG))
@@ -1498,13 +1502,17 @@ fn piv_dynamic_attestation_objects_fetch_only_deferred_attributes() {
     assert_eq!(transmissions.get(), 0);
     let _ = object.size();
     assert_eq!(transmissions.get(), 0);
-    assert!(object
-        .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
-        .is_none());
+    assert!(
+        object
+            .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+            .is_none()
+    );
     assert_eq!(transmissions.get(), 1);
-    assert!(object
-        .attribute_value(CKA_SUBJECT as CK_ATTRIBUTE_TYPE)
-        .is_none());
+    assert!(
+        object
+            .attribute_value(CKA_SUBJECT as CK_ATTRIBUTE_TYPE)
+            .is_none()
+    );
     assert_eq!(transmissions.get(), 1);
 }
 
@@ -1540,10 +1548,12 @@ fn piv_attestation_slot_is_not_exposed_as_a_dynamic_key() {
         data_objects: Vec::new(),
     };
 
-    assert!(crate::Slot::token_objects(&slot, 1)
-        .unwrap()
-        .iter()
-        .all(|object| object.token));
+    assert!(
+        crate::Slot::token_objects(&slot, 1)
+            .unwrap()
+            .iter()
+            .all(|object| object.token)
+    );
 }
 
 #[test]

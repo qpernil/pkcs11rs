@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    ffi::{c_char, c_void, CString},
+    ffi::{CString, c_char, c_void},
     io::{self, Write},
     sync::{Mutex, OnceLock},
 };

@@ -174,12 +174,14 @@ fn software_aes_wrap_and_unwrap_secret_keys() {
     let mut trusted_only_value = [0x44; 16];
     let trusted_only =
         create_software_trusted_wrap_target(TEST_SESSION_HANDLE, &mut trusted_only_value);
-    assert!(checked_bool_attribute(
-        TEST_SESSION_HANDLE,
-        trusted_only,
-        CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
-    )
-    .unwrap());
+    assert!(
+        checked_bool_attribute(
+            TEST_SESSION_HANDLE,
+            trusted_only,
+            CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE,
+        )
+        .unwrap()
+    );
     assert_eq!(
         crate::api::C_WrapKey(
             TEST_SESSION_HANDLE,
@@ -1519,9 +1521,11 @@ fn install_yubihsm_wrap_targets(slot_id: CK_SLOT_ID) -> Vec<(CK_OBJECT_HANDLE, u
                             Some(crate::bool_attribute(extractable))
                         );
                     } else {
-                        assert!(object
-                            .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
-                            .is_none());
+                        assert!(
+                            object
+                                .attribute_value(CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)
+                                .is_none()
+                        );
                     }
                     (context.insert_object(object).unwrap(), object_type, id)
                 },
@@ -2340,12 +2344,14 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     assert_eq!(public_wrap_command_count(), 0);
 
     let standalone_token_public = created[4];
-    assert!(!checked_bool_attribute(
-        session,
-        standalone_token_public,
-        CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
-    )
-    .unwrap());
+    assert!(
+        !checked_bool_attribute(
+            session,
+            standalone_token_public,
+            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+        )
+        .unwrap()
+    );
     let mut copied_standalone = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
         crate::api::C_CopyObject(
@@ -2588,12 +2594,14 @@ fn yubihsm_public_wrap_selection_requires_explicit_wrap_and_token() {
     );
     checked_public_wrap_attributes(session, native_public_wrap).unwrap();
     assert_eq!(public_wrap_command_count(), 1);
-    assert!(!checked_bool_attribute(
-        session,
-        native_public_wrap,
-        CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
-    )
-    .unwrap());
+    assert!(
+        !checked_bool_attribute(
+            session,
+            native_public_wrap,
+            CKA_COPYABLE as CK_ATTRIBUTE_TYPE,
+        )
+        .unwrap()
+    );
     let mut native_copy = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
     assert_eq!(
         crate::api::C_CopyObject(
@@ -2999,10 +3007,12 @@ fn yubihsm_wrap_and_unwrap_cover_aes_ccm_and_rsa_paths() {
         ),
         CKR_OK as CK_RV
     );
-    assert!(commands
-        .borrow()
-        .iter()
-        .any(|(command, _)| { *command == crate::YubiHsmCommandCode::ImportRsaWrapped as u8 }));
+    assert!(
+        commands
+            .borrow()
+            .iter()
+            .any(|(command, _)| { *command == crate::YubiHsmCommandCode::ImportRsaWrapped as u8 })
+    );
 
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_AES as CK_KEY_TYPE;

@@ -1,5 +1,5 @@
 use crate::{
-    Error, CKR_ARGUMENTS_BAD, CKR_CANCEL, CKR_CANT_LOCK, CKR_FUNCTION_FAILED, CKR_PIN_INVALID,
+    CKR_ARGUMENTS_BAD, CKR_CANCEL, CKR_CANT_LOCK, CKR_FUNCTION_FAILED, CKR_PIN_INVALID, Error,
 };
 use std::{ffi::OsString, sync::Mutex};
 use zeroize::Zeroizing;

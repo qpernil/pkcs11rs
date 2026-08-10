@@ -204,9 +204,11 @@ fn generated_attestation_status_sets_discovered_key_provenance() {
             Some(crate::CKM_RSA_PKCS_KEY_PAIR_GEN as crate::CK_MECHANISM_TYPE)
         );
     }
-    assert!(objects
-        .iter()
-        .any(|object| object.unique_id == "openpgp-81-certificate"));
+    assert!(
+        objects
+            .iter()
+            .any(|object| object.unique_id == "openpgp-81-certificate")
+    );
     assert_eq!(
         connector.commands.borrow()[3],
         [0, 0x47, 0x81, 0, 5, 0xb6, 3, 0x84, 1, 0x81, 0]
@@ -226,10 +228,12 @@ fn empty_key_information_skips_public_key_discovery() {
 
     crate::Slot::init_slot(&mut slot).unwrap();
     let objects = crate::Slot::token_objects(&slot, 7).unwrap();
-    assert!(objects
-        .iter()
-        .filter(|object| object.class != crate::CKO_PROFILE as crate::CK_OBJECT_CLASS)
-        .all(|object| object.class == crate::CKO_DATA as crate::CK_OBJECT_CLASS));
+    assert!(
+        objects
+            .iter()
+            .filter(|object| object.class != crate::CKO_PROFILE as crate::CK_OBJECT_CLASS)
+            .all(|object| object.class == crate::CKO_DATA as crate::CK_OBJECT_CLASS)
+    );
     assert_eq!(
         objects
             .iter()
@@ -237,11 +241,13 @@ fn empty_key_information_skips_public_key_discovery() {
             .count(),
         EXPORTED_DATA_OBJECTS.len()
     );
-    assert!(connector
-        .commands
-        .borrow()
-        .iter()
-        .all(|command| command.get(1) != Some(&INS_GENERATE_ASYMMETRIC)));
+    assert!(
+        connector
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.get(1) != Some(&INS_GENERATE_ASYMMETRIC))
+    );
 }
 
 #[test]
@@ -353,7 +359,9 @@ fn selects_certificate_data_object_with_required_reference() {
     };
     assert_eq!(
         command.encode().unwrap(),
-        [0x00, 0xa5, 0x02, 0x04, 0x06, 0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21, 0x00]
+        [
+            0x00, 0xa5, 0x02, 0x04, 0x06, 0x60, 0x04, 0x5c, 0x02, 0x7f, 0x21, 0x00
+        ]
     );
 }
 
@@ -715,11 +723,13 @@ fn guarded_key_generation_only_targets_an_empty_reference() {
             Algorithm::Rsa { bits: 2048 },
         )
         .unwrap();
-    assert!(connector
-        .commands
-        .borrow()
-        .iter()
-        .any(|command| command.get(1..4) == Some(&[0x47, 0x80, 0])));
+    assert!(
+        connector
+            .commands
+            .borrow()
+            .iter()
+            .any(|command| command.get(1..4) == Some(&[0x47, 0x80, 0]))
+    );
 
     let occupied = ScriptedConnector::new(vec![
         response(&[], STATUS_SUCCESS),
@@ -735,11 +745,13 @@ fn guarded_key_generation_only_targets_an_empty_reference() {
         ),
         Err(Error::Generic(rv)) if rv == CKR_ACTION_PROHIBITED as crate::CK_RV
     ));
-    assert!(occupied
-        .commands
-        .borrow()
-        .iter()
-        .all(|command| command.get(1..4) != Some(&[0x47, 0x80, 0])));
+    assert!(
+        occupied
+            .commands
+            .borrow()
+            .iter()
+            .all(|command| command.get(1..4) != Some(&[0x47, 0x80, 0]))
+    );
 }
 
 #[test]
@@ -761,11 +773,13 @@ fn guarded_private_key_import_only_targets_an_empty_reference() {
             &template,
         )
         .unwrap();
-    assert!(connector
-        .commands
-        .borrow()
-        .iter()
-        .any(|command| command.get(1..4) == Some(&[0xdb, 0x3f, 0xff])));
+    assert!(
+        connector
+            .commands
+            .borrow()
+            .iter()
+            .any(|command| command.get(1..4) == Some(&[0xdb, 0x3f, 0xff]))
+    );
 }
 
 #[test]

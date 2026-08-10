@@ -1,20 +1,20 @@
 #[cfg(test)]
 use crate::secure_channel_crypto::aes_ecb;
 use crate::{
-    error::Error,
-    secure_channel_crypto::{
-        aes_cbc, aes_cmac, aes_encrypt_block as aes_block, pad_iso7816 as pad, scp03_kdf,
-        unpad_iso7816 as unpad, Direction, AES_BLOCK_SIZE,
-    },
-    Connector, CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
+    CKR_ATTRIBUTE_VALUE_INVALID, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
     CKR_DEVICE_MEMORY, CKR_ENCRYPTED_DATA_INVALID, CKR_FUNCTION_FAILED, CKR_FUNCTION_REJECTED,
     CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, CKR_SESSION_CLOSED,
-    CKR_SESSION_COUNT,
+    CKR_SESSION_COUNT, Connector,
+    error::Error,
+    secure_channel_crypto::{
+        AES_BLOCK_SIZE, Direction, aes_cbc, aes_cmac, aes_encrypt_block as aes_block,
+        pad_iso7816 as pad, scp03_kdf, unpad_iso7816 as unpad,
+    },
 };
 use p256::{
-    ecdh::diffie_hellman,
-    elliptic_curve::{sec1::ToSec1Point, Generate},
     PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman,
+    elliptic_curve::{Generate, sec1::ToSec1Point},
 };
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -27,8 +27,8 @@ pub(crate) mod trust;
 #[cfg(all(test, not(feature = "abi-tests")))]
 pub(crate) use commands::ObjectFilter;
 pub(crate) use commands::{
-    parse_object_id, parse_object_list, Command, CommandCode, DelegatedObjectParameters,
-    ObjectInfo, ObjectParameters, PublicKey, RsaWrapParameters,
+    Command, CommandCode, DelegatedObjectParameters, ObjectInfo, ObjectParameters, PublicKey,
+    RsaWrapParameters, parse_object_id, parse_object_list,
 };
 
 const COMMAND_CREATE_SESSION: u8 = CommandCode::CreateSession as u8;

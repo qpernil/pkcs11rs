@@ -1,25 +1,24 @@
 use crate::key_metadata::{
-    attribute_kind, cryptoki_ulong_to_u64, AttributeKind, KeyAttributeValue, KeyAttributes,
-    KeyMetadataError,
+    AttributeKind, KeyAttributeValue, KeyAttributes, KeyMetadataError, attribute_kind,
+    cryptoki_ulong_to_u64,
 };
 use crate::piv;
 use crate::pkcs11::*;
 use crate::{
+    CKA_PKCS11RS_FIDO_RP_ID, CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_ALGORITHM,
+    CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY,
+    CKA_YUBICO_TOUCH_POLICY, Connector, Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm,
+    OpenPgpClient, OpenPgpKeyRef, PivClient, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE,
+    YUBIHSM_PUBLIC_KEY, YUBIHSM_WRAP_KEY_PUBLIC, YubiHsmCommand, YubiHsmSessionState,
     der_octet_string, hash, is_yubihsm_ec, is_yubihsm_rsa, is_yubihsm_x25519,
     openpgp_signature_requires_context_specific_login, piv_algorithm_from_certificate,
     piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
-    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters, Connector,
-    Error, HsmAuthAlgorithm, MessageDigest, OpenPgpAlgorithm, OpenPgpClient, OpenPgpKeyRef,
-    PivClient, YubiHsmCommand, YubiHsmSessionState, CKA_PKCS11RS_FIDO_RP_ID,
-    CKA_PKCS11RS_PIV_OBJECT_TAG, CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
-    CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKA_YUBICO_HSMAUTH_ALGORITHM,
-    CKA_YUBICO_HSMAUTH_RETRIES, CKA_YUBICO_HSMAUTH_TOUCH_REQUIRED, CKA_YUBICO_PIN_POLICY,
-    CKA_YUBICO_TOUCH_POLICY, YUBIHSM_ALGO_ED25519, YUBIHSM_OPAQUE, YUBIHSM_PUBLIC_KEY,
-    YUBIHSM_WRAP_KEY_PUBLIC,
+    yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters,
 };
 use rsa::{
-    traits::{PrivateKeyParts, PublicKeyParts},
     BigUint, RsaPrivateKey, RsaPublicKey,
+    traits::{PrivateKeyParts, PublicKeyParts},
 };
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;

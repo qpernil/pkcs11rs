@@ -1,5 +1,5 @@
 use clap::Parser;
-use pkcs11rs_local_hardware::{yubihsm_candidates, YubiHsmUsbCandidate, YubiHsmUsbDevice};
+use pkcs11rs_local_hardware::{YubiHsmUsbCandidate, YubiHsmUsbDevice, yubihsm_candidates};
 use std::{process::ExitCode, time::Duration};
 
 const DEVICE_INFO: &[u8] = &[0x06, 0x00, 0x00];
@@ -104,11 +104,7 @@ async fn run(args: Args) -> Result<bool, String> {
 }
 
 fn outcome(value: bool) -> &'static str {
-    if value {
-        "usable"
-    } else {
-        "failed"
-    }
+    if value { "usable" } else { "failed" }
 }
 
 async fn select_initial(

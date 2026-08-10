@@ -1,6 +1,6 @@
 use crate::key_metadata::{
-    cryptoki_ulong_to_u64, BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking,
-    KeyMetadataError,
+    BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking, KeyMetadataError,
+    cryptoki_ulong_to_u64,
 };
 use crate::storage::{ContentReference, StorageError, StorageProvider};
 use crate::*;

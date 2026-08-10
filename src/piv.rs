@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
-use crate::secure_channel_crypto::{aes_ecb, Direction};
+use crate::secure_channel_crypto::{Direction, aes_ecb};
 use crate::{
-    error::Error, CommandApdu, Connector, ResponseApdu, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
-    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE,
-    CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED,
+    CKR_FUNCTION_REJECTED, CKR_KEY_SIZE_RANGE, CKR_PIN_INCORRECT, CKR_PIN_LEN_RANGE,
+    CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector, ResponseApdu, error::Error,
 };
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use des::TdesEde3;
-use flate2::{read::GzDecoder, read::ZlibDecoder, write::GzEncoder, Compression};
+use flate2::{Compression, read::GzDecoder, read::ZlibDecoder, write::GzEncoder};
 use std::io::{Read, Write};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;

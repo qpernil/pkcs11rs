@@ -6,12 +6,12 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use minicbor::{Decoder, Encoder};
 use p256::{
+    FieldBytes, ProjectivePoint, PublicKey, Scalar,
     elliptic_curve::{
+        Group,
         group::ff::{Field, PrimeField},
         sec1::ToSec1Point,
-        Group,
     },
-    FieldBytes, ProjectivePoint, PublicKey, Scalar,
 };
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -842,15 +842,12 @@ mod tests {
     use signature::hazmat::{PrehashSigner, PrehashVerifier};
     use subtle::ConstantTimeEq;
 
-    const BLINDING_PUBLIC_KEY: &str =
-        "046d3bdf31d0db48988f16d47048fdd24123cd286e42d0512daa9f726b4ecf18df\
+    const BLINDING_PUBLIC_KEY: &str = "046d3bdf31d0db48988f16d47048fdd24123cd286e42d0512daa9f726b4ecf18df\
          65ed42169c69675f936ff7de5f9bd93adbc8ea73036b16e8d90adbfabdaddba7";
-    const KEM_PUBLIC_KEY: &str =
-        "04c38bbdd7286196733fa177e43b73cfd3d6d72cd11cc0bb2c9236cf85a42dcff5\
+    const KEM_PUBLIC_KEY: &str = "04c38bbdd7286196733fa177e43b73cfd3d6d72cd11cc0bb2c9236cf85a42dcff5\
          dfa339c1e07dfcdfda8d7be2a5a3c7382991f387dfe332b1dd8da6e0622cfb35";
     const IKM_A: &str = "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f";
-    const EXPECTED_PUBLIC_KEY_A: &str =
-        "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107\
+    const EXPECTED_PUBLIC_KEY_A: &str = "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107\
          dac2a1b197cc10d2376559ad6df6bc107318d5cfb90def9f4a1f5347e086c2cd";
     const EXPECTED_TICKET_A: &str = "27987995f184a44cfa548d104b0a461d\
          0487fc739dbcdabc293ac5469221da91b220e04c681074ec4692a76ffacb9043dec\
@@ -863,21 +860,17 @@ mod tests {
         "775d7fe9a6dfba43ce671cb38afca3d272c4d14aff97bd67559eb500a092e5e7";
     const CONTEXT_A: &[u8] = b"ARKG-P256.test vectors";
     const IKM_B: &str = "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f";
-    const EXPECTED_PUBLIC_KEY_B: &str =
-        "04aed80c70cc9e2fa6b2d22db62285e6e3af7dc7426ce9846a500723d82aa60cd0\
+    const EXPECTED_PUBLIC_KEY_B: &str = "04aed80c70cc9e2fa6b2d22db62285e6e3af7dc7426ce9846a500723d82aa60cd0\
          98168e98c4f437fc5d45986afaed5d5ce6e39de46fe4f61ae88541cb37687f8d";
     const IKM_ADDITIONAL_B: &str =
         "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf";
-    const EXPECTED_PUBLIC_KEY_ADDITIONAL_B: &str =
-        "04ea7d962c9f44ffe8b18f1058a471f394ef81b674948eefc1865b5c021cf858f\
+    const EXPECTED_PUBLIC_KEY_ADDITIONAL_B: &str = "04ea7d962c9f44ffe8b18f1058a471f394ef81b674948eefc1865b5c021cf858f\
          577f9632b84220e4a1444a20b9430b86731c37e4dcb285eda38d76bf758918d86";
     const CONTEXT_C: &[u8] = b"ARKG-P256.alt context";
-    const EXPECTED_PUBLIC_KEY_C: &str =
-        "04ccfc29c2d0f438642dae5153ccb4eda6be6ec8a0e654a009f2953ab4b52dc1eb\
+    const EXPECTED_PUBLIC_KEY_C: &str = "04ccfc29c2d0f438642dae5153ccb4eda6be6ec8a0e654a009f2953ab4b52dc1eb\
          3ffbbf91b3e46e8e68a3c38c7268b2ca42f6d19c44dd5ee15fa0d30e0c9eb326";
     const CONTEXT_ADDITIONAL_C: &[u8] = b"ARKG-P256.test vectors.0";
-    const EXPECTED_PUBLIC_KEY_ADDITIONAL_C: &str =
-        "04b79b65d6bbb419ff97006a1bd52e3f4ad53042173992423e06e52987a037cb61\
+    const EXPECTED_PUBLIC_KEY_ADDITIONAL_C: &str = "04b79b65d6bbb419ff97006a1bd52e3f4ad53042173992423e06e52987a037cb61\
          dd82b126b162e4e7e8dc5c9fd86e82769d402a1968c7c547ef53ae4f96e10b0e";
 
     /// Test-only model of the ARKG private side implemented by the

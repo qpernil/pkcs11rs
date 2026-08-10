@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use der::Decode;
 use sha2::{Digest, Sha256};
 use std::{
@@ -295,8 +295,10 @@ fn import_certificates(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>, String> {
             decode_pem_certificates(&encoded)
                 .map_err(|error| format!("import PEM {}: {error}", path.display()))?
         } else {
-            vec![certificate_bundle::decode_certificate(&encoded)
-                .map_err(|error| format!("import DER {}: {error}", path.display()))?]
+            vec![
+                certificate_bundle::decode_certificate(&encoded)
+                    .map_err(|error| format!("import DER {}: {error}", path.display()))?,
+            ]
         };
         for certificate in imported {
             let fingerprint: [u8; 32] = Sha256::digest(&certificate).into();
@@ -435,32 +437,38 @@ mod tests {
 
     #[test]
     fn parser_requires_purpose_and_key_by_profile() {
-        assert!(parse_arguments(vec![
-            "certificate-bundle".into(),
-            "verify".into(),
-            "bundle.cbor".into(),
-        ])
-        .is_err());
-        assert!(parse_arguments(vec![
-            "certificate-bundle".into(),
-            "verify".into(),
-            "--purpose".into(),
-            "scp11-oce".into(),
-            "bundle.cbor".into(),
-        ])
-        .is_err());
-        assert!(parse_arguments(vec![
-            "certificate-bundle".into(),
-            "create".into(),
-            "--purpose".into(),
-            "certificate-collection".into(),
-            "--output".into(),
-            "bundle.cbor".into(),
-            "--force".into(),
-            "--force".into(),
-            "certificate.der".into(),
-        ])
-        .is_err());
+        assert!(
+            parse_arguments(vec![
+                "certificate-bundle".into(),
+                "verify".into(),
+                "bundle.cbor".into(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments(vec![
+                "certificate-bundle".into(),
+                "verify".into(),
+                "--purpose".into(),
+                "scp11-oce".into(),
+                "bundle.cbor".into(),
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_arguments(vec![
+                "certificate-bundle".into(),
+                "create".into(),
+                "--purpose".into(),
+                "certificate-collection".into(),
+                "--output".into(),
+                "bundle.cbor".into(),
+                "--force".into(),
+                "--force".into(),
+                "certificate.der".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

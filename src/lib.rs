@@ -16,8 +16,8 @@
 )]
 
 use rsa::{
-    traits::{PrivateKeyParts, PublicKeyParts},
     BigUint, RsaPrivateKey, RsaPublicKey,
+    traits::{PrivateKeyParts, PublicKeyParts},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -158,7 +158,7 @@ mod iso7816;
 use iso7816::ApduCapabilities;
 
 mod scp03;
-use scp03::{parse_hex, select_application, CommandApdu, ResponseApdu, Scp03KeySet, Scp03Session};
+use scp03::{CommandApdu, ResponseApdu, Scp03KeySet, Scp03Session, parse_hex, select_application};
 
 mod scp11;
 use scp11::{Scp11CertificateCacheKey, Scp11KeySet, Scp11Variant};
@@ -199,16 +199,16 @@ use yubikey::Client as YubiKeyClient;
 
 mod yubihsm;
 use yubihsm::{
-    device_public_key_bytes as get_yubihsm_device_public_key,
-    get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
-    parse_object_list as parse_yubihsm_object_list, Command as YubiHsmCommand,
-    CommandCode as YubiHsmCommandCode,
+    Command as YubiHsmCommand, CommandCode as YubiHsmCommandCode,
     DelegatedObjectParameters as YubiHsmDelegatedObjectParameters,
     DirectAuthenticationAlgorithm as YubiHsmAuthAlgorithm,
     DirectAuthenticationMaterial as YubiHsmDirectAuthenticationMaterial,
     ObjectInfo as YubiHsmObjectInfo, ObjectParameters as YubiHsmObjectParameters,
     PublicKey as YubiHsmPublicKey, RsaWrapParameters as YubiHsmRsaWrapParameters,
     SecureSession as YubiHsmSecureSession,
+    device_public_key_bytes as get_yubihsm_device_public_key,
+    get_device_info as get_yubihsm_device_info, parse_object_id as parse_yubihsm_object_id,
+    parse_object_list as parse_yubihsm_object_list,
 };
 
 #[allow(dead_code)]
@@ -1003,14 +1003,14 @@ mod abi_test_backend;
 use abi_test_backend::*;
 
 mod connector;
-#[cfg(test)]
-pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, usb_bcd_version};
 pub(crate) use connector::{
     Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig, PcscAppletConnector,
     PcscReaderState, SharedConnector,
 };
 #[cfg(feature = "native-hardware")]
 pub(crate) use connector::{PcscConnector, UsbConnector};
+#[cfg(test)]
+pub(crate) use connector::{ensure_complete_write, needs_zero_length_packet, usb_bcd_version};
 
 #[cfg(feature = "mock-yubikey")]
 mod mock_yubikey;
@@ -1030,14 +1030,14 @@ pub(crate) use mechanism::*;
 use mechanism::{C_GetMechanismInfo, C_GetMechanismList};
 
 mod api;
-use api::DigestOperation;
 #[cfg(feature = "abi-tests")]
 use api::AES_BLOCK_LENGTH;
+use api::DigestOperation;
 #[cfg(test)]
 use api::{
-    aes_gcm, encode_pkcs1_v1_5_signature_input, openpgp_generate_key_pair_parameters,
-    openpgp_private_import, parse_create_object_template, parse_gcm_parameters,
-    parse_yubihsm_wrap_mechanism, rsa_oaep_pad, rsa_oaep_unpad, rsa_pkcs1_v1_5_unpad,
-    yubihsm_ec_algorithm, yubihsm_enroll_device, yubihsm_generate_key_pair_command,
-    YubiHsmEnrollment,
+    YubiHsmEnrollment, aes_gcm, encode_pkcs1_v1_5_signature_input,
+    openpgp_generate_key_pair_parameters, openpgp_private_import, parse_create_object_template,
+    parse_gcm_parameters, parse_yubihsm_wrap_mechanism, rsa_oaep_pad, rsa_oaep_unpad,
+    rsa_pkcs1_v1_5_unpad, yubihsm_ec_algorithm, yubihsm_enroll_device,
+    yubihsm_generate_key_pair_command,
 };

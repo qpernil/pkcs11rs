@@ -1,5 +1,5 @@
 use crate::*;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{Arc, atomic::AtomicBool};
 
 #[cfg(feature = "native-hardware")]
 pub(crate) use crate::PcscConnector as CcidConnector;

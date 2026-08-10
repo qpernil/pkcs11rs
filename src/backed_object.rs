@@ -1,10 +1,10 @@
 use crate::key_metadata::{
-    cryptoki_ulong_to_u64, BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking,
+    BackedKeyMetadata, KeyAttributeValue, KeyAttributes, KeyBacking, cryptoki_ulong_to_u64,
 };
 use crate::storage::{ContentReference, StorageError, StorageProvider};
 use crate::*;
 use minicbor::{Decoder, Encoder};
-use rsa::{traits::PublicKeyParts, BigUint, RsaPublicKey};
+use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
 
 pub(crate) const PUBLIC_KEY_PROVIDER: &str = "pkcs11rs.public-key";
 const PREVIEW_SIGN_REGISTRATION_PROVIDER: &str = "pkcs11rs.preview-sign-registration";

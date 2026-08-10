@@ -1,4 +1,4 @@
-use crate::{error::Error, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE};
+use crate::{CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, error::Error};
 use zeroize::Zeroizing;
 
 pub(super) const LABEL_LENGTH: usize = 40;

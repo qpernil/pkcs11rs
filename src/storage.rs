@@ -23,8 +23,8 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -747,9 +747,11 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect::<Vec<_>>();
-        assert!(references
-            .iter()
-            .all(|reference| reference == &references[0]));
+        assert!(
+            references
+                .iter()
+                .all(|reference| reference == &references[0])
+        );
         assert_eq!(provider.list().unwrap(), vec![references[0].clone()]);
     }
 }

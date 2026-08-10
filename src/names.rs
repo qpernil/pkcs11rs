@@ -4,7 +4,7 @@ use crate::{
     CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION, CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
     CKK_YUBICO_AES128_CCM_WRAP, CKK_YUBICO_AES192_CCM_WRAP, CKK_YUBICO_AES256_CCM_WRAP,
 };
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 
 macro_rules! constant_name {
     ($value:expr, $type:ty; $($constant:ident),+ $(,)?) => {

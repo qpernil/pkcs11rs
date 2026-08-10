@@ -124,7 +124,7 @@ trait ConnectedCommandTransport: Send {
 
 trait CommandTransportFactory: Send {
     fn open(&mut self)
-        -> BoxFuture<'_, Result<Box<dyn ConnectedCommandTransport>, TransportError>>;
+    -> BoxFuture<'_, Result<Box<dyn ConnectedCommandTransport>, TransportError>>;
 }
 
 struct RecoverableCommandTransport {
@@ -625,8 +625,8 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
             Mutex as StdMutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
     use tokio::sync::Barrier;

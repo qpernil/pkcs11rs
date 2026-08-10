@@ -542,10 +542,12 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
     super::with_test_slot_context(slot, |context| {
         context.refresh_slot_token_objects(slot).unwrap();
         assert!(context.resolve_object(registration_key).unwrap().is_some());
-        assert!(context
-            .resolve_object(restored_signing_key)
-            .unwrap()
-            .is_some());
+        assert!(
+            context
+                .resolve_object(restored_signing_key)
+                .unwrap()
+                .is_some()
+        );
     });
     assert_eq!(
         crate::api::C_DestroyObject(session, projected_key),

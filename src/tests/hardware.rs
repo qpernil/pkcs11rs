@@ -372,10 +372,12 @@ mod hardware_provisioning {
                 crate::api::C_GetTokenInfo(slot_id, &mut token_info),
                 CKR_OK as CK_RV
             );
-            assert!(token_info
-                .serialNumber
-                .iter()
-                .any(|value| !value.is_ascii_whitespace()));
+            assert!(
+                token_info
+                    .serialNumber
+                    .iter()
+                    .any(|value| !value.is_ascii_whitespace())
+            );
         }
         assert!(
             yubihsm_count > 0,
@@ -1067,10 +1069,12 @@ mod hardware_provisioning {
             .discover(issuer_sd.as_ref())
             .expect("failed to rediscover the provisioned SCP11B key");
         assert!(after.keys.iter().any(|key| key.key_ref == key_ref));
-        assert!(after
-            .certificate_bundles
-            .iter()
-            .any(|bundle| { bundle.key_ref == key_ref && bundle.certificates == certificates }));
+        assert!(
+            after
+                .certificate_bundles
+                .iter()
+                .any(|bundle| { bundle.key_ref == key_ref && bundle.certificates == certificates })
+        );
 
         let keys = crate::Scp11KeySet::scp11b_from_certificates(
             kvn,

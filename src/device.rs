@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::connector::Connector;
-use crate::{Error, CKR_MUTEX_BAD};
+use crate::{CKR_MUTEX_BAD, Error};
 use std::sync::{Mutex, RwLock};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

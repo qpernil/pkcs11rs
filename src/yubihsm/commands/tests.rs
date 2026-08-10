@@ -290,44 +290,46 @@ fn otp_aead_key_commands_use_little_endian_nonce_and_validate_key_lengths() {
         (ALGORITHM_AES256_YUBICO_OTP, 32),
     ] {
         let parameters = object_with_algorithm("otp", algorithm);
-        assert!(Command::otp_aead_key(
-            CommandCode::PutOtpAeadKey,
-            &parameters,
-            0,
-            &vec![0; key_length],
-        )
-        .is_ok());
-        assert!(Command::otp_aead_key(
-            CommandCode::PutOtpAeadKey,
-            &parameters,
-            0,
-            &vec![0; key_length + 1],
-        )
-        .is_err());
+        assert!(
+            Command::otp_aead_key(
+                CommandCode::PutOtpAeadKey,
+                &parameters,
+                0,
+                &vec![0; key_length],
+            )
+            .is_ok()
+        );
+        assert!(
+            Command::otp_aead_key(
+                CommandCode::PutOtpAeadKey,
+                &parameters,
+                0,
+                &vec![0; key_length + 1],
+            )
+            .is_err()
+        );
     }
-    assert!(Command::otp_aead_key(
-        CommandCode::GenerateOtpAeadKey,
-        &object_with_algorithm("otp", 0xff),
-        0,
-        &[],
-    )
-    .is_err());
+    assert!(
+        Command::otp_aead_key(
+            CommandCode::GenerateOtpAeadKey,
+            &object_with_algorithm("otp", 0xff),
+            0,
+            &[],
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn change_authentication_key_validates_algorithm_and_key_length() {
-    assert!(Command::change_authentication_key(
-        1,
-        ALGORITHM_AES128_YUBICO_AUTHENTICATION,
-        &[0; 64],
-    )
-    .is_err());
-    assert!(Command::change_authentication_key(
-        1,
-        ALGORITHM_EC_P256_YUBICO_AUTHENTICATION,
-        &[0; 64],
-    )
-    .is_ok());
+    assert!(
+        Command::change_authentication_key(1, ALGORITHM_AES128_YUBICO_AUTHENTICATION, &[0; 64],)
+            .is_err()
+    );
+    assert!(
+        Command::change_authentication_key(1, ALGORITHM_EC_P256_YUBICO_AUTHENTICATION, &[0; 64],)
+            .is_ok()
+    );
     assert!(Command::change_authentication_key(1, 0xff, &[0; 32]).is_err());
 }
 
@@ -350,19 +352,21 @@ fn rsa_wrap_commands_match_wire_vectors_and_validate_digest_lengths() {
         rsa.data(),
         [&[0x12, 0x34, 3, 0x56, 0x78, 50, 26, 33][..], &[0xaa; 20],].concat()
     );
-    assert!(Command::rsa_wrap(
-        CommandCode::ExportRsaWrapped,
-        &RsaWrapParameters {
-            wrapping_key_id: 1,
-            object_type: 3,
-            object_id: 2,
-            aes_algorithm: 50,
-            hash_algorithm: 26,
-            mgf1_algorithm: 33,
-            label_digest: &[0; 31],
-        },
-    )
-    .is_err());
+    assert!(
+        Command::rsa_wrap(
+            CommandCode::ExportRsaWrapped,
+            &RsaWrapParameters {
+                wrapping_key_id: 1,
+                object_type: 3,
+                object_id: 2,
+                aes_algorithm: 50,
+                hash_algorithm: 26,
+                mgf1_algorithm: 33,
+                label_digest: &[0; 31],
+            },
+        )
+        .is_err()
+    );
 }
 
 #[test]

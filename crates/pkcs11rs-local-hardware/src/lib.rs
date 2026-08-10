@@ -8,8 +8,8 @@
 mod yubihsm_usb;
 
 pub use yubihsm_usb::{
-    ensure_complete_write, needs_zero_length_packet, usb_bcd_version, Error, UsbDeviceId,
-    YubiHsmUsbCandidate, YubiHsmUsbDevice, YUBICO_VENDOR_ID, YUBIHSM_PRODUCT_ID,
+    Error, UsbDeviceId, YUBICO_VENDOR_ID, YUBIHSM_PRODUCT_ID, YubiHsmUsbCandidate,
+    YubiHsmUsbDevice, ensure_complete_write, needs_zero_length_packet, usb_bcd_version,
 };
 
 #[cfg(feature = "blocking")]
@@ -17,5 +17,5 @@ pub use yubihsm_usb::yubihsm_candidates_blocking;
 
 #[cfg(feature = "async-tokio")]
 pub use yubihsm_usb::{
-    watch_yubihsms, yubihsm_candidates, YubiHsmHotplugEvent, YubiHsmHotplugWatch,
+    YubiHsmHotplugEvent, YubiHsmHotplugWatch, watch_yubihsms, yubihsm_candidates,
 };
