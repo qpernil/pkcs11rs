@@ -192,7 +192,12 @@ fn selects_piv_and_reads_version_and_serial() {
     assert_eq!(info.serial, Some(0x01020304));
     assert_eq!(
         connector.commands.borrow()[0],
-        [0, 0xa4, 4, 0, 5, 0xa0, 0, 0, 3, 8, 0]
+        [
+            vec![0, 0xa4, 4, 0, PIV_AID.len() as u8],
+            PIV_AID.to_vec(),
+            vec![0],
+        ]
+        .concat()
     );
 }
 

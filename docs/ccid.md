@@ -7,7 +7,7 @@ default:
 
 | Applet | Default AID | AID override |
 | --- | --- | --- |
-| PIV | `A0 00 00 03 08` | `PKCS11RS_PIV_AID` |
+| PIV | `A0 00 00 03 08 00 00 10 00 01 00` | `PKCS11RS_PIV_AID` |
 | OpenPGP | `D2 76 00 01 24 01` | `PKCS11RS_OPENPGP_AID` |
 | YubiHSM Auth | `A0 00 00 05 27 21 07 01` | `PKCS11RS_HSMAUTH_AID` |
 | Issuer SD | `A0 00 00 01 51 00 00 00` | `PKCS11RS_ISSUER_SD_AID` |
@@ -42,9 +42,10 @@ refresh. The connector lazily starts one worker for each reader that contributes
 slots. That worker owns and reuses the reader's `TKSmartCard`, serializes its
 APDUs, and adapts asynchronous session and transmit completions to the
 synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains
-cached, but the current transport opens and ends an exclusive CryptoTokenKit
-session around each raw APDU. A removed card invalidates the retained object;
-the worker resolves a new card by the same reader name when it returns.
+cached, but the current transport opens one exclusive CryptoTokenKit session
+at the first APDU of a device-backed PKCS #11 call and ends it when that call
+returns. A removed card invalidates the retained object; the worker resolves a
+new card by the same reader name when it returns.
 Objective-C objects retained for card I/O stay confined to the worker that
 created them.
 
@@ -52,6 +53,21 @@ The static XCFramework loads Apple's public CryptoTokenKit framework internally
 before it first enumerates readers. Applications importing `PKCS11RS` need no
 CryptoTokenKit import or linker setting, reader object, callback registration,
 or transport implementation.
+
+Set `nfc.discovery` to `true` in the initialization JSON (or set
+`PKCS11RS_NFC_DISCOVERY=1`) to request one NFC card during the first
+`C_GetSlotList`. NFC discovery is disabled by default because it presents
+Apple's system UI. A successful request registers the selected card's applets
+as stable logical slots until `C_Finalize`. Those bound tokens remain logically
+present after the physical NFC session ends so applications can begin an
+operation; the operation requests the card again and rejects a card with a
+different serial. Canceling before discovery completes leaves no placeholder
+slot and is not retried by later slot-list polling. When the last operation
+finishes, the NFC session immediately becomes idle and remains available until
+the card is removed, the user cancels, or another operation reuses it. The
+initiating `C_GetSlotList` blocks while Apple's NFC UI is active and should
+therefore run on an application worker thread. Concurrent slot-list calls are
+serialized and cannot open duplicate NFC requests.
 
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.

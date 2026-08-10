@@ -1,7 +1,12 @@
 #[cfg(test)]
 use crate::connector::Connector;
 use crate::{CKR_MUTEX_BAD, Error};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+pub(crate) trait DeviceOperationLifecycle: Send + Sync + std::fmt::Debug {
+    fn enter(&self, message: &str) -> Result<(), Error>;
+    fn exit(&self);
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceIdentity {
@@ -57,6 +62,7 @@ pub(crate) struct DeviceContext {
     fallback: DeviceIdentity,
     discovered: Mutex<Option<(u64, DeviceIdentity)>>,
     operation: RwLock<()>,
+    lifecycle: Option<Arc<dyn DeviceOperationLifecycle>>,
 }
 
 impl DeviceContext {
@@ -65,6 +71,20 @@ impl DeviceContext {
             fallback,
             discovered: Mutex::new(None),
             operation: RwLock::new(()),
+            lifecycle: None,
+        }
+    }
+
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub(crate) fn with_lifecycle(
+        fallback: DeviceIdentity,
+        lifecycle: Arc<dyn DeviceOperationLifecycle>,
+    ) -> Self {
+        Self {
+            fallback,
+            discovered: Mutex::new(None),
+            operation: RwLock::new(()),
+            lifecycle: Some(lifecycle),
         }
     }
 
@@ -99,18 +119,33 @@ impl DeviceContext {
         &self,
         kind: DeviceOperationKind,
     ) -> Result<DeviceOperationGuard<'_>, Error> {
-        match kind {
+        self.lock_operation_with_message(kind, crate::logging::current_operation_message())
+    }
+
+    pub(crate) fn lock_operation_with_message(
+        &self,
+        kind: DeviceOperationKind,
+        message: &str,
+    ) -> Result<DeviceOperationGuard<'_>, Error> {
+        let guard = match kind {
             DeviceOperationKind::Hid => self
                 .operation
                 .read()
-                .map(|guard| DeviceOperationGuard::Hid { _guard: guard })
+                .map(|guard| DeviceLockGuard::Hid { _guard: guard })
                 .map_err(|_| Error::from(CKR_MUTEX_BAD)),
             DeviceOperationKind::Ccid => self
                 .operation
                 .write()
-                .map(|guard| DeviceOperationGuard::Ccid { _guard: guard })
+                .map(|guard| DeviceLockGuard::Ccid { _guard: guard })
                 .map_err(|_| Error::from(CKR_MUTEX_BAD)),
+        }?;
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.enter(message)?;
         }
+        Ok(DeviceOperationGuard {
+            _guard: guard,
+            lifecycle: self.lifecycle.as_deref(),
+        })
     }
 
     #[cfg(test)]
@@ -119,13 +154,26 @@ impl DeviceContext {
     }
 }
 
-pub(crate) enum DeviceOperationGuard<'a> {
+enum DeviceLockGuard<'a> {
     Hid {
         _guard: std::sync::RwLockReadGuard<'a, ()>,
     },
     Ccid {
         _guard: std::sync::RwLockWriteGuard<'a, ()>,
     },
+}
+
+pub(crate) struct DeviceOperationGuard<'a> {
+    _guard: DeviceLockGuard<'a>,
+    lifecycle: Option<&'a dyn DeviceOperationLifecycle>,
+}
+
+impl Drop for DeviceOperationGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(lifecycle) = self.lifecycle {
+            lifecycle.exit();
+        }
+    }
 }
 
 #[cfg(test)]

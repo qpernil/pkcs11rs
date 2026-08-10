@@ -268,6 +268,11 @@ pub(crate) struct ModuleContext {
     pub(crate) yubihsm_device_trust_prefix: std::ffi::OsString,
     pub(crate) ccid_configurations: Vec<CcidConfiguration>,
     pub(crate) ccid_aids: crate::configuration::CcidAidConfiguration,
+    pub(crate) nfc_discovery: bool,
+    #[cfg(target_os = "ios")]
+    nfc_discovery_attempted: Mutex<bool>,
+    #[cfg(target_os = "ios")]
+    nfc_mount: Mutex<Option<NfcMountRegistration>>,
     pub(crate) secure_channels: Arc<SecureChannelConfiguration>,
     pub(crate) token_storage: Option<TokenStorageConfig>,
     pub(crate) fido_storage: Option<FidoStorageConfig>,
@@ -282,6 +287,18 @@ pub(crate) struct ModuleContext {
 struct CcidReaderInventoryEntry {
     inventory_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
     slot_ids: Vec<CK_SLOT_ID>,
+}
+
+#[cfg(target_os = "ios")]
+struct NfcMountRegistration {
+    transport: Arc<crate::apple::cryptotokenkit::NfcTransport>,
+}
+
+#[cfg(target_os = "ios")]
+impl Drop for NfcMountRegistration {
+    fn drop(&mut self) {
+        self.transport.shutdown();
+    }
 }
 
 // Mutable token state shared by every PKCS #11 session opened on this slot.
@@ -610,6 +627,18 @@ impl SlotContextRegistry {
             .copied()
             .map_or(Some(0), |slot_id| slot_id.checked_add(1))
     }
+
+    #[cfg(target_os = "ios")]
+    fn remove_slots(&mut self, slot_ids: &[CK_SLOT_ID]) {
+        let slot_ids = slot_ids.iter().copied().collect::<HashSet<_>>();
+        self.session_slots
+            .retain(|_, slot_id| !slot_ids.contains(slot_id));
+        self.discovered_slots
+            .retain(|_, registration| !slot_ids.contains(&registration.slot_id));
+        for slot_id in slot_ids {
+            self.slots.remove(&slot_id);
+        }
+    }
 }
 
 impl std::ops::Deref for SlotContextRegistry {
@@ -701,6 +730,7 @@ impl std::fmt::Debug for ModuleContext {
                 &self.software_discovery_pins.keys().collect::<Vec<_>>(),
             )
             .field("ccid_provider", &self.ccid_provider)
+            .field("nfc_discovery", &self.nfc_discovery)
             .field("yubihsm_urls", &self.yubihsm_urls)
             .field("yubihsm_recreate_sessions", &self.yubihsm_recreate_sessions)
             .field("yubihsm_http_tls", &self.yubihsm_http_tls)
@@ -892,6 +922,11 @@ impl ModuleContext {
             yubihsm_device_trust_prefix: configuration.yubihsm_device_trust_prefix,
             ccid_configurations: configuration.ccid_configurations,
             ccid_aids: configuration.ccid_aids,
+            nfc_discovery: configuration.nfc_discovery,
+            #[cfg(target_os = "ios")]
+            nfc_discovery_attempted: Mutex::new(false),
+            #[cfg(target_os = "ios")]
+            nfc_mount: Mutex::new(None),
             secure_channels,
             token_storage,
             fido_storage,
@@ -1688,6 +1723,7 @@ impl SlotContext {
 }
 
 impl ModuleContext {
+    #[allow(unused_mut)]
     fn enumerate_ccid_readers(&self) -> Result<Vec<CcidReader>, Error> {
         let provider = self.ccid_provider.name();
         let _operation = crate::logging::Operation::new(tracing::debug_span!(
@@ -1695,7 +1731,108 @@ impl ModuleContext {
             "ccid.enumerate_readers",
             provider
         ));
-        self.ccid_provider.enumerate()
+        let mut readers = self.ccid_provider.enumerate()?;
+        #[cfg(target_os = "ios")]
+        {
+            let managed = self
+                .nfc_mount
+                .lock()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?
+                .as_ref()
+                .and_then(|registration| registration.transport.slot_name().ok());
+            if let Some(managed) = managed.as_deref() {
+                readers.retain(|reader| reader.connector.name() != managed);
+            }
+        }
+        Ok(readers)
+    }
+
+    #[cfg(target_os = "ios")]
+    fn mount_nfc(&self) -> Result<Vec<CK_SLOT_ID>, Error> {
+        let mut mounted = self.nfc_mount.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Error::from(CKR_OPERATION_ACTIVE),
+            std::sync::TryLockError::Poisoned(_) => Error::from(CKR_MUTEX_BAD),
+        })?;
+        if mounted.is_some() {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
+
+        let (transport, connector, identity) = crate::apple::cryptotokenkit::begin_nfc_mount()?;
+        let reader_state = connector.reader_state();
+        let device = reader_state.device.clone();
+        let result = (|| {
+            let _operation = device.lock_operation_with_message(
+                crate::device::DeviceOperationKind::Ccid,
+                "Discovering token applications…",
+            )?;
+            let mut slot_contexts = self
+                .slot_contexts
+                .write()
+                .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+            let mut ccid_fido_slots = HashMap::new();
+            let slot_ids = self.insert_ccid_reader_slots(
+                &mut slot_contexts,
+                Arc::new(connector) as SharedConnector,
+                reader_state,
+                &mut ccid_fido_slots,
+                Some(identity),
+            )?;
+            if slot_ids.is_empty() {
+                return Err(CKR_TOKEN_NOT_RECOGNIZED.into());
+            }
+            let identity = device.identity(0);
+            if let Err(error) = transport.bind_serial(&identity.serial) {
+                slot_contexts.remove_slots(&slot_ids);
+                return Err(error);
+            }
+            Ok(slot_ids)
+        })();
+        match result {
+            Ok(slot_ids) => {
+                *mounted = Some(NfcMountRegistration { transport });
+                Ok(slot_ids)
+            }
+            Err(error) => {
+                transport.shutdown();
+                let _ = self.hsmauth_providers.remove_device(&device);
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(target_os = "ios")]
+    fn refresh_nfc_discovery(&self) -> Result<(), Error> {
+        if !self.nfc_discovery {
+            return Ok(());
+        }
+        let mut attempted = self
+            .nfc_discovery_attempted
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        if *attempted {
+            return Ok(());
+        }
+        *attempted = true;
+        drop(attempted);
+
+        match self.mount_nfc() {
+            Ok(slot_ids) => tracing::info!(
+                target: "pkcs11rs::discovery",
+                slots = ?slot_ids,
+                outcome = "mounted",
+                "NFC discovery completed"
+            ),
+            Err(error) => {
+                tracing::info!(
+                    target: "pkcs11rs::discovery",
+                    outcome = "unavailable",
+                    error = ?error,
+                    "NFC discovery completed"
+                );
+                log!(1, "NFC discovery did not produce a token: {error:?}");
+            }
+        }
+        Ok(())
     }
 
     fn insert_ccid_reader_slots(
@@ -1704,6 +1841,7 @@ impl ModuleContext {
         base_connector: SharedConnector,
         reader_state: Arc<PcscReaderState>,
         ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+        known_identity: Option<DeviceIdentity>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
         let _operation = crate::logging::Operation::info(tracing::info_span!(
             target: "pkcs11rs::discovery",
@@ -1712,25 +1850,31 @@ impl ModuleContext {
         ));
         base_connector.refresh()?;
         let reader_name = base_connector.name();
-        match YubiKeyClient.discover(base_connector.as_ref()) {
-            Ok(info) => {
-                reader_state.device.replace(
-                    base_connector.connection_epoch(),
-                    DeviceIdentity {
-                        manufacturer: String::from("Yubico"),
-                        product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
-                        serial: info.serial.unwrap_or_else(|| String::from("0")),
-                        hardware_version: None,
-                        firmware_version: info.version,
-                    },
-                )?;
+        if let Some(identity) = known_identity {
+            reader_state
+                .device
+                .replace(base_connector.connection_epoch(), identity)?;
+        } else {
+            match YubiKeyClient.discover(base_connector.as_ref()) {
+                Ok(info) => {
+                    reader_state.device.replace(
+                        base_connector.connection_epoch(),
+                        DeviceIdentity {
+                            manufacturer: String::from("Yubico"),
+                            product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
+                            serial: info.serial.unwrap_or_else(|| String::from("0")),
+                            hardware_version: None,
+                            firmware_version: info.version,
+                        },
+                    )?;
+                }
+                Err(error) => tracing::trace!(
+                    target: "pkcs11rs::discovery",
+                    reader = %reader_name,
+                    ?error,
+                    "YubiKey management metadata not available"
+                ),
             }
-            Err(error) => tracing::trace!(
-                target: "pkcs11rs::discovery",
-                reader = %reader_name,
-                ?error,
-                "YubiKey management metadata not available"
-            ),
         }
 
         let mut reader_slots = Vec::new();
@@ -1965,12 +2109,21 @@ impl ModuleContext {
             if inventory.contains_key(&name) {
                 continue;
             }
-            match self.insert_ccid_reader_slots(
-                slot_contexts,
-                reader.connector.clone(),
-                reader.reader_state.clone(),
-                ccid_fido_slots,
-            ) {
+            let device = reader.reader_state.device.clone();
+            let discovered = (|| {
+                let _operation = device.lock_operation_with_message(
+                    crate::device::DeviceOperationKind::Ccid,
+                    "Discovering token applications…",
+                )?;
+                self.insert_ccid_reader_slots(
+                    slot_contexts,
+                    reader.connector.clone(),
+                    reader.reader_state.clone(),
+                    ccid_fido_slots,
+                    None,
+                )
+            })();
+            match discovered {
                 Ok(slot_ids) if !slot_ids.is_empty() => {
                     if let Some(key) = reader
                         .reader_state
@@ -2708,6 +2861,14 @@ impl ModuleContext {
         };
         for context in refreshable_slots {
             if let Ok(context) = context.lock() {
+                let _operation = context
+                    .device
+                    .as_ref()
+                    .map(|device| device.lock_operation(context.device_operation_kind))
+                    .transpose();
+                if _operation.is_err() {
+                    continue;
+                }
                 let _ = context.slot.refresh();
             }
         }
@@ -2754,6 +2915,8 @@ impl ModuleContext {
         if !initialized {
             self.refresh_ccid_discovery()?;
         }
+        #[cfg(target_os = "ios")]
+        self.refresh_nfc_discovery()?;
         #[cfg(feature = "native-hardware")]
         self.refresh_usb_yubihsm_discovery()?;
         self.refresh_http_yubihsm_discovery()?;
@@ -3315,6 +3478,7 @@ mod discovery_tests {
             yubihsm_device_trust_prefix: std::ffi::OsString::new(),
             ccid_configurations: configuration.ccid_configurations,
             ccid_aids: configuration.ccid_aids,
+            nfc_discovery: configuration.nfc_discovery,
             secure_channels: Arc::new(configuration.secure_channels),
             token_storage: None,
             fido_storage: None,

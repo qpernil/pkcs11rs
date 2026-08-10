@@ -196,6 +196,16 @@ impl PcscReaderState {
         })
     }
 
+    #[cfg_attr(not(any(test, target_os = "ios")), allow(dead_code))]
+    pub(crate) fn invalidate_selected_application(&self) -> Result<(), Error> {
+        self.with_operation(|| {
+            let mut state = self.secure_channel()?;
+            state.session = None;
+            state.application_aid.clear();
+            Ok(())
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_secure_channel(application_aid: Vec<u8>, session: Scp03Session) -> Self {
         Self {
@@ -2618,6 +2628,26 @@ mod tests {
         assert!(yubikey_atr_is_nfc(&[0x3b, 0x8d]));
         assert!(!yubikey_atr_is_nfc(&[0x3b, 0xfd]));
         assert!(!yubikey_atr_is_nfc(&[]));
+    }
+
+    #[test]
+    fn operation_boundary_invalidates_selection_but_preserves_scp11_validation() {
+        let state = PcscReaderState::default();
+        let key = (0x13, 1, [0x55; 32]);
+        state.set_selected_application(&[1, 2, 3]).unwrap();
+        {
+            let mut secure_channel = state.secure_channel().unwrap();
+            secure_channel
+                .validated_scp11_keys
+                .insert(key, vec![0x04; 65]);
+        }
+
+        state.invalidate_selected_application().unwrap();
+
+        let secure_channel = state.secure_channel().unwrap();
+        assert!(secure_channel.application_aid.is_empty());
+        assert!(secure_channel.session.is_none());
+        assert!(secure_channel.validated_scp11_keys.contains_key(&key));
     }
 
     #[test]
