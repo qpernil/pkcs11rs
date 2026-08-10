@@ -537,10 +537,13 @@ slots absent; returning the same reader name reuses them. Replacing a known
 reader's card does not reinterpret its established applet topology or remove
 its slots.
 
-pkcs11rs opens PC/SC cards with `SCARD_SHARE_EXCLUSIVE` and does not currently
-use PC/SC transactions. A reader already held by another process therefore
-contributes no new CCID applet slots on that listing. On macOS this
-commonly includes GnuPG `scdaemon`; native FIDO HID discovery is independent
+pkcs11rs opens PC/SC cards with `SCARD_SHARE_SHARED`. Each device-backed
+PKCS #11 call lazily begins one PC/SC transaction before its first APDU and
+ends it when the call returns. The applet is reselected inside every new
+transaction, so cooperative PC/SC clients can use the card between calls
+without corrupting pkcs11rs's selected-applet state. On macOS, GnuPG
+`scdaemon` must use its PC/SC path and shared mode to coexist; its direct CCID
+driver bypasses PC/SC coordination. Native FIDO HID discovery is independent
 and may still expose the authenticator. `PKCS11RS_LOG=warn` logs reader-open
 failures, `debug` adds successful discovery and phase timing, and `trace` adds
 per-request transport timing.

@@ -114,18 +114,19 @@ One physical native CCID reader has one shared `PcscReaderState`. Every
 selected applet gets a separate logical PKCS #11 slot
 and a slot-local connector facade, while all facades share:
 
-- the card connection and complete APDU-exchange lock;
-- the current selected AID and APDU capabilities;
+- the card connection, complete APDU-exchange lock, and APDU capabilities;
 - a connection-epoch-scoped physical `DeviceContext`;
-- the active secure-channel state and relevant certificate caches.
+- validated SCP11 public-key caches that remain valid for that connection.
 
 Calls on different applet slots may overlap while using their independent slot
 and session state, but their interactions with one physical reader are
-serialized. Each applet selection or complete APDU exchange holds the shared
-reader gate. A multi-APDU call may yield the gate between exchanges and
-reselect its applet when it next accesses the card. Selecting an applet
-invalidates a secure channel belonging to another AID; the next protected
-exchange reselects its AID and establishes the appropriate channel.
+serialized for the complete device-backed PKCS #11 operation. On desktop the
+reader worker lazily enters a PC/SC transaction at the first APDU and retains
+it through the operation; on iOS the analogous boundary is a CryptoTokenKit
+smart-card session. The first APDU in every operation reselects its AID and
+establishes the configured secure channel. The transaction itself owns the
+selected AID and live SCP03 or SCP11 session; ending it destroys that entire
+state. Only validated SCP11 public-key material survives the boundary.
 
 Native PC/SC and native iOS CryptoTokenKit produce the same internal reader
 records. The UTF-8 reader name is the stable inventory key. Every
@@ -141,10 +142,23 @@ The native iOS connector starts a worker lazily for each retained reader. The
 worker confines its retained `TKSmartCard` and all of that card's session and
 transmit operations to one thread, reuses the card while it remains valid, and
 serializes APDU requests. Retaining that card object does not claim exclusive
-access; the current transport begins and ends a CryptoTokenKit session for each
-raw APDU. Reader enumeration itself still uses the current
+access. Reader enumeration itself still uses the current
 `TKSmartCardSlotManager` inventory on every slot-list refresh. CryptoTokenKit
 provides smart-card APDU transport rather than general USB bulk access.
+
+The desktop connector likewise gives each reader a worker that owns its PC/SC
+card handle. Reader workers share the provider's PC/SC context; transactions on
+different readers remain independent. Connections use `SCARD_SHARE_SHARED`.
+The worker keeps the borrowed PC/SC transaction object on its own stack while
+it services all APDU requests for one high-level operation, which avoids both
+unsafe self-references and transaction gaps between APDUs.
+
+A future refinement may allow selected PKCS #11 multipart lifecycles, such as
+`C_FindObjectsInit` through `C_FindObjectsFinal`, to retain one smart-card
+transaction across calls. The present boundary remains one PKCS #11 function
+call. A longer boundary requires an explicit lease, timeout, and abandoned-
+operation cleanup so an application cannot hold PC/SC or the NFC UI while it
+is idle indefinitely.
 
 ## FIDO transports
 
@@ -182,11 +196,11 @@ shared PC/SC `DeviceContext`, even when the FIDO CCID applet is unavailable or
 its slot is removed by transport deduplication. PKCS #11 operations through
 those HID and CCID views cannot overlap. HID-to-HID access remains shareable;
 pkcs11rs does not request `CTAPHID_LOCK` or an operating-system-exclusive HID
-open, and cannot serialize unrelated browser or process access. The PC/SC
-connection uses `SCARD_SHARE_EXCLUSIVE`; the reader gate serializes CCID
-exchanges made by pkcs11rs, but no PC/SC transaction is started. Consequently
-an external shared or exclusive PC/SC connection can prevent discovery or
-reconnection instead of participating in the in-process gate.
+open, and cannot serialize unrelated browser or process access. PC/SC uses a
+shared connection and transaction-bounded operations, so other cooperative
+PC/SC clients can remain connected and run between pkcs11rs calls. An exclusive
+owner can still prevent discovery or reconnection, and a direct USB CCID client
+bypasses PC/SC coordination entirely.
 
 CTAPHID report exchange is also serialized inside each FIDO slot. A response
 on an invalid channel causes one fresh channel allocation and retry because

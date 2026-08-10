@@ -648,6 +648,46 @@ fn pcsc_applet_connectors_share_selected_aid_state() {
 }
 
 #[test]
+fn selected_aid_is_reused_only_within_its_transaction() {
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base = std::sync::Arc::new(RecordingConnector {
+        commands: commands.clone(),
+    });
+    let state = std::sync::Arc::new(crate::PcscReaderState::default());
+    let aid = vec![1, 2, 3, 4, 5];
+    let connector = crate::PcscAppletConnector::new(base, &aid, None, state.clone());
+    let command = crate::CommandApdu {
+        cla: 0,
+        ins: 0xca,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+        le: None,
+        extended: false,
+    };
+
+    state.begin_transaction().unwrap();
+    crate::Connector::send_apdu(&connector, &command).unwrap();
+    crate::Connector::send_apdu(&connector, &command).unwrap();
+    state.end_transaction();
+
+    state.begin_transaction().unwrap();
+    crate::Connector::send_apdu(&connector, &command).unwrap();
+    state.end_transaction();
+
+    let selected = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|encoded| {
+            let command = crate::CommandApdu::decode(encoded).ok()?;
+            (command.ins == 0xa4).then_some(command.data)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec![aid.clone(), aid]);
+}
+
+#[test]
 fn passive_ccid_slots_do_not_repeat_presence_select() {
     let connector = || -> std::rc::Rc<dyn crate::Connector> {
         std::rc::Rc::new(SelectableConnector {

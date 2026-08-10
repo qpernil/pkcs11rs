@@ -75,7 +75,6 @@ impl DeviceContext {
         }
     }
 
-    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub(crate) fn with_lifecycle(
         fallback: DeviceIdentity,
         lifecycle: Arc<dyn DeviceOperationLifecycle>,

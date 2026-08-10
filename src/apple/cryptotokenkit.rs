@@ -103,19 +103,26 @@ impl DeviceOperationLifecycle for AppleCcidLifecycle {
         if let Some(nfc) = &self.nfc {
             nfc.enter(message)?;
         }
-        let result = (|| {
-            self.reader_state
-                .upgrade()
-                .ok_or(CKR_DEVICE_ERROR)?
-                .invalidate_selected_application()?;
-            self.worker()?.begin_operation()
-        })();
-        if result.is_err() {
+        let Some(reader_state) = self.reader_state.upgrade() else {
             if let Some(nfc) = &self.nfc {
                 nfc.exit();
             }
+            return Err(CKR_DEVICE_ERROR.into());
+        };
+        if let Err(error) = reader_state.begin_transaction() {
+            if let Some(nfc) = &self.nfc {
+                nfc.exit();
+            }
+            return Err(error);
         }
-        result
+        if let Err(error) = self.worker().and_then(AppleCcidWorker::begin_operation) {
+            reader_state.end_transaction();
+            if let Some(nfc) = &self.nfc {
+                nfc.exit();
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn exit(&self) {
@@ -128,6 +135,9 @@ impl DeviceOperationLifecycle for AppleCcidLifecycle {
                     "failed to end CryptoTokenKit device operation"
                 );
             }
+        }
+        if let Some(reader_state) = self.reader_state.upgrade() {
+            reader_state.end_transaction();
         }
         if let Some(nfc) = &self.nfc {
             nfc.exit();

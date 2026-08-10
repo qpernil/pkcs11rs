@@ -72,14 +72,27 @@ serialized and cannot open duplicate NFC requests.
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
 
+For each device-backed PKCS #11 call, pkcs11rs lazily begins one native
+smart-card transaction before the first APDU and ends it when the call returns.
+This is a CryptoTokenKit smart-card session on iOS and an
+`SCardBeginTransaction`/`SCardEndTransaction` pair on desktop PC/SC. Every APDU
+belonging to that call therefore runs without interleaving from another
+cooperative client. Because another client may select a different applet
+between calls, a new transaction begins without any assumed card selection.
+The first APDU selects the configured AID while the transaction is held. The
+selected AID and live SCP03 or SCP11 session belong to that transaction and are
+destroyed together when it ends. Validated SCP11 public-key material remains
+available across transactions for the same connected card.
+
 ## PC/SC ownership and external daemons
 
-pkcs11rs connects to each card with `SCARD_SHARE_EXCLUSIVE`, both initially and
-on reconnect. Its shared reader state serializes complete applet selections and
-APDU exchanges among pkcs11rs slots, but it does not call
-`SCardBeginTransaction` or `SCardEndTransaction`. This means another process
-holding either a shared or exclusive PC/SC connection can prevent pkcs11rs from
-opening that reader. Until the reader has contributed a slot, a later
+pkcs11rs connects to each card with `SCARD_SHARE_SHARED`. Its reader worker
+serializes all local APDUs and retains one PC/SC transaction across all APDUs
+in a device-backed PKCS #11 call. Calls that perform no APDU do not acquire a
+transaction. Low-level calls made outside a PKCS #11 operation use a one-APDU
+transaction as a fallback. Another shared PC/SC client can therefore remain
+connected and use the card between pkcs11rs calls. An exclusive PC/SC owner can
+still prevent connection. Until the reader has contributed a slot, a later
 `C_GetSlotList` retries the applet probe. If the reader already has slots, they
 remain registered and report the failed connection as token absence.
 
@@ -101,15 +114,16 @@ Apply it to the next daemon instance with:
 gpgconf --kill scdaemon
 ```
 
-`disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. GnuPG
-documents `pcsc-shared` as potentially unsafe because `scdaemon` still assumes
-exclusive ownership and caches card state. Its current PC/SC implementation
-loads the transaction entry points but does not use them around commands.
-Because pkcs11rs itself still requests exclusive access, `pcsc-shared` does not
-enable concurrent operation between the two programs; `card-timeout` can
-merely let an idle daemon release its connection sooner. Safe coexistence
-requires both clients to use shared connections, transaction-bounded
-multi-APDU operations, and correct applet re-selection.
+`disable-ccid` and `pcsc-shared` change `scdaemon`, not pkcs11rs. They allow
+both programs to hold shared PC/SC connections, and pkcs11rs's operations are
+protected by transactions and applet re-selection. GnuPG documents
+`pcsc-shared` as potentially unsafe because `scdaemon` still assumes exclusive
+ownership and caches card state. Its current PC/SC implementation loads the
+transaction entry points but does not use them around commands. pkcs11rs cannot
+make such a peer's own multi-APDU operations atomic: another client can still
+take a transaction between two unprotected `scdaemon` commands. Fully safe
+coexistence requires every client to use shared connections,
+transaction-bounded multi-APDU operations, and correct applet re-selection.
 
 Native FIDO HID discovery does not use PC/SC and may remain available while
 the CCID interface is owned by another process.
