@@ -22,6 +22,17 @@
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Connect to the local YubiHSM Connector for this PKCS11RS test.</string>
+    <key>NFCReaderUsageDescription</key>
+    <string>Read the YubiHSM Auth applet on a nearby YubiKey.</string>
+    <key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+	<array>
+		<string>A000000527471117</string>
+		<string>A000000308000010000100</string>
+		<string>D27600012401</string>
+		<string>A000000527210701</string>
+		<string>A000000151000000</string>
+		<string>A0000006472F0001</string>
+	</array>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIRequiredDeviceCapabilities</key>

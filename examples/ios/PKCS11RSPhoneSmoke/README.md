@@ -14,6 +14,46 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+The initialization JSON enables NFC discovery. At launch, the app calls
+`C_Initialize` and `C_GetInfo` on its background inspection queue, but does not
+enumerate slots. The first tap on **Refresh** calls `C_GetSlotList` and presents
+Apple's NFC UI. Rust
+selects the configured applets through the ordinary CCID connector and
+registers each successful applet as a normal PKCS #11 slot. The bound tokens
+remain logically present until `C_Finalize`; after the physical NFC session
+ends, later operations present the UI again as needed and accept only the card
+serial bound during discovery. Canceling or presenting an unrecognized card
+simply omits NFC slots from that inventory and is not retried by later slot-list
+polling. Restarting the app starts a fresh module lifetime and discovery
+attempt. After the last operation, the NFC UI immediately displays its idle
+message and remains available until the key is removed, the user cancels, or
+another operation reuses the same session.
+The NFC message identifies the current PKCS #11 stage, such as token discovery,
+object search, attribute reading, or authentication. Generic communication
+still identifies the bound YubiKey serial, and serial-guidance messages remain
+stable.
+
+Each device-backed PKCS #11 call holds one CryptoTokenKit smart-card session
+across all of its APDUs. At the start of that transaction, pkcs11rs forgets the
+cached applet selection so the first APDU re-selects the slot's AID before any
+operation command. This prevents another CCID application from changing the
+selected applet between pkcs11rs calls without detection. Configured SCP03 or
+SCP11 channels are consequently re-established after that selection.
+
+After the NFC UI has closed, tap **Refresh** to repeat the ordinary PKCS #11
+inventory. NFC discovery itself remains latched, but the first operation on a
+bound NFC token requests the same card again and verifies its serial. This is
+the manual reacquisition test. Launching or foregrounding the app does not
+refresh automatically, so presenting or dismissing the NFC system UI cannot
+create an application-activation refresh loop.
+
+The app's Core NFC polling list includes all applet AIDs that Rust may select.
+Testing on iOS 26 found that CryptoTokenKit removes the NFC slot when the full
+PIV AID is absent, even when Rust subsequently communicates only with YubiHSM
+Auth. The PIV entry is therefore a CryptoTokenKit bootstrap requirement, not a
+requirement that the operation or card use PIV. A short PIV AID suitable for an
+APDU partial SELECT does not satisfy this requirement.
+
 The JSON also configures a persistent software token named `iPhone smoke` and
 places its storage below the app's Application Support directory. On first use,
 the app recognizes exactly that owned slot by its `Software token` model and
@@ -31,7 +71,7 @@ generate another pair.
 
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials and selects the first one. It builds an unambiguous
-`C_LoginUser` username as `:1234<label>@<source>`, where `1234` is the target
+`C_LoginUser` username as `:1236<label>@<source>`, where `1236` is the target
 YubiHSM Authentication Key ID and the source is the owning YubiKey serial (or
 slot description when no serial is available), then supplies the prototype
 credential password `password`. The app probes that login on every token. Only
@@ -74,7 +114,8 @@ card I/O to one thread, serializes APDUs, and reuses its non-exclusive
 `TKSmartCard`. The app uses a default-QoS serial inspection queue so its
 synchronous PKCS #11 calls match the worker and blocking networking work while
 remaining off the main thread. The current transport begins and ends an
-exclusive CryptoTokenKit session around each raw APDU. This provides CCID/APDU
+exclusive CryptoTokenKit session around each complete device-backed PKCS #11
+operation, acquiring it lazily at the first APDU. This provides CCID/APDU
 transport, not access to arbitrary USB interfaces or bulk endpoints.
 
 The smoke JSON requests the `debug` level, so pkcs11rs writes directly to Apple
@@ -94,8 +135,10 @@ the authenticated view. The named software slot is the deliberate exception:
 the app initializes it when necessary and creates the one persistent X25519
 keypair described above.
 
-This path requires a physical iPhone or iPad with a CCID-enabled key attached
-directly or through a USB-C adapter. A Simulator cannot expose that USB reader.
+USB discovery requires a physical iPhone or iPad with a CCID-enabled key
+attached directly or through a USB-C adapter. NFC discovery likewise requires
+a physical NFC-capable device and a compatible contactless smart card. A
+Simulator supports neither reader.
 If no hardware slot appears, confirm that the key and adapter support CCID and
 that another application is not holding the smart-card session, then foreground
 the smoke app again.
@@ -120,8 +163,9 @@ before an ordinary PKCS #11 login. Change the literal in the smoke JSON when
 the target YubiHSM does not use the factory-development credential. Do not ship
 or commit a production credential in application source.
 
-The smoke app calls `C_Initialize` once, enumerates local readers during every
-`C_GetSlotList`, and calls `C_Finalize` only when the app terminates. Readers
+The smoke app calls `C_Initialize` at launch, but only calls `C_GetSlotList` in
+response to **Refresh**. It enumerates local readers during every slot-list call
+and calls `C_Finalize` only when the app terminates. Readers
 first attached after initialization append their configured application slots.
 Slots already allocated to a reader remain stable if it disappears; they report
 no token until that reader returns. The client initially supplies room for ten
@@ -131,17 +175,19 @@ refresh needs one slot-list call and one connector inventory request. It uses
 the same PKCS #11 buffer contract while enumerating objects. This exercises the
 normal long-lived client lifecycle and connector recovery rather than
 rebuilding the module on every refresh. Returning to the app after the iPhone
-sleeps or after another app has been active runs the same refresh. If iOS
-terminated the process while it was suspended, the next launch initializes a
-new module instance before refreshing.
+sleeps or after another app has been active leaves the existing inventory in
+place until **Refresh** is tapped. If iOS terminated the process while it was
+suspended, the next launch initializes a new module instance but still waits
+for **Refresh** before enumerating slots.
 
 The smoke app is also the manual client for a connector running on a Mac across
 real Mac system sleep. The connector retains its listener, USB watcher,
 registry, and claimed device handles while macOS is suspended. Bringing the
-long-lived iOS app back to the foreground then refreshes its remote slot
-inventory without a preceding `C_Finalize`/`C_Initialize` cycle once the Mac's
-network interface is reachable again. Recheck this path after changes to
-connector sleep behavior; the separate USB-only test is documented in the
+long-lived iOS app back to the foreground and tapping **Refresh** then refreshes
+its remote slot inventory without a preceding `C_Finalize`/`C_Initialize` cycle
+once the Mac's network interface is reachable again. Recheck this path after
+changes to connector sleep behavior; the separate USB-only test is documented
+in the
 [connector guide](../../../docs/connector.md#usb-only-sleepwake-test).
 
 The checked-in Xcode project contains the maintainer's development team for
