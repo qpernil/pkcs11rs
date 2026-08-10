@@ -79,6 +79,11 @@ authentication. The card receipt is verified before the channel becomes
 active. Subsequent APDUs use the same short, extended, command-chaining,
 response-chaining, counter, padding, and MAC handling as the SCP03 transport.
 
+The live SCP11 session and selected applet belong to one native smart-card
+transaction and are destroyed together when the device-backed PKCS #11 call
+ends. Later calls reuse only the connection-scoped validated card public key;
+they perform a fresh SCP11 handshake for their transaction.
+
 ## Issuer SD key provisioning
 
 `pkcs11rs.h` declares typed administration functions for SCP11 keys and trust
