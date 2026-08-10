@@ -4,19 +4,19 @@ use der::Encode;
 use p256::ecdsa::{DerSignature, SigningKey, VerifyingKey};
 use p256::elliptic_curve::Generate;
 #[cfg(any(test, feature = "abi-tests"))]
-use rsa::{pkcs8::DecodePrivateKey, RsaPrivateKey};
+use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
 #[cfg(feature = "abi-tests")]
-use rsa::{pkcs8::EncodePublicKey, RsaPublicKey};
+use rsa::{RsaPublicKey, pkcs8::EncodePublicKey};
 use spki::{SubjectPublicKeyInfoOwned, SubjectPublicKeyInfoRef};
 #[cfg(any(test, feature = "abi-tests"))]
 use std::sync::OnceLock;
 use std::{str::FromStr, time::Duration};
 use x509_cert::{
-    builder::{profile::BuilderProfile, Builder, CertificateBuilder},
+    builder::{Builder, CertificateBuilder, profile::BuilderProfile},
     certificate::TbsCertificate,
     ext::{
-        pkix::{name::GeneralName, BasicConstraints, KeyUsage, KeyUsages, SubjectAltName},
         Extension, ToExtension,
+        pkix::{BasicConstraints, KeyUsage, KeyUsages, SubjectAltName, name::GeneralName},
     },
     name::Name,
     serial_number::SerialNumber,

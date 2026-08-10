@@ -43,10 +43,10 @@ pub use wrap::*;
 #[cfg(test)]
 pub(crate) use hsmauth::*;
 
-pub(crate) use crypt::aes_gcm;
-pub(crate) use crypt::DigestOperation;
 #[cfg(feature = "abi-tests")]
 pub(crate) use crypt::AES_BLOCK_LENGTH;
+pub(crate) use crypt::DigestOperation;
+pub(crate) use crypt::aes_gcm;
 #[cfg(test)]
 pub(crate) use crypt::{
     encode_pkcs1_v1_5_signature_input, parse_gcm_parameters, rsa_oaep_pad, rsa_oaep_unpad,
@@ -62,4 +62,4 @@ pub(crate) use object::{openpgp_private_import, parse_create_object_template};
 #[cfg(test)]
 pub(crate) use wrap::parse_yubihsm_wrap_mechanism;
 #[cfg(test)]
-pub(crate) use yubihsm::{yubihsm_enroll_device, YubiHsmEnrollment};
+pub(crate) use yubihsm::{YubiHsmEnrollment, yubihsm_enroll_device};

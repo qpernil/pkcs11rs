@@ -1,4 +1,4 @@
-use crate::{Error, CKR_FUNCTION_FAILED};
+use crate::{CKR_FUNCTION_FAILED, Error};
 use p256::SecretKey;
 use sha2::Sha256;
 use zeroize::Zeroizing;

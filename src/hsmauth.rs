@@ -1,9 +1,9 @@
 use crate::{
-    CommandApdu, Connector, Error, ResponseApdu, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
-    CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_FUNCTION_FAILED,
-    CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED, CKR_OBJECT_HANDLE_INVALID,
-    CKR_PIN_INCORRECT, CKR_PIN_INVALID, CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED,
-    CKR_TOKEN_NOT_RECOGNIZED, CKR_USER_NOT_LOGGED_IN, CK_RV,
+    CK_RV, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
+    CKR_DEVICE_MEMORY, CKR_FUNCTION_FAILED, CKR_FUNCTION_NOT_SUPPORTED, CKR_FUNCTION_REJECTED,
+    CKR_OBJECT_HANDLE_INVALID, CKR_PIN_INCORRECT, CKR_PIN_INVALID, CKR_PIN_LEN_RANGE,
+    CKR_PIN_LOCKED, CKR_TOKEN_NOT_RECOGNIZED, CKR_USER_NOT_LOGGED_IN, CommandApdu, Connector,
+    Error, ResponseApdu,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -854,7 +854,7 @@ mod tests {
     }
 
     fn p256_public_key() -> Vec<u8> {
-        use p256::elliptic_curve::{sec1::ToSec1Point, Generate};
+        use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
 
         p256::SecretKey::generate()
             .public_key()
@@ -967,14 +967,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [4, 3, 4, 3]
         );
-        assert!(commands[1]
-            .data
-            .windows(2)
-            .any(|value| value == [TAG_RESPONSE, 8]));
-        assert!(commands[3]
-            .data
-            .windows(2)
-            .any(|value| value == [TAG_PUBLIC_KEY, 65]));
+        assert!(
+            commands[1]
+                .data
+                .windows(2)
+                .any(|value| value == [TAG_RESPONSE, 8])
+        );
+        assert!(
+            commands[3]
+                .data
+                .windows(2)
+                .any(|value| value == [TAG_PUBLIC_KEY, 65])
+        );
         assert_eq!(commands[3].data.len(), 257);
         assert!(!commands[3].extended);
     }
@@ -1036,14 +1040,18 @@ mod tests {
                 INS_RESET,
             ]
         );
-        assert!(commands[0]
-            .data
-            .windows(2)
-            .any(|value| value == [TAG_ALGORITHM, 1]));
-        assert!(commands[1]
-            .data
-            .windows(2)
-            .any(|value| value == [TAG_PRIVATE_KEY, 0]));
+        assert!(
+            commands[0]
+                .data
+                .windows(2)
+                .any(|value| value == [TAG_ALGORITHM, 1])
+        );
+        assert!(
+            commands[1]
+                .data
+                .windows(2)
+                .any(|value| value == [TAG_PRIVATE_KEY, 0])
+        );
         assert_eq!((commands[5].p1, commands[5].p2), (1, 0));
         assert_eq!((commands[6].p1, commands[6].p2), (0xde, 0xad));
     }
@@ -1150,7 +1158,9 @@ mod tests {
         assert_eq!(password_to_key(b"").unwrap().as_slice(), &[0; 16]);
         assert_eq!(
             password_to_key("lösenord".as_bytes()).unwrap().as_slice(),
-            &[0x6c, 0xc3, 0xb6, 0x73, 0x65, 0x6e, 0x6f, 0x72, 0x64, 0, 0, 0, 0, 0, 0, 0,]
+            &[
+                0x6c, 0xc3, 0xb6, 0x73, 0x65, 0x6e, 0x6f, 0x72, 0x64, 0, 0, 0, 0, 0, 0, 0,
+            ]
         );
         assert_eq!(
             password_to_key(b"000102030405060708090a0B0c0D0e0F")

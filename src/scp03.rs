@@ -1,11 +1,11 @@
 use crate::{
+    CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
+    CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG, Connector,
     error::Error,
     secure_channel_crypto::{
-        aes_cbc, aes_cmac, aes_encrypt_block as aes_block, pad_iso7816 as pad, scp03_kdf as derive,
-        unpad_iso7816 as unpad, Direction, AES_BLOCK_SIZE,
+        AES_BLOCK_SIZE, Direction, aes_cbc, aes_cmac, aes_encrypt_block as aes_block,
+        pad_iso7816 as pad, scp03_kdf as derive, unpad_iso7816 as unpad,
     },
-    Connector, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
-    CKR_KEY_FUNCTION_NOT_PERMITTED, CKR_PIN_INCORRECT, CKR_RANDOM_NO_RNG,
 };
 use std::time::Duration;
 use subtle::ConstantTimeEq;

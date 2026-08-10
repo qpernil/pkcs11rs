@@ -3,7 +3,7 @@ use super::shared::{
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
-use ghash::{universal_hash::UniversalHash, GHash};
+use ghash::{GHash, universal_hash::UniversalHash};
 use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
 
 ffi_entry_point! {

@@ -1,4 +1,4 @@
-use crate::{CtapTransport, Error, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_DEVICE_REMOVED};
+use crate::{CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_DEVICE_REMOVED, CtapTransport, Error};
 use std::{
     cell::RefCell,
     ffi::CString,

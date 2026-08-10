@@ -1,5 +1,5 @@
 use super::protocol::*;
-use crate::{error::Error, CKR_DATA_LEN_RANGE};
+use crate::{CKR_DATA_LEN_RANGE, error::Error};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

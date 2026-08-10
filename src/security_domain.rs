@@ -1,7 +1,7 @@
 use crate::{
-    secure_channel_crypto::{aes_cbc, aes_encrypt_block, Direction, AES_BLOCK_SIZE},
-    CommandApdu, Connector, Error, ResponseApdu, Scp03Session, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID,
-    CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
+    CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_DEVICE_MEMORY, CKR_KEY_SIZE_RANGE,
+    CommandApdu, Connector, Error, ResponseApdu, Scp03Session,
+    secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc, aes_encrypt_block},
 };
 use const_oid::ObjectIdentifier;
 use der::{Decode, Encode};
@@ -1106,32 +1106,10 @@ mod tests {
     fn scp03_put_key_requires_aes128_components_and_wrapping_dek() {
         let key = [0; AES_BLOCK_SIZE];
         let short = [0; AES_BLOCK_SIZE - 1];
-        assert!(scp03_put_key_command(
-            &short,
-            1,
-            0,
-            &Scp03ProvisioningKeys {
-                enc: &key,
-                mac: &key,
-                dek: &key,
-            },
-        )
-        .is_err());
-        assert!(scp03_put_key_command(
-            &key,
-            1,
-            0,
-            &Scp03ProvisioningKeys {
-                enc: &short,
-                mac: &key,
-                dek: &key,
-            },
-        )
-        .is_err());
-        for reserved_kvn in [0, 255] {
-            assert!(scp03_put_key_command(
-                &key,
-                reserved_kvn,
+        assert!(
+            scp03_put_key_command(
+                &short,
+                1,
                 0,
                 &Scp03ProvisioningKeys {
                     enc: &key,
@@ -1139,7 +1117,35 @@ mod tests {
                     dek: &key,
                 },
             )
-            .is_err());
+            .is_err()
+        );
+        assert!(
+            scp03_put_key_command(
+                &key,
+                1,
+                0,
+                &Scp03ProvisioningKeys {
+                    enc: &short,
+                    mac: &key,
+                    dek: &key,
+                },
+            )
+            .is_err()
+        );
+        for reserved_kvn in [0, 255] {
+            assert!(
+                scp03_put_key_command(
+                    &key,
+                    reserved_kvn,
+                    0,
+                    &Scp03ProvisioningKeys {
+                        enc: &key,
+                        mac: &key,
+                        dek: &key,
+                    },
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1187,9 +1193,11 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(Client
-            .put_scp03_key_set(&connector, &mut session, 2, 0, &keys)
-            .is_err());
+        assert!(
+            Client
+                .put_scp03_key_set(&connector, &mut session, 2, 0, &keys)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1325,9 +1333,11 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(Client
-            .prepare_scp11_administration(&card_only, &operation)
-            .is_err());
+        assert!(
+            Client
+                .prepare_scp11_administration(&card_only, &operation)
+                .is_err()
+        );
 
         let oce = Scp03Session::from_session_keys(
             vec![0; 16],
@@ -1339,22 +1349,26 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(Client
-            .prepare_scp11_administration(
-                &oce,
-                &Scp11Administration::PutPrivateKey {
-                    key_ref: KeyRef {
-                        kid: KID_SCP11A,
-                        kvn: 1,
+        assert!(
+            Client
+                .prepare_scp11_administration(
+                    &oce,
+                    &Scp11Administration::PutPrivateKey {
+                        key_ref: KeyRef {
+                            kid: KID_SCP11A,
+                            kvn: 1,
+                        },
+                        replace_kvn: 0,
+                        encoded: Zeroizing::new(key.to_pkcs8_der().unwrap().as_bytes().to_vec(),),
                     },
-                    replace_kvn: 0,
-                    encoded: Zeroizing::new(key.to_pkcs8_der().unwrap().as_bytes().to_vec(),),
-                },
-            )
-            .is_err());
-        assert!(Client
-            .prepare_scp11_administration(&oce, &operation)
-            .is_ok());
+                )
+                .is_err()
+        );
+        assert!(
+            Client
+                .prepare_scp11_administration(&oce, &operation)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1413,15 +1427,17 @@ mod tests {
             )
             .unwrap();
         assert!(allowlist.command.data.ends_with(&hex("70 04 93 02 00 80")));
-        assert!(Client
-            .prepare_scp11_administration(
-                &session,
-                &Scp11Administration::SetAllowlist {
-                    key_ref,
-                    serials: vec![vec![0]],
-                },
-            )
-            .is_err());
+        assert!(
+            Client
+                .prepare_scp11_administration(
+                    &session,
+                    &Scp11Administration::SetAllowlist {
+                        key_ref,
+                        serials: vec![vec![0]],
+                    },
+                )
+                .is_err()
+        );
 
         let deleted = Client
             .prepare_scp11_administration(
@@ -1433,18 +1449,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(deleted.command.data, hex("d0 01 11 d2 01 02"));
-        assert!(Client
-            .prepare_scp11_administration(
-                &session,
-                &Scp11Administration::DeleteKey {
-                    key_ref: KeyRef {
-                        kid: KID_SCP11A,
-                        kvn: 0,
+        assert!(
+            Client
+                .prepare_scp11_administration(
+                    &session,
+                    &Scp11Administration::DeleteKey {
+                        key_ref: KeyRef {
+                            kid: KID_SCP11A,
+                            kvn: 0,
+                        },
+                        delete_last: false,
                     },
-                    delete_last: false,
-                },
-            )
-            .is_err());
+                )
+                .is_err()
+        );
     }
 
     fn hex(value: &str) -> Vec<u8> {

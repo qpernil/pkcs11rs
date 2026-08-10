@@ -1,15 +1,15 @@
 #[path = "../http_timeout.rs"]
 mod http_timeout;
 
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use clap::Parser;
 use http_timeout::WriteTimeoutAcceptor;
 use hyper_util::rt::TokioTimer;
 use std::{
     net::{SocketAddr, TcpListener as StdTcpListener},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -269,9 +269,5 @@ fn complete_response_length(response: &[u8]) -> Option<usize> {
 }
 
 fn usability(usable: bool) -> &'static str {
-    if usable {
-        "usable"
-    } else {
-        "unusable"
-    }
+    if usable { "usable" } else { "unusable" }
 }

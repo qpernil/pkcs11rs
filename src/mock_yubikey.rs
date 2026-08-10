@@ -3,16 +3,15 @@ use crate::ctap::{
     AUTHENTICATOR_GET_INFO, AUTHENTICATOR_MAKE_CREDENTIAL,
 };
 use crate::{
-    is_multiple_of,
-    secure_channel_crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
-    ApduCapabilities, CommandApdu, Connector, Error, ResponseApdu, CKR_ARGUMENTS_BAD,
-    CKR_DEVICE_ERROR,
+    ApduCapabilities, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CommandApdu, Connector, Error,
+    ResponseApdu, is_multiple_of,
+    secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc},
 };
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use minicbor::Encoder;
 use p256::ecdsa::{DerSignature, SigningKey};
-use p256::{ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point, PublicKey, SecretKey};
+use p256::{PublicKey, SecretKey, ecdh::diffie_hellman, elliptic_curve::sec1::ToSec1Point};
 use sha2::{Digest, Sha256};
 use signature::Signer;
 use std::{
@@ -1446,7 +1445,7 @@ fn pin_hash_matches(protocol: u8, shared: &[u8], encrypted: &[u8], pin: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{select_application, CcidCtapTransport, CtapClient};
+    use crate::{CcidCtapTransport, CtapClient, select_application};
     use std::rc::Rc;
 
     #[test]
@@ -1495,9 +1494,11 @@ mod tests {
             .unwrap();
 
         client.change_pin(&info, b"123456", b"654321").unwrap();
-        assert!(client
-            .authorize_credential_enumeration(&info, b"123456")
-            .is_err());
+        assert!(
+            client
+                .authorize_credential_enumeration(&info, b"123456")
+                .is_err()
+        );
         client
             .authorize_credential_enumeration(&info, b"654321")
             .unwrap();

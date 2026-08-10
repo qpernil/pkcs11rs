@@ -1,4 +1,4 @@
-use crate::{pinentry, Error, CKR_ARGUMENTS_BAD};
+use crate::{CKR_ARGUMENTS_BAD, Error, pinentry};
 use zeroize::Zeroizing;
 
 pub(crate) fn decrypt_file(

@@ -1,16 +1,15 @@
 use crate::{
-    is_multiple_of,
-    secure_channel_crypto::{aes_cbc, Direction, AES_BLOCK_SIZE},
-    Error, CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_INVALID,
-    CKR_PIN_LOCKED, CKR_USER_PIN_NOT_INITIALIZED,
+    CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_PIN_INCORRECT, CKR_PIN_INVALID,
+    CKR_PIN_LOCKED, CKR_USER_PIN_NOT_INITIALIZED, Error, is_multiple_of,
+    secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc},
 };
 use hmac::{Hmac, Mac};
-use minicbor::{data::Type, Decoder, Encoder};
+use minicbor::{Decoder, Encoder, data::Type};
 use p256::{
-    ecdh::diffie_hellman,
-    ecdsa::{signature::Verifier, Signature, VerifyingKey},
-    elliptic_curve::sec1::ToSec1Point,
     PublicKey, SecretKey,
+    ecdh::diffie_hellman,
+    ecdsa::{Signature, VerifyingKey, signature::Verifier},
+    elliptic_curve::sec1::ToSec1Point,
 };
 use sha2::{Digest, Sha256};
 use std::{rc::Rc, sync::OnceLock};
@@ -1956,7 +1955,7 @@ fn parse_credential_descriptor(decoder: &mut Decoder<'_>) -> Result<Vec<u8>, Cta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::ecdsa::{signature::Signer, SigningKey};
+    use p256::ecdsa::{SigningKey, signature::Signer};
     use std::{cell::RefCell, collections::VecDeque};
 
     #[derive(Debug)]
@@ -2462,16 +2461,22 @@ mod tests {
             encode_get_key_agreement_request(PinUvAuthProtocol::One).unwrap(),
             [0xa2, 0x01, PIN_UV_AUTH_PROTOCOL_ONE, 0x02, 0x02]
         );
-        assert!(PinUvAuthProtocol::One
-            .decrypt(&key[..31], &ciphertext)
-            .is_err());
+        assert!(
+            PinUvAuthProtocol::One
+                .decrypt(&key[..31], &ciphertext)
+                .is_err()
+        );
         assert!(PinUvAuthProtocol::One.decrypt(&key, &[]).is_err());
-        assert!(PinUvAuthProtocol::One
-            .decrypt(&key, &ciphertext[..15])
-            .is_err());
-        assert!(PinUvAuthProtocol::One
-            .authenticate(&[0u8; 15], b"message")
-            .is_err());
+        assert!(
+            PinUvAuthProtocol::One
+                .decrypt(&key, &ciphertext[..15])
+                .is_err()
+        );
+        assert!(
+            PinUvAuthProtocol::One
+                .authenticate(&[0u8; 15], b"message")
+                .is_err()
+        );
         assert!(PinUvAuthProtocol::One.valid_token_length(16));
         assert!(PinUvAuthProtocol::One.valid_token_length(32));
         assert!(!PinUvAuthProtocol::One.valid_token_length(24));
@@ -3266,10 +3271,12 @@ mod tests {
             protocol: PinUvAuthProtocol::Two,
             token: Zeroizing::new(vec![0x55; 32]),
         };
-        assert!(client
-            .enumerate_credentials(&credential_management_info(), &authorization)
-            .unwrap()
-            .is_empty());
+        assert!(
+            client
+                .enumerate_credentials(&credential_management_info(), &authorization)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

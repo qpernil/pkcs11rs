@@ -1,8 +1,8 @@
-use crate::{Error, CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT};
+use crate::{CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT, Error};
 use minicbor::{Decoder, Encoder};
 use p256::{
-    pkcs8::{DecodePublicKey, EncodePublicKey},
     PublicKey,
+    pkcs8::{DecodePublicKey, EncodePublicKey},
 };
 use sha2::{Digest, Sha256};
 use std::{

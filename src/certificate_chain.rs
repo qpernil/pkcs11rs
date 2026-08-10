@@ -1,8 +1,8 @@
-use crate::{Error, CKR_ARGUMENTS_BAD};
+use crate::{CKR_ARGUMENTS_BAD, Error};
 use const_oid::ObjectIdentifier;
 use der::{
-    asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
     Decode, Encode,
+    asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
 };
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
-    ext::pkix::{BasicConstraints, KeyUsage},
     Certificate,
+    ext::pkix::{BasicConstraints, KeyUsage},
 };
 
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
@@ -30,8 +30,8 @@ const FIDO_AAGUID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.4.1.
 
 type Fingerprint = [u8; 32];
 
-fn supported_signature_algorithms(
-) -> &'static [&'static dyn rustls_pki_types::SignatureVerificationAlgorithm] {
+fn supported_signature_algorithms()
+-> &'static [&'static dyn rustls_pki_types::SignatureVerificationAlgorithm] {
     webpki::ALL_VERIFICATION_ALGS
 }
 

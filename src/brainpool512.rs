@@ -2,12 +2,12 @@
 //! and prime-order curve infrastructure.
 
 use elliptic_curve::{
-    array::typenum::{U1024, U64},
+    CurveArithmetic, PrimeCurve, PrimeCurveArithmetic,
+    array::typenum::{U64, U1024},
     bigint::{Odd, U512},
     hazmat::FieldArithmetic,
-    CurveArithmetic, PrimeCurve, PrimeCurveArithmetic,
 };
-use primeorder::{mul_backend, point_arithmetic, PrimeCurveParams};
+use primeorder::{PrimeCurveParams, mul_backend, point_arithmetic};
 
 const ORDER_HEX: &str = "aadd9db8dbe9c48b3fd4e6ae33c9fc07cb308db3b3c9d20ed6639cca70330870553e5c414ca92619418661197fac10471db1d381085ddaddb58796829ca90069";
 const ORDER: Odd<U512> = Odd::<U512>::from_be_hex(ORDER_HEX);
@@ -65,7 +65,7 @@ mod field {
 }
 
 mod scalar {
-    use super::{BrainpoolP512r1, ORDER, ORDER_HEX, U1024, U512};
+    use super::{BrainpoolP512r1, ORDER, ORDER_HEX, U512, U1024};
     use elliptic_curve::{
         ff::PrimeField,
         scalar::{FromUintUnchecked, IsHigh},

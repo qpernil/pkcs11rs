@@ -1,12 +1,12 @@
 use crate::{
+    CKR_ARGUMENTS_BAD, CcidApplication, CcidConfiguration, Error,
     logging::LogLevel,
     scp03::{parse_hex, validate_security_level},
-    CcidApplication, CcidConfiguration, Error, CKR_ARGUMENTS_BAD,
 };
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    ffi::{c_char, OsString},
+    ffi::{OsString, c_char},
     path::PathBuf,
 };
 use zeroize::Zeroizing;
@@ -867,20 +867,22 @@ mod tests {
         assert!(
             serde_json::from_str::<JsonConfiguration>(r#"{"version":1,"unknown":true}"#).is_err()
         );
-        assert!(serde_json::from_str::<JsonConfiguration>(
-            r#"{"version":1,"yubihsm":{"usb":false}}"#
-        )
-        .is_err());
-        assert!(resolve(
-            Some(json(
-                r#"{
+        assert!(
+            serde_json::from_str::<JsonConfiguration>(r#"{"version":1,"yubihsm":{"usb":false}}"#)
+                .is_err()
+        );
+        assert!(
+            resolve(
+                Some(json(
+                    r#"{
                     "version": 1,
                     "scp03": {"bmk": "00", "enc_key": "00", "mac_key": "00"}
                 }"#,
-            )),
-            &[],
-        )
-        .is_err());
+                )),
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]

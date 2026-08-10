@@ -7,7 +7,7 @@
 //! to a backend-native companion-object representation.
 
 use crate::pkcs11::*;
-use minicbor::{data::Type, Decoder, Encoder};
+use minicbor::{Decoder, Encoder, data::Type};
 use std::{collections::BTreeMap, fmt};
 
 const BACKED_KEY_SCHEMA: &str = "pkcs11rs.backed-key";

@@ -1280,19 +1280,23 @@ mod tests {
 
         let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
         slot.get_slot_info(&mut slot_info).unwrap();
-        assert!(slot_info
-            .slotDescription
-            .windows(b"FIDO2 (FIDO_2_1)".len())
-            .any(|window| window == b"FIDO2 (FIDO_2_1)"));
+        assert!(
+            slot_info
+                .slotDescription
+                .windows(b"FIDO2 (FIDO_2_1)".len())
+                .any(|window| window == b"FIDO2 (FIDO_2_1)")
+        );
         assert_eq!(slot_info.firmwareVersion.major, 5);
         assert_eq!(slot_info.firmwareVersion.minor, 80);
 
         let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
         slot.get_token_info(&mut token_info).unwrap();
-        assert!(token_info
-            .label
-            .windows(b"FIDO2 FIDO_2_1 #12345678".len())
-            .any(|window| window == b"FIDO2 FIDO_2_1 #12345678"));
+        assert!(
+            token_info
+                .label
+                .windows(b"FIDO2 FIDO_2_1 #12345678".len())
+                .any(|window| window == b"FIDO2 FIDO_2_1 #12345678")
+        );
         assert_eq!(
             token_info.flags,
             (CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED) as CK_FLAGS
@@ -1309,9 +1313,11 @@ mod tests {
             .chain(HASHED_RSA_PSS_MECHANISMS)
             .chain(HASHED_ECDSA_MECHANISMS)
         {
-            assert!(!mechanisms
-                .iter()
-                .any(|mechanism| mechanism.type_ == unsupported));
+            assert!(
+                !mechanisms
+                    .iter()
+                    .any(|mechanism| mechanism.type_ == unsupported)
+            );
         }
     }
 
@@ -1419,10 +1425,12 @@ mod tests {
         assert!(slot.is_present());
         let mut slot_info = unsafe { std::mem::zeroed::<CK_SLOT_INFO>() };
         slot.get_slot_info(&mut slot_info).unwrap();
-        assert!(slot_info
-            .slotDescription
-            .windows(b"FIDO2".len())
-            .any(|window| window == b"FIDO2"));
+        assert!(
+            slot_info
+                .slotDescription
+                .windows(b"FIDO2".len())
+                .any(|window| window == b"FIDO2")
+        );
         let mut token_info = unsafe { std::mem::zeroed::<CK_TOKEN_INFO>() };
         assert!(slot.get_token_info(&mut token_info).is_err());
     }
@@ -1479,10 +1487,12 @@ mod tests {
             public.attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE),
             der_octet_string(&point)
         );
-        assert!(!public
-            .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !public
+                .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
+                .unwrap()
+                .is_empty()
+        );
 
         let private = objects
             .iter()

@@ -471,9 +471,11 @@ mod tests {
                 .len(),
             mechanisms.len()
         );
-        assert!(mechanisms
-            .iter()
-            .all(|mechanism| mechanism.flags & CKF_HW as CK_FLAGS == 0));
+        assert!(
+            mechanisms
+                .iter()
+                .all(|mechanism| mechanism.flags & CKF_HW as CK_FLAGS == 0)
+        );
         assert!(mechanisms
             .iter()
             .any(|mechanism| mechanism.type_ == CKM_GENERIC_SECRET_KEY_GEN as CK_MECHANISM_TYPE));

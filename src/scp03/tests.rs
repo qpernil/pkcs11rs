@@ -349,12 +349,10 @@ fn yubikey_factory_key_set_uses_documented_defaults() {
 
 #[test]
 fn non_default_key_selectors_require_custom_key_material() {
-    assert!(validate_factory_key_selector(
-        YUBIKEY_FACTORY_KEY_VERSION,
-        YUBIKEY_FACTORY_KEY_ID,
-        false,
-    )
-    .is_ok());
+    assert!(
+        validate_factory_key_selector(YUBIKEY_FACTORY_KEY_VERSION, YUBIKEY_FACTORY_KEY_ID, false,)
+            .is_ok()
+    );
     assert!(validate_factory_key_selector(1, YUBIKEY_FACTORY_KEY_ID, false).is_err());
     assert!(validate_factory_key_selector(YUBIKEY_FACTORY_KEY_VERSION, 1, false).is_err());
     assert!(validate_factory_key_selector(1, 1, true).is_ok());
@@ -363,14 +361,16 @@ fn non_default_key_selectors_require_custom_key_material() {
 #[test]
 fn accepts_explicit_generic_scp03_key_sizes_and_security_levels() {
     for key_size in [16, 24, 32] {
-        assert!(Scp03KeySet::new(
-            1,
-            0,
-            vec![1; key_size],
-            vec![2; key_size],
-            vec![3; key_size],
-        )
-        .is_ok());
+        assert!(
+            Scp03KeySet::new(
+                1,
+                0,
+                vec![1; key_size],
+                vec![2; key_size],
+                vec![3; key_size],
+            )
+            .is_ok()
+        );
     }
     assert!(Scp03KeySet::new(1, 0, vec![1; 16], vec![2; 24], vec![3; 16]).is_err());
     assert!(Scp03KeySet::new(1, 0, vec![1; 16], vec![2; 16], vec![3; 32]).is_err());
@@ -395,12 +395,14 @@ fn yubico_diversification_matches_sp800_108_cmac_vectors() {
         yubico_diversify_key(&bmk, YUBICO_DIVERSIFICATION_DEK_LABEL, &issuer_context).unwrap(),
         hex("53A68B700A229B4314315BFCB162A650")
     );
-    assert!(yubico_diversify_key(
-        &bmk[..AES_BLOCK_SIZE],
-        YUBICO_DIVERSIFICATION_ENC_LABEL,
-        &issuer_context,
-    )
-    .is_err());
+    assert!(
+        yubico_diversify_key(
+            &bmk[..AES_BLOCK_SIZE],
+            YUBICO_DIVERSIFICATION_ENC_LABEL,
+            &issuer_context,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -458,12 +460,14 @@ fn rejects_invalid_padding_and_response_mac() {
         encryption_counter: 1,
         security_level: 0x11,
     };
-    assert!(session
-        .unprotect_response(ResponseApdu {
-            data: vec![0; 8],
-            status: 0x9000,
-        })
-        .is_err());
+    assert!(
+        session
+            .unprotect_response(ResponseApdu {
+                data: vec![0; 8],
+                status: 0x9000,
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -586,17 +590,19 @@ fn secure_messaging_normalizes_cla_and_rejects_other_logical_channels() {
 
     for cla in [0x01, 0x40, 0x81, 0xc0] {
         let mut session = test_session(0x01);
-        assert!(session
-            .protect_command(&CommandApdu {
-                cla,
-                ins: 0xca,
-                p1: 0,
-                p2: 0,
-                data: vec![],
-                le: Some(256),
-                extended: false,
-            })
-            .is_err());
+        assert!(
+            session
+                .protect_command(&CommandApdu {
+                    cla,
+                    ins: 0xca,
+                    p1: 0,
+                    p2: 0,
+                    data: vec![],
+                    le: Some(256),
+                    extended: false,
+                })
+                .is_err()
+        );
         assert_eq!(session.encryption_counter, 0);
     }
 }
@@ -832,9 +838,11 @@ fn chained_transfer_stops_on_invalid_intermediate_response() {
     };
     for response in [hex("6A 80"), hex("01 90 00")] {
         let connector = ScriptedConnector::new(vec![response]);
-        assert!(test_session(0x01)
-            .transmit_chained(&connector, &command)
-            .is_err());
+        assert!(
+            test_session(0x01)
+                .transmit_chained(&connector, &command)
+                .is_err()
+        );
         assert_eq!(connector.commands.into_inner().len(), 1);
     }
 }
@@ -912,20 +920,22 @@ fn yubikey_sessions_share_and_require_the_authenticated_channel() {
     assert_eq!(shared.borrow().as_ref().unwrap().encryption_counter, 1);
 
     *shared.borrow_mut() = None;
-    assert!(session
-        .send_apdu(
-            &CommandApdu {
-                cla: 0,
-                ins: 0x84,
-                p1: 0,
-                p2: 0,
-                data: Vec::new(),
-                le: Some(8),
-                extended: false,
-            },
-            false,
-        )
-        .is_err());
+    assert!(
+        session
+            .send_apdu(
+                &CommandApdu {
+                    cla: 0,
+                    ins: 0x84,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(8),
+                    extended: false,
+                },
+                false,
+            )
+            .is_err()
+    );
     assert_eq!(connector.commands.borrow().len(), 1);
 }
 
@@ -939,20 +949,22 @@ fn yubikey_sessions_discard_desynchronized_channels() {
         connector,
         session: shared.clone(),
     };
-    assert!(session
-        .send_apdu(
-            &CommandApdu {
-                cla: 0,
-                ins: 0x84,
-                p1: 0,
-                p2: 0,
-                data: Vec::new(),
-                le: Some(8),
-                extended: false,
-            },
-            false,
-        )
-        .is_err());
+    assert!(
+        session
+            .send_apdu(
+                &CommandApdu {
+                    cla: 0,
+                    ins: 0x84,
+                    p1: 0,
+                    p2: 0,
+                    data: Vec::new(),
+                    le: Some(8),
+                    extended: false,
+                },
+                false,
+            )
+            .is_err()
+    );
     assert!(shared.borrow().is_none());
 }
 

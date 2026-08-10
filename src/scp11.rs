@@ -1,15 +1,15 @@
 use crate::{
+    CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT, CKR_USER_PIN_NOT_INITIALIZED,
+    Connector,
     error::Error,
     scp03::{CommandApdu, Scp03Session},
     secure_channel_crypto::aes_cmac,
-    Connector, CKR_ARGUMENTS_BAD, CKR_DEVICE_ERROR, CKR_PIN_INCORRECT,
-    CKR_USER_PIN_NOT_INITIALIZED,
 };
 use p256::{
-    ecdh::diffie_hellman,
-    elliptic_curve::{sec1::ToSec1Point, Generate},
-    pkcs8::{DecodePrivateKey, DecodePublicKey},
     PublicKey as P256PublicKey, SecretKey as P256SecretKey,
+    ecdh::diffie_hellman,
+    elliptic_curve::{Generate, sec1::ToSec1Point},
+    pkcs8::{DecodePrivateKey, DecodePublicKey},
 };
 use sha2::{Digest, Sha256};
 use std::fs;

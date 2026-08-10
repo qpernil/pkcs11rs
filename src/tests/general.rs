@@ -558,10 +558,12 @@ fn pcsc_applet_presence_requires_a_successful_aid_select() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
     assert!(crate::Connector::refresh(&connector).is_err());
     assert!(!crate::Connector::is_present(&connector));
-    assert!(connector
-        .discovery_error()
-        .as_deref()
-        .is_some_and(|reason| reason.contains("Generic")));
+    assert!(
+        connector
+            .discovery_error()
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Generic"))
+    );
     base.select_ok
         .store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(crate::Connector::refresh(&connector).is_ok());
@@ -585,22 +587,26 @@ fn pcsc_applet_connector_reuses_selected_aid() {
     );
     let mut receive = [0; 16];
 
-    assert!(crate::Connector::transmit(
-        &connector,
-        &[0x00, 0x00],
-        &mut receive,
-        std::time::Duration::from_secs(1),
-    )
-    .is_ok());
+    assert!(
+        crate::Connector::transmit(
+            &connector,
+            &[0x00, 0x00],
+            &mut receive,
+            std::time::Duration::from_secs(1),
+        )
+        .is_ok()
+    );
     base.select_ok
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    assert!(crate::Connector::transmit(
-        &connector,
-        &[0x00, 0x00],
-        &mut receive,
-        std::time::Duration::from_secs(1),
-    )
-    .is_ok());
+    assert!(
+        crate::Connector::transmit(
+            &connector,
+            &[0x00, 0x00],
+            &mut receive,
+            std::time::Duration::from_secs(1),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -654,16 +660,20 @@ fn passive_ccid_slots_do_not_repeat_presence_select() {
     let hsmauth_aid = crate::hsmauth::AID.to_vec();
     let mut hsmauth = crate::HsmAuthSlot::new(connector(), hsmauth_aid);
     assert!(crate::Slot::init_slot(&mut hsmauth).is_ok());
-    assert!(!crate::Slot::mechanisms(&hsmauth)
-        .iter()
-        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
+    assert!(
+        !crate::Slot::mechanisms(&hsmauth)
+            .iter()
+            .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+    );
 
     let issuer_sd_aid = vec![0xa0, 0x00, 0x00, 0x01, 0x51, 0x00, 0x00, 0x00];
     let mut issuer_sd = crate::IssuerSecurityDomainSlot::new(connector(), issuer_sd_aid);
     assert!(crate::Slot::init_slot(&mut issuer_sd).is_ok());
-    assert!(!crate::Slot::mechanisms(&issuer_sd)
-        .iter()
-        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
+    assert!(
+        !crate::Slot::mechanisms(&issuer_sd)
+            .iter()
+            .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+    );
 }
 
 #[test]
@@ -1191,9 +1201,11 @@ fn openpgp_pw1_policy_maps_sign_once_to_context_specific_login() {
             touch_policy: 1,
         },
     };
-    assert!(object
-        .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
-        .is_some());
+    assert!(
+        object
+            .attribute_value(CKA_ALWAYS_AUTHENTICATE as CK_ATTRIBUTE_TYPE)
+            .is_some()
+    );
     assert_eq!(
         object.attribute_value(crate::CKA_YUBICO_TOUCH_POLICY),
         Some(crate::ulong_attribute(1))
@@ -1334,21 +1346,27 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
     assert!(crate::Slot::backend_mechanisms(&slot).is_empty());
     let mechanisms = crate::Slot::mechanisms(&slot);
     for unsupported in crate::SOFTWARE_DIGEST_MECHANISMS {
-        assert!(!mechanisms
-            .iter()
-            .any(|mechanism| mechanism.type_ == unsupported.type_));
+        assert!(
+            !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == unsupported.type_)
+        );
     }
     for unsupported in crate::software_public_mechanisms()
         .into_iter()
         .filter(|mechanism| mechanism.type_ != crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
     {
-        assert!(!mechanisms
-            .iter()
-            .any(|mechanism| mechanism.type_ == unsupported.type_));
+        assert!(
+            !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == unsupported.type_)
+        );
     }
-    assert!(!mechanisms
-        .iter()
-        .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY));
+    assert!(
+        !mechanisms
+            .iter()
+            .any(|mechanism| mechanism.type_ == crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY)
+    );
     for private_only in [
         CKM_RSA_PKCS_KEY_PAIR_GEN,
         CKM_EC_KEY_PAIR_GEN,
@@ -1357,9 +1375,11 @@ fn issuer_sd_token_uses_device_model_and_applet_label() {
         CKM_ECDH1_DERIVE,
         CKM_ECDH1_COFACTOR_DERIVE,
     ] {
-        assert!(!mechanisms
-            .iter()
-            .any(|mechanism| mechanism.type_ == private_only as CK_MECHANISM_TYPE));
+        assert!(
+            !mechanisms
+                .iter()
+                .any(|mechanism| mechanism.type_ == private_only as CK_MECHANISM_TYPE)
+        );
     }
     assert!(crate::Slot::login(&mut slot, &[]).is_ok());
     assert!(crate::Slot::login_is_active(&slot));
@@ -1528,9 +1548,11 @@ fn hsmauth_objects_expose_credential_metadata_without_secret_material() {
     assert_eq!(public.class, CKO_PUBLIC_KEY as CK_OBJECT_CLASS);
     assert_eq!(public.key_type, CKK_EC as CK_KEY_TYPE);
     assert!(!public.verify);
-    assert!(public
-        .attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE)
-        .is_some());
+    assert!(
+        public
+            .attribute_value(CKA_EC_POINT as CK_ATTRIBUTE_TYPE)
+            .is_some()
+    );
     let public_key_info = public
         .attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE)
         .unwrap();
@@ -3897,12 +3919,14 @@ fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
         .unwrap();
     let replacement = *context.token_object_handles.keys().next().unwrap();
     assert_ne!(replacement, original);
-    assert!(context.sessions[&TEST_SESSION_HANDLE]
-        .find_operation
-        .as_ref()
-        .unwrap()
-        .objects
-        .is_empty());
+    assert!(
+        context.sessions[&TEST_SESSION_HANDLE]
+            .find_operation
+            .as_ref()
+            .unwrap()
+            .objects
+            .is_empty()
+    );
 
     let mut moved = object;
     moved.unique_id = "native-object-moved".to_owned();
@@ -3918,8 +3942,10 @@ fn token_object_reconciliation_preserves_replaces_and_rebinds_handles() {
         "native-object-moved"
     );
 
-    assert!(context
-        .reconcile_slot_token_objects(100, vec![moved.clone(), moved])
-        .is_err());
+    assert!(
+        context
+            .reconcile_slot_token_objects(100, vec![moved.clone(), moved])
+            .is_err()
+    );
     finalize_for_test();
 }

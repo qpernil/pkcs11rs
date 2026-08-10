@@ -6,18 +6,18 @@
 //! PKCS #11 mechanisms; private-key reconstruction remains authenticator-side.
 
 use crate::storage::{ContentReference, StorageError};
-use minicbor::{data::Type, Decoder, Encoder};
+use minicbor::{Decoder, Encoder, data::Type};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
 mod arkg;
 
+pub use arkg::{
+    ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM, ARKG_PUBLIC_KEY_TYPE, ArkgP256DerivedKey,
+    ArkgP256PublicSeed, ESP256_ALGORITHM,
+};
 #[cfg(feature = "mock-yubikey")]
 pub(crate) use arkg::{mock_preview_sign, mock_preview_sign_seed_cose};
-pub use arkg::{
-    ArkgP256DerivedKey, ArkgP256PublicSeed, ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM,
-    ARKG_PUBLIC_KEY_TYPE, ESP256_ALGORITHM,
-};
 
 const REGISTRATION_SCHEMA: &str = "pkcs11rs.preview-sign.registration";
 const DERIVED_KEY_SCHEMA: &str = "pkcs11rs.preview-sign.derived-key";
@@ -1009,8 +1009,7 @@ mod tests {
     const ARKG_VECTOR_IKM: &str =
         "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f";
     const ARKG_VECTOR_CONTEXT: &[u8] = b"ARKG-P256.test vectors";
-    const ARKG_VECTOR_PUBLIC_KEY: &str =
-        "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107\
+    const ARKG_VECTOR_PUBLIC_KEY: &str = "04572a111ce5cfd2a67d56a0f7c684184b16ccd212490dc9c5b579df749647d107\
          dac2a1b197cc10d2376559ad6df6bc107318d5cfb90def9f4a1f5347e086c2cd";
 
     fn decode_hex(input: &str) -> Vec<u8> {

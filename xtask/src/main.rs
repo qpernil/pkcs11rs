@@ -1,7 +1,7 @@
 use libloading::{Library, Symbol};
 use std::{
     env,
-    ffi::{c_ulong, c_void, OsString},
+    ffi::{OsString, c_ulong, c_void},
     fs,
     path::{Path, PathBuf},
     process::{self, Command},

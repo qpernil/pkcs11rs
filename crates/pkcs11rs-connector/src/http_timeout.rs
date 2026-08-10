@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
-    time::{sleep, Sleep},
+    time::{Sleep, sleep},
 };
 
 #[derive(Clone, Debug)]

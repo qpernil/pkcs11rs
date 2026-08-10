@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use crate::{
-    error::Error,
-    scp03::{select_application, CommandApdu},
-    Connector, CKR_ACTION_PROHIBITED, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
+    CKR_ACTION_PROHIBITED, CKR_ARGUMENTS_BAD, CKR_DATA_INVALID, CKR_DATA_LEN_RANGE,
     CKR_DEVICE_ERROR, CKR_FUNCTION_NOT_SUPPORTED, CKR_KEY_TYPE_INCONSISTENT, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN,
+    CKR_PIN_LEN_RANGE, CKR_PIN_LOCKED, CKR_USER_NOT_LOGGED_IN, Connector,
+    error::Error,
+    scp03::{CommandApdu, select_application},
 };
 use rsa::{BigUint, RsaPublicKey};
 use sha2::{Digest, Sha256, Sha512};

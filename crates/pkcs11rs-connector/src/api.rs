@@ -1,17 +1,17 @@
 use crate::registry::{DeviceRegistry, LegacySelectionError, TransportError, TransportErrorKind};
 use axum::{
+    Json, Router,
     body::Bytes,
     error_handling::HandleErrorLayer,
     extract::{Path, State},
-    http::{header::CONTENT_TYPE, StatusCode},
+    http::{StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::Serialize;
 use std::time::Duration;
 use tower::{
-    limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer, BoxError, ServiceBuilder,
+    BoxError, ServiceBuilder, limit::GlobalConcurrencyLimitLayer, load_shed::LoadShedLayer,
 };
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -479,9 +479,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(String::from_utf8(body(response).await)
-            .unwrap()
-            .contains(r#""status":"unclaimed""#));
+        assert!(
+            String::from_utf8(body(response).await)
+                .unwrap()
+                .contains(r#""status":"unclaimed""#)
+        );
 
         let response = app
             .clone()
@@ -496,9 +498,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(String::from_utf8(body(response).await)
-            .unwrap()
-            .contains(r#""code":"device_unclaimed""#));
+        assert!(
+            String::from_utf8(body(response).await)
+                .unwrap()
+                .contains(r#""code":"device_unclaimed""#)
+        );
 
         let response = app
             .oneshot(
@@ -878,9 +882,11 @@ mod tests {
         .unwrap();
         assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
         let overloaded_body = overloaded.into_body().collect().await.unwrap().to_bytes();
-        assert!(String::from_utf8(overloaded_body.to_vec())
-            .unwrap()
-            .contains("server_overloaded"));
+        assert!(
+            String::from_utf8(overloaded_body.to_vec())
+                .unwrap()
+                .contains("server_overloaded")
+        );
 
         release.notify_one();
         assert_eq!(first.await.unwrap().status(), StatusCode::OK);

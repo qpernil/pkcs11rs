@@ -1276,7 +1276,7 @@ fn http_certificate_bundle(encoded: &[u8]) -> Result<Vec<ureq::tls::Certificate<
 // ureq 3.3 does not re-export the KeyKind argument required by PrivateKey::from_der.
 // Keep its PEM-only adapter internal; configured and persisted keys remain PKCS#8 DER.
 fn http_pkcs8_private_key(encoded: &[u8]) -> Result<ureq::tls::PrivateKey<'static>, Error> {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
     let base64 = Zeroizing::new(STANDARD.encode(encoded));
     let mut armored = Zeroizing::new(b"-----BEGIN PRIVATE KEY-----\n".to_vec());
@@ -1911,7 +1911,7 @@ mod tests {
         second: Arc<PcscReaderState>,
         concurrent: bool,
     ) {
-        use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+        use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 
         let (first_entered_tx, first_entered_rx) = sync_channel(0);
         let (release_first_tx, release_first_rx) = sync_channel(0);
@@ -2336,14 +2336,18 @@ mod tests {
 
         let other_key = crate::certificate_builder::p256_key();
         let other_private_key = other_key.to_pkcs8_der().unwrap();
-        assert!(HttpConnectorTlsConfig::from_client_identity(
-            &certificate,
-            other_private_key.as_bytes()
-        )
-        .is_err());
-        assert!(HttpConnectorTlsConfig::default()
-            .with_ca_bundle(b"not a CA bundle")
-            .is_err());
+        assert!(
+            HttpConnectorTlsConfig::from_client_identity(
+                &certificate,
+                other_private_key.as_bytes()
+            )
+            .is_err()
+        );
+        assert!(
+            HttpConnectorTlsConfig::default()
+                .with_ca_bundle(b"not a CA bundle")
+                .is_err()
+        );
     }
 
     #[test]

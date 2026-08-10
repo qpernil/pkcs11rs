@@ -1,13 +1,14 @@
 use crate::device::{DeviceContext, DeviceIdentity};
 use crate::*;
 use block2::RcBlock;
-use objc2::{rc::autoreleasepool, rc::Retained, runtime::Bool};
+use objc2::{rc::Retained, rc::autoreleasepool, runtime::Bool};
 use objc2_crypto_token_kit::{TKSmartCard, TKSmartCardSlotManager};
 use objc2_foundation::{NSData, NSError, NSString};
 use std::ffi::{c_char, c_int, c_void};
 use std::sync::{
+    Arc, OnceLock,
     atomic::{AtomicBool, Ordering},
-    mpsc, Arc, OnceLock,
+    mpsc,
 };
 
 unsafe extern "C" {

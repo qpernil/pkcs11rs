@@ -1,10 +1,10 @@
 use crate::{
-    error::Error, CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR,
-    CKR_ENCRYPTED_DATA_INVALID,
+    CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
+    error::Error,
 };
 use aes::{
-    cipher::{consts::U16, Block, BlockDecrypt, BlockEncrypt, BlockSizeUser, KeyInit},
     Aes128, Aes192, Aes256,
+    cipher::{Block, BlockDecrypt, BlockEncrypt, BlockSizeUser, KeyInit, consts::U16},
 };
 use cmac::{Cmac, Mac};
 

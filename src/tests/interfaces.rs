@@ -1726,9 +1726,11 @@ fn abi_test_slots_are_hardware_free_and_reach_backend_sessions() {
             CKR_OK as CK_RV
         );
         assert_eq!(&token_info.model[..model.len()], model);
-        assert!(token_info.model[model.len()..]
-            .iter()
-            .all(|byte| *byte == b' '));
+        assert!(
+            token_info.model[model.len()..]
+                .iter()
+                .all(|byte| *byte == b' ')
+        );
     }
 
     let mut session = 0;

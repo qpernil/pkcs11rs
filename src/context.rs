@@ -1,33 +1,34 @@
+#[cfg(feature = "mock-yubikey")]
+use crate::MockYubiKeyConnector;
 #[cfg(not(feature = "abi-tests"))]
 use crate::configured_yubihsm_public_discovery_credential_with_pinentry;
 #[cfg(feature = "native-hardware")]
-use crate::ctap_hid::{enumerate_fido_devices, CtapHidTransport};
+use crate::ctap_hid::{CtapHidTransport, enumerate_fido_devices};
 use crate::device::{DeviceContext, DeviceIdentity, PhysicalDeviceKey};
 use crate::pkcs11::*;
 use crate::storage::{
     LocalStorageProvider, MemoryStorageProvider, StorageProvider, UnavailableStorageProvider,
 };
-#[cfg(feature = "mock-yubikey")]
-use crate::MockYubiKeyConnector;
 #[cfg(feature = "abi-tests")]
 use crate::{
-    abi_test_piv_slot, abi_test_yubihsm_slots, AbiScp03Slot, AbiTestSlot, ABI_TEST_PIV_SLOT_ID,
-    ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID,
+    ABI_TEST_PIV_SLOT_ID, ABI_TEST_SCP03_SLOT_ID, ABI_TEST_SCP11_SLOT_ID, AbiScp03Slot,
+    AbiTestSlot, abi_test_piv_slot, abi_test_yubihsm_slots,
 };
+#[cfg(any(test, feature = "abi-tests"))]
+use crate::{ABI_TEST_SLOT_ID, KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial};
 use crate::{
+    BackendSession, CcidApplication, CcidConfiguration, CcidProvider, CcidReader, Connector,
+    CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation, HsmAuthProviderRegistry,
+    HsmAuthSlot, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
+    IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PcscAppletConnector,
+    PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector, SignatureOperation,
+    Slot, SlotKind, SoftwareSlot, TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSlot,
+    YubiKeyClient,
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
-    ccid_application_label, pinentry, select_application, str_pad, BackendSession, CcidApplication,
-    CcidConfiguration, CcidProvider, CcidReader, Connector, CryptOperation, DigestOperation, Error,
-    Fido2Slot, FindOperation, HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector,
-    HttpConnectorEndpoint, HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration,
-    OpenPgpSlot, PcscAppletConnector, PcscReaderState, PivSlot, SecureChannelConfiguration,
-    SharedConnector, SignatureOperation, Slot, SlotKind, SoftwareSlot, TokenObject,
-    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
+    ccid_application_label, pinentry, select_application, str_pad,
 };
 #[cfg(feature = "native-hardware")]
 use crate::{HidFidoEndpoint, UsbConnector};
-#[cfg(any(test, feature = "abi-tests"))]
-use crate::{KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial, ABI_TEST_SLOT_ID};
 #[cfg(any(test, feature = "abi-tests"))]
 use rsa::RsaPublicKey;
 use std::{
@@ -3207,10 +3208,12 @@ mod discovery_tests {
             .get(&http_slot_identity(1, "12345678"))
             .unwrap();
         assert_ne!(first.slot_id, second.slot_id);
-        assert!(!first
-            .backend
-            .http_yubihsm_connector()
-            .shares_endpoint_with(second.backend.http_yubihsm_connector()));
+        assert!(
+            !first
+                .backend
+                .http_yubihsm_connector()
+                .shares_endpoint_with(second.backend.http_yubihsm_connector())
+        );
     }
 
     #[cfg(not(feature = "abi-tests"))]
