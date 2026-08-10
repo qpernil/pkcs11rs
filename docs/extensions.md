@@ -21,8 +21,8 @@ to the current build:
 Each returns null for an unknown value. A non-null string is immutable,
 library-owned, and valid for the lifetime of the process; callers must neither
 free nor modify it. Deprecated standard aliases resolve to their current
-canonical names. The iPhone smoke app demonstrates the mechanism helper while
-rendering `C_GetMechanismList` and `C_GetMechanismInfo` results.
+canonical names. The iPhone smoke app demonstrates the object-class and
+key-type helpers while rendering its public and authenticated inventories.
 
 ## Vendor mechanisms, key types, and attributes
 
@@ -64,3 +64,8 @@ These calls operate on a normal PKCS #11 session handle and inherit the login,
 slot, device, template, and output-buffer rules documented for the referenced
 feature. They are exported symbols, not members of any standard versioned
 `CK_FUNCTION_LIST`.
+
+The `PKCS11RS_HsmAuth*` family is strictly an applet-administration surface. It
+does not expose runtime Calculate Session Keys commands. Runtime YubiHSM
+authentication remains an internal provider operation selected through
+ordinary YubiHSM `C_Login` or `C_LoginUser` forms.

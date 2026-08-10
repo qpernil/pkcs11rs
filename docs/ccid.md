@@ -156,10 +156,11 @@ remain local to their applet slot and do not overwrite the physical identity.
 ## Secure channels
 
 Set `PKCS11RS_CCID_SECURE_CHANNEL` to `scp03`, `scp11a`, `scp11b`, or `scp11c`
-to use that transport for every selected CCID applet. The secure channel is
-scoped to the selected AID. Selecting another applet invalidates the previous
-channel, so the module selects the requested AID and renegotiates before
-sending the next protected command.
+to use that transport for every selected CCID applet. A live secure channel is
+owned by one native smart-card transaction. The first APDU selects the
+transaction's requested AID and establishes the configured channel; ending the
+transaction destroys both states. A later operation therefore selects and
+authenticates again instead of trusting reader state retained between calls.
 
 The reader connection is shared between all applet slots. The Issuer SD is the
 Secure Domain management applet; it is not required to use PIV,
@@ -205,8 +206,8 @@ object mapping and local hardware probes, and
 [`preview-sign.md`](preview-sign.md) for the separate experimental lifecycle.
 
 The YubiHSM Auth applet exposes credential metadata in its own slot. Those
-credentials are also available as authentication providers to each ordinary
-USB YubiHSM slot. They do not create additional PKCS #11 slots. See
+credentials are also available as authentication providers to every ordinary
+local or remote YubiHSM slot. They do not create additional PKCS #11 slots. See
 [`yubihsm-auth.md`](yubihsm-auth.md) for the resulting slot layout and login
 syntax.
 

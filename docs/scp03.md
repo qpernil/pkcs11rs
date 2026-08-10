@@ -9,9 +9,13 @@ For the Issuer SD, the selected AID is the Secure Domain used for
 management. For PIV and OpenPGP, the transport initializes against those
 applets' AIDs directly.
 
-The CCID path selects an application and establishes an SCP03 channel during
-`C_Login`. The channel is scoped to the selected application and is
-renegotiated when another applet is selected.
+The CCID path starts each device-backed PKCS #11 call without an assumed
+selection or live channel. Before its first operation APDU, it selects the
+target application and establishes SCP03 inside the native smart-card
+transaction. The selected AID and SCP03 session are destroyed when that
+transaction ends, so a later call establishes a fresh channel even when it
+targets the same applet. `C_Login` establishes the PKCS #11 authorization
+state; it does not extend the lifetime of one SCP03 session across calls.
 
 SCP03 configuration is supplied as hexadecimal environment variables:
 
@@ -41,7 +45,8 @@ YubiKey 5 defaults use security level `0x33` and AES-128 keys. Explicit generic
 SCP03 configurations may still select security levels `0x00`, `0x01`, `0x03`,
 `0x11`, `0x13`, or `0x33`, and AES-128, AES-192, or AES-256 direct keys are
 accepted. Key values are never included in debug output, and derived
-transport and session keys are zeroized when the PKCS #11 login ends.
+transport and session keys are zeroized when their smart-card transaction
+ends.
 
 This implementation currently supports SCP03 S8 mode. It validates the
 card's `i` parameter, verifies pseudo-random card challenges using the

@@ -111,8 +111,10 @@ return `CKR_FUNCTION_FAILED` if another PKCS #11 call is executing; ordinary
 calls return `CKR_CRYPTOKI_NOT_INITIALIZED` while either transition is active.
 
 Applet connectors on a reader share one `PcscReaderState`, which owns the card
-connection, selected AID, APDU capabilities, SCP state, and complete APDU
-exchange lock. PKCS #11 calls targeting different applet slots may overlap
+connection, APDU capabilities, validated SCP11 trust cache, and complete APDU
+exchange lock. Each device-backed PKCS #11 call creates transaction-local
+selected-AID and live SCP03/SCP11 state and destroys both when the transaction
+ends. PKCS #11 calls targeting different applet slots may overlap
 while working with their independent slot and session state, but their card
 interactions cannot: each applet selection or complete APDU exchange on one
 reader holds the shared physical-reader gate. Different YubiHSMs and different
@@ -195,7 +197,7 @@ such as the iOS XCFramework and generated-binding checks.
 to their configured TLS, SCP11 OCE, or collection purpose. See
 [Certificate-bundle authoring](docs/pkcs11rs-tool.md).
 
-### Experimental iOS XCFramework
+### iOS XCFramework
 
 The PKCS #11 API is already a C ABI, so an iOS build can expose the existing
 entry points and headers directly without another Rust FFI adapter. Build
@@ -222,19 +224,25 @@ general USB interfaces or bulk endpoints to pkcs11rs.
 Software slots and configured remote YubiHSM HTTP connectors also remain
 available.
 
+Optional NFC discovery requests one card through Apple's system UI during the
+first `C_GetSlotList`, registers its applets as ordinary stable slots, and
+binds those slots to the discovered serial. Later device-backed operations
+reacquire the same card through CryptoTokenKit when necessary. USB CCID and NFC
+therefore share the same applet, transaction, secure-channel, and PKCS #11
+implementation rather than using an application-supplied transport shim.
+
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
 linking the XCFramework from Swift while pkcs11rs itself enumerates local
 CryptoTokenKit smart-card readers and transmits their APDUs. The app passes
 only a direct JSON configuration string through
 `CK_C_INITIALIZE_ARGS.pReserved`; it contains no CryptoTokenKit, CCID
-transport, or logging callback code. The app also uses the
-pkcs11rs `PKCS11RS_GetMechanismName` C extension, which returns a
-library-owned canonical `CKM_*` string for a recognized mechanism or null for
-an unknown value. Parallel helpers provide canonical `CKR_*`, `CKO_*`, `CKK_*`,
-`CKA_*`, and `CKP_*` names for return values, object classes, key types,
-attribute types, and profile IDs. Deprecated aliases resolve to their current
-canonical names, and every returned string remains owned by the library for the
-lifetime of the process.
+transport, or logging callback code. It uses the
+`PKCS11RS_GetObjectClassName` and `PKCS11RS_GetKeyTypeName` extensions while
+rendering its object inventory. Parallel helpers provide canonical `CKM_*`,
+`CKR_*`, `CKA_*`, and `CKP_*` names for mechanisms, return values, attribute
+types, and profile IDs. Deprecated aliases resolve to their current canonical
+names, and every returned string remains owned by the library for the lifetime
+of the process.
 
 ### Asynchronous multi-device connector
 
@@ -460,6 +468,14 @@ YubiHSM Auth selector as `C_Login`. The password may be omitted when
 caches it only after that slot authenticates successfully. A failed attempt
 does not populate another slot's cache. CCID applets, including YubiHSM Auth
 providers, are discovered before this YubiHSM discovery pass.
+
+For an asymmetric YubiHSM Auth credential, a provisioner can also persist its
+public point as an ordinary `CKO_PUBLIC_KEY` on each matching YubiHSM, using
+the Authentication Key ID as `CKA_ID`. A client can compare `CKA_EC_POINT`
+across the credential and YubiHSM slots, obtain the explicit target ID, and
+then use the normal named `C_LoginUser` form. pkcs11rs performs the selected
+login but deliberately does not hide this cross-slot matching policy inside
+the provider.
 
 See [YubiHSM public discovery](docs/yubihsm-auth.md#public-object-discovery)
 for credential provisioning, metadata, caching, and logout behavior.
