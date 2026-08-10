@@ -1486,7 +1486,7 @@ fn project_public_key_object(
 
 fn software_ecdh(key: &SoftwarePrivateKeyMaterial, public_data: &[u8]) -> Result<Vec<u8>, Error> {
     macro_rules! derive {
-        ($key:expr_2021, $curve:ty) => {{
+        ($key:expr, $curve:ty) => {{
             let peer = elliptic_curve::PublicKey::<$curve>::from_sec1_bytes(public_data)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             Ok(

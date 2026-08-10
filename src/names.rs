@@ -7,7 +7,7 @@ use crate::{
 use std::ffi::{c_char, CStr};
 
 macro_rules! constant_name {
-    ($value:expr_2021, $type:ty; $($constant:ident),+ $(,)?) => {
+    ($value:expr, $type:ty; $($constant:ident),+ $(,)?) => {
         match $value {
             $(candidate if candidate == $constant as $type => {
                 // Each input is a Rust identifier, so its stringified form

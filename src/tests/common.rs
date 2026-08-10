@@ -7862,7 +7862,7 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     };
 
     macro_rules! assert_stub {
-        ($name:literal, $call:expr_2021) => {
+        ($name:literal, $call:expr) => {
             assert_eq!($call, expected, "{} should validate session state", $name);
         };
     }
