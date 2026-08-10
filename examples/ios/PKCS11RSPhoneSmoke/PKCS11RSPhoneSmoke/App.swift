@@ -6,7 +6,7 @@ private let fallbackConnectorURL = "http://192.168.1.169:12345"
 private let initialSlotListCapacity = 10
 private let objectFindBatchCapacity = 64
 private let objectAttributeBufferCapacity = 1024
-private let yubiHsmAuthenticationKeyID = "1234"
+private let yubiHsmAuthenticationKeyID = "1236"
 private let yubiHsmAuthPassword = "password"
 private let softwareTokenName = "iPhone smoke"
 private let softwareTokenModel = "Software token"
@@ -105,6 +105,9 @@ private func connectorConfiguration() -> ConnectorConfiguration {
         "yubihsm": [
             "urls": [url],
             "public_discovery": "0001password",
+        ],
+        "nfc": [
+            "discovery": true,
         ],
     ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
@@ -688,7 +691,9 @@ private func authenticatedObjectInventory(
 
 private final class InspectionViewController: UIViewController {
     private let statusLabel = UILabel()
+    private let refreshButton = UIButton(type: .system)
     private let inventoryView = UITextView()
+    var onRefresh: (() -> Void)?
     private var refreshStartedAt: Date?
     private var refreshTimer: Timer?
 
@@ -701,6 +706,12 @@ private final class InspectionViewController: UIViewController {
         statusLabel.isHidden = true
         view.addSubview(statusLabel)
 
+        refreshButton.translatesAutoresizingMaskIntoConstraints = false
+        refreshButton.configuration = .bordered()
+        refreshButton.configuration?.title = "Refresh"
+        refreshButton.addTarget(self, action: #selector(refresh), for: .touchUpInside)
+        view.addSubview(refreshButton)
+
         inventoryView.translatesAutoresizingMaskIntoConstraints = false
         inventoryView.backgroundColor = .systemBackground
         inventoryView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
@@ -708,9 +719,11 @@ private final class InspectionViewController: UIViewController {
         inventoryView.textContainerInset = UIEdgeInsets(top: 8, left: 12, bottom: 20, right: 12)
         view.addSubview(inventoryView)
         NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            refreshButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            refreshButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            statusLabel.centerYAnchor.constraint(equalTo: refreshButton.centerYAnchor),
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            inventoryView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 4),
+            inventoryView.topAnchor.constraint(equalTo: refreshButton.bottomAnchor, constant: 4),
             inventoryView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             inventoryView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             inventoryView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -719,6 +732,7 @@ private final class InspectionViewController: UIViewController {
 
     func beginRefresh() {
         refreshTimer?.invalidate()
+        refreshButton.isEnabled = false
         refreshStartedAt = Date()
         updateRefreshStatus()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
@@ -728,11 +742,16 @@ private final class InspectionViewController: UIViewController {
     }
 
     func showInventory(_ inventory: String) {
+        endOperation()
+        inventoryView.text = inventory
+    }
+
+    private func endOperation() {
         refreshTimer?.invalidate()
         refreshTimer = nil
         refreshStartedAt = nil
         statusLabel.isHidden = true
-        inventoryView.text = inventory
+        refreshButton.isEnabled = true
     }
 
     private func updateRefreshStatus() {
@@ -741,29 +760,71 @@ private final class InspectionViewController: UIViewController {
         statusLabel.text = "Working… \(seconds)s"
         statusLabel.isHidden = false
     }
+
+    @objc private func refresh() {
+        onRefresh?()
+    }
 }
 
 private final class ModuleInspector {
     private var initialized = false
 
-    func inspect(configuration: ConnectorConfiguration) -> String {
+    private func initialize(configuration: ConnectorConfiguration) -> CK_RV {
         if !initialized {
             var arguments = CK_C_INITIALIZE_ARGS()
             arguments.flags = CK_FLAGS(CKF_OS_LOCKING_OK)
-            let initialize = configuration.json.withCString { json in
+            let result = configuration.json.withCString { json in
                 arguments.pReserved = UnsafeMutableRawPointer(mutating: json)
                 return C_Initialize(&arguments)
             }
-            guard initialize == CKR_OK else {
-                return "C_Initialize failed: \(initialize)"
+            guard result == CKR_OK else {
+                return result
             }
             initialized = true
+        }
+        return CKR_OK
+    }
+
+    private func moduleInformation(
+        configuration: ConnectorConfiguration
+    ) -> (lines: [String]?, error: String?) {
+        let initialize = initialize(configuration: configuration)
+        guard initialize == CKR_OK else {
+            return (nil, "C_Initialize failed: \(initialize)")
         }
 
         var info = CK_INFO()
         let getInfo = C_GetInfo(&info)
         guard getInfo == CKR_OK else {
-            return "C_GetInfo failed: \(getInfo)"
+            return (nil, "C_GetInfo failed: \(getInfo)")
+        }
+
+        return ([
+            "PKCS11RS on iPhone",
+            "",
+            "Cryptoki: \(info.cryptokiVersion.major).\(info.cryptokiVersion.minor)",
+            "Manufacturer: \(paddedString(info.manufacturerID))",
+            "Library: \(paddedString(info.libraryDescription)) \(info.libraryVersion.major).\(info.libraryVersion.minor)",
+            "Configuration: C_Initialize JSON",
+            "Connector: \(configuration.url)",
+            "Token storage: \(configuration.tokenStoragePath)",
+        ], nil)
+    }
+
+    func initializeAndDescribe(configuration: ConnectorConfiguration) -> String {
+        let information = moduleInformation(configuration: configuration)
+        guard var lines = information.lines else {
+            return information.error ?? "Module initialization failed"
+        }
+        lines.append("")
+        lines.append("Tap Refresh to discover slots and inspect tokens.")
+        return lines.joined(separator: "\n")
+    }
+
+    func inspect(configuration: ConnectorConfiguration) -> String {
+        let module = moduleInformation(configuration: configuration)
+        guard let information = module.lines else {
+            return module.error ?? "Module inspection failed"
         }
 
         var count = CK_ULONG(initialSlotListCapacity)
@@ -781,18 +842,9 @@ private final class ModuleInspector {
             return "C_GetSlotList failed: \(listResult)"
         }
 
-        var lines = [
-            "PKCS11RS on iPhone",
-            "",
-            "Cryptoki: \(info.cryptokiVersion.major).\(info.cryptokiVersion.minor)",
-            "Manufacturer: \(paddedString(info.manufacturerID))",
-            "Library: \(paddedString(info.libraryDescription)) \(info.libraryVersion.major).\(info.libraryVersion.minor)",
-            "Configuration: C_Initialize JSON",
-            "Connector: \(configuration.url)",
-            "Token storage: \(configuration.tokenStoragePath)",
-            "",
-            "Token-present slots: \(count)",
-        ]
+        var lines = information
+        lines.append("")
+        lines.append("Token-present slots: \(count)")
 
         var slotInventories = [SlotInventory]()
         for slot in slots.prefix(Int(count)) {
@@ -879,12 +931,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         window.rootViewController = controller
         window.makeKeyAndVisible()
         self.window = window
+        controller.onRefresh = { [weak self] in
+            self?.refresh()
+        }
+        initializeModule()
 
         return true
-    }
-
-    func applicationDidBecomeActive(_ application: UIApplication) {
-        refresh()
     }
 
     func applicationWillTerminate(_ application: UIApplication) {
@@ -899,6 +951,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         inspectionQueue.async { [weak self] in
             guard let self else { return }
             let result = moduleInspector.inspect(configuration: configuration)
+            DispatchQueue.main.async {
+                self.controller.showInventory(result)
+            }
+        }
+    }
+
+    private func initializeModule() {
+        let configuration = connectorConfiguration()
+        controller.beginRefresh()
+        inspectionQueue.async { [weak self] in
+            guard let self else { return }
+            let result = moduleInspector.initializeAndDescribe(configuration: configuration)
             DispatchQueue.main.async {
                 self.controller.showInventory(result)
             }
