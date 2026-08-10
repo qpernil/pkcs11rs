@@ -947,7 +947,7 @@ details.
 
 - [GlobalPlatform Secure Channel Protocol '03', Amendment D Version 1.2](https://globalplatform.org/specs-library/secure-channel-protocol-03-amendment-d-v1-2/)
 - [GlobalPlatform Secure Channel Protocol '11', Amendment F Version 1.4](https://globalplatform.org/specs-library/secure-channel-protocol-11-amendment-f/)
-- [YubiKey SCP03 and SCP11 Specifics](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-scp-specifics.html)
+- [YubiKey SCP03 and SCP11 Specifics](https://docs.yubico.com/hardware/yubikey/yk-tech-manual/yk5-apps-scp.html)
 - [YubiHSM 2 Command Reference](https://docs.yubico.com/hardware/yubihsm-2/hsm-2-user-guide/hsm2-cmd-reference.html)
 
 ## Security Notes
