@@ -118,6 +118,14 @@ typed internal requests before adding more PKCS #11-specific methods to the
 backend traits. Compare the software and YubiHSM paths for every new
 operation.
 
+The proposed
+[provider-backed YubiHSM authentication credentials](yubihsm-auth.md#future-provider-backed-authentication-credentials)
+are a second design probe. A regular P-256 key, and later an explicit AES-128
+K-ENC/K-MAC pair, should authenticate without exporting static key material or
+turning provider identities into transient PKCS #11 handles. The design must
+also establish authorization lifetime and deadlock-free cross-provider lock
+ordering before it is implemented.
+
 ### 2. Purify one internal boundary
 
 Move algorithm selection, provider object identity, capabilities, and errors
