@@ -14,6 +14,12 @@ names come from the `PKCS11RS_GetObjectClassName` and
 `PKCS11RS_GetKeyTypeName` helpers. YubiHSM Auth credential objects also show
 their algorithm, remaining password retries, and touch policy.
 
+For the reusable Xcode setup and the shared Swift and Objective-C application
+integration model, start with the
+[iOS integration guide](../../../docs/ios-integration.md). This document then
+describes the additional behavior exercised by the comprehensive Swift smoke
+test.
+
 The initialization JSON enables NFC discovery. At launch, the app calls
 `C_Initialize` and `C_GetInfo` on its background inspection queue, but does not
 enumerate slots. The first tap on **Refresh** calls `C_GetSlotList` and presents

@@ -244,6 +244,12 @@ types, and profile IDs. Deprecated aliases resolve to their current canonical
 names, and every returned string remains owned by the library for the lifetime
 of the process.
 
+The [iOS application integration guide](docs/ios-integration.md) gives the
+complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
+storage, and diagnostics guidance for both Swift and Objective-C applications.
+The compact [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke)
+demonstrates direct calls to the same statically linked C ABI.
+
 ### Asynchronous multi-device connector
 
 The workspace also builds `pkcs11rs-connector`, a fully asynchronous HTTP(S)
@@ -588,10 +594,12 @@ export PKCS11RS_CCID_SECURE_CHANNEL=scp11c
 Detailed configuration:
 
 - [Initialization configuration](docs/configuration.md)
+- [iOS application integration for Swift and Objective-C](docs/ios-integration.md)
 - [Multi-device YubiHSM connector](docs/connector.md)
 - [Named software slots](docs/software.md)
 - [Vendor extension API index](docs/extensions.md)
 - [iPhone smoke test](examples/ios/PKCS11RSPhoneSmoke/README.md)
+- [Objective-C iPhone smoke test](examples/ios/PKCS11RSObjCSmoke/README.md)
 - [Software secret-key design history](docs/software-secret-keys-plan.md)
 - [Provider abstraction roadmap](docs/provider-abstraction-plan.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
