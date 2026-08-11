@@ -130,6 +130,27 @@ jobs:
       - name: Build iOS XCFramework
         run: cargo xtask ios --release
 
+      - name: Build iOS example applications
+        run: |
+          xcodebuild -quiet \
+            -project examples/ios/PKCS11RSPhoneSmoke/PKCS11RSPhoneSmoke.xcodeproj \
+            -scheme PKCS11RSPhoneSmoke \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            build
+          xcodebuild -quiet \
+            -project examples/ios/PKCS11RSObjCSmoke/PKCS11RSObjCSmoke.xcodeproj \
+            -scheme PKCS11RSObjCSmoke \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=YES \
+            build
+
       - name: Run Rust tests
         run: cargo test --locked
 
