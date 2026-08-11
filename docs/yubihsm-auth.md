@@ -706,6 +706,61 @@ than by `C_Login`; if the device rejects the retained key, the SO login is
 cleared so the caller can retry. Reset is destructive and removes every
 YubiHSM Auth credential.
 
+## Future: provider-backed authentication credentials
+
+The current implementation authenticates with password-derived direct
+YubiHSM material or a credential held by the YubiHSM Auth applet. A future
+internal provider boundary may additionally allow explicitly selected ordinary
+PKCS #11 keys to supply the same YubiHSM authentication protocols. This is a
+development direction, not current behavior or a public API commitment.
+
+The preferred first implementation is a regular P-256 private key. The key
+must be selected by stable provider and object identity, remain usable for
+ECDH, and may remain non-extractable. Its provider would derive the static
+secret from the target device public key; the existing asymmetric handshake
+would then derive and verify the ephemeral session keys and receipt. Target
+device-key validation through an enrolled public key or verified attestation
+must be mandatory for this mode. Qualifying P-256 keys must never become login
+credentials through implicit discovery.
+
+A later symmetric implementation may accept an explicitly associated pair of
+AES-128 keys: one K-ENC key and one K-MAC key. Both keys must belong to the same
+provider and security domain, have compatible token lifetimes and CMAC/KDF
+policy, and be referenced as one atomic credential recipe. The implementation
+must invoke provider operations rather than read either `CKA_VALUE`. Labels and
+transient object handles are not sufficient pair identities, and arbitrary AES
+keys must not be inferred as credentials.
+
+The generalized internal abstraction should describe a YubiHSM authentication
+provider rather than treating these keys as YubiHSM Auth applet objects or as
+an ordinary application-visible cryptographic mechanism. Implementations may
+include the existing applet credential, an explicit P-256 key, an explicit AES
+pair, and the existing password-derived direct credential. Configuration or a
+future vendor selector must use stable token and object identities.
+
+This work must define the cross-slot authorization and concurrency boundary
+before adding key providers:
+
+- the source token must already authorize use of a private credential key;
+- circular authentication, where a target must authenticate before it can use
+  its own authentication credential, must be rejected;
+- source and target slot locking must have a fixed order and must not call back
+  through the public PKCS #11 ABI;
+- session recreation must retain stable credential references rather than
+  copied static key material;
+- source logout, removal, replacement, or object deletion must invalidate
+  authentication and recreation; and
+- derived session keys must remain only in zeroizing memory for the target
+  YubiHSM session and must never become PKCS #11 objects.
+
+Initial qualification should cover non-extractable software P-256 keys,
+wrong-device trust, source logout and removal, target reconnection, ambiguous
+object identities, circular dependencies, and concurrent cross-slot login.
+AES-pair qualification must additionally cover wrong key roles, mismatched
+providers, missing keys, non-AES-128 material, and card-cryptogram rejection.
+This feature is also a concrete design probe for the
+[provider abstraction roadmap](provider-abstraction-plan.md).
+
 ## Asymmetric hardware provisioning test
 
 The ignored `provisions_asymmetric_hsmauth_credential_on_yubihsm` and
