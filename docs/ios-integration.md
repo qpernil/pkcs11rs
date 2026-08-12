@@ -1,15 +1,23 @@
 # iOS application integration
 
-pkcs11rs exposes the same standard PKCS #11 C ABI on iOS that it exposes on
-Linux, macOS, and Windows. The unusual part of the iOS integration is packaging:
-the module is linked into the application as a static XCFramework instead of
-being discovered as a shared library at a filesystem path.
+pkcs11rs exposes the same standard PKCS #11 C ABI on iOS as on Linux, macOS,
+and Windows. This is normal PKCS #11 usage: Swift and Objective-C clients use
+the standard headers, types, functions, return values, buffer conventions,
+sessions, and lifecycle directly, without a pkcs11rs-specific client API or
+language wrapper.
 
-Swift and Objective-C applications can therefore call `C_Initialize`,
-`C_GetSlotList`, `C_OpenSession`, and every other exported PKCS #11 entry point
-directly. Applications that implement a generic PKCS #11 client may instead use
-`C_GetFunctionList` or `C_GetInterface`; the ABI and function semantics are the
-same either way.
+The PKCS #11 implementation, token and applet logic, sessions, and object model
+come from the shared cross-platform Rust codebase. The iOS-specific differences
+are packaging the module as a static XCFramework and using Apple CryptoTokenKit
+for local smart-card transport. Software slots and remote YubiHSM connectors
+continue to use the shared implementations.
+
+## Prerequisites
+
+Building the iOS XCFramework requires macOS, Xcode with the iOS SDK and Command
+Line Tools, and Rust 1.85 or newer. The generated artifact supports ARM64 iPhone
+and iPad devices and Apple Silicon (`arm64`) Simulator destinations; it does not
+include an Intel (`x86_64`) Simulator slice.
 
 ## Build the XCFramework
 
@@ -24,8 +32,6 @@ cargo xtask ios --release
 The output is `target/ios/PKCS11RS.xcframework`. Set
 `IPHONEOS_DEPLOYMENT_TARGET` before the command to override the default iOS 18.0
 deployment target, or pass `--output PATH` to choose a different output path.
-The XCFramework contains ARM64 device and Apple Silicon Simulator slices. It
-does not contain an Intel `x86_64` Simulator slice.
 
 ## Add pkcs11rs to an Xcode target
 
@@ -46,8 +52,8 @@ Or from Objective-C:
 @import PKCS11RS;
 ```
 
-No bridging header, Rust-specific adapter, CryptoTokenKit import, application
-transport callback, or CryptoTokenKit linker setting is required.
+No bridging header, CryptoTokenKit import, application transport callback, or
+CryptoTokenKit linker setting is required.
 
 ## Initialize the module
 
@@ -96,8 +102,9 @@ and cannot rely on a shell environment. The complete schema is documented in
 
 ## Call the PKCS #11 API
 
-The static link makes every exported C entry point directly callable. A known
-pkcs11rs client does not need to obtain a function table first:
+The static link makes every exported C entry point directly callable. An
+application linked directly against pkcs11rs does not need to obtain a function
+table first:
 
 ```objc
 CK_INFO info = {0};
@@ -169,7 +176,7 @@ initialization JSON:
 
 The application also needs `NFCReaderUsageDescription` and the complete list of
 ISO 7816 applet identifiers that pkcs11rs may select. Copy the maintained values
-from the Swift smoke app's
+from either smoke app's synchronized `Info.plist`, such as the Swift app's
 [`Info.plist`](../examples/ios/PKCS11RSPhoneSmoke/PKCS11RSPhoneSmoke/Info.plist).
 Run the initiating slot-list call on the background PKCS #11 queue. Cancellation
 or an unrecognized card omits NFC slots from that discovery attempt rather than
@@ -188,24 +195,21 @@ absolute path as `storage.tokens`; do not use the desktop example paths shown in
 the complete configuration schema.
 
 Never embed production PINs, YubiHSM authentication secrets, SCP keys, or TLS
-private keys in application source. The sample credentials in the Swift smoke
-app are deliberately prototype-only.
+private keys in application source. The sample credentials in both smoke apps
+are deliberately prototype-only.
 
 ## Example applications
 
 Two checked-in UIKit applications use the same XCFramework and direct C ABI:
 
-- [Swift iPhone smoke test](../examples/ios/PKCS11RSPhoneSmoke/README.md) is the
-  comprehensive integration and hardware exercise. It covers USB CCID, NFC,
-  persistent software keys, remote YubiHSM discovery, YubiHSM Auth login, object
-  inventory, and long-lived application behavior.
-- [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) is the
-  compact integration example. It initializes the module, reads `CK_INFO`, and
-  lists present slots and tokens on a serial background queue. It uses the same
-  initialization configuration as the Swift app: the connector URL override,
-  Application Support storage, software slot, public YubiHSM discovery, debug
-  logging, and NFC discovery all match. In both apps, the first explicit refresh
-  starts slot discovery so NFC UI is not presented automatically at launch.
+- [Swift iPhone smoke test](../examples/ios/PKCS11RSPhoneSmoke/README.md) and
+  [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) provide
+  synchronized functional coverage through their respective language bindings.
+  Both cover USB CCID, NFC, persistent software-token initialization and X25519
+  keys, remote YubiHSM discovery, explicit YubiHSM Auth public-key matching and
+  login, object inventory, debug Unified Logging, and long-lived application
+  behavior. The first explicit refresh starts slot discovery in both apps so
+  NFC UI is not presented automatically at launch.
 
 Build the XCFramework before opening either Xcode project. Both projects contain
 the maintainer's development team for automatic device signing; select a

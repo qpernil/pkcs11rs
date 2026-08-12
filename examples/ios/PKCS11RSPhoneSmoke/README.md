@@ -16,9 +16,9 @@ their algorithm, remaining password retries, and touch policy.
 
 For the reusable Xcode setup and the shared Swift and Objective-C application
 integration model, start with the
-[iOS integration guide](../../../docs/ios-integration.md). This document then
-describes the additional behavior exercised by the comprehensive Swift smoke
-test.
+[iOS integration guide](../../../docs/ios-integration.md). The Objective-C
+smoke app exercises the same functional flow through the C ABI; this document
+describes the shared behavior from the Swift client's perspective.
 
 The initialization JSON enables NFC discovery. At launch, the app calls
 `C_Initialize` and `C_GetInfo` on its background inspection queue, but does not

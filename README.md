@@ -247,8 +247,9 @@ of the process.
 The [iOS application integration guide](docs/ios-integration.md) gives the
 complete Xcode setup, initialization, threading, lifecycle, transport, NFC,
 storage, and diagnostics guidance for both Swift and Objective-C applications.
-The compact [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke)
-demonstrates direct calls to the same statically linked C ABI.
+The [Objective-C smoke-test app](examples/ios/PKCS11RSObjCSmoke) demonstrates
+direct calls to the same statically linked C ABI with synchronized discovery,
+software-token, object-inventory, and YubiHSM Auth coverage.
 
 ### Asynchronous multi-device connector
 
