@@ -226,10 +226,12 @@ available.
 
 Optional NFC discovery requests one card through Apple's system UI during the
 first `C_GetSlotList`, registers its applets as ordinary stable slots, and
-binds those slots to the discovered serial. Later device-backed operations
-reacquire the same card through CryptoTokenKit when necessary. USB CCID and NFC
-therefore share the same applet, transaction, secure-channel, and PKCS #11
-implementation rather than using an application-supplied transport shim.
+binds those slots to the discovered serial. The logical mount retains that
+identity until finalization, while PKCS #11 token presence follows whether
+CryptoTokenKit currently reports the card. A retained operation can reacquire
+only the same serial. USB CCID and NFC therefore share the same applet,
+transaction, secure-channel, and PKCS #11 implementation rather than using an
+application-supplied transport shim.
 
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
 linking the XCFramework from Swift while pkcs11rs itself enumerates local

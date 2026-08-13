@@ -1780,11 +1780,6 @@ impl ModuleContext {
             if slot_ids.is_empty() {
                 return Err(CKR_TOKEN_NOT_RECOGNIZED.into());
             }
-            let identity = device.identity(0);
-            if let Err(error) = transport.bind_serial(&identity.serial) {
-                slot_contexts.remove_slots(&slot_ids);
-                return Err(error);
-            }
             Ok(slot_ids)
         })();
         match result {

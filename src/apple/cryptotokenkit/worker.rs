@@ -2,10 +2,11 @@ use super::card::{
     OwnedSessionGuard, SessionGuard, begin_session, card_is_valid, discover_card_identity,
     resolve_card, transmit_card,
 };
-use super::{NfcTransport, nfc_diagnostic};
+use super::{DEFAULT_TIMEOUT, NfcTransport, nfc_diagnostic};
 use crate::*;
 use objc2::rc::Retained;
 use objc2_crypto_token_kit::TKSmartCard;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 
 enum WorkerRequest {
@@ -32,11 +33,12 @@ impl AppleCcidWorker {
     pub(super) fn spawn(
         reader_name: String,
         nfc: Option<Arc<NfcTransport>>,
+        present: Arc<AtomicBool>,
     ) -> Result<Self, CK_RV> {
         let (requests, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("pkcs11rs-apple-ccid".to_owned())
-            .spawn(move || run_worker(reader_name, nfc, receiver))
+            .spawn(move || run_worker(reader_name, nfc, present, receiver))
             .map_err(|_| CKR_HOST_MEMORY)?;
         Ok(Self { requests })
     }
@@ -90,6 +92,7 @@ impl AppleCcidWorker {
 fn run_worker(
     reader_name: String,
     nfc: Option<Arc<NfcTransport>>,
+    present: Arc<AtomicBool>,
     receiver: mpsc::Receiver<WorkerRequest>,
 ) {
     let mut card: Option<Retained<TKSmartCard>> = None;
@@ -119,10 +122,12 @@ fn run_worker(
                 let _ = reply.try_send(());
             }
             WorkerRequest::Refresh { reply } => {
-                let result = if nfc.as_ref().is_some_and(|nfc| nfc.is_mounted()) {
-                    Ok(())
-                } else if nfc.is_some() {
-                    Err(CKR_TOKEN_NOT_PRESENT as CK_RV)
+                let result = if let Some(nfc) = &nfc {
+                    if nfc.has_verified_card() {
+                        Ok(())
+                    } else {
+                        prepare_nfc_card(nfc, &mut card, &mut card_generation, DEFAULT_TIMEOUT)
+                    }
                 } else if card.as_deref().is_some_and(card_is_valid) {
                     Ok(())
                 } else {
@@ -141,6 +146,7 @@ fn run_worker(
                         }
                     }
                 };
+                present.store(result.is_ok(), Ordering::Release);
                 let _ = reply.try_send(result);
             }
             WorkerRequest::Transmit {
@@ -150,26 +156,7 @@ fn run_worker(
             } => {
                 let result = (|| {
                     if let Some(nfc) = &nfc {
-                        let prepared = nfc.prepare()?;
-                        loop {
-                            if card_generation != Some(prepared.generation) {
-                                card = None;
-                                card_generation = Some(prepared.generation);
-                            }
-                            if !card.as_deref().is_some_and(card_is_valid) {
-                                card = Some(resolve_card(&prepared.slot_name)?);
-                            }
-                            if !prepared.verify_serial {
-                                break;
-                            }
-                            let current = card.as_deref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
-                            let identity = discover_card_identity(current, timeout)?;
-                            if nfc.verify_serial(prepared.generation, identity.serial.as_deref())? {
-                                break;
-                            }
-                            nfc.wait_for_replacement(prepared.generation)?;
-                            card = None;
-                        }
+                        prepare_nfc_card(nfc, &mut card, &mut card_generation, timeout)?;
                     }
                     if !card.as_deref().is_some_and(card_is_valid) {
                         card = Some(resolve_card(&reader_name)?);
@@ -213,5 +200,33 @@ fn run_worker(
                 let _ = reply.try_send(result);
             }
         }
+    }
+}
+
+fn prepare_nfc_card(
+    nfc: &NfcTransport,
+    card: &mut Option<Retained<TKSmartCard>>,
+    card_generation: &mut Option<u64>,
+    timeout: Duration,
+) -> Result<(), CK_RV> {
+    let prepared = nfc.prepare()?;
+    loop {
+        if *card_generation != Some(prepared.generation) {
+            *card = None;
+            *card_generation = Some(prepared.generation);
+        }
+        if !card.as_deref().is_some_and(card_is_valid) {
+            *card = Some(resolve_card(&prepared.slot_name)?);
+        }
+        if !prepared.verify_serial {
+            return Ok(());
+        }
+        let current = card.as_deref().ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
+        let identity = discover_card_identity(current, timeout)?;
+        if nfc.verify_serial(prepared.generation, identity.serial.as_deref())? {
+            return Ok(());
+        }
+        nfc.wait_for_replacement(prepared.generation)?;
+        *card = None;
     }
 }
