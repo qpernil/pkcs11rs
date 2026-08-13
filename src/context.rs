@@ -820,6 +820,27 @@ impl SessionContext {
         self.encrypt_operation = None;
         self.decrypt_operation = None;
     }
+
+    pub(crate) fn cancel_operations(&mut self, flags: CK_FLAGS) {
+        if flags & CKF_FIND_OBJECTS as CK_FLAGS != 0 {
+            self.find_operation = None;
+        }
+        if flags & CKF_DIGEST as CK_FLAGS != 0 {
+            self.digest_operation = None;
+        }
+        if flags & CKF_ENCRYPT as CK_FLAGS != 0 {
+            self.encrypt_operation = None;
+        }
+        if flags & CKF_DECRYPT as CK_FLAGS != 0 {
+            self.decrypt_operation = None;
+        }
+        if flags & CKF_SIGN as CK_FLAGS != 0 {
+            self.sign_operation = None;
+        }
+        if flags & CKF_VERIFY as CK_FLAGS != 0 {
+            self.verify_operation = None;
+        }
+    }
 }
 
 impl std::fmt::Debug for SessionContext {

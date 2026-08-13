@@ -9,8 +9,17 @@ struct StaticInterface(CK_INTERFACE);
 // promising that every caller-created CK_INTERFACE is safe to share.
 unsafe impl Sync for StaticInterface {}
 
-session_unsupported_stub!(C_GetFunctionStatus());
-session_unsupported_stub!(C_CancelFunction());
+ffi_entry_point! {
+    pub fn C_GetFunctionStatus(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+        crate::api::general::session_function_not_parallel(session_handle)
+    }
+}
+
+ffi_entry_point! {
+    pub fn C_CancelFunction(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+        crate::api::general::session_function_not_parallel(session_handle)
+    }
+}
 
 ffi_entry_point! {
     pub fn C_GetInterfaceList(
@@ -92,8 +101,6 @@ ffi_entry_point! {
         }
     }
 }
-
-session_unsupported_stub!(C_SessionCancel(_flags: CK_FLAGS));
 
 session_unsupported_stub!(C_MessageEncryptInit(
     mechanism: *mut CK_MECHANISM,
