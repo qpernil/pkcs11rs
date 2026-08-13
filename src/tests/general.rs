@@ -2502,6 +2502,145 @@ pub fn session_entry_points_validate_initialization_and_session() {
 }
 
 #[test]
+pub fn legacy_parallel_functions_return_function_not_parallel() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    assert_eq!(
+        crate::api::C_GetFunctionStatus(TEST_SESSION_HANDLE),
+        CKR_FUNCTION_NOT_PARALLEL as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_CancelFunction(TEST_SESSION_HANDLE),
+        CKR_FUNCTION_NOT_PARALLEL as CK_RV
+    );
+
+    finalize_for_test();
+}
+
+#[test]
+pub fn session_cancel_clears_only_flagged_operations() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(::std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(test_slot_with_mechanisms(
+            true,
+            &[(CKM_SHA256 as CK_MECHANISM_TYPE, CKF_DIGEST as CK_FLAGS)],
+        )),
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    let (public_key, private_key) = with_test_slot_context(TEST_SLOT_ID, |context| {
+        let public_key = context
+            .memory_objects
+            .iter()
+            .find_map(|(handle, object)| {
+                (object.class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS).then_some(*handle)
+            })
+            .unwrap();
+        let private_key = context
+            .memory_objects
+            .iter()
+            .find_map(|(handle, object)| {
+                (object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS).then_some(*handle)
+            })
+            .unwrap();
+        (public_key, private_key)
+    });
+
+    let mut digest_mechanism = CK_MECHANISM {
+        mechanism: CKM_SHA256 as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    let mut rsa_mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        pParameter: ::std::ptr::null_mut(),
+        ulParameterLen: 0,
+    };
+    assert_eq!(
+        crate::api::C_FindObjectsInit(TEST_SESSION_HANDLE, ::std::ptr::null_mut(), 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DigestInit(TEST_SESSION_HANDLE, &mut digest_mechanism),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_EncryptInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_DecryptInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut rsa_mechanism, public_key),
+        CKR_OK as CK_RV
+    );
+
+    let operation_state = || {
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let session = context.sessions.get(&TEST_SESSION_HANDLE).unwrap();
+            (
+                session.find_operation.is_some(),
+                session.digest_operation.is_some(),
+                session.encrypt_operation.is_some(),
+                session.decrypt_operation.is_some(),
+                session.sign_operation.is_some(),
+                session.verify_operation.is_some(),
+            )
+        })
+    };
+
+    assert_eq!(operation_state(), (true, true, true, true, true, true));
+    assert_eq!(
+        crate::api::C_SessionCancel(TEST_SESSION_HANDLE, 0),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(operation_state(), (true, true, true, true, true, true));
+
+    let first_flags = (CKF_FIND_OBJECTS | CKF_ENCRYPT | CKF_SIGN) as CK_FLAGS;
+    assert_eq!(
+        crate::api::C_SessionCancel(TEST_SESSION_HANDLE, first_flags),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(operation_state(), (false, true, false, true, false, true));
+
+    assert_eq!(
+        crate::api::C_SessionCancel(TEST_SESSION_HANDLE, first_flags),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(operation_state(), (false, true, false, true, false, true));
+
+    let remaining_flags = (CKF_DIGEST | CKF_DECRYPT | CKF_VERIFY) as CK_FLAGS;
+    assert_eq!(
+        crate::api::C_SessionCancel(TEST_SESSION_HANDLE, remaining_flags),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        operation_state(),
+        (false, false, false, false, false, false)
+    );
+
+    finalize_for_test();
+}
+
+#[test]
 pub fn non_session_entry_points_validate_arguments_or_report_unsupported() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();

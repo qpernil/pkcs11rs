@@ -8,6 +8,14 @@ pub(super) fn session_function_not_supported(session_handle: CK_SESSION_HANDLE) 
     map(result)
 }
 
+pub(super) fn session_function_not_parallel(session_handle: CK_SESSION_HANDLE) -> CK_RV {
+    let result: Result<(), Error> = with_session_context(session_handle, |ctx| {
+        ctx._get_session(session_handle)?;
+        Err(CKR_FUNCTION_NOT_PARALLEL.into())
+    });
+    map(result)
+}
+
 ffi_entry_point! {
     pub fn C_Initialize(
         init_args: CK_VOID_PTR,

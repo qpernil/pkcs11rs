@@ -1,6 +1,23 @@
 use crate::*;
 
 ffi_entry_point! {
+    pub fn C_SessionCancel(
+        session_handle: CK_SESSION_HANDLE,
+        flags: CK_FLAGS,
+    ) -> CK_RV {
+        map(session_cancel(session_handle, flags))
+    }
+}
+
+fn session_cancel(session_handle: CK_SESSION_HANDLE, flags: CK_FLAGS) -> Result<(), Error> {
+    with_session_context_mut(session_handle, |ctx| {
+        ctx.get_session_context_mut(session_handle)?
+            .cancel_operations(flags);
+        Ok(())
+    })
+}
+
+ffi_entry_point! {
     pub fn C_InitToken(
         slot_id: CK_SLOT_ID,
         pin: *mut ::std::os::raw::c_uchar,
