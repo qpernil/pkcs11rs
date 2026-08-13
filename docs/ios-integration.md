@@ -182,6 +182,21 @@ Run the initiating slot-list call on the background PKCS #11 queue. Cancellation
 or an unrecognized card omits NFC slots from that discovery attempt rather than
 failing the entire slot list.
 
+A CryptoTokenKit NFC slot name lasts only for its system NFC session, so it
+cannot itself identify a PKCS #11 slot. pkcs11rs performs one identity scan at
+discovery and binds the resulting device serial to the logical slots for the
+module lifetime. That stable serial is what lets NFC use the same model as USB:
+slots remain registered while `CKF_TOKEN_PRESENT` independently follows the
+current transport. NFC adds only the session reacquisition step, which verifies
+the serial before allowing a replacement NFC session to carry APDUs for those
+slots.
+
+After physical removal, the next token-present slot-list refresh asks for the
+bound serial again. Successful verification restores NFC presence. If the user
+cancels, the NFC transport remains absent and YubiHSM Auth provider selection
+ignores it; connecting the same YubiKey through USB therefore selects its
+present USB provider without an ambiguous credential match.
+
 ## Network and storage configuration
 
 When connecting to a YubiHSM connector on the local network, provide the

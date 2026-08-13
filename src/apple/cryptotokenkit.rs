@@ -9,7 +9,7 @@ pub(crate) use provider::{CcidConnector, CcidProvider, CcidReader};
 use crate::device::DeviceOperationLifecycle;
 use crate::*;
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, OnceLock, Weak, atomic::AtomicBool};
 use worker::AppleCcidWorker;
 
 fn nfc_diagnostic(message: std::fmt::Arguments<'_>) {
@@ -43,6 +43,7 @@ struct AppleCcidLifecycle {
     reader_name: String,
     worker: Arc<OnceLock<Result<AppleCcidWorker, CK_RV>>>,
     reader_state: Weak<PcscReaderState>,
+    present: Arc<AtomicBool>,
     nfc: Option<Arc<NfcTransport>>,
 }
 
@@ -59,7 +60,13 @@ impl std::fmt::Debug for AppleCcidLifecycle {
 impl AppleCcidLifecycle {
     fn worker(&self) -> Result<&AppleCcidWorker, Error> {
         self.worker
-            .get_or_init(|| AppleCcidWorker::spawn(self.reader_name.clone(), self.nfc.clone()))
+            .get_or_init(|| {
+                AppleCcidWorker::spawn(
+                    self.reader_name.clone(),
+                    self.nfc.clone(),
+                    self.present.clone(),
+                )
+            })
             .as_ref()
             .map_err(|error| Error::from(*error))
     }

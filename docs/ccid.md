@@ -57,17 +57,21 @@ or transport implementation.
 Set `nfc.discovery` to `true` in the initialization JSON (or set
 `PKCS11RS_NFC_DISCOVERY=1`) to request one NFC card during the first
 `C_GetSlotList`. NFC discovery is disabled by default because it presents
-Apple's system UI. A successful request registers the selected card's applets
-as stable logical slots until `C_Finalize`. Those bound tokens remain logically
-present after the physical NFC session ends so applications can begin an
-operation; the operation requests the card again and rejects a card with a
-different serial. Canceling before discovery completes leaves no placeholder
-slot and is not retried by later slot-list polling. When the last operation
-finishes, the NFC session immediately becomes idle and remains available until
-the card is removed, the user cancels, or another operation reuses it. The
-initiating `C_GetSlotList` blocks while Apple's NFC UI is active and should
-therefore run on an application worker thread. Concurrent slot-list calls are
-serialized and cannot open duplicate NFC requests.
+Apple's system UI. Because CryptoTokenKit NFC slot names are session-scoped,
+pkcs11rs scans the selected card once and binds its device serial to stable
+logical slots until `C_Finalize`. Those slots then follow the ordinary USB slot
+model: registration is stable while physical token presence is refreshed
+independently. A replacement NFC session must verify the bound serial before
+carrying APDUs. After physical removal, the next `C_GetSlotList(CK_TRUE, ...)`
+asks for that serial again. Canceling the request leaves NFC absent, so HSM Auth
+ignores it when the same YubiKey is connected through USB. Canceling before
+discovery completes leaves no placeholder slot and is not retried by later
+slot-list polling. When the last operation finishes, the NFC session immediately
+becomes idle and remains available until the card is removed, the user cancels,
+or another operation reuses it. The initiating `C_GetSlotList` blocks while
+Apple's NFC UI is active and should therefore run on an application worker
+thread. Concurrent slot-list calls are serialized and cannot open duplicate NFC
+requests.
 
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.

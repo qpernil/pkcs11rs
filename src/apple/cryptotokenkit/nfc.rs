@@ -8,6 +8,7 @@ use objc2_crypto_token_kit::{
     TKErrorCode, TKSmartCardSlotManager, TKSmartCardSlotNFCSession, TKSmartCardSlotState,
 };
 use objc2_foundation::{NSError, NSString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Instant;
 
@@ -136,23 +137,25 @@ pub(super) struct PreparedNfcCard {
     pub(super) verify_serial: bool,
 }
 
+// CryptoTokenKit NFC slot names are session-scoped. The initial identity scan
+// binds one device serial to the module-lifetime PKCS #11 slots; every later
+// session is only transport state for that same stable identity.
 struct NfcTransportState {
-    mounted: bool,
+    mounted_serial: Option<String>,
     session: Option<NfcSessionGuard>,
     slot_name: Option<String>,
     generation: u64,
     verified_generation: Option<u64>,
-    expected_serial: Option<String>,
-    active_operations: usize,
+    operation_active: bool,
     operation_message: String,
     deadline: Option<Instant>,
     missing_since: Option<Instant>,
     cancel_retry_after: Option<Instant>,
-    shutdown: bool,
 }
 
 pub(crate) struct NfcTransport {
     state: Mutex<NfcTransportState>,
+    present: Arc<AtomicBool>,
     acquire: Mutex<()>,
     wake: Condvar,
 }
@@ -162,35 +165,37 @@ impl std::fmt::Debug for NfcTransport {
         let state = self.state.try_lock().ok();
         formatter
             .debug_struct("NfcTransport")
-            .field("mounted", &state.as_ref().map(|state| state.mounted))
-            .field("generation", &state.as_ref().map(|state| state.generation))
             .field(
-                "expected_serial",
+                "mounted_serial",
                 &state
                     .as_ref()
-                    .and_then(|state| state.expected_serial.as_deref()),
+                    .and_then(|state| state.mounted_serial.as_deref()),
             )
+            .field("generation", &state.as_ref().map(|state| state.generation))
             .finish_non_exhaustive()
     }
 }
 
 impl NfcTransport {
-    fn new(session: NfcSessionGuard, slot_name: String) -> Result<Arc<Self>, Error> {
+    fn new(
+        session: NfcSessionGuard,
+        slot_name: String,
+        expected_serial: String,
+    ) -> Result<Arc<Self>, Error> {
         let transport = Arc::new(Self {
             state: Mutex::new(NfcTransportState {
-                mounted: true,
+                mounted_serial: Some(expected_serial),
                 session: Some(session),
                 slot_name: Some(slot_name),
                 generation: 1,
                 verified_generation: Some(1),
-                expected_serial: None,
-                active_operations: 0,
+                operation_active: false,
                 operation_message: NFC_READING.to_owned(),
                 deadline: None,
                 missing_since: None,
                 cancel_retry_after: None,
-                shutdown: false,
             }),
+            present: Arc::new(AtomicBool::new(true)),
             acquire: Mutex::new(()),
             wake: Condvar::new(),
         });
@@ -208,7 +213,7 @@ impl NfcTransport {
             Err(_) => return,
         };
         loop {
-            if state.shutdown {
+            if state.mounted_serial.is_none() {
                 return;
             }
             let Some(deadline) = state.deadline else {
@@ -229,7 +234,7 @@ impl NfcTransport {
                 continue;
             }
             state.deadline = None;
-            if state.active_operations != 0 || state.session.is_none() {
+            if state.operation_active || state.session.is_none() {
                 continue;
             }
 
@@ -248,6 +253,7 @@ impl NfcTransport {
                 state.slot_name = None;
                 state.verified_generation = None;
                 state.missing_since = None;
+                self.present.store(false, Ordering::Release);
                 drop(state);
                 drop(ended);
                 state = match self.state.lock() {
@@ -263,7 +269,7 @@ impl NfcTransport {
 
     fn operation_display_message(state: &NfcTransportState) -> String {
         if state.operation_message == crate::logging::COMMUNICATING_MESSAGE {
-            communication_message(state.expected_serial.as_deref())
+            communication_message(state.mounted_serial.as_deref())
         } else {
             state.operation_message.clone()
         }
@@ -276,9 +282,10 @@ impl NfcTransport {
         let expected_serial;
         {
             let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
-            if !state.mounted || state.shutdown {
-                return Err(CKR_TOKEN_NOT_PRESENT as CK_RV);
-            }
+            expected_serial = state
+                .mounted_serial
+                .clone()
+                .ok_or(CKR_TOKEN_NOT_PRESENT as CK_RV)?;
             let now = Instant::now();
             if state
                 .cancel_retry_after
@@ -312,8 +319,8 @@ impl NfcTransport {
                 stale = state.session.take();
                 state.slot_name = None;
                 state.verified_generation = None;
+                self.present.store(false, Ordering::Release);
             }
-            expected_serial = state.expected_serial.clone();
         }
         drop(stale);
         if let Some(error) = inactive_error {
@@ -321,13 +328,13 @@ impl NfcTransport {
         }
 
         nfc_diagnostic(format_args!("requesting replacement NFC slot session"));
-        let prompt = nfc_prompt(expected_serial.as_deref());
+        let prompt = nfc_prompt(Some(&expected_serial));
         let (session, slot_name) =
             create_nfc_session(&prompt).map_err(|error| self.latch_cancellation(error))?;
         CcidConnector::wait_for_named_card(&slot_name, &session, &prompt)
             .map_err(|error| self.latch_cancellation(error))?;
         let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
-        if !state.mounted || state.shutdown {
+        if state.mounted_serial.is_none() {
             drop(state);
             drop(session);
             return Err(CKR_TOKEN_NOT_PRESENT as CK_RV);
@@ -341,10 +348,11 @@ impl NfcTransport {
             "installed NFC slot session generation {}",
             state.generation
         ));
-        state.verified_generation = state.expected_serial.is_none().then_some(state.generation);
+        state.verified_generation = None;
         state.slot_name = Some(slot_name.clone());
         state.session = Some(session);
         state.missing_since = None;
+        self.present.store(false, Ordering::Release);
         Ok(PreparedNfcCard {
             generation: state.generation,
             slot_name,
@@ -362,14 +370,16 @@ impl NfcTransport {
             return Err(CKR_DEVICE_REMOVED as CK_RV);
         }
         let matches = state
-            .expected_serial
+            .mounted_serial
             .as_deref()
             .zip(serial)
-            .is_some_and(|(expected, presented)| expected == presented);
+            .is_some_and(|(mounted, presented)| mounted == presented);
         if matches {
             state.verified_generation = Some(generation);
+            self.present.store(true, Ordering::Release);
             return Ok(true);
         }
+        self.present.store(false, Ordering::Release);
         if let Some(session) = &state.session {
             session
                 .update_message_checked("Wrong YubiKey — please remove it.")
@@ -388,7 +398,7 @@ impl NfcTransport {
                 return Err(CKR_DEVICE_ERROR as CK_RV);
             }
             let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD as CK_RV)?;
-            if state.generation != generation || !state.mounted || state.shutdown {
+            if state.generation != generation || state.mounted_serial.is_none() {
                 return Err(CKR_DEVICE_REMOVED as CK_RV);
             }
             let slot_name = state
@@ -404,9 +414,9 @@ impl NfcTransport {
             }
             if now >= next_session_check {
                 let expected = state
-                    .expected_serial
+                    .mounted_serial
                     .as_deref()
-                    .unwrap_or("the mounted key");
+                    .ok_or(CKR_DEVICE_REMOVED as CK_RV)?;
                 let message = if removed {
                     format!("Please present YubiKey {expected}.")
                 } else {
@@ -448,23 +458,10 @@ impl NfcTransport {
             }
             state.verified_generation = None;
         }
-    }
-
-    pub(crate) fn bind_serial(&self, serial: &str) -> Result<(), Error> {
-        if serial.is_empty() || serial.chars().all(|character| character == '0') {
-            return Err(CKR_DEVICE_ERROR.into());
-        }
-        let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD)?;
-        if state
-            .expected_serial
-            .as_deref()
-            .is_some_and(|expected| expected != serial)
-        {
-            return Err(CKR_DEVICE_REMOVED.into());
-        }
-        state.expected_serial = Some(serial.to_owned());
-        state.verified_generation = Some(state.generation);
-        Ok(())
+        // A transport failure means this session is no longer evidence that
+        // the mounted key is physically present. Reacquisition will set this
+        // again only after it verifies the stable serial.
+        self.present.store(false, Ordering::Release);
     }
 
     pub(crate) fn slot_name(&self) -> Result<String, Error> {
@@ -476,22 +473,40 @@ impl NfcTransport {
             .ok_or_else(|| Error::from(CKR_DEVICE_REMOVED))
     }
 
-    pub(crate) fn is_mounted(&self) -> bool {
+    // A mount survives removal of the physical card so its identity remains
+    // available for lifecycle management and verified reacquisition.
+    pub(crate) fn mounted_serial(&self) -> Option<String> {
         self.state
             .lock()
-            .is_ok_and(|state| state.mounted && !state.shutdown)
+            .ok()
+            .and_then(|state| state.mounted_serial.clone())
+    }
+
+    pub(crate) fn presence(&self) -> Arc<AtomicBool> {
+        self.present.clone()
+    }
+
+    // Avoid running the interactive preparation path during an ordinary
+    // refresh while the already verified CryptoTokenKit card is still valid.
+    pub(super) fn has_verified_card(&self) -> bool {
+        let slot_name = self.state.lock().ok().and_then(|state| {
+            (state.mounted_serial.is_some() && state.verified_generation == Some(state.generation))
+                .then(|| state.slot_name.clone())
+                .flatten()
+        });
+        slot_name.as_deref().is_some_and(nfc_slot_has_valid_card)
     }
 
     pub(crate) fn shutdown(&self) {
         let ended = self.state.lock().ok().and_then(|mut state| {
-            state.mounted = false;
-            state.shutdown = true;
+            state.mounted_serial = None;
             state.deadline = None;
             state.missing_since = None;
             state.slot_name = None;
             state.verified_generation = None;
             state.session.take()
         });
+        self.present.store(false, Ordering::Release);
         self.wake.notify_all();
         drop(ended);
     }
@@ -502,13 +517,13 @@ impl DeviceOperationLifecycle for NfcTransport {
         let mut ended = None;
         {
             let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD)?;
-            if !state.mounted || state.shutdown {
+            if state.mounted_serial.is_none() {
                 return Err(CKR_TOKEN_NOT_PRESENT.into());
             }
-            state.active_operations = state
-                .active_operations
-                .checked_add(1)
-                .ok_or(CKR_DEVICE_ERROR)?;
+            if state.operation_active {
+                return Err(CKR_OPERATION_ACTIVE.into());
+            }
+            state.operation_active = true;
             state.operation_message = message.to_owned();
             state.deadline = None;
             state.missing_since = None;
@@ -522,6 +537,7 @@ impl DeviceOperationLifecycle for NfcTransport {
                     ended = state.session.take();
                     state.slot_name = None;
                     state.verified_generation = None;
+                    self.present.store(false, Ordering::Release);
                 }
             }
         }
@@ -536,8 +552,8 @@ impl DeviceOperationLifecycle for NfcTransport {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
-            state.active_operations = state.active_operations.saturating_sub(1);
-            if state.active_operations == 0 && state.session.is_some() && !state.shutdown {
+            state.operation_active = false;
+            if state.session.is_some() && state.mounted_serial.is_some() {
                 let update_error = state
                     .session
                     .as_ref()
@@ -550,6 +566,7 @@ impl DeviceOperationLifecycle for NfcTransport {
                     state.slot_name = None;
                     state.verified_generation = None;
                     state.missing_since = None;
+                    self.present.store(false, Ordering::Release);
                 } else {
                     state.deadline = Some(Instant::now());
                     self.wake.notify_all();
@@ -590,7 +607,7 @@ pub(crate) fn begin_nfc_mount() -> Result<(Arc<NfcTransport>, CcidConnector, Dev
         hardware_version: None,
         firmware_version: info.version,
     };
-    let transport = NfcTransport::new(session, slot_name.clone())?;
+    let transport = NfcTransport::new(session, slot_name.clone(), identity.serial.clone())?;
     let (atr, max_input_length, max_output_length) = profile.into_transport_profile();
     let connector = CcidConnector::new_nfc(
         slot_name,

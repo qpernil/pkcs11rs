@@ -25,15 +25,17 @@ The initialization JSON enables NFC discovery. At launch, the app calls
 enumerate slots. The first tap on **Refresh** calls `C_GetSlotList` and presents
 Apple's NFC UI. Rust
 selects the configured applets through the ordinary CCID connector and
-registers each successful applet as a normal PKCS #11 slot. The bound tokens
-remain logically present until `C_Finalize`; after the physical NFC session
-ends, later operations present the UI again as needed and accept only the card
-serial bound during discovery. Canceling or presenting an unrecognized card
-simply omits NFC slots from that inventory and is not retried by later slot-list
-polling. Restarting the app starts a fresh module lifetime and discovery
-attempt. After the last operation, the NFC UI immediately displays its idle
-message and remains available until the key is removed, the user cancels, or
-another operation reuses the same session.
+registers each successful applet as a normal PKCS #11 slot. The logical NFC
+mount and its bound serial remain registered until `C_Finalize`, but PKCS #11
+token presence follows whether CryptoTokenKit currently reports the physical
+card. After removal, a later token-present inventory asks for the bound serial
+again; successful verification restores presence, while cancellation leaves
+the NFC slots absent. Canceling or presenting an unrecognized card during initial
+discovery leaves no NFC slots and is not retried by later slot-list polling.
+Restarting the app starts a fresh module lifetime and discovery attempt. After
+the last operation, the NFC UI immediately displays its idle message and remains
+available until the key is removed, the user cancels, or another operation
+reuses the same session.
 The NFC message identifies the current PKCS #11 stage, such as token discovery,
 object search, attribute reading, or authentication. Generic communication
 still identifies the bound YubiKey serial, and serial-guidance messages remain
@@ -47,11 +49,13 @@ selected applet between pkcs11rs calls without detection. Configured SCP03 or
 SCP11 channels are established inside the transaction and destroyed with it.
 
 After the NFC UI has closed, tap **Refresh** to repeat the ordinary PKCS #11
-inventory. NFC discovery itself remains latched, but the first operation on a
-bound NFC token requests the same card again and verifies its serial. This is
-the manual reacquisition test. Launching or foregrounding the app does not
-refresh automatically, so presenting or dismissing the NFC system UI cannot
-create an application-activation refresh loop.
+inventory. If the NFC key was removed, Refresh asks for the bound serial again.
+Presenting it restores NFC presence. If that request is canceled after the same
+key has been attached through USB, its USB slots and HSM Auth provider remain
+present while the retained but absent NFC provider is ignored. Launching or
+foregrounding the app does not refresh automatically, so presenting or
+dismissing the NFC system UI cannot create an application-activation refresh
+loop.
 
 The app's Core NFC polling list includes all applet AIDs that Rust may select.
 Testing on iOS 26 found that CryptoTokenKit removes the NFC slot when the full

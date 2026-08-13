@@ -138,6 +138,7 @@ impl HsmAuthProviderRegistry {
                     .source
                     .as_ref()
                     .is_none_or(|source| provider.source_identifier() == *source)
+                && provider.connector.as_ref().is_present()
         });
         let provider = match matches.next() {
             Some(provider) => provider,

@@ -36,12 +36,16 @@ impl CcidConnector {
         max_output_length: usize,
         nfc: Option<Arc<NfcTransport>>,
     ) -> Self {
+        let present = nfc
+            .as_ref()
+            .map_or_else(|| Arc::new(AtomicBool::new(true)), |nfc| nfc.presence());
         let worker = Arc::new(OnceLock::new());
         let state = Arc::new_cyclic(|reader_state| {
             let lifecycle = Arc::new(AppleCcidLifecycle {
                 reader_name: reader_name.clone(),
                 worker: worker.clone(),
                 reader_state: reader_state.clone(),
+                present: present.clone(),
                 nfc: nfc.clone(),
             });
             let device = Arc::new(DeviceContext::with_lifecycle(
@@ -56,7 +60,7 @@ impl CcidConnector {
             max_input_length,
             max_output_length,
             state,
-            present: Arc::new(AtomicBool::new(true)),
+            present,
             worker,
             nfc,
         }
@@ -222,7 +226,13 @@ impl CcidConnector {
 
     fn worker(&self) -> Result<&AppleCcidWorker, Error> {
         self.worker
-            .get_or_init(|| AppleCcidWorker::spawn(self.reader_name.clone(), self.nfc.clone()))
+            .get_or_init(|| {
+                AppleCcidWorker::spawn(
+                    self.reader_name.clone(),
+                    self.nfc.clone(),
+                    self.present.clone(),
+                )
+            })
             .as_ref()
             .map_err(|error| Error::from(*error))
     }
@@ -287,10 +297,7 @@ impl Connector for CcidConnector {
     }
 
     fn is_present(&self) -> bool {
-        self.nfc.as_ref().map_or_else(
-            || self.present.load(Ordering::Acquire),
-            |nfc| nfc.is_mounted(),
-        )
+        self.present.load(Ordering::Acquire)
     }
 
     fn buffer_size(&self) -> usize {
@@ -329,12 +336,6 @@ impl Connector for CcidConnector {
     }
 
     fn refresh(&self) -> Result<(), Error> {
-        if let Some(nfc) = &self.nfc {
-            return nfc
-                .is_mounted()
-                .then_some(())
-                .ok_or_else(|| Error::from(CKR_TOKEN_NOT_PRESENT));
-        }
         self.worker()?.refresh()
     }
 }
