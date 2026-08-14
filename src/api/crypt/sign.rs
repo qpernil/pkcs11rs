@@ -201,6 +201,20 @@ fn ml_dsa_sign<P: ml_dsa::MlDsaParams>(
     parameters: Option<&MlDsaSignatureParameters>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
+    ml_dsa_sign_with_randomizer(key, parameters, data, |expanded, data, context| {
+        expanded
+            .sign_randomized(data, context, &mut getrandom::SysRng)
+            .map(|signature| signature.encode().to_vec())
+            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
+    })
+}
+
+fn ml_dsa_sign_with_randomizer<P: ml_dsa::MlDsaParams>(
+    key: &ml_dsa::SigningKey<P>,
+    parameters: Option<&MlDsaSignatureParameters>,
+    data: &[u8],
+    randomized: impl FnOnce(&ml_dsa::ExpandedSigningKey<P>, &[u8], &[u8]) -> Result<Vec<u8>, Error>,
+) -> Result<Vec<u8>, Error> {
     let parameters = parameters.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
     let expanded = key.expanded_key();
     let deterministic = || {
@@ -211,15 +225,12 @@ fn ml_dsa_sign<P: ml_dsa::MlDsaParams>(
     };
     match parameters.hedge_variant {
         x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => deterministic(),
-        x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => expanded
-            .sign_randomized(data, &parameters.context, &mut getrandom::SysRng)
-            .map(|signature| signature.encode().to_vec())
-            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG)),
-        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => expanded
-            .sign_randomized(data, &parameters.context, &mut getrandom::SysRng)
-            .map(|signature| signature.encode().to_vec())
-            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
-            .or_else(|_| deterministic()),
+        x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => {
+            randomized(expanded, data, &parameters.context)
+        }
+        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => {
+            randomized(expanded, data, &parameters.context).or_else(|_| deterministic())
+        }
         _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
     }
 }
@@ -1212,6 +1223,7 @@ session_unsupported_stub!(C_SignRecover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signature::Keypair;
 
     const MESSAGE: &[u8] = b"software-assisted hardware signature";
     const KEY_ID: u16 = 0x1234;
@@ -1296,5 +1308,55 @@ mod tests {
             assert_eq!(&command.data()[..2], &KEY_ID.to_be_bytes());
             assert_eq!(&command.data()[2..], digest(mechanism));
         }
+    }
+
+    #[test]
+    fn ml_dsa_hedge_required_reports_rng_failure_without_fallback() {
+        let key = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::Seed::from([7; 32]));
+        let parameters = MlDsaSignatureParameters {
+            hedge_variant: CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE,
+            context: b"required".to_vec(),
+        };
+
+        let error = ml_dsa_sign_with_randomizer(
+            &key,
+            Some(&parameters),
+            MESSAGE,
+            |_expanded, _data, _context| Err(CKR_RANDOM_NO_RNG.into()),
+        )
+        .unwrap_err();
+
+        assert_eq!(CK_RV::from(error), CKR_RANDOM_NO_RNG as CK_RV);
+    }
+
+    #[test]
+    fn ml_dsa_hedge_preferred_rng_failure_returns_valid_deterministic_signature() {
+        let key = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&ml_dsa::Seed::from([7; 32]));
+        let parameters = MlDsaSignatureParameters {
+            hedge_variant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
+            context: b"preferred".to_vec(),
+        };
+
+        let encoded = ml_dsa_sign_with_randomizer(
+            &key,
+            Some(&parameters),
+            MESSAGE,
+            |_expanded, _data, _context| Err(CKR_RANDOM_NO_RNG.into()),
+        )
+        .unwrap();
+        let signature = ml_dsa::Signature::<ml_dsa::MlDsa44>::try_from(encoded.as_slice()).unwrap();
+
+        assert!(
+            key.verifying_key()
+                .verify_with_context(MESSAGE, &parameters.context, &signature)
+        );
+        assert_eq!(
+            encoded,
+            key.expanded_key()
+                .sign_deterministic(MESSAGE, &parameters.context)
+                .unwrap()
+                .encode()
+                .to_vec()
+        );
     }
 }
