@@ -10,11 +10,9 @@ private let yubiHsmAuthPassword = "password"
 private let softwareTokenName = "iPhone smoke"
 private let softwareTokenModel = "Software token"
 private let softwareTokenPIN = "password"
-private let softwareX25519Label = "iPhone smoke X25519"
-private let softwareX25519ID = Array("iphone-smoke-x25519".utf8)
-private let x25519Parameters: [UInt8] = [
-    0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
-]
+private let softwareMlDsaLabel = "iPhone smoke ML-DSA-87"
+private let softwareMlDsaID = Array("iphone-smoke-ml-dsa-87".utf8)
+private let softwareMlDsaMessageLength = 32
 private let ckaYubicoHsmAuthAlgorithm =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5901)
 private let ckaYubicoHsmAuthRetries =
@@ -432,12 +430,13 @@ private func initializeSoftwareUserPIN(session: CK_SESSION_HANDLE) -> CK_RV {
     }
 }
 
-private func findSoftwareX25519PrivateKey(
-    session: CK_SESSION_HANDLE
+private func findSoftwareMlDsaKey(
+    session: CK_SESSION_HANDLE,
+    objectClass: CK_OBJECT_CLASS
 ) -> (result: CK_RV, object: CK_OBJECT_HANDLE?) {
-    var objectClass = CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
-    var keyType = CK_KEY_TYPE(CKK_EC_MONTGOMERY)
-    var identifier = softwareX25519ID
+    var objectClass = objectClass
+    var keyType = CK_KEY_TYPE(CKK_ML_DSA)
+    var identifier = softwareMlDsaID
     var attributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 3)
     let initialize = withUnsafeMutablePointer(to: &objectClass) { classPointer in
         withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
@@ -478,72 +477,80 @@ private func findSoftwareX25519PrivateKey(
     return (CK_RV(CKR_OK), count == 0 ? nil : object)
 }
 
-private func generateSoftwareX25519KeyPair(
+private func generateSoftwareMlDsaKeyPair(
     session: CK_SESSION_HANDLE
 ) -> (result: CK_RV, publicKey: CK_OBJECT_HANDLE, privateKey: CK_OBJECT_HANDLE) {
     var token = CK_BBOOL(CK_TRUE)
-    var derive = CK_BBOOL(CK_TRUE)
-    var parameters = x25519Parameters
-    var identifier = softwareX25519ID
-    var label = Array(softwareX25519Label.utf8)
+    var verify = CK_BBOOL(CK_TRUE)
+    var sign = CK_BBOOL(CK_TRUE)
+    var parameterSet = CK_ML_DSA_PARAMETER_SET_TYPE(CKP_ML_DSA_87)
+    var identifier = softwareMlDsaID
+    var label = Array(softwareMlDsaLabel.utf8)
     var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
     var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
     var mechanism = CK_MECHANISM(
-        mechanism: CK_MECHANISM_TYPE(CKM_EC_MONTGOMERY_KEY_PAIR_GEN),
+        mechanism: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
         pParameter: nil,
         ulParameterLen: 0
     )
     let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
-        withUnsafeMutablePointer(to: &derive) { derivePointer in
-            parameters.withUnsafeMutableBytes { parameterBuffer in
-                identifier.withUnsafeMutableBytes { identifierBuffer in
-                    label.withUnsafeMutableBytes { labelBuffer in
-                        var publicAttributes = [CK_ATTRIBUTE](
-                            repeating: CK_ATTRIBUTE(),
-                            count: 4
-                        )
-                        publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
-                        publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
-                        publicAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                        publicAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
-                        publicAttributes[1].pValue = labelBuffer.baseAddress
-                        publicAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
-                        publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
-                        publicAttributes[2].pValue = identifierBuffer.baseAddress
-                        publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                        publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_EC_PARAMS)
-                        publicAttributes[3].pValue = parameterBuffer.baseAddress
-                        publicAttributes[3].ulValueLen = CK_ULONG(parameterBuffer.count)
+        withUnsafeMutablePointer(to: &verify) { verifyPointer in
+            withUnsafeMutablePointer(to: &sign) { signPointer in
+                withUnsafeMutablePointer(to: &parameterSet) { parameterSetPointer in
+                    identifier.withUnsafeMutableBytes { identifierBuffer in
+                        label.withUnsafeMutableBytes { labelBuffer in
+                            var publicAttributes = [CK_ATTRIBUTE](
+                                repeating: CK_ATTRIBUTE(),
+                                count: 5
+                            )
+                            publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                            publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                            publicAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            publicAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                            publicAttributes[1].pValue = labelBuffer.baseAddress
+                            publicAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                            publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                            publicAttributes[2].pValue = identifierBuffer.baseAddress
+                            publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                            publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_PARAMETER_SET)
+                            publicAttributes[3].pValue = UnsafeMutableRawPointer(parameterSetPointer)
+                            publicAttributes[3].ulValueLen = CK_ULONG(
+                                MemoryLayout<CK_ML_DSA_PARAMETER_SET_TYPE>.size
+                            )
+                            publicAttributes[4].type = CK_ATTRIBUTE_TYPE(CKA_VERIFY)
+                            publicAttributes[4].pValue = UnsafeMutableRawPointer(verifyPointer)
+                            publicAttributes[4].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
 
-                        var privateAttributes = [CK_ATTRIBUTE](
-                            repeating: CK_ATTRIBUTE(),
-                            count: 4
-                        )
-                        privateAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
-                        privateAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
-                        privateAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
-                        privateAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
-                        privateAttributes[1].pValue = labelBuffer.baseAddress
-                        privateAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
-                        privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
-                        privateAttributes[2].pValue = identifierBuffer.baseAddress
-                        privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                        privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_DERIVE)
-                        privateAttributes[3].pValue = UnsafeMutableRawPointer(derivePointer)
-                        privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            var privateAttributes = [CK_ATTRIBUTE](
+                                repeating: CK_ATTRIBUTE(),
+                                count: 4
+                            )
+                            privateAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                            privateAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                            privateAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            privateAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                            privateAttributes[1].pValue = labelBuffer.baseAddress
+                            privateAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                            privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                            privateAttributes[2].pValue = identifierBuffer.baseAddress
+                            privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                            privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_SIGN)
+                            privateAttributes[3].pValue = UnsafeMutableRawPointer(signPointer)
+                            privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
 
-                        return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
-                            privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
-                                C_GenerateKeyPair(
-                                    session,
-                                    &mechanism,
-                                    publicBuffer.baseAddress,
-                                    CK_ULONG(publicBuffer.count),
-                                    privateBuffer.baseAddress,
-                                    CK_ULONG(privateBuffer.count),
-                                    &publicKey,
-                                    &privateKey
-                                )
+                            return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
+                                privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
+                                    C_GenerateKeyPair(
+                                        session,
+                                        &mechanism,
+                                        publicBuffer.baseAddress,
+                                        CK_ULONG(publicBuffer.count),
+                                        privateBuffer.baseAddress,
+                                        CK_ULONG(privateBuffer.count),
+                                        &publicKey,
+                                        &privateKey
+                                    )
+                                }
                             }
                         }
                     }
@@ -552,6 +559,91 @@ private func generateSoftwareX25519KeyPair(
         }
     }
     return (result, publicKey, privateKey)
+}
+
+private func exerciseSoftwareMlDsa(
+    session: CK_SESSION_HANDLE,
+    publicKey: CK_OBJECT_HANDLE,
+    privateKey: CK_OBJECT_HANDLE
+) -> (
+    result: CK_RV,
+    operation: String,
+    signatureLength: Int,
+    signMilliseconds: Double,
+    verifyMilliseconds: Double
+) {
+    var message = [UInt8](repeating: 0, count: softwareMlDsaMessageLength)
+    var result = message.withUnsafeMutableBufferPointer { buffer in
+        C_GenerateRandom(session, buffer.baseAddress, CK_ULONG(buffer.count))
+    }
+    guard result == CKR_OK else {
+        return (result, "C_GenerateRandom", 0, 0, 0)
+    }
+    var mechanism = CK_MECHANISM(
+        mechanism: CK_MECHANISM_TYPE(CKM_ML_DSA),
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    let signStart = ProcessInfo.processInfo.systemUptime
+    result = C_SignInit(session, &mechanism, privateKey)
+    guard result == CKR_OK else {
+        return (result, "C_SignInit", 0, 0, 0)
+    }
+    var signatureLength = CK_ULONG()
+    result = message.withUnsafeMutableBufferPointer { buffer in
+        C_Sign(
+            session,
+            buffer.baseAddress,
+            CK_ULONG(buffer.count),
+            nil,
+            &signatureLength
+        )
+    }
+    guard result == CKR_OK else {
+        return (result, "C_Sign(size)", 0, 0, 0)
+    }
+    var signature = [UInt8](repeating: 0, count: Int(signatureLength))
+    result = message.withUnsafeMutableBufferPointer { messageBuffer in
+        signature.withUnsafeMutableBufferPointer { signatureBuffer in
+            C_Sign(
+                session,
+                messageBuffer.baseAddress,
+                CK_ULONG(messageBuffer.count),
+                signatureBuffer.baseAddress,
+                &signatureLength
+            )
+        }
+    }
+    let signMilliseconds = (ProcessInfo.processInfo.systemUptime - signStart) * 1_000
+    guard result == CKR_OK else {
+        return (result, "C_Sign", 0, signMilliseconds, 0)
+    }
+
+    signature.removeSubrange(Int(signatureLength)..<signature.count)
+    let verifyStart = ProcessInfo.processInfo.systemUptime
+    result = C_VerifyInit(session, &mechanism, publicKey)
+    guard result == CKR_OK else {
+        return (result, "C_VerifyInit", signature.count, signMilliseconds, 0)
+    }
+    result = message.withUnsafeMutableBufferPointer { messageBuffer in
+        signature.withUnsafeMutableBufferPointer { signatureBuffer in
+            C_Verify(
+                session,
+                messageBuffer.baseAddress,
+                CK_ULONG(messageBuffer.count),
+                signatureBuffer.baseAddress,
+                CK_ULONG(signatureBuffer.count)
+            )
+        }
+    }
+    let verifyMilliseconds = (ProcessInfo.processInfo.systemUptime - verifyStart) * 1_000
+    return (
+        result,
+        "C_Verify",
+        signature.count,
+        signMilliseconds,
+        verifyMilliseconds
+    )
 }
 
 private func softwareObjectInventory(
@@ -621,19 +713,62 @@ private func softwareObjectInventory(
     }
 
     if failure == nil {
-        let found = findSoftwareX25519PrivateKey(session: session)
-        if found.result != CKR_OK {
-            failure = "X25519 key search failed: \(found.result)"
-        } else if found.object != nil {
-            lines.append("  X25519 keypair already present")
+        let foundPublic = findSoftwareMlDsaKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY)
+        )
+        let foundPrivate = findSoftwareMlDsaKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
+        )
+        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        if foundPublic.result != CKR_OK {
+            failure = "ML-DSA-87 public-key search failed: \(foundPublic.result)"
+        } else if foundPrivate.result != CKR_OK {
+            failure = "ML-DSA-87 private-key search failed: \(foundPrivate.result)"
+        } else if foundPublic.object != nil, foundPrivate.object != nil {
+            lines.append("  ML-DSA-87 keypair already present")
+        } else if foundPublic.object != nil || foundPrivate.object != nil {
+            failure = "ML-DSA-87 keypair is incomplete"
         } else {
-            let generated = generateSoftwareX25519KeyPair(session: session)
+            let generationStart = ProcessInfo.processInfo.systemUptime
+            let generated = generateSoftwareMlDsaKeyPair(session: session)
+            let generationMilliseconds =
+                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
             if generated.result == CKR_OK {
+                publicKey = generated.publicKey
+                privateKey = generated.privateKey
                 lines.append(
-                    "  generated X25519 keypair: public \(generated.publicKey), private \(generated.privateKey)"
+                    String(
+                        format: "  generated ML-DSA-87 keypair in %.3f ms: public %llu, private %llu",
+                        generationMilliseconds,
+                        UInt64(generated.publicKey),
+                        UInt64(generated.privateKey)
+                    )
                 )
             } else {
-                failure = "C_GenerateKeyPair(X25519) failed: \(generated.result)"
+                failure = "C_GenerateKeyPair(ML-DSA-87) failed: \(generated.result)"
+            }
+        }
+
+        if failure == nil {
+            let exercised = exerciseSoftwareMlDsa(
+                session: session,
+                publicKey: publicKey,
+                privateKey: privateKey
+            )
+            if exercised.result == CKR_OK {
+                lines.append(
+                    String(
+                        format: "  ML-DSA-87 sign %.3f ms, verify %.3f ms (%d-byte signature)",
+                        exercised.signMilliseconds,
+                        exercised.verifyMilliseconds,
+                        exercised.signatureLength
+                    )
+                )
+            } else {
+                failure = "\(exercised.operation)(ML-DSA-87) failed: \(exercised.result)"
             }
         }
     }
