@@ -193,6 +193,9 @@ fn software_sign(
         SoftwarePrivateKeyMaterial::MlDsa44(key) => ml_dsa_sign(key, ml_dsa, data),
         SoftwarePrivateKeyMaterial::MlDsa65(key) => ml_dsa_sign(key, ml_dsa, data),
         SoftwarePrivateKeyMaterial::MlDsa87(key) => ml_dsa_sign(key, ml_dsa, data),
+        SoftwarePrivateKeyMaterial::MlKem512(_)
+        | SoftwarePrivateKeyMaterial::MlKem768(_)
+        | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 

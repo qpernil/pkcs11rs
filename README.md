@@ -42,7 +42,8 @@ The minimum supported Rust version is 1.85.
 - **Named software slots** created only by explicit configuration, with
   login-gated asymmetric and secret keys, plus encrypted persistent key
   objects when local token storage is configured. This includes RSA, EC,
-  Ed25519, X25519, AES, HMAC, generic-secret, and legacy 3DES keys.
+  Ed25519, X25519, ML-DSA, ML-KEM, AES, HMAC, generic-secret, and legacy 3DES
+  keys.
 
 Hardware and firmware capabilities determine which objects and mechanisms are
 available in a particular slot.

@@ -429,6 +429,7 @@ fn generate_key_pair(
                     || x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
             )
         {
             let (public_object, mut private_object) =
@@ -1164,6 +1165,29 @@ fn software_generate_key_pair(
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             (CKK_ML_DSA as CK_KEY_TYPE, material)
+        }
+        x if x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameter_set = read_ulong_template_attribute(
+                template_attribute(public_template, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            let mut seed = Zeroizing::new([0u8; 64]);
+            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+            let seed = ml_kem::Seed::from(*seed);
+            let material = match parameter_set {
+                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(seed))
+                }
+                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlKem768(ml_kem::DecapsulationKey::from_seed(seed))
+                }
+                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlKem1024(ml_kem::DecapsulationKey::from_seed(seed))
+                }
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            };
+            (CKK_ML_KEM as CK_KEY_TYPE, material)
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
@@ -2262,7 +2286,7 @@ pub(crate) fn x963_kdf(
     Ok(output)
 }
 
-fn derived_secret_object(
+pub(super) fn derived_secret_object(
     templ: &[CK_ATTRIBUTE],
     default_length: usize,
     maximum_length: usize,

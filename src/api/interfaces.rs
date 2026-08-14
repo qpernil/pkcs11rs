@@ -216,24 +216,6 @@ session_unsupported_stub!(C_VerifyMessageNext(
 ));
 session_unsupported_stub!(C_MessageVerifyFinal());
 
-session_unsupported_stub!(C_EncapsulateKey(
-    mechanism: *mut CK_MECHANISM,
-    public_key: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    attribute_count: ::std::os::raw::c_ulong,
-    ciphertext: *mut ::std::os::raw::c_uchar,
-    ciphertext_len: *mut ::std::os::raw::c_ulong,
-    key: *mut CK_OBJECT_HANDLE,
-));
-session_unsupported_stub!(C_DecapsulateKey(
-    mechanism: *mut CK_MECHANISM,
-    private_key: CK_OBJECT_HANDLE,
-    templ: *mut CK_ATTRIBUTE,
-    attribute_count: ::std::os::raw::c_ulong,
-    ciphertext: *mut ::std::os::raw::c_uchar,
-    ciphertext_len: ::std::os::raw::c_ulong,
-    key: *mut CK_OBJECT_HANDLE,
-));
 session_unsupported_stub!(C_VerifySignatureInit(
     mechanism: *mut CK_MECHANISM,
     key: CK_OBJECT_HANDLE,

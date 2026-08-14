@@ -235,6 +235,8 @@ backend does not duplicate cryptography.
 - ML-DSA: FIPS 204 parameter sets ML-DSA-44, ML-DSA-65, and ML-DSA-87;
   key-pair generation plus pure signing and verification with optional context
   and deterministic or hedged signing.
+- ML-KEM: FIPS 203 parameter sets ML-KEM-512, ML-KEM-768, and ML-KEM-1024;
+  key-pair generation plus PKCS #11 3.2 encapsulation and decapsulation.
 - AES: 128, 192, and 256-bit keys with ECB, CBC, CBC-PAD, CTR, CCM, GCM,
   AES-KW, AES-KWP, CMAC, CMAC-GENERAL, and GMAC.
 - Legacy 3DES: three-key 24-byte keys with ECB, CBC, and CBC-PAD. This is a
@@ -268,6 +270,8 @@ The slot advertises these exact mechanism groups:
 | `CKM_EDDSA` | 255 | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_ML_DSA_KEY_PAIR_GEN` | 1312–2592 bytes | `CKF_GENERATE_KEY_PAIR` |
 | `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_ML_KEM_KEY_PAIR_GEN` | 800–1568 bytes | `CKF_GENERATE_KEY_PAIR` |
+| `CKM_ML_KEM` | 800–1568 bytes | `CKF_ENCAPSULATE \| CKF_DECAPSULATE` |
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
 | `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
@@ -283,9 +287,9 @@ The slot advertises these exact mechanism groups:
 | SHA-1, SHA-2, and SHA-3 digest mechanisms | 0 | `CKF_DIGEST` |
 
 The numeric range is the envelope representable by `C_GetMechanismInfo`;
-`CKA_EC_PARAMS` selects and validates the exact named curve. For ML-DSA, the
-range is the encoded public-key size and `CKA_PARAMETER_SET` selects the exact
-parameter set.
+`CKA_EC_PARAMS` selects and validates the exact named curve. For ML-DSA and
+ML-KEM, the range is the encoded public-key size and `CKA_PARAMETER_SET`
+selects the exact parameter set.
 
 ### ML-DSA parameters and key attributes
 
@@ -304,6 +308,30 @@ most 255 bytes and select `CKH_HEDGE_PREFERRED`, `CKH_HEDGE_REQUIRED`, or
 ignores the hedge choice. Persistent generated keys are stored using the
 standard ML-DSA PKCS #8 seed encoding inside the software token's existing
 encrypted private-key record.
+
+### ML-KEM parameters and key attributes
+
+`CKM_ML_KEM_KEY_PAIR_GEN` takes no mechanism parameter. The public-key
+template must contain `CKA_PARAMETER_SET` with `CKP_ML_KEM_512`,
+`CKP_ML_KEM_768`, or `CKP_ML_KEM_1024`. Generated public and private objects
+use `CKK_ML_KEM`; both expose `CKA_PARAMETER_SET`. Public `CKA_VALUE` is the
+raw FIPS 203 encapsulation key. Private `CKA_SEED` is the 64-byte generation
+seed and private `CKA_VALUE` is the expanded FIPS 203 decapsulation key; the
+normal PKCS #11 sensitive-attribute rules protect both private values.
+
+`CKM_ML_KEM` takes no mechanism parameter. `C_EncapsulateKey` requires a
+public key with `CKA_ENCAPSULATE=CK_TRUE`, returns the parameter-set-sized
+ciphertext, and creates a 32-byte shared-secret object. `C_DecapsulateKey`
+requires the corresponding private key with `CKA_DECAPSULATE=CK_TRUE` and
+creates the same secret. The output template may select `CKK_GENERIC_SECRET`
+at its full 32-byte length or `CKK_AES` at 16, 24, or 32 bytes.
+
+The KEM operations use the PKCS #11 3.2 function-table entries. The mechanisms
+and key-pair generation remain discoverable through every supported interface,
+but the 2.40, 3.0, and 3.1 tables have no KEM operation slots. Persistent
+generated keys use the standard ML-KEM PKCS #8 seed encoding inside the
+software token's existing encrypted private-key record; public ML-KEM objects
+use the existing software-backed public-object record.
 
 ### PBKDF2 parameters
 

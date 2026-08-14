@@ -777,6 +777,8 @@ fn piv_certificate_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -900,6 +902,8 @@ fn piv_data_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -1262,6 +1266,8 @@ fn is_key_component_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
             || x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE
             || x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE
             || x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE
+            || x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            || x == CKA_SEED as CK_ATTRIBUTE_TYPE
     )
 }
 
@@ -1292,6 +1298,19 @@ fn optional_big_num(
             }
         })
         .unwrap_or(Ok(None))
+}
+
+fn required_parameter_set(
+    components: &mut HashMap<CK_ATTRIBUTE_TYPE, Zeroizing<Vec<u8>>>,
+) -> Result<CK_ULONG, Error> {
+    let value = components
+        .remove(&(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE))
+        .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+    let value: [u8; std::mem::size_of::<CK_ULONG>()] = value
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
+    Ok(CK_ULONG::from_ne_bytes(value))
 }
 
 fn build_imported_key_material(
@@ -1349,6 +1368,22 @@ fn build_imported_key_material(
             KeyMaterial::Public(PublicKeyMaterial::Ec {
                 parameters: parameters.to_vec(),
                 public_key: point[1..].to_vec(),
+            })
+        }
+        (class, key_type)
+            if class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_ML_KEM as CK_KEY_TYPE =>
+        {
+            let parameter_set = required_parameter_set(&mut components)?;
+            let public_key = components
+                .remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE))
+                .ok_or(CKR_TEMPLATE_INCOMPLETE)?;
+            if ml_kem_public_key_info(parameter_set, &public_key).is_none() {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::MlKem {
+                parameter_set,
+                public_key: public_key.to_vec(),
             })
         }
         (class, key_type)
@@ -1469,6 +1504,50 @@ fn build_imported_key_material(
                     .try_into()
                     .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
                 SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(value))
+            };
+            KeyMaterial::SoftwarePrivate(material)
+        }
+        (class, key_type)
+            if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
+                && key_type == CKK_ML_KEM as CK_KEY_TYPE =>
+        {
+            let parameter_set = required_parameter_set(&mut components)?;
+            let seed = components.remove(&(CKA_SEED as CK_ATTRIBUTE_TYPE));
+            let expanded = components.remove(&(CKA_VALUE as CK_ATTRIBUTE_TYPE));
+            if seed.is_some() == expanded.is_some() {
+                return Err(CKR_TEMPLATE_INCONSISTENT.into());
+            }
+            macro_rules! decode {
+                ($params:ty, $variant:ident) => {{
+                    let key = if let Some(seed) = seed {
+                        let seed = ml_kem::Seed::try_from(seed.as_slice())
+                            .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                        ml_kem::DecapsulationKey::<$params>::from_seed(seed)
+                    } else {
+                        #[allow(deprecated)]
+                        {
+                            let expanded = ml_kem::ExpandedDecapsulationKey::<$params>::try_from(
+                                expanded.as_deref().ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+                            )
+                            .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+                            ml_kem::ExpandedKeyEncoding::from_expanded_bytes(&expanded)
+                                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+                        }
+                    };
+                    SoftwarePrivateKeyMaterial::$variant(key)
+                }};
+            }
+            let material = match parameter_set {
+                x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    decode!(ml_kem::MlKem512, MlKem512)
+                }
+                x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    decode!(ml_kem::MlKem768, MlKem768)
+                }
+                x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
+                    decode!(ml_kem::MlKem1024, MlKem1024)
+                }
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             KeyMaterial::SoftwarePrivate(material)
         }
