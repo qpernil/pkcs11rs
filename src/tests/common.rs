@@ -604,6 +604,136 @@ fn finalize_for_test() {
     let _ = crate::api::C_Finalize(::std::ptr::null_mut());
 }
 
+#[test]
+fn repeated_slot_list_with_valid_card_handle_is_apdu_free() {
+    #[derive(Debug)]
+    struct ValidCardHandleConnector {
+        refreshes: std::sync::atomic::AtomicUsize,
+        commands: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl crate::Connector for ValidCardHandleConnector {
+        fn as_debug(&self) -> &dyn std::fmt::Debug {
+            self
+        }
+
+        fn manufacturer(&self) -> &str {
+            "Yubico"
+        }
+
+        fn product(&self) -> &str {
+            "Mock CryptoTokenKit card"
+        }
+
+        fn major(&self) -> u8 {
+            5
+        }
+
+        fn minor(&self) -> u8 {
+            72
+        }
+
+        fn connection_epoch(&self) -> u64 {
+            1
+        }
+
+        fn is_present(&self) -> bool {
+            true
+        }
+
+        fn buffer_size(&self) -> usize {
+            1024
+        }
+
+        fn transmit<'a>(
+            &self,
+            send_buffer: &[u8],
+            receive_buffer: &'a mut [u8],
+            _timeout: std::time::Duration,
+        ) -> Result<&'a [u8], crate::Error> {
+            self.commands.lock().unwrap().push(send_buffer.to_vec());
+            receive_buffer[..2].copy_from_slice(&[0x90, 0x00]);
+            Ok(&receive_buffer[..2])
+        }
+
+        fn refresh(&self) -> Result<(), crate::Error> {
+            self.refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    const SLOT_ID: CK_SLOT_ID = 96;
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+
+    let transport = std::sync::Arc::new(ValidCardHandleConnector {
+        refreshes: std::sync::atomic::AtomicUsize::new(0),
+        commands: std::sync::Mutex::new(Vec::new()),
+    });
+    let identity = crate::device::DeviceIdentity {
+        manufacturer: "Yubico".to_owned(),
+        product: "YubiKey".to_owned(),
+        serial: "12345678".to_owned(),
+        hardware_version: None,
+        firmware_version: Some((5, 7, 2)),
+    };
+    let connector = crate::connector::CcidDeviceConnector::new(
+        identity,
+        transport.clone() as crate::connector::SharedConnector,
+    );
+    let aid = vec![0xa0, 0x00, 0x00, 0x05, 0x27, 0x21, 0x01];
+    let applet = std::rc::Rc::new(crate::connector::PcscAppletConnector::new(
+        connector.clone() as crate::connector::SharedConnector,
+        &aid,
+        None,
+        connector.reader_state(),
+    ));
+    let slot = crate::backend::HsmAuthSlot::new_with_device(
+        applet,
+        aid,
+        connector.reader_state().device.clone(),
+    );
+    install_test_slot_with_backend(SLOT_ID, Box::new(slot));
+
+    let mut first = [0; 128];
+    let mut first_count = first.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, first.as_mut_ptr(), &mut first_count),
+        CKR_OK as CK_RV
+    );
+    let mut second = [0; 128];
+    let mut second_count = second.len() as CK_ULONG;
+    assert_eq!(
+        crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, second.as_mut_ptr(), &mut second_count,),
+        CKR_OK as CK_RV
+    );
+
+    assert_eq!(first_count, second_count);
+    assert_eq!(
+        &first[..first_count as usize],
+        &second[..second_count as usize]
+    );
+    assert!(first[..first_count as usize].contains(&SLOT_ID));
+    assert_eq!(
+        transport
+            .refreshes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert!(transport.commands.lock().unwrap().is_empty());
+    assert_eq!(
+        crate::connector::Connector::connection_epoch(connector.as_ref()),
+        0
+    );
+
+    finalize_for_test();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum YubiHsmLoginApi {
     Login,

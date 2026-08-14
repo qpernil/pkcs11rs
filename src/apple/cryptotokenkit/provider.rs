@@ -5,14 +5,14 @@ use super::nfc::{
 };
 use super::worker::AppleCcidWorker;
 use super::{AppleCcidLifecycle, DEFAULT_TIMEOUT, load_crypto_token_kit};
-use crate::device::{DeviceContext, DeviceIdentity};
+use crate::device::{DeviceContext, DeviceIdentity, DeviceOperationLifecycle};
 use crate::*;
 use objc2::rc::autoreleasepool;
 use objc2_crypto_token_kit::{TKSmartCardSlot, TKSmartCardSlotManager, TKSmartCardSlotState};
 use objc2_foundation::NSString;
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Instant;
 
@@ -24,6 +24,7 @@ pub(crate) struct CcidConnector {
     max_output_length: usize,
     state: Arc<PcscReaderState>,
     present: Arc<AtomicBool>,
+    connection_epoch: Arc<AtomicU64>,
     worker: Arc<OnceLock<Result<AppleCcidWorker, CK_RV>>>,
     nfc: Option<Arc<NfcTransport>>,
 }
@@ -40,6 +41,7 @@ impl CcidConnector {
             .as_ref()
             .map_or_else(|| Arc::new(AtomicBool::new(true)), |nfc| nfc.presence());
         let worker = Arc::new(OnceLock::new());
+        let connection_epoch = Arc::new(AtomicU64::new(0));
         let state = Arc::new_cyclic(|reader_state| {
             let lifecycle = Arc::new(AppleCcidLifecycle {
                 reader_name: reader_name.clone(),
@@ -61,6 +63,7 @@ impl CcidConnector {
             max_output_length,
             state,
             present,
+            connection_epoch,
             worker,
             nfc,
         }
@@ -296,6 +299,17 @@ impl Connector for CcidConnector {
         self.state.device.identity(0).firmware_version
     }
 
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch.load(Ordering::Acquire)
+    }
+
+    fn transport_verified_serial(&self) -> Option<String> {
+        self.nfc
+            .as_ref()
+            .filter(|nfc| nfc.has_verified_card())
+            .and_then(|nfc| nfc.mounted_serial())
+    }
+
     fn is_present(&self) -> bool {
         self.present.load(Ordering::Acquire)
     }
@@ -310,6 +324,35 @@ impl Connector for CcidConnector {
         ApduCapabilities {
             command_chaining: card.command_chaining,
             extended: card.extended && self.max_input_length > 261,
+        }
+    }
+
+    fn begin_transport_operation(&self, message: &str) -> Result<(), Error> {
+        if let Some(nfc) = &self.nfc {
+            nfc.enter(crate::device::DeviceOperationKind::Ccid, message)?;
+        }
+        if let Err(error) = self.worker()?.begin_operation() {
+            if let Some(nfc) = &self.nfc {
+                nfc.exit(crate::device::DeviceOperationKind::Ccid);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn end_transport_operation(&self) {
+        if let Ok(worker) = self.worker() {
+            if let Err(error) = worker.end_operation() {
+                tracing::debug!(
+                    target: "pkcs11rs::transport",
+                    reader = %self.reader_name,
+                    ?error,
+                    "failed to end CryptoTokenKit transport operation"
+                );
+            }
+        }
+        if let Some(nfc) = &self.nfc {
+            nfc.exit(crate::device::DeviceOperationKind::Ccid);
         }
     }
 
@@ -336,7 +379,10 @@ impl Connector for CcidConnector {
     }
 
     fn refresh(&self) -> Result<(), Error> {
-        self.worker()?.refresh()
+        if self.worker()?.refresh()? {
+            self.connection_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(())
     }
 }
 

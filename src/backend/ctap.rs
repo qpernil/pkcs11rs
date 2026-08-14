@@ -211,6 +211,156 @@ impl FidoEndpoint for CcidFidoEndpoint {
 }
 
 #[derive(Debug)]
+struct SwitchableFidoRoutes {
+    ccid: Rc<dyn FidoEndpoint>,
+    preferred: RefCell<Option<Rc<dyn FidoEndpoint>>>,
+}
+
+impl SwitchableFidoRoutes {
+    fn active(&self) -> Rc<dyn FidoEndpoint> {
+        self.preferred
+            .borrow()
+            .as_ref()
+            .filter(|endpoint| endpoint.is_present())
+            .cloned()
+            .unwrap_or_else(|| self.ccid.clone())
+    }
+}
+
+#[derive(Debug)]
+struct SwitchableCtapTransport {
+    routes: Rc<SwitchableFidoRoutes>,
+}
+
+impl CtapTransport for SwitchableCtapTransport {
+    fn transact(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
+        self.routes.active().transport().transact(request)
+    }
+}
+
+/// One serial-owned FIDO applet with CCID as its universal route and an
+/// optional preferred USB HID route. If HID is unavailable, the same slot
+/// naturally falls back to CCID, including through a desktop NFC reader.
+#[derive(Debug)]
+pub(crate) struct SwitchableFidoEndpoint {
+    routes: Rc<SwitchableFidoRoutes>,
+    transport: Rc<SwitchableCtapTransport>,
+    device: Arc<DeviceContext>,
+    identity: DeviceIdentity,
+}
+
+impl SwitchableFidoEndpoint {
+    fn new(ccid: Rc<dyn FidoEndpoint>) -> Rc<Self> {
+        let device = ccid.device_context();
+        let identity = ccid.identity();
+        let routes = Rc::new(SwitchableFidoRoutes {
+            ccid,
+            preferred: RefCell::new(None),
+        });
+        Rc::new(Self {
+            transport: Rc::new(SwitchableCtapTransport {
+                routes: routes.clone(),
+            }),
+            routes,
+            device,
+            identity,
+        })
+    }
+
+    pub(crate) fn prefer(&self, endpoint: Rc<dyn FidoEndpoint>) {
+        *self.routes.preferred.borrow_mut() = Some(endpoint);
+    }
+}
+
+impl FidoEndpoint for SwitchableFidoEndpoint {
+    fn transport(&self) -> Rc<dyn CtapTransport> {
+        self.transport.clone()
+    }
+
+    fn device_context(&self) -> Arc<DeviceContext> {
+        self.device.clone()
+    }
+
+    fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+        self.routes.active().device_operation_kind()
+    }
+
+    fn name(&self) -> String {
+        self.routes.active().name()
+    }
+
+    fn manufacturer(&self) -> &str {
+        &self.identity.manufacturer
+    }
+
+    fn product(&self) -> &str {
+        &self.identity.product
+    }
+
+    fn serial(&self) -> &str {
+        &self.identity.serial
+    }
+
+    fn major(&self) -> u8 {
+        self.identity
+            .firmware_version
+            .map_or(0, |version| version.0)
+    }
+
+    fn minor(&self) -> u8 {
+        self.identity.firmware_version.map_or(0, |version| {
+            version.1.saturating_mul(10).saturating_add(version.2)
+        })
+    }
+
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        self.identity.hardware_version
+    }
+
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.identity.firmware_version
+    }
+
+    fn identity(&self) -> DeviceIdentity {
+        self.identity.clone()
+    }
+
+    fn is_present(&self) -> bool {
+        self.routes.active().is_present()
+    }
+
+    fn refresh(&self) -> Result<(), Error> {
+        if let Some(preferred) = self.routes.preferred.borrow().clone()
+            && preferred.refresh().is_ok()
+            && preferred.is_present()
+        {
+            return Ok(());
+        }
+        self.routes.ccid.refresh()
+    }
+
+    fn prepare(&self) -> Result<(), Error> {
+        self.routes.active().prepare()
+    }
+
+    fn clear(&self) {
+        self.routes.active().clear();
+    }
+
+    fn set_discovery_error(&self, error: &Error) {
+        self.routes.active().set_discovery_error(error);
+    }
+
+    fn clear_discovery_error(&self) {
+        self.routes.active().clear_discovery_error();
+    }
+
+    fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
+        self.routes.active().open_session(slot_id, flags)
+    }
+}
+
+#[derive(Debug)]
 #[cfg(feature = "native-hardware")]
 pub(crate) struct HidFidoEndpoint {
     descriptor: HidDeviceDescriptor,
@@ -378,6 +528,7 @@ impl Fido2Slot {
         Self::new_with_device(connector, application_aid, device)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new_with_device(
         connector: Rc<dyn Connector>,
         application_aid: Vec<u8>,
@@ -388,6 +539,16 @@ impl Fido2Slot {
             application_aid,
             device,
         )))
+    }
+
+    pub(crate) fn new_switchable_with_device(
+        connector: Rc<dyn Connector>,
+        application_aid: Vec<u8>,
+        device: Arc<DeviceContext>,
+    ) -> (Self, Rc<SwitchableFidoEndpoint>) {
+        let ccid = Rc::new(CcidFidoEndpoint::new(connector, application_aid, device));
+        let endpoint = SwitchableFidoEndpoint::new(ccid);
+        (Self::new_with_endpoint(endpoint.clone()), endpoint)
     }
 
     pub(crate) fn new_with_endpoint(endpoint: Rc<dyn FidoEndpoint>) -> Self {
@@ -1076,6 +1237,118 @@ mod tests {
     use super::*;
     use crate::ctap::{AUTHENTICATOR_CLIENT_PIN, AUTHENTICATOR_GET_INFO, FIDO2_AID};
     use std::{cell::RefCell, collections::VecDeque};
+
+    #[derive(Debug)]
+    struct RouteTransport(u8);
+
+    impl CtapTransport for RouteTransport {
+        fn transact(&self, _request: &[u8]) -> Result<Vec<u8>, Error> {
+            Ok(vec![self.0])
+        }
+    }
+
+    #[derive(Debug)]
+    struct RouteEndpoint {
+        present: Cell<bool>,
+        kind: crate::device::DeviceOperationKind,
+        marker: u8,
+        device: Arc<DeviceContext>,
+    }
+
+    impl RouteEndpoint {
+        fn new(
+            present: bool,
+            kind: crate::device::DeviceOperationKind,
+            marker: u8,
+            device: Arc<DeviceContext>,
+        ) -> Rc<Self> {
+            Rc::new(Self {
+                present: Cell::new(present),
+                kind,
+                marker,
+                device,
+            })
+        }
+    }
+
+    impl FidoEndpoint for RouteEndpoint {
+        fn transport(&self) -> Rc<dyn CtapTransport> {
+            Rc::new(RouteTransport(self.marker))
+        }
+
+        fn device_context(&self) -> Arc<DeviceContext> {
+            self.device.clone()
+        }
+
+        fn device_operation_kind(&self) -> crate::device::DeviceOperationKind {
+            self.kind
+        }
+
+        fn name(&self) -> String {
+            format!("route {}", self.marker)
+        }
+
+        fn manufacturer(&self) -> &str {
+            "Yubico"
+        }
+
+        fn product(&self) -> &str {
+            "YubiKey"
+        }
+
+        fn serial(&self) -> &str {
+            "12345678"
+        }
+
+        fn major(&self) -> u8 {
+            5
+        }
+
+        fn minor(&self) -> u8 {
+            70
+        }
+
+        fn is_present(&self) -> bool {
+            self.present.get()
+        }
+
+        fn open_session(&self, slot_id: CK_SLOT_ID, flags: CK_FLAGS) -> Box<dyn BackendSession> {
+            Box::new(Fido2Session { slot_id, flags })
+        }
+    }
+
+    #[test]
+    fn serial_owned_fido_route_prefers_hid_and_falls_back_to_ccid() {
+        let device = Arc::new(DeviceContext::new(DeviceIdentity {
+            manufacturer: "Yubico".to_owned(),
+            product: "YubiKey".to_owned(),
+            serial: "12345678".to_owned(),
+            hardware_version: None,
+            firmware_version: Some((5, 7, 0)),
+        }));
+        let ccid = RouteEndpoint::new(
+            true,
+            crate::device::DeviceOperationKind::Ccid,
+            1,
+            device.clone(),
+        );
+        let hid = RouteEndpoint::new(true, crate::device::DeviceOperationKind::Hid, 2, device);
+        let endpoint = SwitchableFidoEndpoint::new(ccid);
+        endpoint.prefer(hid.clone());
+
+        assert_eq!(
+            endpoint.device_operation_kind(),
+            crate::device::DeviceOperationKind::Hid
+        );
+        assert_eq!(endpoint.transport().transact(&[0x04]).unwrap(), vec![2]);
+        hid.present.set(false);
+        assert_eq!(
+            endpoint.device_operation_kind(),
+            crate::device::DeviceOperationKind::Ccid
+        );
+        assert_eq!(endpoint.transport().transact(&[0x04]).unwrap(), vec![1]);
+        assert_eq!(endpoint.serial(), "12345678");
+    }
 
     #[derive(Debug)]
     struct ScriptedConnector {

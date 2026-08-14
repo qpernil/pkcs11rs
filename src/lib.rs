@@ -784,7 +784,7 @@ fn with_slot_context<T: Send>(
     let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let device = child.device.clone();
-    let device_operation_kind = child.device_operation_kind;
+    let device_operation_kind = child.slot.device_operation_kind();
     let _device_operation = device
         .as_ref()
         .map(|device| device.lock_operation(device_operation_kind))
@@ -809,7 +809,7 @@ fn with_slot_context_mut_in_context<T: Send>(
     let child = slot_context(ctx, slot_id, CKR_SLOT_ID_INVALID as CK_RV)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let device = child.device.clone();
-    let device_operation_kind = child.device_operation_kind;
+    let device_operation_kind = child.slot.device_operation_kind();
     let _device_operation = device
         .as_ref()
         .map(|device| device.lock_operation(device_operation_kind))
@@ -826,7 +826,7 @@ fn with_session_context<T: Send>(
     let child = session_slot_context(ctx, session_handle)?;
     let child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let device = child.device.clone();
-    let device_operation_kind = child.device_operation_kind;
+    let device_operation_kind = child.slot.device_operation_kind();
     let _device_operation = device
         .as_ref()
         .map(|device| device.lock_operation(device_operation_kind))
@@ -851,7 +851,7 @@ fn with_session_context_mut_in_context<T: Send>(
     let child = session_slot_context(ctx, session_handle)?;
     let mut child = child.lock().map_err(|_| Error::from(CKR_MUTEX_BAD))?;
     let device = child.device.clone();
-    let device_operation_kind = child.device_operation_kind;
+    let device_operation_kind = child.slot.device_operation_kind();
     let _device_operation = device
         .as_ref()
         .map(|device| device.lock_operation(device_operation_kind))
@@ -1004,8 +1004,8 @@ use abi_test_backend::*;
 
 mod connector;
 pub(crate) use connector::{
-    Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig, PcscAppletConnector,
-    PcscReaderState, SharedConnector,
+    CcidDeviceConnector, Connector, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
+    PcscAppletConnector, PcscReaderState, SharedConnector,
 };
 #[cfg(feature = "native-hardware")]
 pub(crate) use connector::{PcscConnector, UsbConnector};

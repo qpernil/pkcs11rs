@@ -140,7 +140,9 @@ lifecycle:
 
 Do not finalize and reinitialize for every refresh. Each module lifetime owns
 its sessions and stable slot IDs, and a later `C_GetSlotList` refreshes reader
-and remote connector discovery.
+and remote connector discovery. See
+[Discovery lifecycle and stable slots](architecture.md#discovery-lifecycle-and-stable-slots)
+for what happens during the first listing and what later listings refresh.
 
 ## Available iOS backends
 
@@ -183,19 +185,59 @@ or an unrecognized card omits NFC slots from that discovery attempt rather than
 failing the entire slot list.
 
 A CryptoTokenKit NFC slot name lasts only for its system NFC session, so it
-cannot itself identify a PKCS #11 slot. pkcs11rs performs one identity scan at
-discovery and binds the resulting device serial to the logical slots for the
-module lifetime. That stable serial is what lets NFC use the same model as USB:
-slots remain registered while `CKF_TOKEN_PRESENT` independently follows the
-current transport. NFC adds only the session reacquisition step, which verifies
-the serial before allowing a replacement NFC session to carry APDUs for those
-slots.
+cannot itself identify a PKCS #11 slot. USB CryptoTokenKit and PC/SC names are
+also merely locators and may differ between implementations or after USB
+re-enumeration. At the top layer these are all CCID smart-card endpoints.
+pkcs11rs performs one identity scan and binds the discovered applet topology to
+the device serial for the module lifetime. The same logical slots can therefore
+move between NFC and USB CCID without repeating applet discovery:
+`CKF_TOKEN_PRESENT` follows the current endpoint, while iOS NFC reacquisition
+verifies the serial before carrying APDUs.
 
-After physical removal, the next token-present slot-list refresh asks for the
-bound serial again. Successful verification restores NFC presence. If the user
-cancels, the NFC transport remains absent and YubiHSM Auth provider selection
-ignores it; connecting the same YubiKey through USB therefore selects its
-present USB provider without an ambiguous credential match.
+After physical removal, the next slot-list refresh can ask for the bound serial
+again. Successful verification restores NFC presence. If the user cancels, the
+NFC transport remains absent and YubiHSM Auth provider selection ignores it;
+connecting the same YubiKey through USB therefore selects its present USB
+provider without an ambiguous credential match.
+
+### When the NFC UI appears
+
+The system NFC UI can be opened at two distinct stages:
+
+1. **Initial identity discovery.** When `nfc.discovery` is enabled, the first
+   `C_GetSlotList` in the module lifetime first reconciles the non-interactive
+   CryptoTokenKit USB inventory, then opens a generic “Hold your YubiKey”
+   request. pkcs11rs reads the physical serial and probes applets before it can
+   create stable slots. If that serial was already discovered over USB, NFC is
+   retained only as its fallback connector and does not replace the present USB
+   route. Canceling or presenting an unrecognized card at this stage creates no
+   NFC slots, and ordinary later slot-list polling does not repeat this initial
+   scan. Reinitialization is required for another initial discovery attempt.
+2. **Reacquisition of registered slots.** After successful discovery, removal
+   or an inactive CryptoTokenKit NFC session leaves the stable slots registered
+   but absent. A later `C_GetSlotList` refresh, or a device-backed operation
+   that reaches NFC transport preparation, can open a serial-specific request
+   for the already bound YubiKey. The presented serial must match before
+   presence is restored or APDUs are allowed.
+
+The `CK_TRUE` argument to `C_GetSlotList` does not itself cause the UI. Every
+slot-list call refreshes registered transports before applying the
+token-present filter, so either `C_GetSlotList(CK_FALSE, ...)` or
+`C_GetSlotList(CK_TRUE, ...)` can request reacquisition after removal. Calls
+that merely read retained metadata without refreshing or preparing the NFC
+transport do not open the UI.
+
+On every later slot-list refresh, USB reconciliation likewise runs before
+registered slots are refreshed. Moving an NFC-discovered YubiKey to USB can
+therefore rebind its serial-owned slots to USB before an absent NFC route has an
+opportunity to request reacquisition UI.
+
+While the verified card and its CryptoTokenKit session remain valid, refreshes
+and operations reuse that session and do not create a new system UI. If the
+wrong YubiKey is presented during reacquisition, the same UI asks for its
+removal and then for the bound serial; it is not a new discovery or a new
+PKCS #11 slot. Canceling reacquisition leaves the existing slots absent. A
+later explicit refresh may request the bound serial again.
 
 ## Network and storage configuration
 

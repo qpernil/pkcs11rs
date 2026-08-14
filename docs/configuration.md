@@ -110,18 +110,21 @@ including direct YubiHSM USB, native FIDO HID, native PC/SC, and iOS
 CryptoTokenKit. It does not affect explicitly configured
 `yubihsm.urls`. `yubihsm.recreate_sessions` defaults to `false`; its security
 and retry semantics are described in [YubiHSM authentication](yubihsm-auth.md).
+The first-pass and later-refresh behavior is summarized in
+[Discovery lifecycle and stable slots](architecture.md#discovery-lifecycle-and-stable-slots).
 
 On iOS, `nfc.discovery` opts into one NFC card request during the first
 `C_GetSlotList` after initialization. It defaults to `false`. Successful
-discovery registers stable, applet-specific tokens that remain logically
-present for the module lifetime; later operations request the same physical
-card again when needed. Cancellation or an unrecognized card is an isolated
+discovery registers stable, applet-specific slots whose token presence is
+tracked independently; later operations request the same physical card again
+when needed. Cancellation or an unrecognized card is an isolated
 discovery miss and does not fail slot listing or retry automatically.
 After an operation, the NFC session remains idle until the card is removed,
 the user cancels, or another operation reuses it. This field has no effect on
 other platforms. Because PKCS #11 is synchronous, the first `C_GetSlotList`
 blocks until the NFC request completes; applications must make that call away
-from their main UI thread.
+from their main UI thread. Later UI triggers are summarized in
+[When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears).
 
 ## Environment mapping
 

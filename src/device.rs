@@ -4,8 +4,8 @@ use crate::{CKR_MUTEX_BAD, Error};
 use std::sync::{Arc, Mutex, RwLock};
 
 pub(crate) trait DeviceOperationLifecycle: Send + Sync + std::fmt::Debug {
-    fn enter(&self, message: &str) -> Result<(), Error>;
-    fn exit(&self);
+    fn enter(&self, kind: DeviceOperationKind, message: &str) -> Result<(), Error>;
+    fn exit(&self, kind: DeviceOperationKind);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,11 +139,12 @@ impl DeviceContext {
                 .map_err(|_| Error::from(CKR_MUTEX_BAD)),
         }?;
         if let Some(lifecycle) = &self.lifecycle {
-            lifecycle.enter(message)?;
+            lifecycle.enter(kind, message)?;
         }
         Ok(DeviceOperationGuard {
             _guard: guard,
             lifecycle: self.lifecycle.as_deref(),
+            kind,
         })
     }
 
@@ -165,12 +166,13 @@ enum DeviceLockGuard<'a> {
 pub(crate) struct DeviceOperationGuard<'a> {
     _guard: DeviceLockGuard<'a>,
     lifecycle: Option<&'a dyn DeviceOperationLifecycle>,
+    kind: DeviceOperationKind,
 }
 
 impl Drop for DeviceOperationGuard<'_> {
     fn drop(&mut self) {
         if let Some(lifecycle) = self.lifecycle {
-            lifecycle.exit();
+            lifecycle.exit(self.kind);
         }
     }
 }

@@ -73,33 +73,39 @@ impl AppleCcidLifecycle {
 }
 
 impl DeviceOperationLifecycle for AppleCcidLifecycle {
-    fn enter(&self, message: &str) -> Result<(), Error> {
+    fn enter(&self, kind: crate::device::DeviceOperationKind, message: &str) -> Result<(), Error> {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return Ok(());
+        }
         if let Some(nfc) = &self.nfc {
-            nfc.enter(message)?;
+            nfc.enter(kind, message)?;
         }
         let Some(reader_state) = self.reader_state.upgrade() else {
             if let Some(nfc) = &self.nfc {
-                nfc.exit();
+                nfc.exit(kind);
             }
             return Err(CKR_DEVICE_ERROR.into());
         };
         if let Err(error) = reader_state.begin_transaction() {
             if let Some(nfc) = &self.nfc {
-                nfc.exit();
+                nfc.exit(kind);
             }
             return Err(error);
         }
         if let Err(error) = self.worker().and_then(AppleCcidWorker::begin_operation) {
             reader_state.end_transaction();
             if let Some(nfc) = &self.nfc {
-                nfc.exit();
+                nfc.exit(kind);
             }
             return Err(error);
         }
         Ok(())
     }
 
-    fn exit(&self) {
+    fn exit(&self, kind: crate::device::DeviceOperationKind) {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return;
+        }
         if let Ok(worker) = self.worker() {
             if let Err(error) = worker.end_operation() {
                 tracing::debug!(
@@ -114,7 +120,7 @@ impl DeviceOperationLifecycle for AppleCcidLifecycle {
             reader_state.end_transaction();
         }
         if let Some(nfc) = &self.nfc {
-            nfc.exit();
+            nfc.exit(kind);
         }
     }
 }

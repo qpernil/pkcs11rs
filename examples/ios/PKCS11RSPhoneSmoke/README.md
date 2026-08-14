@@ -90,11 +90,12 @@ and supplies the prototype credential password `password`. Missing or
 ambiguous public-key matches skip login instead of invoking hidden backend
 selection. After a successful login, the app enumerates the objects again as an
 authenticated user, logs out, and closes the session. On iOS the module
-discovers the interactive NFC reader before ordinary USB smart-card readers so
-its UI appears immediately, while still discovering every smart-card
-credential provider before YubiHSM slots. The final display preserves discovery
-order within each group but places YubiHSM slots after software and YubiKey
-applet slots.
+reconciles ordinary CryptoTokenKit USB smart-card readers before requesting
+interactive NFC discovery. A USB view of an NFC-discovered serial therefore
+rebinds its existing slots before their refresh can request NFC reacquisition.
+The module still discovers every smart-card credential provider before YubiHSM
+slots. The final display preserves discovery order within each group but places
+YubiHSM slots after software and YubiKey applet slots.
 
 If discovery produces no YubiHSM Auth credential over any transport, the
 inventory says so explicitly and notes that an interactive prompt may have been
