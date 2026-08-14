@@ -48,6 +48,8 @@ pub(crate) struct TokenObject {
     pub(crate) derive: bool,
     pub(crate) wrap: bool,
     pub(crate) unwrap: bool,
+    pub(crate) encapsulate: bool,
+    pub(crate) decapsulate: bool,
     pub(crate) sensitive: bool,
     pub(crate) extractable: bool,
     pub(crate) always_sensitive: bool,
@@ -74,6 +76,10 @@ pub(crate) enum PublicKeyMaterial {
         parameter_set: CK_ML_DSA_PARAMETER_SET_TYPE,
         public_key: Vec<u8>,
     },
+    MlKem {
+        parameter_set: CK_ML_KEM_PARAMETER_SET_TYPE,
+        public_key: Vec<u8>,
+    },
 }
 
 #[derive(Clone)]
@@ -92,6 +98,9 @@ pub(crate) enum SoftwarePrivateKeyMaterial {
     MlDsa44(ml_dsa::SigningKey<ml_dsa::MlDsa44>),
     MlDsa65(ml_dsa::SigningKey<ml_dsa::MlDsa65>),
     MlDsa87(ml_dsa::SigningKey<ml_dsa::MlDsa87>),
+    MlKem512(ml_kem::DecapsulationKey<ml_kem::MlKem512>),
+    MlKem768(ml_kem::DecapsulationKey<ml_kem::MlKem768>),
+    MlKem1024(ml_kem::DecapsulationKey<ml_kem::MlKem1024>),
 }
 
 impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
@@ -111,6 +120,9 @@ impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
             Self::MlDsa44(_) => fmt.write_str("MlDsa44([REDACTED])"),
             Self::MlDsa65(_) => fmt.write_str("MlDsa65([REDACTED])"),
             Self::MlDsa87(_) => fmt.write_str("MlDsa87([REDACTED])"),
+            Self::MlKem512(_) => fmt.write_str("MlKem512([REDACTED])"),
+            Self::MlKem768(_) => fmt.write_str("MlKem768([REDACTED])"),
+            Self::MlKem1024(_) => fmt.write_str("MlKem1024([REDACTED])"),
         }
     }
 }
@@ -131,7 +143,10 @@ impl SoftwarePrivateKeyMaterial {
             | Self::X25519(_)
             | Self::MlDsa44(_)
             | Self::MlDsa65(_)
-            | Self::MlDsa87(_) => None,
+            | Self::MlDsa87(_)
+            | Self::MlKem512(_)
+            | Self::MlKem768(_)
+            | Self::MlKem1024(_) => None,
         }
     }
 
@@ -149,6 +164,7 @@ impl SoftwarePrivateKeyMaterial {
             Self::Ed25519(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
             Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
             Self::MlDsa44(_) | Self::MlDsa65(_) | Self::MlDsa87(_) => CKK_ML_DSA as CK_KEY_TYPE,
+            Self::MlKem512(_) | Self::MlKem768(_) | Self::MlKem1024(_) => CKK_ML_KEM as CK_KEY_TYPE,
         }
     }
 
@@ -202,6 +218,18 @@ impl SoftwarePrivateKeyMaterial {
                 parameter_set: CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE,
                 public_key: key.verifying_key().encode().to_vec(),
             }),
+            Self::MlKem512(key) => Ok(PublicKeyMaterial::MlKem {
+                parameter_set: CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE,
+                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+            }),
+            Self::MlKem768(key) => Ok(PublicKeyMaterial::MlKem {
+                parameter_set: CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE,
+                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+            }),
+            Self::MlKem1024(key) => Ok(PublicKeyMaterial::MlKem {
+                parameter_set: CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE,
+                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+            }),
         }
     }
 
@@ -222,6 +250,15 @@ impl SoftwarePrivateKeyMaterial {
             Self::MlDsa44(key) => Some(key.expanded_key().to_expanded().to_vec()),
             Self::MlDsa65(key) => Some(key.expanded_key().to_expanded().to_vec()),
             Self::MlDsa87(key) => Some(key.expanded_key().to_expanded().to_vec()),
+            Self::MlKem512(key) => {
+                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
+            }
+            Self::MlKem768(key) => {
+                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
+            }
+            Self::MlKem1024(key) => {
+                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
+            }
         }
     }
 
@@ -230,6 +267,15 @@ impl SoftwarePrivateKeyMaterial {
             Self::MlDsa44(key) => Some(key.as_seed().to_vec()),
             Self::MlDsa65(key) => Some(key.as_seed().to_vec()),
             Self::MlDsa87(key) => Some(key.as_seed().to_vec()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn ml_kem_seed(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::MlKem512(key) => key.to_seed().map(|seed| seed.to_vec()),
+            Self::MlKem768(key) => key.to_seed().map(|seed| seed.to_vec()),
+            Self::MlKem1024(key) => key.to_seed().map(|seed| seed.to_vec()),
             _ => None,
         }
     }
@@ -518,6 +564,8 @@ pub(crate) struct TokenObjectTemplate {
     pub(crate) derive: bool,
     pub(crate) wrap: bool,
     pub(crate) unwrap: bool,
+    pub(crate) encapsulate: bool,
+    pub(crate) decapsulate: bool,
     pub(crate) sensitive: Option<bool>,
     pub(crate) extractable: Option<bool>,
     pub(crate) allowed_mechanisms: Option<Vec<CK_MECHANISM_TYPE>>,
@@ -805,6 +853,23 @@ fn is_ml_dsa_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     )
 }
 
+fn is_ml_kem_public_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_ml_kem_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            || x == CKA_SEED as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
 const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_CLASS as CK_ATTRIBUTE_TYPE,
     CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -1028,6 +1093,30 @@ pub(crate) fn ml_dsa_public_key_info(
     }
 }
 
+pub(crate) fn ml_kem_public_key_info(
+    parameter_set: CK_ML_KEM_PARAMETER_SET_TYPE,
+    public_key: &[u8],
+) -> Option<Vec<u8>> {
+    macro_rules! encode {
+        ($params:ty) => {{
+            use ml_kem::pkcs8::EncodePublicKey;
+            let key =
+                ml_kem::kem::Key::<ml_kem::EncapsulationKey<$params>>::try_from(public_key).ok()?;
+            ml_kem::EncapsulationKey::<$params>::new(&key)
+                .ok()?
+                .to_public_key_der()
+                .ok()
+                .map(|document| document.as_bytes().to_vec())
+        }};
+    }
+    match parameter_set {
+        x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem512),
+        x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem768),
+        x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
 pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     matches!(
         attribute_type,
@@ -1177,6 +1266,9 @@ impl TokenObject {
                         x if x == CKK_ML_DSA as CK_KEY_TYPE => {
                             is_ml_dsa_public_attribute(attribute_type)
                         }
+                        x if x == CKK_ML_KEM as CK_KEY_TYPE => {
+                            is_ml_kem_public_attribute(attribute_type)
+                        }
                         _ => false,
                     }
             }
@@ -1195,6 +1287,9 @@ impl TokenObject {
                         }
                         x if x == CKK_ML_DSA as CK_KEY_TYPE => {
                             is_ml_dsa_private_attribute(attribute_type)
+                        }
+                        x if x == CKK_ML_KEM as CK_KEY_TYPE => {
+                            is_ml_kem_private_attribute(attribute_type)
                         }
                         _ => false,
                     }
@@ -1278,6 +1373,10 @@ impl TokenObject {
                 attribute_type,
                 x if x == CKA_SEED as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
             ),
+            x if x == CKK_ML_KEM as CK_KEY_TYPE => matches!(
+                attribute_type,
+                x if x == CKA_SEED as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            ),
             _ => false,
         }
     }
@@ -1327,6 +1426,10 @@ impl TokenObject {
                     parameter_set,
                     public_key,
                 } => ml_dsa_public_key_info(*parameter_set, public_key),
+                PublicKeyMaterial::MlKem {
+                    parameter_set,
+                    public_key,
+                } => ml_kem_public_key_info(*parameter_set, public_key),
             };
         }
         None
@@ -1451,6 +1554,12 @@ impl TokenObject {
             x if x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
                 Some(bool_attribute(self.can_unwrap()))
             }
+            x if x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.encapsulate))
+            }
+            x if x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE && self.is_key_object() => {
+                Some(bool_attribute(self.decapsulate))
+            }
             x if x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE
                 && matches!(
                     self.class,
@@ -1460,9 +1569,7 @@ impl TokenObject {
             {
                 Some(bool_attribute(self.wrap_with_trusted))
             }
-            x if x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE
-                || x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE
-                || x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
+            x if x == CKA_SIGN_RECOVER as CK_ATTRIBUTE_TYPE
                 || x == CKA_VERIFY_RECOVER as CK_ATTRIBUTE_TYPE =>
             {
                 Some(bool_attribute(false))
@@ -1758,11 +1865,16 @@ impl TokenObject {
                     Some(PublicKeyMaterial::MlDsa { parameter_set, .. }) => {
                         Some(ulong_attribute(parameter_set))
                     }
+                    Some(PublicKeyMaterial::MlKem { parameter_set, .. }) => {
+                        Some(ulong_attribute(parameter_set))
+                    }
                     _ => None,
                 }
             }
             x if x == CKA_SEED as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(key) => key.ml_dsa_seed(),
+                KeyMaterial::SoftwarePrivate(key) => {
+                    key.ml_dsa_seed().or_else(|| key.ml_kem_seed())
+                }
                 _ => None,
             },
             x if x == CKA_YUBICO_HSMAUTH_ALGORITHM => match &self.material {
@@ -1819,6 +1931,7 @@ impl TokenObject {
                         key.private_value()
                     }
                     KeyMaterial::Public(PublicKeyMaterial::MlDsa { public_key, .. })
+                    | KeyMaterial::Public(PublicKeyMaterial::MlKem { public_key, .. })
                         if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
                     {
                         Some(public_key.clone())
@@ -2133,6 +2246,14 @@ impl TokenObjectTemplate {
                 self.unwrap = read_bool_template_attribute(attribute)?;
                 Ok(())
             }
+            x if x == CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE => {
+                self.encapsulate = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
+            x if x == CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE => {
+                self.decapsulate = read_bool_template_attribute(attribute)?;
+                Ok(())
+            }
             x if x == CKA_WRAP_WITH_TRUSTED as CK_ATTRIBUTE_TYPE => {
                 self.wrap_with_trusted = read_bool_template_attribute(attribute)?;
                 Ok(())
@@ -2241,6 +2362,8 @@ impl TokenObjectTemplate {
             derive: self.derive,
             wrap: self.wrap,
             unwrap: self.unwrap,
+            encapsulate: self.encapsulate,
+            decapsulate: self.decapsulate,
             sensitive,
             extractable,
             always_sensitive: sensitive,
@@ -2570,7 +2693,7 @@ pub(crate) fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<b
 }
 
 #[cfg(test)]
-mod ml_dsa_tests {
+mod post_quantum_tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -2599,6 +2722,39 @@ mod ml_dsa_tests {
         assert_eq!(
             Sha256::digest(public_key).as_slice(),
             crate::parse_hex("838b88b6ac41e2c60698173e08ca173d0b0d2839205806e56a8a3d53195f3a03")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn ml_kem_512_key_generation_matches_nist_acvp_fips_203() {
+        // NIST ACVP-Server, ML-KEM-keyGen-FIPS203, tgId 1 / tcId 1, pinned at:
+        // https://github.com/usnistgov/ACVP-Server/blob/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ML-KEM-keyGen-FIPS203/internalProjection.json
+        // The assertion hashes the 800-byte expected encapsulation key to keep the source small.
+        let d =
+            crate::parse_hex("47B893474672BA92E4B12EE44FB32953AF8E8503B5FB471D1614FB8A021A660A")
+                .unwrap();
+        let z =
+            crate::parse_hex("1F8CB39E9E30BC458A0DC5408884B1187FB217018DF760FA57317703B844A0A9")
+                .unwrap();
+        let seed: [u8; 64] = [d, z].concat().try_into().unwrap();
+        let material = SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(
+            ml_kem::Seed::from(seed),
+        ));
+        let PublicKeyMaterial::MlKem {
+            parameter_set,
+            public_key,
+        } = material.public_key().unwrap()
+        else {
+            panic!("ML-KEM key projected to the wrong public-key type");
+        };
+        assert_eq!(
+            parameter_set,
+            CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE
+        );
+        assert_eq!(
+            Sha256::digest(public_key).as_slice(),
+            crate::parse_hex("7e4a2b716a684c1ad33c43c808782da9e1a72f14ccda82723f712d49f53a9f28")
                 .unwrap()
         );
     }

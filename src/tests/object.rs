@@ -1,6 +1,66 @@
 use super::*;
 
 #[test]
+fn ml_kem_public_seed_and_expanded_private_imports_are_validated() {
+    use ml_kem::kem::KeyExport;
+
+    let key =
+        ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_seed(ml_kem::Seed::from([0x5a; 64]));
+    let mut class = CKO_PUBLIC_KEY as CK_OBJECT_CLASS;
+    let mut key_type = CKK_ML_KEM as CK_KEY_TYPE;
+    let mut parameter_set = CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE;
+    let mut encapsulate = CK_TRUE as CK_BBOOL;
+    let mut public_value = key.encapsulation_key().to_bytes().to_vec();
+    let public_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+        scalar_attribute(CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE, &mut encapsulate),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut public_value),
+    ];
+    let public = crate::parse_create_object_template(&public_template).unwrap();
+    assert!(public.encapsulate);
+    assert!(matches!(
+        public.material,
+        crate::KeyMaterial::Public(crate::PublicKeyMaterial::MlKem { parameter_set, .. })
+            if parameter_set == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE
+    ));
+
+    class = CKO_PRIVATE_KEY as CK_OBJECT_CLASS;
+    let mut decapsulate = CK_TRUE as CK_BBOOL;
+    let mut seed = [0x5a; 64];
+    let seed_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+        scalar_attribute(CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE, &mut decapsulate),
+        bytes_attribute(CKA_SEED as CK_ATTRIBUTE_TYPE, &mut seed),
+    ];
+    let private = crate::parse_create_object_template(&seed_template).unwrap();
+    assert!(private.decapsulate);
+    assert!(matches!(
+        private.material,
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem512(_))
+    ));
+
+    #[allow(deprecated)]
+    let mut expanded = ml_kem::ExpandedKeyEncoding::to_expanded_bytes(&key).to_vec();
+    let expanded_template = [
+        scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+        scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut key_type),
+        scalar_attribute(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE, &mut parameter_set),
+        scalar_attribute(CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE, &mut decapsulate),
+        bytes_attribute(CKA_VALUE as CK_ATTRIBUTE_TYPE, &mut expanded),
+    ];
+    assert!(matches!(
+        crate::parse_create_object_template(&expanded_template)
+            .unwrap()
+            .material,
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::MlKem512(_))
+    ));
+}
+
+#[test]
 fn software_secret_material_has_explicit_usage_and_extraction_policy() {
     let mut class = CKO_SECRET_KEY as CK_OBJECT_CLASS;
     let mut key_type = CKK_GENERIC_SECRET as CK_KEY_TYPE;
@@ -445,6 +505,8 @@ pub fn yubihsm_persisted_public_objects_require_a_yubihsm_backend() {
                 derive: false,
                 wrap: false,
                 unwrap: false,
+                encapsulate: false,
+                decapsulate: false,
                 sensitive: false,
                 extractable: true,
                 always_sensitive: false,
@@ -588,6 +650,8 @@ pub fn destroy_openpgp_objects_is_prohibited() {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -2333,6 +2397,8 @@ pub fn get_attribute_value_reads_certificate_values() {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -2416,6 +2482,8 @@ pub fn issuer_sd_objects_expose_values_but_cannot_be_copied_or_destroyed() {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,

@@ -4041,6 +4041,8 @@ fn insert_yubihsm_aes_test_object(slot_id: CK_SLOT_ID, key_id: u16) -> CK_OBJECT
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: true,
         extractable: false,
         always_sensitive: true,
@@ -6017,6 +6019,8 @@ fn piv_ec_objects_expose_named_curve_and_der_encoded_point() {
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: true,
         always_sensitive: false,
@@ -7679,6 +7683,8 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
             derive: false,
             wrap: false,
             unwrap: false,
+            encapsulate: false,
+            decapsulate: false,
             sensitive: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
             extractable: class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
             always_sensitive: class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS,
@@ -8589,32 +8595,6 @@ fn assert_session_entry_points_return(session: CK_SESSION_HANDLE, expected: CK_R
     assert_stub!(
         "C_MessageVerifyFinal",
         crate::api::C_MessageVerifyFinal(session)
-    );
-    assert_stub!(
-        "C_EncapsulateKey",
-        crate::api::C_EncapsulateKey(
-            session,
-            ::std::ptr::null_mut(),
-            0,
-            ::std::ptr::null_mut(),
-            0,
-            data.as_mut_ptr(),
-            &mut data_len,
-            &mut object
-        )
-    );
-    assert_stub!(
-        "C_DecapsulateKey",
-        crate::api::C_DecapsulateKey(
-            session,
-            ::std::ptr::null_mut(),
-            0,
-            ::std::ptr::null_mut(),
-            0,
-            data.as_mut_ptr(),
-            data_len,
-            &mut object
-        )
     );
     assert_stub!(
         "C_VerifySignatureInit",

@@ -14,6 +14,7 @@ const PUBLIC_KEY_SCHEMA_VERSION: u64 = 1;
 const PUBLIC_KEY_KIND_RSA: u64 = 1;
 const PUBLIC_KEY_KIND_EC: u64 = 2;
 const PUBLIC_KEY_KIND_ML_DSA: u64 = 3;
+const PUBLIC_KEY_KIND_ML_KEM: u64 = 4;
 const BACKED_KEY_SCHEMA: &str = "pkcs11rs.backed-key";
 
 pub(crate) struct EncodedBackedObject {
@@ -87,6 +88,14 @@ fn object_attributes(object: &TokenObject) -> Result<KeyAttributes, Error> {
         (
             CKA_DERIVE as CK_ATTRIBUTE_TYPE,
             KeyAttributeValue::Boolean(object.derive),
+        ),
+        (
+            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+            KeyAttributeValue::Boolean(object.encapsulate),
+        ),
+        (
+            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+            KeyAttributeValue::Boolean(object.decapsulate),
         ),
         (
             CKA_SENSITIVE as CK_ATTRIBUTE_TYPE,
@@ -196,6 +205,15 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
             public_key,
         } => (
             PUBLIC_KEY_KIND_ML_DSA,
+            vec![u8::try_from(*parameter_set).map_err(|_| Error::from(CKR_DATA_INVALID))?],
+            public_key.clone(),
+            false,
+        ),
+        PublicKeyMaterial::MlKem {
+            parameter_set,
+            public_key,
+        } => (
+            PUBLIC_KEY_KIND_ML_KEM,
             vec![u8::try_from(*parameter_set).map_err(|_| Error::from(CKR_DATA_INVALID))?],
             public_key.clone(),
             false,
@@ -534,6 +552,17 @@ fn decode_public_key_material(
                 public_key: second,
             })
         }
+        PUBLIC_KEY_KIND_ML_KEM if key_type == CKK_ML_KEM as CK_KEY_TYPE && !prefix => {
+            let parameter_set =
+                CK_ML_KEM_PARAMETER_SET_TYPE::from(*first.first().ok_or(CKR_DATA_INVALID)?);
+            if first.len() != 1 || crate::ml_kem_public_key_info(parameter_set, &second).is_none() {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::MlKem {
+                parameter_set,
+                public_key: second,
+            })
+        }
         _ => return Err(CKR_DATA_INVALID.into()),
     };
     Ok((key_type, material, rp_id))
@@ -596,6 +625,10 @@ fn materialize_object(
         derive: required_bool(attributes, CKA_DERIVE as CK_ATTRIBUTE_TYPE)?,
         wrap: false,
         unwrap: false,
+        encapsulate: optional_bool(attributes, CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false),
+        decapsulate: optional_bool(attributes, CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE)?
+            .unwrap_or(false),
         sensitive: required_bool(attributes, CKA_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
         extractable: required_bool(attributes, CKA_EXTRACTABLE as CK_ATTRIBUTE_TYPE)?,
         always_sensitive: required_bool(attributes, CKA_ALWAYS_SENSITIVE as CK_ATTRIBUTE_TYPE)?,
@@ -854,6 +887,8 @@ mod tests {
             derive: false,
             wrap: false,
             unwrap: false,
+            encapsulate: false,
+            decapsulate: false,
             sensitive: false,
             extractable: true,
             always_sensitive: false,
@@ -892,5 +927,65 @@ mod tests {
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);
         assert_eq!(restored[0].1.policy_templates, object.policy_templates);
+    }
+
+    #[test]
+    fn backed_ml_kem_public_key_preserves_material_and_encapsulation_policy() {
+        use ml_kem::kem::KeyExport;
+        let private =
+            ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_seed(ml_kem::Seed::from([0x42; 64]));
+        let public_key = private.encapsulation_key().to_bytes().to_vec();
+        let object = TokenObject {
+            slot_id: Some(7),
+            unique_id: "ml-kem-public".to_owned(),
+            class: CKO_PUBLIC_KEY as CK_OBJECT_CLASS,
+            key_type: CKK_ML_KEM as CK_KEY_TYPE,
+            label: "ML-KEM-512".to_owned(),
+            id: vec![2],
+            token: true,
+            private: false,
+            encrypt: false,
+            decrypt: false,
+            sign: false,
+            verify: false,
+            derive: false,
+            wrap: false,
+            unwrap: false,
+            encapsulate: true,
+            decapsulate: false,
+            sensitive: false,
+            extractable: true,
+            always_sensitive: false,
+            never_extractable: false,
+            local: true,
+            key_gen_mechanism: Some(CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE),
+            allowed_mechanisms: Some(vec![CKM_ML_KEM as CK_MECHANISM_TYPE]),
+            wrap_with_trusted: false,
+            policy_templates: crate::KeyPolicyTemplates::default(),
+            creator_session: None,
+            public_key: None,
+            rp_id: None,
+            material: KeyMaterial::Public(PublicKeyMaterial::MlKem {
+                parameter_set: CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE,
+                public_key: public_key.clone(),
+            }),
+        };
+        let encoded = encode_backed_object(&object).unwrap().object;
+        let provider = FixedProvider {
+            reference: ContentReference::for_object(&encoded),
+            object: encoded,
+        };
+        let restored = stored_objects(&provider, 7, true).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].1.encapsulate);
+        assert_eq!(restored[0].1.allowed_mechanisms, object.allowed_mechanisms);
+        assert!(matches!(
+            &restored[0].1.material,
+            KeyMaterial::Public(PublicKeyMaterial::MlKem {
+                parameter_set,
+                public_key: restored_key,
+            }) if *parameter_set == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE
+                && restored_key == &public_key
+        ));
     }
 }

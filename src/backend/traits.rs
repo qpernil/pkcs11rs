@@ -24,6 +24,8 @@ pub(crate) fn profile_token_object(slot_id: CK_SLOT_ID, profile_id: CK_PROFILE_I
         derive: false,
         wrap: false,
         unwrap: false,
+        encapsulate: false,
+        decapsulate: false,
         sensitive: false,
         extractable: false,
         always_sensitive: false,

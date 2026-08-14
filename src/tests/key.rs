@@ -17,7 +17,11 @@ fn generate_software_key_pair(
     }
     if let Some(parameters) = parameters {
         public_template.push(bytes_attribute(
-            if mechanism_type == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+            if matches!(
+                mechanism_type,
+                x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+            ) {
                 CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
             } else {
                 CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
@@ -27,7 +31,9 @@ fn generate_software_key_pair(
     }
     let mut public_verify = CK_TRUE as CK_BBOOL;
     let mut public_encrypt = CK_TRUE as CK_BBOOL;
-    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+        && mechanism_type != CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+    {
         public_template.push(scalar_attribute(
             CKA_VERIFY as CK_ATTRIBUTE_TYPE,
             &mut public_verify,
@@ -39,12 +45,21 @@ fn generate_software_key_pair(
             &mut public_encrypt,
         ));
     }
+    let mut encapsulate = CK_TRUE as CK_BBOOL;
+    if mechanism_type == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        public_template.push(scalar_attribute(
+            CKA_ENCAPSULATE as CK_ATTRIBUTE_TYPE,
+            &mut encapsulate,
+        ));
+    }
 
     let mut private_template = Vec::new();
     let mut sign = CK_TRUE as CK_BBOOL;
     let mut decrypt = CK_TRUE as CK_BBOOL;
     let mut derive = CK_TRUE as CK_BBOOL;
-    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+    if mechanism_type != CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+        && mechanism_type != CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+    {
         private_template.push(scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign));
     }
     if mechanism_type == CKM_RSA_PKCS_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
@@ -61,6 +76,13 @@ fn generate_software_key_pair(
         private_template.push(scalar_attribute(
             CKA_DERIVE as CK_ATTRIBUTE_TYPE,
             &mut derive,
+        ));
+    }
+    let mut decapsulate = CK_TRUE as CK_BBOOL;
+    if mechanism_type == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+        private_template.push(scalar_attribute(
+            CKA_DECAPSULATE as CK_ATTRIBUTE_TYPE,
+            &mut decapsulate,
         ));
     }
 
@@ -313,6 +335,184 @@ fn software_ml_dsa_context_and_hedging_follow_pkcs11_3_2() {
         ),
         CKR_SIGNATURE_INVALID as CK_RV
     );
+    finalize_for_test();
+}
+
+#[test]
+fn software_ml_kem_keygen_encapsulation_and_decapsulation_cover_all_parameter_sets() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    for (parameter_set, public_length, private_length, ciphertext_length) in [
+        (CKP_ML_KEM_512, 800, 1632, 768),
+        (CKP_ML_KEM_768, 1184, 2400, 1088),
+        (CKP_ML_KEM_1024, 1568, 3168, 1568),
+    ] {
+        let mut parameter = crate::ulong_attribute(parameter_set as CK_ML_KEM_PARAMETER_SET_TYPE);
+        let (public, private) = generate_software_key_pair(
+            TEST_SESSION_HANDLE,
+            CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            Some(&mut parameter),
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let public_object = context.resolve_object(public).unwrap().unwrap();
+            let private_object = context.resolve_object(private).unwrap().unwrap();
+            assert!(public_object.encapsulate);
+            assert!(private_object.decapsulate);
+            assert_eq!(
+                public_object
+                    .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+                    .unwrap()
+                    .len(),
+                public_length
+            );
+            assert_eq!(
+                private_object
+                    .attribute_value(CKA_SEED as CK_ATTRIBUTE_TYPE)
+                    .unwrap()
+                    .len(),
+                64
+            );
+            assert_eq!(
+                private_object
+                    .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+                    .unwrap()
+                    .len(),
+                private_length
+            );
+        });
+
+        let mut mechanism = CK_MECHANISM {
+            mechanism: CKM_ML_KEM as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut actual_length = 0;
+        let mut encapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                public,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut actual_length,
+                &mut encapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(actual_length as usize, ciphertext_length);
+        assert_eq!(encapsulated_secret, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+        let mut too_small = vec![0; ciphertext_length - 1];
+        actual_length = too_small.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                public,
+                std::ptr::null_mut(),
+                0,
+                too_small.as_mut_ptr(),
+                &mut actual_length,
+                &mut encapsulated_secret,
+            ),
+            CKR_BUFFER_TOO_SMALL as CK_RV
+        );
+        assert_eq!(actual_length as usize, ciphertext_length);
+        assert_eq!(encapsulated_secret, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+        let mut ciphertext = vec![0; ciphertext_length];
+        actual_length = ciphertext.len() as CK_ULONG;
+        assert_eq!(
+            crate::api::C_EncapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                public,
+                std::ptr::null_mut(),
+                0,
+                ciphertext.as_mut_ptr(),
+                &mut actual_length,
+                &mut encapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(encapsulated_secret, CK_INVALID_HANDLE as CK_OBJECT_HANDLE);
+
+        let mut decapsulated_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                private,
+                std::ptr::null_mut(),
+                0,
+                ciphertext.as_mut_ptr(),
+                ciphertext.len() as CK_ULONG,
+                &mut decapsulated_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let encapsulated = context
+                .resolve_object(encapsulated_secret)
+                .unwrap()
+                .unwrap();
+            let decapsulated = context
+                .resolve_object(decapsulated_secret)
+                .unwrap()
+                .unwrap();
+            assert_eq!(encapsulated.key_type, CKK_GENERIC_SECRET as CK_KEY_TYPE);
+            assert_eq!(
+                encapsulated.key_gen_mechanism,
+                Some(CKM_ML_KEM as CK_MECHANISM_TYPE)
+            );
+            assert_eq!(
+                encapsulated.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+                decapsulated.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+            );
+            assert_eq!(
+                encapsulated
+                    .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+                    .unwrap()
+                    .len(),
+                32
+            );
+        });
+
+        ciphertext[0] ^= 1;
+        let mut rejected_secret = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_DecapsulateKey(
+                TEST_SESSION_HANDLE,
+                &mut mechanism,
+                private,
+                std::ptr::null_mut(),
+                0,
+                ciphertext.as_mut_ptr(),
+                ciphertext.len() as CK_ULONG,
+                &mut rejected_secret,
+            ),
+            CKR_OK as CK_RV
+        );
+        with_test_slot_context(TEST_SLOT_ID, |context| {
+            let original = context
+                .resolve_object(encapsulated_secret)
+                .unwrap()
+                .unwrap();
+            let rejected = context.resolve_object(rejected_secret).unwrap().unwrap();
+            assert_ne!(
+                original.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE),
+                rejected.attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+            );
+        });
+    }
     finalize_for_test();
 }
 

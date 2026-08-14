@@ -64,6 +64,9 @@ const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110")
 const ML_DSA_44_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
 const ML_DSA_65_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
 const ML_DSA_87_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
+const ML_KEM_512_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.1");
+const ML_KEM_768_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.2");
+const ML_KEM_1024_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.4.3");
 const FRIENDLY_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.20");
 const LOCAL_KEY_ID_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
 // UUIDv5(URL namespace,
@@ -327,6 +330,8 @@ struct StoredAttributes {
     sign: bool,
     verify: bool,
     derive: bool,
+    encapsulate: bool,
+    decapsulate: bool,
     sensitive: bool,
     extractable: bool,
     always_sensitive: bool,
@@ -1118,6 +1123,8 @@ fn decode_record(
         derive: attributes.derive,
         wrap: false,
         unwrap: false,
+        encapsulate: attributes.encapsulate,
+        decapsulate: attributes.decapsulate,
         sensitive: attributes.sensitive,
         extractable: attributes.extractable,
         always_sensitive: attributes.always_sensitive,
@@ -1266,6 +1273,8 @@ fn decode_stored_secret_key_info(
         derive,
         wrap,
         unwrap,
+        encapsulate: false,
+        decapsulate: false,
         sensitive,
         extractable,
         always_sensitive,
@@ -1487,6 +1496,8 @@ fn stored_attributes(object: &TokenObject) -> Result<StoredAttributes, Error> {
         sign: object.sign,
         verify: object.verify,
         derive: object.derive,
+        encapsulate: object.encapsulate,
+        decapsulate: object.decapsulate,
         sensitive: object.sensitive,
         extractable: object.extractable,
         always_sensitive: object.always_sensitive,
@@ -1505,7 +1516,7 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
     let mut encoded = Zeroizing::new(Vec::new());
     let mut encoder = Encoder::new(&mut *encoded);
     let encoder = encoder
-        .array(23)
+        .array(25)
         .and_then(|encoder| encoder.str(RECORD_SCHEMA))
         .and_then(|encoder| encoder.u64(FORMAT_VERSION))
         .and_then(|encoder| encoder.u64(attributes.class))
@@ -1520,6 +1531,8 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
         attributes.sign,
         attributes.verify,
         attributes.derive,
+        attributes.encapsulate,
+        attributes.decapsulate,
         attributes.sensitive,
         attributes.extractable,
         attributes.always_sensitive,
@@ -1548,7 +1561,8 @@ fn encode_stored_attributes(attributes: &StoredAttributes) -> Result<Zeroizing<V
 
 fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
     let mut decoder = Decoder::new(encoded);
-    if decoder.array().map_err(|_| CKR_DATA_INVALID)? != Some(23)
+    let count = decoder.array().map_err(|_| CKR_DATA_INVALID)?;
+    if !matches!(count, Some(23 | 25))
         || decoder.str().map_err(|_| CKR_DATA_INVALID)? != RECORD_SCHEMA
         || decoder.u64().map_err(|_| CKR_DATA_INVALID)? != FORMAT_VERSION
     {
@@ -1565,6 +1579,16 @@ fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
         sign: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
         verify: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
         derive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
+        encapsulate: if count == Some(25) {
+            decoder.bool().map_err(|_| CKR_DATA_INVALID)?
+        } else {
+            false
+        },
+        decapsulate: if count == Some(25) {
+            decoder.bool().map_err(|_| CKR_DATA_INVALID)?
+        } else {
+            false
+        },
         sensitive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
         extractable: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
         always_sensitive: decoder.bool().map_err(|_| CKR_DATA_INVALID)?,
@@ -1585,7 +1609,7 @@ fn decode_stored_attributes(encoded: &[u8]) -> Result<StoredAttributes, Error> {
         derive_template: decode_optional_bytes(&mut decoder)?,
     };
     if decoder.position() != encoded.len()
-        || encode_stored_attributes(&attributes)?.as_slice() != encoded
+        || count == Some(25) && encode_stored_attributes(&attributes)?.as_slice() != encoded
     {
         return Err(CKR_DATA_INVALID.into());
     }
@@ -1794,6 +1818,9 @@ pub(crate) fn material_to_pkcs8(
         SoftwarePrivateKeyMaterial::MlDsa44(key) => key.to_pkcs8_der().ok(),
         SoftwarePrivateKeyMaterial::MlDsa65(key) => key.to_pkcs8_der().ok(),
         SoftwarePrivateKeyMaterial::MlDsa87(key) => key.to_pkcs8_der().ok(),
+        SoftwarePrivateKeyMaterial::MlKem512(key) => key.to_pkcs8_der().ok(),
+        SoftwarePrivateKeyMaterial::MlKem768(key) => key.to_pkcs8_der().ok(),
+        SoftwarePrivateKeyMaterial::MlKem1024(key) => key.to_pkcs8_der().ok(),
         _ => None,
     };
     if let Some(document) = ml_dsa {
@@ -1888,6 +1915,30 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         }
         return ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_pkcs8_der(encoded)
             .map(SoftwarePrivateKeyMaterial::MlDsa87)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
+    if info.algorithm.oid == ML_KEM_512_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlKem512)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
+    if info.algorithm.oid == ML_KEM_768_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlKem768)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
+    if info.algorithm.oid == ML_KEM_1024_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_kem::DecapsulationKey::<ml_kem::MlKem1024>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlKem1024)
             .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1") {
@@ -2030,6 +2081,8 @@ mod tests {
             derive: material.key_type() != crate::CKK_RSA as crate::CK_KEY_TYPE,
             wrap: false,
             unwrap: false,
+            encapsulate: false,
+            decapsulate: false,
             sensitive: true,
             extractable: false,
             always_sensitive: true,
@@ -2063,6 +2116,8 @@ mod tests {
             derive: false,
             wrap: true,
             unwrap: true,
+            encapsulate: false,
+            decapsulate: false,
             sensitive: true,
             extractable: false,
             always_sensitive: true,
@@ -2137,6 +2192,15 @@ mod tests {
             SoftwarePrivateKeyMaterial::MlDsa87(ml_dsa::SigningKey::from_seed(
                 &ml_dsa::Seed::from([7; 32]),
             )),
+            SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(
+                ml_kem::Seed::from([7; 64]),
+            )),
+            SoftwarePrivateKeyMaterial::MlKem768(ml_kem::DecapsulationKey::from_seed(
+                ml_kem::Seed::from([7; 64]),
+            )),
+            SoftwarePrivateKeyMaterial::MlKem1024(ml_kem::DecapsulationKey::from_seed(
+                ml_kem::Seed::from([7; 64]),
+            )),
         ];
         for material in materials {
             let encoded = material_to_pkcs8(&material).unwrap();
@@ -2160,9 +2224,35 @@ mod tests {
                     || info.algorithm.oid == ML_DSA_44_OID
                     || info.algorithm.oid == ML_DSA_65_OID
                     || info.algorithm.oid == ML_DSA_87_OID
+                    || info.algorithm.oid == ML_KEM_512_OID
+                    || info.algorithm.oid == ML_KEM_768_OID
+                    || info.algorithm.oid == ML_KEM_1024_OID
                     || info.algorithm.oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1")
             );
         }
+    }
+
+    #[test]
+    fn persistent_ml_kem_private_key_preserves_decapsulation_policy() {
+        let master_key = [0x3c; MASTER_KEY_LENGTH];
+        let mut original = object(SoftwarePrivateKeyMaterial::MlKem512(
+            ml_kem::DecapsulationKey::from_seed(ml_kem::Seed::from([0x21; 64])),
+        ));
+        original.sign = false;
+        original.derive = false;
+        original.decapsulate = true;
+        original.key_gen_mechanism =
+            Some(crate::CKM_ML_KEM_KEY_PAIR_GEN as crate::CK_MECHANISM_TYPE);
+        original.allowed_mechanisms = Some(vec![crate::CKM_ML_KEM as crate::CK_MECHANISM_TYPE]);
+        let encoded = encode_record("ml-kem storage", &master_key, &original).unwrap();
+        let decoded =
+            decode_record("ml-kem storage", 7, "ml-kem-private", &master_key, &encoded).unwrap();
+        assert!(decoded.decapsulate);
+        assert_eq!(decoded.allowed_mechanisms, original.allowed_mechanisms);
+        assert!(matches!(
+            decoded.material,
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::MlKem512(_))
+        ));
     }
 
     #[test]
