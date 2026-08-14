@@ -120,6 +120,8 @@ pub(crate) fn mechanism_name(type_: CK_MECHANISM_TYPE) -> Option<&'static std::f
         CKM_EC_EDWARDS_KEY_PAIR_GEN,
         CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
         CKM_EDDSA,
+        CKM_ML_DSA_KEY_PAIR_GEN,
+        CKM_ML_DSA,
         CKM_GENERIC_SECRET_KEY_GEN,
         CKM_AES_KEY_GEN,
         CKM_AES_ECB,
@@ -302,6 +304,12 @@ pub(crate) fn software_public_mechanisms() -> Vec<MechanismDetails> {
         flags: CKF_VERIFY as CK_FLAGS,
     });
     mechanisms.push(MechanismDetails {
+        type_: CKM_ML_DSA as CK_MECHANISM_TYPE,
+        min_key_size: 1312,
+        max_key_size: 2592,
+        flags: CKF_VERIFY as CK_FLAGS,
+    });
+    mechanisms.push(MechanismDetails {
         type_: CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
         min_key_size: 0,
         max_key_size: 0,
@@ -339,6 +347,18 @@ pub(crate) fn software_private_mechanisms() -> Vec<MechanismDetails> {
             min_key_size: 255,
             max_key_size: 255,
             flags: (CKF_GENERATE_KEY_PAIR | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME) as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            min_key_size: 1312,
+            max_key_size: 2592,
+            flags: CKF_GENERATE_KEY_PAIR as CK_FLAGS,
+        },
+        MechanismDetails {
+            type_: CKM_ML_DSA as CK_MECHANISM_TYPE,
+            min_key_size: 1312,
+            max_key_size: 2592,
+            flags: CKF_SIGN as CK_FLAGS,
         },
         MechanismDetails {
             type_: CKM_ECDH1_DERIVE as CK_MECHANISM_TYPE,

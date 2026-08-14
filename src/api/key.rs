@@ -428,6 +428,7 @@ fn generate_key_pair(
                     || x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE
                     || x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE
+                    || x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE
             )
         {
             let (public_object, mut private_object) =
@@ -1040,6 +1041,8 @@ fn software_key_pair_object(
             x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE
                 || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+                || (class == CKO_PUBLIC_KEY as CK_OBJECT_CLASS
+                    && x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
         ) {
             continue;
         }
@@ -1138,6 +1141,29 @@ fn software_generate_key_pair(
                 CKK_EC_MONTGOMERY as CK_KEY_TYPE,
                 SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(*scalar)),
             )
+        }
+        x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
+            let parameter_set = read_ulong_template_attribute(
+                template_attribute(public_template, CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE)
+                    .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
+            )
+            .map_err(Error::from)?;
+            let mut seed = Zeroizing::new([0u8; 32]);
+            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
+            let seed = ml_dsa::Seed::from(*seed);
+            let material = match parameter_set {
+                x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(&seed))
+                }
+                x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlDsa65(ml_dsa::SigningKey::from_seed(&seed))
+                }
+                x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+                    SoftwarePrivateKeyMaterial::MlDsa87(ml_dsa::SigningKey::from_seed(&seed))
+                }
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            };
+            (CKK_ML_DSA as CK_KEY_TYPE, material)
         }
         _ => return Err(CKR_MECHANISM_INVALID.into()),
     };
@@ -1467,6 +1493,8 @@ fn project_public_key_object(
                 || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+                || x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+                || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
         ) {
             parsed.apply_attribute(attribute).map_err(Error::from)?;
@@ -1496,6 +1524,7 @@ fn project_public_key_object(
                 x if x == CKK_RSA as CK_KEY_TYPE
                     || x == CKK_EC as CK_KEY_TYPE
                     || x == CKK_EC_EDWARDS as CK_KEY_TYPE
+                    || x == CKK_ML_DSA as CK_KEY_TYPE
             )
     {
         return Err(CKR_TEMPLATE_INCONSISTENT.into());
@@ -1513,6 +1542,8 @@ fn project_public_key_object(
                 || x == CKA_PUBLIC_EXPONENT as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
                 || x == CKA_EC_POINT as CK_ATTRIBUTE_TYPE
+                || x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+                || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
                 || x == CKA_WRAP as CK_ATTRIBUTE_TYPE
                 || x == CKA_UNWRAP as CK_ATTRIBUTE_TYPE
         ) {

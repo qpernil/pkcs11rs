@@ -232,6 +232,9 @@ backend does not duplicate cryptography.
   brainpoolP256r1, brainpoolP384r1, and brainpoolP512r1; ECDSA and ECDH.
 - Edwards: Ed25519 signing.
 - Montgomery: X25519 key agreement.
+- ML-DSA: FIPS 204 parameter sets ML-DSA-44, ML-DSA-65, and ML-DSA-87;
+  key-pair generation plus pure signing and verification with optional context
+  and deterministic or hedged signing.
 - AES: 128, 192, and 256-bit keys with ECB, CBC, CBC-PAD, CTR, CCM, GCM,
   AES-KW, AES-KWP, CMAC, CMAC-GENERAL, and GMAC.
 - Legacy 3DES: three-key 24-byte keys with ECB, CBC, and CBC-PAD. This is a
@@ -263,6 +266,8 @@ The slot advertises these exact mechanism groups:
 | `CKM_ECDH1_DERIVE`, `CKM_ECDH1_COFACTOR_DERIVE` | 224–521 | `CKF_DERIVE` |
 | `CKM_EC_EDWARDS_KEY_PAIR_GEN`, `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` | 255 | `CKF_GENERATE_KEY_PAIR \| CKF_EC_NAMEDCURVE \| CKF_EC_CURVENAME` |
 | `CKM_EDDSA` | 255 | `CKF_SIGN \| CKF_VERIFY` |
+| `CKM_ML_DSA_KEY_PAIR_GEN` | 1312–2592 bytes | `CKF_GENERATE_KEY_PAIR` |
+| `CKM_ML_DSA` | 1312–2592 bytes | `CKF_SIGN \| CKF_VERIFY` |
 | `CKM_PKCS11RS_PROJECT_PUBLIC_KEY` | 0 | `CKF_DERIVE` |
 | `CKM_GENERIC_SECRET_KEY_GEN` | 1–1024 bytes | `CKF_GENERATE` |
 | `CKM_AES_KEY_GEN` | 16–32 bytes | `CKF_GENERATE` |
@@ -278,7 +283,27 @@ The slot advertises these exact mechanism groups:
 | SHA-1, SHA-2, and SHA-3 digest mechanisms | 0 | `CKF_DIGEST` |
 
 The numeric range is the envelope representable by `C_GetMechanismInfo`;
-`CKA_EC_PARAMS` selects and validates the exact named curve.
+`CKA_EC_PARAMS` selects and validates the exact named curve. For ML-DSA, the
+range is the encoded public-key size and `CKA_PARAMETER_SET` selects the exact
+parameter set.
+
+### ML-DSA parameters and key attributes
+
+`CKM_ML_DSA_KEY_PAIR_GEN` takes no mechanism parameter. The public-key
+template must contain `CKA_PARAMETER_SET` with `CKP_ML_DSA_44`,
+`CKP_ML_DSA_65`, or `CKP_ML_DSA_87`. Generated public and private objects use
+`CKK_ML_DSA`; both expose `CKA_PARAMETER_SET`. Public `CKA_VALUE` is the raw
+FIPS 204 encoded public key. Private `CKA_SEED` is the 32-byte generation seed
+and private `CKA_VALUE` is the expanded FIPS 204 private key; the normal
+PKCS #11 sensitive-attribute rules protect both private values.
+
+`CKM_ML_DSA` without a parameter uses an empty context and hedge-preferred
+signing. A `CK_SIGN_ADDITIONAL_CONTEXT` parameter may supply a context of at
+most 255 bytes and select `CKH_HEDGE_PREFERRED`, `CKH_HEDGE_REQUIRED`, or
+`CKH_DETERMINISTIC_REQUIRED`. Verification uses the supplied context and
+ignores the hedge choice. Persistent generated keys are stored using the
+standard ML-DSA PKCS #8 seed encoding inside the software token's existing
+encrypted private-key record.
 
 ### PBKDF2 parameters
 
