@@ -28,18 +28,28 @@ Simulator even though the Simulator has no USB CCID or NFC reader.
 The app recognizes exactly that owned software slot by its `Software token`
 model and `iPhone smoke` label. It initializes the token and user PIN when
 their standard flags require it, logs in with the prototype PIN `password`,
-and creates one persistent ML-DSA-87 keypair with ID
-`iphone-smoke-ml-dsa-87` when absent. It reports the generation time, then
-generates a fresh 32-byte message with `C_GenerateRandom`, signs it, and
-verifies it on every refresh while reporting both operation times. Later
-refreshes and launches reuse the keypair. These state-changing calls are never
-applied to discovered hardware.
+and creates persistent ML-DSA-87 and ML-KEM-1024 keypairs with IDs
+`iphone-smoke-ml-dsa-87` and `iphone-smoke-ml-kem-1024` when absent. It reports
+each generation time, then generates a fresh 32-byte message with
+`C_GenerateRandom`, signs it, and verifies it on every refresh while reporting
+both operation times. It also uses the PKCS #11 3.2 `C_EncapsulateKey` and
+`C_DecapsulateKey` entry points, verifies that their two 32-byte shared secrets
+match, and reports both operation times and the ciphertext length. Later
+refreshes and launches reuse both persistent keypairs. These state-changing
+calls are never applied to discovered hardware.
 
-Generation timing surrounds the complete `C_GenerateKeyPair` call, including
-encrypted persistence. `C_GenerateRandom` runs outside the sign timer. Signing
-includes `C_SignInit`, the signature-length query, and the output-producing
-`C_Sign`; verification includes `C_VerifyInit` and `C_Verify`, and is considered
-successful only when `C_Verify` returns `CKR_OK`.
+Each generation timing surrounds the complete `C_GenerateKeyPair` call,
+including encrypted persistence. `C_GenerateRandom` runs outside the sign
+timer. Signing includes `C_SignInit`, the signature-length query, and the
+output-producing `C_Sign`; verification includes `C_VerifyInit` and `C_Verify`.
+ML-KEM encapsulation timing includes its ciphertext-length query and the
+output-producing `C_EncapsulateKey`; decapsulation timing surrounds
+`C_DecapsulateKey`. The shared-secret reads and comparison occur after the
+timers. Both output templates request a 32-byte `CKK_GENERIC_SECRET` with
+`CKA_TOKEN` false, `CKA_SENSITIVE` false, and `CKA_EXTRACTABLE` true so the app
+can compare `CKA_VALUE`. These are session objects: successful comparisons
+destroy them explicitly, and closing the session cleans them up on an earlier
+failure. Only the ML-KEM keypair is persisted.
 
 The `public_discovery` prototype credential is required for the matching flow:
 it lets pkcs11rs expose the public companion objects on a YubiHSM before the

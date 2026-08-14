@@ -13,6 +13,9 @@ private let softwareTokenPIN = "password"
 private let softwareMlDsaLabel = "iPhone smoke ML-DSA-87"
 private let softwareMlDsaID = Array("iphone-smoke-ml-dsa-87".utf8)
 private let softwareMlDsaMessageLength = 32
+private let softwareMlKemLabel = "iPhone smoke ML-KEM-1024"
+private let softwareMlKemID = Array("iphone-smoke-ml-kem-1024".utf8)
+private let softwareMlKemSecretLength = 32
 private let ckaYubicoHsmAuthAlgorithm =
     CK_ATTRIBUTE_TYPE(CKA_VENDOR_DEFINED) | CK_ATTRIBUTE_TYPE(0x5901)
 private let ckaYubicoHsmAuthRetries =
@@ -430,13 +433,15 @@ private func initializeSoftwareUserPIN(session: CK_SESSION_HANDLE) -> CK_RV {
     }
 }
 
-private func findSoftwareMlDsaKey(
+private func findSoftwareKey(
     session: CK_SESSION_HANDLE,
-    objectClass: CK_OBJECT_CLASS
+    objectClass: CK_OBJECT_CLASS,
+    keyType: CK_KEY_TYPE,
+    identifier: [UInt8]
 ) -> (result: CK_RV, object: CK_OBJECT_HANDLE?) {
     var objectClass = objectClass
-    var keyType = CK_KEY_TYPE(CKK_ML_DSA)
-    var identifier = softwareMlDsaID
+    var keyType = keyType
+    var identifier = identifier
     var attributes = [CK_ATTRIBUTE](repeating: CK_ATTRIBUTE(), count: 3)
     let initialize = withUnsafeMutablePointer(to: &objectClass) { classPointer in
         withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
@@ -477,25 +482,31 @@ private func findSoftwareMlDsaKey(
     return (CK_RV(CKR_OK), count == 0 ? nil : object)
 }
 
-private func generateSoftwareMlDsaKeyPair(
-    session: CK_SESSION_HANDLE
+private func generateSoftwarePostQuantumKeyPair(
+    session: CK_SESSION_HANDLE,
+    mechanismType: CK_MECHANISM_TYPE,
+    parameterSet: CK_ULONG,
+    label: String,
+    identifier: [UInt8],
+    publicUsageAttribute: CK_ATTRIBUTE_TYPE,
+    privateUsageAttribute: CK_ATTRIBUTE_TYPE
 ) -> (result: CK_RV, publicKey: CK_OBJECT_HANDLE, privateKey: CK_OBJECT_HANDLE) {
     var token = CK_BBOOL(CK_TRUE)
-    var verify = CK_BBOOL(CK_TRUE)
-    var sign = CK_BBOOL(CK_TRUE)
-    var parameterSet = CK_ML_DSA_PARAMETER_SET_TYPE(CKP_ML_DSA_87)
-    var identifier = softwareMlDsaID
-    var label = Array(softwareMlDsaLabel.utf8)
+    var publicUsage = CK_BBOOL(CK_TRUE)
+    var privateUsage = CK_BBOOL(CK_TRUE)
+    var parameterSet = parameterSet
+    var identifier = identifier
+    var label = Array(label.utf8)
     var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
     var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
     var mechanism = CK_MECHANISM(
-        mechanism: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
+        mechanism: mechanismType,
         pParameter: nil,
         ulParameterLen: 0
     )
     let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
-        withUnsafeMutablePointer(to: &verify) { verifyPointer in
-            withUnsafeMutablePointer(to: &sign) { signPointer in
+        withUnsafeMutablePointer(to: &publicUsage) { publicUsagePointer in
+            withUnsafeMutablePointer(to: &privateUsage) { privateUsagePointer in
                 withUnsafeMutablePointer(to: &parameterSet) { parameterSetPointer in
                     identifier.withUnsafeMutableBytes { identifierBuffer in
                         label.withUnsafeMutableBytes { labelBuffer in
@@ -515,10 +526,10 @@ private func generateSoftwareMlDsaKeyPair(
                             publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_PARAMETER_SET)
                             publicAttributes[3].pValue = UnsafeMutableRawPointer(parameterSetPointer)
                             publicAttributes[3].ulValueLen = CK_ULONG(
-                                MemoryLayout<CK_ML_DSA_PARAMETER_SET_TYPE>.size
+                                MemoryLayout<CK_ULONG>.size
                             )
-                            publicAttributes[4].type = CK_ATTRIBUTE_TYPE(CKA_VERIFY)
-                            publicAttributes[4].pValue = UnsafeMutableRawPointer(verifyPointer)
+                            publicAttributes[4].type = publicUsageAttribute
+                            publicAttributes[4].pValue = UnsafeMutableRawPointer(publicUsagePointer)
                             publicAttributes[4].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
 
                             var privateAttributes = [CK_ATTRIBUTE](
@@ -534,8 +545,8 @@ private func generateSoftwareMlDsaKeyPair(
                             privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
                             privateAttributes[2].pValue = identifierBuffer.baseAddress
                             privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
-                            privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_SIGN)
-                            privateAttributes[3].pValue = UnsafeMutableRawPointer(signPointer)
+                            privateAttributes[3].type = privateUsageAttribute
+                            privateAttributes[3].pValue = UnsafeMutableRawPointer(privateUsagePointer)
                             privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
 
                             return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
@@ -646,6 +657,243 @@ private func exerciseSoftwareMlDsa(
     )
 }
 
+private func softwareSecretValue(
+    session: CK_SESSION_HANDLE,
+    object: CK_OBJECT_HANDLE
+) -> (result: CK_RV, value: [UInt8]?) {
+    var attribute = CK_ATTRIBUTE(
+        type: CK_ATTRIBUTE_TYPE(CKA_VALUE),
+        pValue: nil,
+        ulValueLen: 0
+    )
+    var result = C_GetAttributeValue(session, object, &attribute, 1)
+    guard result == CKR_OK else {
+        return (result, nil)
+    }
+    guard attribute.ulValueLen != CK_ULONG(CK_UNAVAILABLE_INFORMATION) else {
+        return (CK_RV(CKR_ATTRIBUTE_SENSITIVE), nil)
+    }
+    var value = [UInt8](repeating: 0, count: Int(attribute.ulValueLen))
+    result = value.withUnsafeMutableBufferPointer { buffer in
+        attribute.pValue = UnsafeMutableRawPointer(buffer.baseAddress)
+        attribute.ulValueLen = CK_ULONG(buffer.count)
+        return C_GetAttributeValue(session, object, &attribute, 1)
+    }
+    guard result == CKR_OK else {
+        return (result, nil)
+    }
+    value.removeSubrange(Int(attribute.ulValueLen)..<value.count)
+    return (result, value)
+}
+
+private func exerciseSoftwareMlKem(
+    session: CK_SESSION_HANDLE,
+    publicKey: CK_OBJECT_HANDLE,
+    privateKey: CK_OBJECT_HANDLE
+) -> (
+    result: CK_RV,
+    operation: String,
+    ciphertextLength: Int,
+    encapsulateMilliseconds: Double,
+    decapsulateMilliseconds: Double
+) {
+    var mechanism = CK_MECHANISM(
+        mechanism: CK_MECHANISM_TYPE(CKM_ML_KEM),
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    var encapsulatedSecret = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var decapsulatedSecret = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    defer {
+        if encapsulatedSecret != CK_OBJECT_HANDLE(CK_INVALID_HANDLE) {
+            _ = C_DestroyObject(session, encapsulatedSecret)
+        }
+        if decapsulatedSecret != CK_OBJECT_HANDLE(CK_INVALID_HANDLE) {
+            _ = C_DestroyObject(session, decapsulatedSecret)
+        }
+    }
+
+    var token = CK_BBOOL(CK_FALSE)
+    var sensitive = CK_BBOOL(CK_FALSE)
+    var extractable = CK_BBOOL(CK_TRUE)
+    var keyType = CK_KEY_TYPE(CKK_GENERIC_SECRET)
+    var valueLength = CK_ULONG(softwareMlKemSecretLength)
+    var ciphertextLength = CK_ULONG()
+    let encapsulateStart = ProcessInfo.processInfo.systemUptime
+    var result = C_EncapsulateKey(
+        session,
+        &mechanism,
+        publicKey,
+        nil,
+        0,
+        nil,
+        &ciphertextLength,
+        &encapsulatedSecret
+    )
+    guard result == CKR_OK else {
+        return (result, "C_EncapsulateKey(size)", 0, 0, 0)
+    }
+    var ciphertext = [UInt8](repeating: 0, count: Int(ciphertextLength))
+    result = withUnsafeMutablePointer(to: &token) { tokenPointer in
+        withUnsafeMutablePointer(to: &sensitive) { sensitivePointer in
+            withUnsafeMutablePointer(to: &extractable) { extractablePointer in
+                withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+                    withUnsafeMutablePointer(to: &valueLength) { valueLengthPointer in
+                        var attributes = [
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_TOKEN),
+                                pValue: UnsafeMutableRawPointer(tokenPointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_SENSITIVE),
+                                pValue: UnsafeMutableRawPointer(sensitivePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_EXTRACTABLE),
+                                pValue: UnsafeMutableRawPointer(extractablePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE),
+                                pValue: UnsafeMutableRawPointer(keyTypePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_VALUE_LEN),
+                                pValue: UnsafeMutableRawPointer(valueLengthPointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_ULONG>.size)
+                            ),
+                        ]
+                        return attributes.withUnsafeMutableBufferPointer { attributeBuffer in
+                            ciphertext.withUnsafeMutableBufferPointer { ciphertextBuffer in
+                                C_EncapsulateKey(
+                                    session,
+                                    &mechanism,
+                                    publicKey,
+                                    attributeBuffer.baseAddress,
+                                    CK_ULONG(attributeBuffer.count),
+                                    ciphertextBuffer.baseAddress,
+                                    &ciphertextLength,
+                                    &encapsulatedSecret
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let encapsulateMilliseconds =
+        (ProcessInfo.processInfo.systemUptime - encapsulateStart) * 1_000
+    guard result == CKR_OK else {
+        return (result, "C_EncapsulateKey", 0, encapsulateMilliseconds, 0)
+    }
+    ciphertext.removeSubrange(Int(ciphertextLength)..<ciphertext.count)
+
+    let decapsulateStart = ProcessInfo.processInfo.systemUptime
+    result = withUnsafeMutablePointer(to: &token) { tokenPointer in
+        withUnsafeMutablePointer(to: &sensitive) { sensitivePointer in
+            withUnsafeMutablePointer(to: &extractable) { extractablePointer in
+                withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+                    withUnsafeMutablePointer(to: &valueLength) { valueLengthPointer in
+                        var attributes = [
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_TOKEN),
+                                pValue: UnsafeMutableRawPointer(tokenPointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_SENSITIVE),
+                                pValue: UnsafeMutableRawPointer(sensitivePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_EXTRACTABLE),
+                                pValue: UnsafeMutableRawPointer(extractablePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE),
+                                pValue: UnsafeMutableRawPointer(keyTypePointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
+                            ),
+                            CK_ATTRIBUTE(
+                                type: CK_ATTRIBUTE_TYPE(CKA_VALUE_LEN),
+                                pValue: UnsafeMutableRawPointer(valueLengthPointer),
+                                ulValueLen: CK_ULONG(MemoryLayout<CK_ULONG>.size)
+                            ),
+                        ]
+                        return attributes.withUnsafeMutableBufferPointer { attributeBuffer in
+                            ciphertext.withUnsafeMutableBufferPointer { ciphertextBuffer in
+                                C_DecapsulateKey(
+                                    session,
+                                    &mechanism,
+                                    privateKey,
+                                    attributeBuffer.baseAddress,
+                                    CK_ULONG(attributeBuffer.count),
+                                    ciphertextBuffer.baseAddress,
+                                    CK_ULONG(ciphertextBuffer.count),
+                                    &decapsulatedSecret
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let decapsulateMilliseconds =
+        (ProcessInfo.processInfo.systemUptime - decapsulateStart) * 1_000
+    guard result == CKR_OK else {
+        return (
+            result,
+            "C_DecapsulateKey",
+            ciphertext.count,
+            encapsulateMilliseconds,
+            decapsulateMilliseconds
+        )
+    }
+
+    let first = softwareSecretValue(session: session, object: encapsulatedSecret)
+    guard first.result == CKR_OK, let firstValue = first.value else {
+        return (
+            first.result,
+            "C_GetAttributeValue(encapsulated secret)",
+            ciphertext.count,
+            encapsulateMilliseconds,
+            decapsulateMilliseconds
+        )
+    }
+    let second = softwareSecretValue(session: session, object: decapsulatedSecret)
+    guard second.result == CKR_OK, let secondValue = second.value else {
+        return (
+            second.result,
+            "C_GetAttributeValue(decapsulated secret)",
+            ciphertext.count,
+            encapsulateMilliseconds,
+            decapsulateMilliseconds
+        )
+    }
+    guard firstValue.count == softwareMlKemSecretLength, firstValue == secondValue else {
+        return (
+            CK_RV(CKR_GENERAL_ERROR),
+            "ML-KEM shared-secret comparison",
+            ciphertext.count,
+            encapsulateMilliseconds,
+            decapsulateMilliseconds
+        )
+    }
+    return (
+        CK_RV(CKR_OK),
+        "ML-KEM shared-secret comparison",
+        ciphertext.count,
+        encapsulateMilliseconds,
+        decapsulateMilliseconds
+    )
+}
+
 private func softwareObjectInventory(
     slot: CK_SLOT_ID,
     tokenInfo: CK_TOKEN_INFO
@@ -713,13 +961,17 @@ private func softwareObjectInventory(
     }
 
     if failure == nil {
-        let foundPublic = findSoftwareMlDsaKey(
+        let foundPublic = findSoftwareKey(
             session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY)
+            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
+            keyType: CK_KEY_TYPE(CKK_ML_DSA),
+            identifier: softwareMlDsaID
         )
-        let foundPrivate = findSoftwareMlDsaKey(
+        let foundPrivate = findSoftwareKey(
             session: session,
-            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY)
+            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+            keyType: CK_KEY_TYPE(CKK_ML_DSA),
+            identifier: softwareMlDsaID
         )
         var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
         var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
@@ -733,7 +985,15 @@ private func softwareObjectInventory(
             failure = "ML-DSA-87 keypair is incomplete"
         } else {
             let generationStart = ProcessInfo.processInfo.systemUptime
-            let generated = generateSoftwareMlDsaKeyPair(session: session)
+            let generated = generateSoftwarePostQuantumKeyPair(
+                session: session,
+                mechanismType: CK_MECHANISM_TYPE(CKM_ML_DSA_KEY_PAIR_GEN),
+                parameterSet: CK_ULONG(CKP_ML_DSA_87),
+                label: softwareMlDsaLabel,
+                identifier: softwareMlDsaID,
+                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_VERIFY),
+                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_SIGN)
+            )
             let generationMilliseconds =
                 (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
             if generated.result == CKR_OK {
@@ -769,6 +1029,79 @@ private func softwareObjectInventory(
                 )
             } else {
                 failure = "\(exercised.operation)(ML-DSA-87) failed: \(exercised.result)"
+            }
+        }
+    }
+
+    if failure == nil {
+        let foundPublic = findSoftwareKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
+            keyType: CK_KEY_TYPE(CKK_ML_KEM),
+            identifier: softwareMlKemID
+        )
+        let foundPrivate = findSoftwareKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+            keyType: CK_KEY_TYPE(CKK_ML_KEM),
+            identifier: softwareMlKemID
+        )
+        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        if foundPublic.result != CKR_OK {
+            failure = "ML-KEM-1024 public-key search failed: \(foundPublic.result)"
+        } else if foundPrivate.result != CKR_OK {
+            failure = "ML-KEM-1024 private-key search failed: \(foundPrivate.result)"
+        } else if foundPublic.object != nil, foundPrivate.object != nil {
+            lines.append("  ML-KEM-1024 keypair already present")
+        } else if foundPublic.object != nil || foundPrivate.object != nil {
+            failure = "ML-KEM-1024 keypair is incomplete"
+        } else {
+            let generationStart = ProcessInfo.processInfo.systemUptime
+            let generated = generateSoftwarePostQuantumKeyPair(
+                session: session,
+                mechanismType: CK_MECHANISM_TYPE(CKM_ML_KEM_KEY_PAIR_GEN),
+                parameterSet: CK_ULONG(CKP_ML_KEM_1024),
+                label: softwareMlKemLabel,
+                identifier: softwareMlKemID,
+                publicUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_ENCAPSULATE),
+                privateUsageAttribute: CK_ATTRIBUTE_TYPE(CKA_DECAPSULATE)
+            )
+            let generationMilliseconds =
+                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
+            if generated.result == CKR_OK {
+                publicKey = generated.publicKey
+                privateKey = generated.privateKey
+                lines.append(
+                    String(
+                        format: "  generated ML-KEM-1024 keypair in %.3f ms: public %llu, private %llu",
+                        generationMilliseconds,
+                        UInt64(generated.publicKey),
+                        UInt64(generated.privateKey)
+                    )
+                )
+            } else {
+                failure = "C_GenerateKeyPair(ML-KEM-1024) failed: \(generated.result)"
+            }
+        }
+
+        if failure == nil {
+            let exercised = exerciseSoftwareMlKem(
+                session: session,
+                publicKey: publicKey,
+                privateKey: privateKey
+            )
+            if exercised.result == CKR_OK {
+                lines.append(
+                    String(
+                        format: "  ML-KEM-1024 encapsulate %.3f ms, decapsulate %.3f ms (%d-byte ciphertext, shared secret matched)",
+                        exercised.encapsulateMilliseconds,
+                        exercised.decapsulateMilliseconds,
+                        exercised.ciphertextLength
+                    )
+                )
+            } else {
+                failure = "\(exercised.operation)(ML-KEM-1024) failed: \(exercised.result)"
             }
         }
     }

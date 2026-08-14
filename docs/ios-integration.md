@@ -263,12 +263,15 @@ Two checked-in UIKit applications use the same XCFramework and direct C ABI:
   [Objective-C smoke test](../examples/ios/PKCS11RSObjCSmoke/README.md) provide
   synchronized functional coverage through their respective language bindings.
   Both cover USB CCID, NFC, persistent software-token initialization,
-  ML-DSA-87 key generation and timed sign/verify, remote YubiHSM discovery,
-  explicit YubiHSM Auth public-key matching and login, object inventory, debug
-  Unified Logging, and long-lived application behavior. Each refresh signs a
-  fresh 32-byte value from `C_GenerateRandom` and treats `C_Verify` success as
-  part of the smoke result. The first explicit refresh starts slot discovery in
-  both apps so NFC UI is not presented automatically at launch.
+  ML-DSA-87 key generation and timed sign/verify, ML-KEM-1024 key generation
+  and timed encapsulation/decapsulation, remote YubiHSM discovery, explicit
+  YubiHSM Auth public-key matching and login, object inventory, debug Unified
+  Logging, and long-lived application behavior. Each refresh signs and verifies
+  a fresh 32-byte value from `C_GenerateRandom`, then uses the PKCS #11 3.2 KEM
+  entry points and compares their session-only 32-byte generic secrets through
+  `CKA_VALUE`. The test makes these derived secrets extractable solely for that
+  comparison and does not persist them. The first explicit refresh starts slot
+  discovery in both apps so NFC UI is not presented automatically at launch.
 
 Build the XCFramework before opening either Xcode project. Both projects contain
 the maintainer's development team for automatic device signing; select a
