@@ -9,12 +9,15 @@ static NSString *const PKCS11RSSoftwareTokenModel = @"Software token";
 static NSString *const PKCS11RSSoftwareTokenPIN = @"password";
 static NSString *const PKCS11RSSoftwareMLDSALabel = @"iPhone smoke ML-DSA-87";
 static NSString *const PKCS11RSSoftwareMLDSAID = @"iphone-smoke-ml-dsa-87";
+static NSString *const PKCS11RSSoftwareMLKEMLabel = @"iPhone smoke ML-KEM-1024";
+static NSString *const PKCS11RSSoftwareMLKEMID = @"iphone-smoke-ml-kem-1024";
 static NSString *const PKCS11RSHsmAuthPassword = @"password";
 enum {
     PKCS11RSInitialSlotCapacity = 10,
     PKCS11RSObjectBatchCapacity = 64,
     PKCS11RSAttributeCapacity = 1024,
     PKCS11RSMLDSAMessageLength = 32,
+    PKCS11RSMLKEMSecretLength = 32,
 };
 static const CK_ATTRIBUTE_TYPE PKCS11RSHsmAuthAlgorithm =
     CKA_VENDOR_DEFINED | 0x5901UL;
@@ -542,13 +545,14 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return result;
 }
 
-- (CK_RV)findSoftwareMLDSAKeyInSession:(CK_SESSION_HANDLE)session
-                           objectClass:(CK_OBJECT_CLASS)objectClass
-                                object:(CK_OBJECT_HANDLE *)object
-                                 found:(BOOL *)found {
-    CK_KEY_TYPE keyType = CKK_ML_DSA;
+- (CK_RV)findSoftwareKeyInSession:(CK_SESSION_HANDLE)session
+                      objectClass:(CK_OBJECT_CLASS)objectClass
+                           keyType:(CK_KEY_TYPE)keyType
+                         identifier:(NSString *)identifierString
+                           object:(CK_OBJECT_HANDLE *)object
+                            found:(BOOL *)found {
     NSMutableData *identifier =
-        [[PKCS11RSSoftwareMLDSAID dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [[identifierString dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     CK_ATTRIBUTE attributes[] = {
         {CKA_CLASS, &objectClass, sizeof(objectClass)},
         {CKA_KEY_TYPE, &keyType, sizeof(keyType)},
@@ -575,31 +579,36 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     return CKR_OK;
 }
 
-- (CK_RV)generateSoftwareMLDSAKeyPairInSession:(CK_SESSION_HANDLE)session
-                                      publicKey:(CK_OBJECT_HANDLE *)publicKey
-                                     privateKey:(CK_OBJECT_HANDLE *)privateKey {
+- (CK_RV)generateSoftwarePostQuantumKeyPairInSession:(CK_SESSION_HANDLE)session
+                                            mechanism:(CK_MECHANISM_TYPE)mechanismType
+                                          parameterSet:(CK_ULONG)parameterSet
+                                                 label:(NSString *)labelString
+                                            identifier:(NSString *)identifierString
+                                  publicUsageAttribute:(CK_ATTRIBUTE_TYPE)publicUsageAttribute
+                                 privateUsageAttribute:(CK_ATTRIBUTE_TYPE)privateUsageAttribute
+                                             publicKey:(CK_OBJECT_HANDLE *)publicKey
+                                            privateKey:(CK_OBJECT_HANDLE *)privateKey {
     CK_BBOOL token = CK_TRUE;
-    CK_BBOOL verify = CK_TRUE;
-    CK_BBOOL sign = CK_TRUE;
-    CK_ML_DSA_PARAMETER_SET_TYPE parameterSet = CKP_ML_DSA_87;
+    CK_BBOOL publicUsage = CK_TRUE;
+    CK_BBOOL privateUsage = CK_TRUE;
     NSMutableData *identifier =
-        [[PKCS11RSSoftwareMLDSAID dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [[identifierString dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     NSMutableData *label =
-        [[PKCS11RSSoftwareMLDSALabel dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [[labelString dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     CK_ATTRIBUTE publicAttributes[] = {
         {CKA_TOKEN, &token, sizeof(token)},
         {CKA_LABEL, label.mutableBytes, label.length},
         {CKA_ID, identifier.mutableBytes, identifier.length},
         {CKA_PARAMETER_SET, &parameterSet, sizeof(parameterSet)},
-        {CKA_VERIFY, &verify, sizeof(verify)},
+        {publicUsageAttribute, &publicUsage, sizeof(publicUsage)},
     };
     CK_ATTRIBUTE privateAttributes[] = {
         {CKA_TOKEN, &token, sizeof(token)},
         {CKA_LABEL, label.mutableBytes, label.length},
         {CKA_ID, identifier.mutableBytes, identifier.length},
-        {CKA_SIGN, &sign, sizeof(sign)},
+        {privateUsageAttribute, &privateUsage, sizeof(privateUsage)},
     };
-    CK_MECHANISM mechanism = {CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0};
+    CK_MECHANISM mechanism = {mechanismType, NULL_PTR, 0};
     *publicKey = CK_INVALID_HANDLE;
     *privateKey = CK_INVALID_HANDLE;
     return C_GenerateKeyPair(session,
@@ -668,6 +677,125 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                       signature.length);
     *verifyMilliseconds = (NSProcessInfo.processInfo.systemUptime - verifyStart) * 1000.0;
     *failedOperation = @"C_Verify";
+    return result;
+}
+
+- (CK_RV)softwareSecretValueInSession:(CK_SESSION_HANDLE)session
+                                  key:(CK_OBJECT_HANDLE)key
+                                value:(NSData * __autoreleasing *)value {
+    CK_ATTRIBUTE attribute = {CKA_VALUE, NULL_PTR, 0};
+    CK_RV result = C_GetAttributeValue(session, key, &attribute, 1);
+    if (result != CKR_OK) {
+        return result;
+    }
+    if (attribute.ulValueLen == CK_UNAVAILABLE_INFORMATION) {
+        return CKR_ATTRIBUTE_SENSITIVE;
+    }
+    NSMutableData *storage = [NSMutableData dataWithLength:attribute.ulValueLen];
+    attribute.pValue = storage.mutableBytes;
+    result = C_GetAttributeValue(session, key, &attribute, 1);
+    if (result != CKR_OK) {
+        return result;
+    }
+    storage.length = attribute.ulValueLen;
+    *value = storage;
+    return CKR_OK;
+}
+
+- (CK_RV)exerciseSoftwareMLKEMInSession:(CK_SESSION_HANDLE)session
+                               publicKey:(CK_OBJECT_HANDLE)publicKey
+                              privateKey:(CK_OBJECT_HANDLE)privateKey
+                        ciphertextLength:(CK_ULONG *)ciphertextLength
+                 encapsulateMilliseconds:(double *)encapsulateMilliseconds
+                 decapsulateMilliseconds:(double *)decapsulateMilliseconds
+                         failedOperation:(NSString * __autoreleasing *)failedOperation {
+    CK_MECHANISM mechanism = {CKM_ML_KEM, NULL_PTR, 0};
+    CK_OBJECT_HANDLE encapsulatedSecret = CK_INVALID_HANDLE;
+    CK_OBJECT_HANDLE decapsulatedSecret = CK_INVALID_HANDLE;
+    CK_BBOOL token = CK_FALSE;
+    CK_BBOOL sensitive = CK_FALSE;
+    CK_BBOOL extractable = CK_TRUE;
+    CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
+    CK_ULONG valueLength = PKCS11RSMLKEMSecretLength;
+    CK_ATTRIBUTE secretAttributes[] = {
+        {CKA_TOKEN, &token, sizeof(token)},
+        {CKA_SENSITIVE, &sensitive, sizeof(sensitive)},
+        {CKA_EXTRACTABLE, &extractable, sizeof(extractable)},
+        {CKA_KEY_TYPE, &keyType, sizeof(keyType)},
+        {CKA_VALUE_LEN, &valueLength, sizeof(valueLength)},
+    };
+
+    *ciphertextLength = 0;
+    NSTimeInterval encapsulateStart = NSProcessInfo.processInfo.systemUptime;
+    CK_RV result = C_EncapsulateKey(session,
+                                    &mechanism,
+                                    publicKey,
+                                    NULL_PTR,
+                                    0,
+                                    NULL_PTR,
+                                    ciphertextLength,
+                                    &encapsulatedSecret);
+    if (result != CKR_OK) {
+        *failedOperation = @"C_EncapsulateKey(size)";
+        return result;
+    }
+    NSMutableData *ciphertext = [NSMutableData dataWithLength:*ciphertextLength];
+    result = C_EncapsulateKey(session,
+                              &mechanism,
+                              publicKey,
+                              secretAttributes,
+                              sizeof(secretAttributes) / sizeof(secretAttributes[0]),
+                              ciphertext.mutableBytes,
+                              ciphertextLength,
+                              &encapsulatedSecret);
+    *encapsulateMilliseconds =
+        (NSProcessInfo.processInfo.systemUptime - encapsulateStart) * 1000.0;
+    if (result != CKR_OK) {
+        *failedOperation = @"C_EncapsulateKey";
+        return result;
+    }
+    ciphertext.length = *ciphertextLength;
+
+    NSTimeInterval decapsulateStart = NSProcessInfo.processInfo.systemUptime;
+    result = C_DecapsulateKey(session,
+                              &mechanism,
+                              privateKey,
+                              secretAttributes,
+                              sizeof(secretAttributes) / sizeof(secretAttributes[0]),
+                              ciphertext.mutableBytes,
+                              ciphertext.length,
+                              &decapsulatedSecret);
+    *decapsulateMilliseconds =
+        (NSProcessInfo.processInfo.systemUptime - decapsulateStart) * 1000.0;
+    if (result != CKR_OK) {
+        *failedOperation = @"C_DecapsulateKey";
+        return result;
+    }
+
+    NSData *first = nil;
+    result = [self softwareSecretValueInSession:session key:encapsulatedSecret value:&first];
+    if (result != CKR_OK) {
+        *failedOperation = @"C_GetAttributeValue(encapsulated secret)";
+        return result;
+    }
+    NSData *second = nil;
+    result = [self softwareSecretValueInSession:session key:decapsulatedSecret value:&second];
+    if (result != CKR_OK) {
+        *failedOperation = @"C_GetAttributeValue(decapsulated secret)";
+        return result;
+    }
+    if (first.length != PKCS11RSMLKEMSecretLength || ![first isEqualToData:second]) {
+        *failedOperation = @"ML-KEM shared-secret comparison";
+        return CKR_GENERAL_ERROR;
+    }
+
+    result = C_DestroyObject(session, encapsulatedSecret);
+    if (result != CKR_OK) {
+        *failedOperation = @"C_DestroyObject(encapsulated secret)";
+        return result;
+    }
+    result = C_DestroyObject(session, decapsulatedSecret);
+    *failedOperation = @"C_DestroyObject(decapsulated secret)";
     return result;
 }
 
@@ -750,14 +878,18 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
         CK_OBJECT_HANDLE privateKey = CK_INVALID_HANDLE;
         BOOL foundPublic = NO;
         BOOL foundPrivate = NO;
-        CK_RV findPublic = [self findSoftwareMLDSAKeyInSession:session
-                                                   objectClass:CKO_PUBLIC_KEY
-                                                        object:&publicKey
-                                                         found:&foundPublic];
-        CK_RV findPrivate = [self findSoftwareMLDSAKeyInSession:session
-                                                    objectClass:CKO_PRIVATE_KEY
-                                                         object:&privateKey
-                                                          found:&foundPrivate];
+        CK_RV findPublic = [self findSoftwareKeyInSession:session
+                                              objectClass:CKO_PUBLIC_KEY
+                                                   keyType:CKK_ML_DSA
+                                                identifier:PKCS11RSSoftwareMLDSAID
+                                                   object:&publicKey
+                                                    found:&foundPublic];
+        CK_RV findPrivate = [self findSoftwareKeyInSession:session
+                                               objectClass:CKO_PRIVATE_KEY
+                                                    keyType:CKK_ML_DSA
+                                                 identifier:PKCS11RSSoftwareMLDSAID
+                                                    object:&privateKey
+                                                     found:&foundPrivate];
         if (findPublic != CKR_OK) {
             failure = [NSString stringWithFormat:@"ML-DSA-87 public-key search failed: %@",
                                                       PKCS11RSReturnValue(findPublic)];
@@ -770,9 +902,15 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
             failure = @"ML-DSA-87 keypair is incomplete";
         } else {
             NSTimeInterval generationStart = NSProcessInfo.processInfo.systemUptime;
-            CK_RV generate = [self generateSoftwareMLDSAKeyPairInSession:session
-                                                                publicKey:&publicKey
-                                                               privateKey:&privateKey];
+            CK_RV generate = [self generateSoftwarePostQuantumKeyPairInSession:session
+                                                                     mechanism:CKM_ML_DSA_KEY_PAIR_GEN
+                                                                   parameterSet:CKP_ML_DSA_87
+                                                                          label:PKCS11RSSoftwareMLDSALabel
+                                                                     identifier:PKCS11RSSoftwareMLDSAID
+                                                           publicUsageAttribute:CKA_VERIFY
+                                                          privateUsageAttribute:CKA_SIGN
+                                                                      publicKey:&publicKey
+                                                                     privateKey:&privateKey];
             double generationMilliseconds =
                 (NSProcessInfo.processInfo.systemUptime - generationStart) * 1000.0;
             if (generate == CKR_OK) {
@@ -807,6 +945,84 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
                     (unsigned long)signatureLength]];
             } else {
                 failure = [NSString stringWithFormat:@"%@(ML-DSA-87) failed: %@",
+                                                      failedOperation,
+                                                      PKCS11RSReturnValue(exercise)];
+            }
+        }
+    }
+
+    if (failure == nil) {
+        CK_OBJECT_HANDLE publicKey = CK_INVALID_HANDLE;
+        CK_OBJECT_HANDLE privateKey = CK_INVALID_HANDLE;
+        BOOL foundPublic = NO;
+        BOOL foundPrivate = NO;
+        CK_RV findPublic = [self findSoftwareKeyInSession:session
+                                              objectClass:CKO_PUBLIC_KEY
+                                                   keyType:CKK_ML_KEM
+                                                identifier:PKCS11RSSoftwareMLKEMID
+                                                   object:&publicKey
+                                                    found:&foundPublic];
+        CK_RV findPrivate = [self findSoftwareKeyInSession:session
+                                               objectClass:CKO_PRIVATE_KEY
+                                                    keyType:CKK_ML_KEM
+                                                 identifier:PKCS11RSSoftwareMLKEMID
+                                                    object:&privateKey
+                                                     found:&foundPrivate];
+        if (findPublic != CKR_OK) {
+            failure = [NSString stringWithFormat:@"ML-KEM-1024 public-key search failed: %@",
+                                                      PKCS11RSReturnValue(findPublic)];
+        } else if (findPrivate != CKR_OK) {
+            failure = [NSString stringWithFormat:@"ML-KEM-1024 private-key search failed: %@",
+                                                      PKCS11RSReturnValue(findPrivate)];
+        } else if (foundPublic && foundPrivate) {
+            [prefix addObject:@"  ML-KEM-1024 keypair already present"];
+        } else if (foundPublic || foundPrivate) {
+            failure = @"ML-KEM-1024 keypair is incomplete";
+        } else {
+            NSTimeInterval generationStart = NSProcessInfo.processInfo.systemUptime;
+            CK_RV generate = [self generateSoftwarePostQuantumKeyPairInSession:session
+                                                                     mechanism:CKM_ML_KEM_KEY_PAIR_GEN
+                                                                   parameterSet:CKP_ML_KEM_1024
+                                                                          label:PKCS11RSSoftwareMLKEMLabel
+                                                                     identifier:PKCS11RSSoftwareMLKEMID
+                                                           publicUsageAttribute:CKA_ENCAPSULATE
+                                                          privateUsageAttribute:CKA_DECAPSULATE
+                                                                      publicKey:&publicKey
+                                                                     privateKey:&privateKey];
+            double generationMilliseconds =
+                (NSProcessInfo.processInfo.systemUptime - generationStart) * 1000.0;
+            if (generate == CKR_OK) {
+                [prefix addObject:[NSString stringWithFormat:
+                    @"  generated ML-KEM-1024 keypair in %.3f ms: public %lu, private %lu",
+                    generationMilliseconds,
+                    (unsigned long)publicKey,
+                    (unsigned long)privateKey]];
+            } else {
+                failure = [NSString stringWithFormat:@"C_GenerateKeyPair(ML-KEM-1024) failed: %@",
+                                                      PKCS11RSReturnValue(generate)];
+            }
+        }
+
+        if (failure == nil) {
+            CK_ULONG ciphertextLength = 0;
+            double encapsulateMilliseconds = 0;
+            double decapsulateMilliseconds = 0;
+            NSString *failedOperation = nil;
+            CK_RV exercise = [self exerciseSoftwareMLKEMInSession:session
+                                                        publicKey:publicKey
+                                                       privateKey:privateKey
+                                                 ciphertextLength:&ciphertextLength
+                                          encapsulateMilliseconds:&encapsulateMilliseconds
+                                          decapsulateMilliseconds:&decapsulateMilliseconds
+                                                  failedOperation:&failedOperation];
+            if (exercise == CKR_OK) {
+                [prefix addObject:[NSString stringWithFormat:
+                    @"  ML-KEM-1024 encapsulate %.3f ms, decapsulate %.3f ms (%lu-byte ciphertext, shared secret matched)",
+                    encapsulateMilliseconds,
+                    decapsulateMilliseconds,
+                    (unsigned long)ciphertextLength]];
+            } else {
+                failure = [NSString stringWithFormat:@"%@(ML-KEM-1024) failed: %@",
                                                       failedOperation,
                                                       PKCS11RSReturnValue(exercise)];
             }
