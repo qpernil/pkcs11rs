@@ -72,32 +72,41 @@ the app recognizes exactly that owned slot by its `Software token` model and
 login/`C_InitPIN` sequence is needed. Both profiles use the prototype PIN
 `password`. These initialization calls are never applied to discovered
 hardware. Before enumerating the software token's objects, the app logs in and
-searches for two persistent post-quantum keypairs: ML-DSA-87 with stable ID
-`iphone-smoke-ml-dsa-87`, and ML-KEM-1024 with stable ID
-`iphone-smoke-ml-kem-1024`. If either pair is absent, the app generates that
-pair as two token objects and reports the key-generation time. On every refresh
-it uses `C_GenerateRandom` to create a fresh 32-byte message, signs it with
-ML-DSA, verifies the signature, and reports both operation times and the
-signature length. It also calls the PKCS #11 3.2 `C_EncapsulateKey` and
+searches for three persistent keypairs: X25519 with stable ID
+`iphone-smoke-x25519`, ML-DSA-87 with stable ID `iphone-smoke-ml-dsa-87`, and
+ML-KEM-1024 with stable ID `iphone-smoke-ml-kem-1024`. If a pair is absent, the
+app generates it as two token objects and reports the key-generation time. On
+every refresh it performs an X25519 self-agreement by deriving from the private
+key and its own public `CKA_EC_POINT`, validates the resulting 32-byte shared
+secret as nonzero, and reports the `C_DeriveKey` time. This is a compact
+functional and performance smoke test, not a model of a two-party protocol. The
+app also uses
+`C_GenerateRandom` to create a fresh 32-byte message, signs it with ML-DSA,
+verifies the signature, and reports both operation times and the signature
+length. Finally, it calls the PKCS #11 3.2 `C_EncapsulateKey` and
 `C_DecapsulateKey` entry points with the ML-KEM pair, checks that they produced
 the same 32-byte shared secret, and reports both operation times and the
 ciphertext length. It then enumerates the authenticated software session so
-both halves of both persistent keypairs appear in Inventory. Later refreshes
-and process launches reuse the pairs while repeating both functional tests.
+both halves of all three persistent keypairs appear in Inventory. Later
+refreshes and process launches reuse the pairs while repeating all three
+functional tests.
 
 Each generation measurement surrounds the complete `C_GenerateKeyPair` call,
 including encrypted token-object persistence. Random-message generation occurs
-before the sign timer. The sign measurement includes `C_SignInit`, the standard
+before the sign timer. X25519 timing surrounds only `C_DeriveKey`; reading the
+public point happens before it, and validating the derived secret happens
+afterward. The sign measurement includes `C_SignInit`, the standard
 signature-length query, and the output-producing `C_Sign`; the verify
 measurement includes `C_VerifyInit` and `C_Verify`. ML-KEM encapsulation timing
 includes the standard ciphertext-length query and the output-producing
 `C_EncapsulateKey`; decapsulation timing surrounds `C_DecapsulateKey`. The
-shared-secret attribute reads and comparison occur after those timers. Both
-output templates request a 32-byte `CKK_GENERIC_SECRET` with `CKA_TOKEN` false,
-`CKA_SENSITIVE` false, and `CKA_EXTRACTABLE` true so this smoke client can read
-and compare `CKA_VALUE`. These are session objects: successful comparisons
-destroy them explicitly, and closing the session cleans them up on an earlier
-failure. Only the ML-KEM keypair is persistent.
+shared-secret attribute reads and comparison occur after those timers. The
+X25519 output template and both ML-KEM output templates request a 32-byte
+`CKK_GENERIC_SECRET` with `CKA_TOKEN` false, `CKA_SENSITIVE` false, and
+`CKA_EXTRACTABLE` true so this smoke client can read and validate `CKA_VALUE`.
+These are session objects: successful checks destroy them explicitly, and
+closing the session cleans them up on an earlier failure. Only the three
+keypairs are persistent.
 
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials and selects the first one. For each YubiHSM slot it
@@ -176,7 +185,7 @@ inspection login authenticates but remains read-only. Private hardware objects
 that require login are absent from the public-session view and may appear in
 the authenticated view. The named software slot is the deliberate exception:
 the app initializes it when necessary and creates and exercises the persistent
-ML-DSA-87 and ML-KEM-1024 keypairs described above.
+X25519, ML-DSA-87, and ML-KEM-1024 keypairs described above.
 
 USB discovery requires a physical iPhone or iPad with a CCID-enabled key
 attached directly or through a USB-C adapter. NFC discovery likewise requires

@@ -10,6 +10,12 @@ private let yubiHsmAuthPassword = "password"
 private let softwareTokenName = "iPhone smoke"
 private let softwareTokenModel = "Software token"
 private let softwareTokenPIN = "password"
+private let softwareX25519Label = "iPhone smoke X25519"
+private let softwareX25519ID = Array("iphone-smoke-x25519".utf8)
+private let softwareX25519SecretLength = 32
+private let x25519Parameters: [UInt8] = [
+    0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39,
+]
 private let softwareMlDsaLabel = "iPhone smoke ML-DSA-87"
 private let softwareMlDsaID = Array("iphone-smoke-ml-dsa-87".utf8)
 private let softwareMlDsaMessageLength = 32
@@ -482,6 +488,82 @@ private func findSoftwareKey(
     return (CK_RV(CKR_OK), count == 0 ? nil : object)
 }
 
+private func generateSoftwareX25519KeyPair(
+    session: CK_SESSION_HANDLE
+) -> (result: CK_RV, publicKey: CK_OBJECT_HANDLE, privateKey: CK_OBJECT_HANDLE) {
+    var token = CK_BBOOL(CK_TRUE)
+    var derive = CK_BBOOL(CK_TRUE)
+    var parameters = x25519Parameters
+    var identifier = softwareX25519ID
+    var label = Array(softwareX25519Label.utf8)
+    var publicKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var privateKey = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    var mechanism = CK_MECHANISM(
+        mechanism: CK_MECHANISM_TYPE(CKM_EC_MONTGOMERY_KEY_PAIR_GEN),
+        pParameter: nil,
+        ulParameterLen: 0
+    )
+    let result = withUnsafeMutablePointer(to: &token) { tokenPointer in
+        withUnsafeMutablePointer(to: &derive) { derivePointer in
+            parameters.withUnsafeMutableBytes { parameterBuffer in
+                identifier.withUnsafeMutableBytes { identifierBuffer in
+                    label.withUnsafeMutableBytes { labelBuffer in
+                        var publicAttributes = [CK_ATTRIBUTE](
+                            repeating: CK_ATTRIBUTE(),
+                            count: 4
+                        )
+                        publicAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                        publicAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                        publicAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        publicAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                        publicAttributes[1].pValue = labelBuffer.baseAddress
+                        publicAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                        publicAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                        publicAttributes[2].pValue = identifierBuffer.baseAddress
+                        publicAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                        publicAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_EC_PARAMS)
+                        publicAttributes[3].pValue = parameterBuffer.baseAddress
+                        publicAttributes[3].ulValueLen = CK_ULONG(parameterBuffer.count)
+
+                        var privateAttributes = [CK_ATTRIBUTE](
+                            repeating: CK_ATTRIBUTE(),
+                            count: 4
+                        )
+                        privateAttributes[0].type = CK_ATTRIBUTE_TYPE(CKA_TOKEN)
+                        privateAttributes[0].pValue = UnsafeMutableRawPointer(tokenPointer)
+                        privateAttributes[0].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                        privateAttributes[1].type = CK_ATTRIBUTE_TYPE(CKA_LABEL)
+                        privateAttributes[1].pValue = labelBuffer.baseAddress
+                        privateAttributes[1].ulValueLen = CK_ULONG(labelBuffer.count)
+                        privateAttributes[2].type = CK_ATTRIBUTE_TYPE(CKA_ID)
+                        privateAttributes[2].pValue = identifierBuffer.baseAddress
+                        privateAttributes[2].ulValueLen = CK_ULONG(identifierBuffer.count)
+                        privateAttributes[3].type = CK_ATTRIBUTE_TYPE(CKA_DERIVE)
+                        privateAttributes[3].pValue = UnsafeMutableRawPointer(derivePointer)
+                        privateAttributes[3].ulValueLen = CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+
+                        return publicAttributes.withUnsafeMutableBufferPointer { publicBuffer in
+                            privateAttributes.withUnsafeMutableBufferPointer { privateBuffer in
+                                C_GenerateKeyPair(
+                                    session,
+                                    &mechanism,
+                                    publicBuffer.baseAddress,
+                                    CK_ULONG(publicBuffer.count),
+                                    privateBuffer.baseAddress,
+                                    CK_ULONG(privateBuffer.count),
+                                    &publicKey,
+                                    &privateKey
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return (result, publicKey, privateKey)
+}
+
 private func generateSoftwarePostQuantumKeyPair(
     session: CK_SESSION_HANDLE,
     mechanismType: CK_MECHANISM_TYPE,
@@ -657,12 +739,13 @@ private func exerciseSoftwareMlDsa(
     )
 }
 
-private func softwareSecretValue(
+private func softwareAttributeValue(
     session: CK_SESSION_HANDLE,
-    object: CK_OBJECT_HANDLE
+    object: CK_OBJECT_HANDLE,
+    type: CK_ATTRIBUTE_TYPE
 ) -> (result: CK_RV, value: [UInt8]?) {
     var attribute = CK_ATTRIBUTE(
-        type: CK_ATTRIBUTE_TYPE(CKA_VALUE),
+        type: type,
         pValue: nil,
         ulValueLen: 0
     )
@@ -684,6 +767,117 @@ private func softwareSecretValue(
     }
     value.removeSubrange(Int(attribute.ulValueLen)..<value.count)
     return (result, value)
+}
+
+private func exerciseSoftwareX25519(
+    session: CK_SESSION_HANDLE,
+    publicKey: CK_OBJECT_HANDLE,
+    privateKey: CK_OBJECT_HANDLE
+) -> (result: CK_RV, operation: String, deriveMilliseconds: Double) {
+    let publicResult = softwareAttributeValue(
+        session: session,
+        object: publicKey,
+        type: CK_ATTRIBUTE_TYPE(CKA_EC_POINT)
+    )
+    guard publicResult.result == CKR_OK, var publicPoint = publicResult.value else {
+        return (publicResult.result, "C_GetAttributeValue(CKA_EC_POINT)", 0)
+    }
+
+    var token = CK_BBOOL(CK_FALSE)
+    var sensitive = CK_BBOOL(CK_FALSE)
+    var extractable = CK_BBOOL(CK_TRUE)
+    var keyType = CK_KEY_TYPE(CKK_GENERIC_SECRET)
+    var valueLength = CK_ULONG(softwareX25519SecretLength)
+    var derivedSecret = CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+    defer {
+        if derivedSecret != CK_OBJECT_HANDLE(CK_INVALID_HANDLE) {
+            _ = C_DestroyObject(session, derivedSecret)
+        }
+    }
+
+    let deriveStart = ProcessInfo.processInfo.systemUptime
+    let result = publicPoint.withUnsafeMutableBufferPointer { publicBuffer in
+        var parameters = CK_ECDH1_DERIVE_PARAMS(
+            kdf: CK_EC_KDF_TYPE(CKD_NULL),
+            ulSharedDataLen: 0,
+            pSharedData: nil,
+            ulPublicDataLen: CK_ULONG(publicBuffer.count),
+            pPublicData: publicBuffer.baseAddress
+        )
+        var mechanism = CK_MECHANISM(
+            mechanism: CK_MECHANISM_TYPE(CKM_ECDH1_DERIVE),
+            pParameter: nil,
+            ulParameterLen: CK_ULONG(MemoryLayout<CK_ECDH1_DERIVE_PARAMS>.size)
+        )
+        return withUnsafeMutablePointer(to: &parameters) { parametersPointer in
+            mechanism.pParameter = UnsafeMutableRawPointer(parametersPointer)
+            return withUnsafeMutablePointer(to: &token) { tokenPointer in
+                withUnsafeMutablePointer(to: &sensitive) { sensitivePointer in
+                    withUnsafeMutablePointer(to: &extractable) { extractablePointer in
+                        withUnsafeMutablePointer(to: &keyType) { keyTypePointer in
+                            withUnsafeMutablePointer(to: &valueLength) { valueLengthPointer in
+                                var attributes = [
+                                    CK_ATTRIBUTE(
+                                        type: CK_ATTRIBUTE_TYPE(CKA_TOKEN),
+                                        pValue: UnsafeMutableRawPointer(tokenPointer),
+                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                                    ),
+                                    CK_ATTRIBUTE(
+                                        type: CK_ATTRIBUTE_TYPE(CKA_SENSITIVE),
+                                        pValue: UnsafeMutableRawPointer(sensitivePointer),
+                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                                    ),
+                                    CK_ATTRIBUTE(
+                                        type: CK_ATTRIBUTE_TYPE(CKA_EXTRACTABLE),
+                                        pValue: UnsafeMutableRawPointer(extractablePointer),
+                                        ulValueLen: CK_ULONG(MemoryLayout<CK_BBOOL>.size)
+                                    ),
+                                    CK_ATTRIBUTE(
+                                        type: CK_ATTRIBUTE_TYPE(CKA_KEY_TYPE),
+                                        pValue: UnsafeMutableRawPointer(keyTypePointer),
+                                        ulValueLen: CK_ULONG(MemoryLayout<CK_KEY_TYPE>.size)
+                                    ),
+                                    CK_ATTRIBUTE(
+                                        type: CK_ATTRIBUTE_TYPE(CKA_VALUE_LEN),
+                                        pValue: UnsafeMutableRawPointer(valueLengthPointer),
+                                        ulValueLen: CK_ULONG(MemoryLayout<CK_ULONG>.size)
+                                    ),
+                                ]
+                                return attributes.withUnsafeMutableBufferPointer { buffer in
+                                    C_DeriveKey(
+                                        session,
+                                        &mechanism,
+                                        privateKey,
+                                        buffer.baseAddress,
+                                        CK_ULONG(buffer.count),
+                                        &derivedSecret
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let deriveMilliseconds = (ProcessInfo.processInfo.systemUptime - deriveStart) * 1_000
+    guard result == CKR_OK else {
+        return (result, "C_DeriveKey", deriveMilliseconds)
+    }
+    let secret = softwareAttributeValue(
+        session: session,
+        object: derivedSecret,
+        type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
+    )
+    guard secret.result == CKR_OK else {
+        return (secret.result, "C_GetAttributeValue(derived secret)", deriveMilliseconds)
+    }
+    guard let secretValue = secret.value,
+          secretValue.count == softwareX25519SecretLength,
+          secretValue.contains(where: { $0 != 0 }) else {
+        return (CK_RV(CKR_GENERAL_ERROR), "X25519 shared-secret validation", deriveMilliseconds)
+    }
+    return (CK_RV(CKR_OK), "X25519 self-agreement", deriveMilliseconds)
 }
 
 private func exerciseSoftwareMlKem(
@@ -856,7 +1050,11 @@ private func exerciseSoftwareMlKem(
         )
     }
 
-    let first = softwareSecretValue(session: session, object: encapsulatedSecret)
+    let first = softwareAttributeValue(
+        session: session,
+        object: encapsulatedSecret,
+        type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
+    )
     guard first.result == CKR_OK, let firstValue = first.value else {
         return (
             first.result,
@@ -866,7 +1064,11 @@ private func exerciseSoftwareMlKem(
             decapsulateMilliseconds
         )
     }
-    let second = softwareSecretValue(session: session, object: decapsulatedSecret)
+    let second = softwareAttributeValue(
+        session: session,
+        object: decapsulatedSecret,
+        type: CK_ATTRIBUTE_TYPE(CKA_VALUE)
+    )
     guard second.result == CKR_OK, let secondValue = second.value else {
         return (
             second.result,
@@ -957,6 +1159,69 @@ private func softwareObjectInventory(
             userLoggedIn = true
         } else {
             failure = "C_Login(CKU_USER) failed: \(userLogin)"
+        }
+    }
+
+    if failure == nil {
+        let foundPublic = findSoftwareKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PUBLIC_KEY),
+            keyType: CK_KEY_TYPE(CKK_EC_MONTGOMERY),
+            identifier: softwareX25519ID
+        )
+        let foundPrivate = findSoftwareKey(
+            session: session,
+            objectClass: CK_OBJECT_CLASS(CKO_PRIVATE_KEY),
+            keyType: CK_KEY_TYPE(CKK_EC_MONTGOMERY),
+            identifier: softwareX25519ID
+        )
+        var publicKey = foundPublic.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        var privateKey = foundPrivate.object ?? CK_OBJECT_HANDLE(CK_INVALID_HANDLE)
+        if foundPublic.result != CKR_OK {
+            failure = "X25519 public-key search failed: \(foundPublic.result)"
+        } else if foundPrivate.result != CKR_OK {
+            failure = "X25519 private-key search failed: \(foundPrivate.result)"
+        } else if foundPublic.object != nil, foundPrivate.object != nil {
+            lines.append("  X25519 keypair already present")
+        } else if foundPublic.object != nil || foundPrivate.object != nil {
+            failure = "X25519 keypair is incomplete"
+        } else {
+            let generationStart = ProcessInfo.processInfo.systemUptime
+            let generated = generateSoftwareX25519KeyPair(session: session)
+            let generationMilliseconds =
+                (ProcessInfo.processInfo.systemUptime - generationStart) * 1_000
+            if generated.result == CKR_OK {
+                publicKey = generated.publicKey
+                privateKey = generated.privateKey
+                lines.append(
+                    String(
+                        format: "  generated X25519 keypair in %.3f ms: public %llu, private %llu",
+                        generationMilliseconds,
+                        UInt64(generated.publicKey),
+                        UInt64(generated.privateKey)
+                    )
+                )
+            } else {
+                failure = "C_GenerateKeyPair(X25519) failed: \(generated.result)"
+            }
+        }
+
+        if failure == nil {
+            let exercised = exerciseSoftwareX25519(
+                session: session,
+                publicKey: publicKey,
+                privateKey: privateKey
+            )
+            if exercised.result == CKR_OK {
+                lines.append(
+                    String(
+                        format: "  X25519 self-agreement %.3f ms (32-byte shared secret)",
+                        exercised.deriveMilliseconds
+                    )
+                )
+            } else {
+                failure = "\(exercised.operation)(X25519) failed: \(exercised.result)"
+            }
         }
     }
 
