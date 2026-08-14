@@ -17,13 +17,13 @@ use crate::{
 #[cfg(any(test, feature = "abi-tests"))]
 use crate::{ABI_TEST_SLOT_ID, KeyMaterial, PublicKeyMaterial, SoftwarePrivateKeyMaterial};
 use crate::{
-    BackendSession, CcidApplication, CcidConfiguration, CcidProvider, CcidReader, Connector,
-    CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation, HsmAuthProviderRegistry,
-    HsmAuthSlot, HttpConnector, HttpConnectorEndpoint, HttpConnectorTlsConfig,
-    IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot, PcscAppletConnector,
-    PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector, SignatureOperation,
-    Slot, SlotKind, SoftwareSlot, TokenObject, YubiHsmPublicDiscoveryConfig, YubiHsmSlot,
-    YubiKeyClient,
+    BackendSession, CcidApplication, CcidConfiguration, CcidDeviceConnector, CcidProvider,
+    CcidReader, Connector, CryptOperation, DigestOperation, Error, Fido2Slot, FindOperation,
+    HsmAuthProviderRegistry, HsmAuthSlot, HttpConnector, HttpConnectorEndpoint,
+    HttpConnectorTlsConfig, IssuerSecurityDomainSlot, ModuleConfiguration, OpenPgpSlot,
+    PcscAppletConnector, PcscReaderState, PivSlot, SecureChannelConfiguration, SharedConnector,
+    SignatureOperation, Slot, SlotKind, SoftwareSlot, SwitchableFidoEndpoint, TokenObject,
+    YubiHsmPublicDiscoveryConfig, YubiHsmSlot, YubiKeyClient,
     backed_object::{backed_object_unique_id, put_backed_object, stored_objects},
     ccid_application_label, pinentry, select_application, str_pad,
 };
@@ -258,7 +258,7 @@ pub(crate) struct ModuleContext {
     pub(crate) hardware_discovery: bool,
     pub(crate) software_slots: Vec<String>,
     pub(crate) software_discovery_pins: HashMap<String, Zeroizing<Vec<u8>>>,
-    ccid_readers: Mutex<HashMap<String, CcidReaderInventoryEntry>>,
+    ccid_readers: Mutex<HashMap<CcidInventoryKey, CcidReaderInventoryEntry>>,
     ccid_provider: CcidProvider,
     pub(crate) yubihsm_urls: Vec<String>,
     pub(crate) yubihsm_http_tls: HttpConnectorTlsConfig,
@@ -284,7 +284,19 @@ pub(crate) struct ModuleContext {
     pub(crate) slot_contexts: RwLock<SlotContextRegistry>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum CcidInventoryKey {
+    Serial(PhysicalDeviceKey),
+    TransientReader(String),
+}
+
 struct CcidReaderInventoryEntry {
+    reader_name: Option<String>,
+    connector: Option<Arc<CcidDeviceConnector>>,
+    #[cfg(target_os = "ios")]
+    fallback_connector: Option<SharedConnector>,
+    #[cfg(target_os = "ios")]
+    using_fallback_connector: bool,
     inventory_presence: Option<Arc<std::sync::atomic::AtomicBool>>,
     slot_ids: Vec<CK_SLOT_ID>,
 }
@@ -306,7 +318,6 @@ pub(crate) struct SlotContext {
     pub(crate) slot_id: CK_SLOT_ID,
     pub(crate) slot: Box<dyn Slot>,
     pub(crate) device: Option<Arc<crate::device::DeviceContext>>,
-    pub(crate) device_operation_kind: crate::device::DeviceOperationKind,
     handles: Arc<HandleCounters>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
     pub(crate) trust_store: Arc<crate::yubihsm::trust::TrustStore>,
@@ -476,16 +487,24 @@ impl DiscoveredSlotBackend {
 enum FidoDuplicateResolution {
     Independent,
     KeepSecuredCcid(CK_SLOT_ID),
-    ReplaceCcidWithHid(CK_SLOT_ID),
+    PreferHid(CK_SLOT_ID),
+}
+
+struct CcidFidoRegistration {
+    slot_id: CK_SLOT_ID,
+    secure_channel: bool,
+    endpoint: Option<Rc<SwitchableFidoEndpoint>>,
 }
 
 fn resolve_fido_duplicate(
-    ccid_slots: &HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+    ccid_slots: &HashMap<PhysicalDeviceKey, CcidFidoRegistration>,
     key: &PhysicalDeviceKey,
 ) -> FidoDuplicateResolution {
-    match ccid_slots.get(key).copied() {
-        Some((slot_id, true)) => FidoDuplicateResolution::KeepSecuredCcid(slot_id),
-        Some((slot_id, false)) => FidoDuplicateResolution::ReplaceCcidWithHid(slot_id),
+    match ccid_slots.get(key) {
+        Some(registration) if registration.secure_channel => {
+            FidoDuplicateResolution::KeepSecuredCcid(registration.slot_id)
+        }
+        Some(registration) => FidoDuplicateResolution::PreferHid(registration.slot_id),
         None => FidoDuplicateResolution::Independent,
     }
 }
@@ -1133,12 +1152,10 @@ impl SlotContext {
         token_storage: Box<dyn StorageProvider>,
     ) -> Result<Self, Error> {
         let device = slot.device_context();
-        let device_operation_kind = slot.device_operation_kind();
         let mut context = Self {
             slot_id,
             slot,
             device,
-            device_operation_kind,
             handles,
             pinentry,
             trust_store,
@@ -1779,6 +1796,32 @@ impl ModuleContext {
         }
 
         let (transport, connector, identity) = crate::apple::cryptotokenkit::begin_nfc_mount()?;
+        let nfc_connector = Arc::new(connector) as SharedConnector;
+        let key = identity.physical_key().ok_or(CKR_TOKEN_NOT_RECOGNIZED)?;
+        let inventory_key = CcidInventoryKey::Serial(key);
+        let mut inventory = self
+            .ccid_readers
+            .lock()
+            .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+        if let Some(registration) = inventory.get_mut(&inventory_key) {
+            let connector = registration
+                .connector
+                .as_ref()
+                .cloned()
+                .ok_or(CKR_TOKEN_NOT_RECOGNIZED)?;
+            registration.fallback_connector = Some(nfc_connector.clone());
+            if registration.reader_name.is_none() || !connector.is_present() {
+                connector.apply_reader(nfc_connector)?;
+                registration.reader_name = None;
+                registration.using_fallback_connector = true;
+            }
+            let slot_ids = registration.slot_ids.clone();
+            *mounted = Some(NfcMountRegistration { transport });
+            return Ok(slot_ids);
+        }
+        drop(inventory);
+
+        let connector = CcidDeviceConnector::new(identity.clone(), nfc_connector.clone());
         let reader_state = connector.reader_state();
         let device = reader_state.device.clone();
         let result = (|| {
@@ -1793,7 +1836,7 @@ impl ModuleContext {
             let mut ccid_fido_slots = HashMap::new();
             let slot_ids = self.insert_ccid_reader_slots(
                 &mut slot_contexts,
-                Arc::new(connector) as SharedConnector,
+                connector.clone() as SharedConnector,
                 reader_state,
                 &mut ccid_fido_slots,
                 Some(identity),
@@ -1805,6 +1848,21 @@ impl ModuleContext {
         })();
         match result {
             Ok(slot_ids) => {
+                let mut inventory = self
+                    .ccid_readers
+                    .lock()
+                    .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
+                inventory.insert(
+                    inventory_key,
+                    CcidReaderInventoryEntry {
+                        reader_name: None,
+                        connector: Some(connector),
+                        fallback_connector: Some(nfc_connector),
+                        using_fallback_connector: true,
+                        inventory_presence: None,
+                        slot_ids: slot_ids.clone(),
+                    },
+                );
                 *mounted = Some(NfcMountRegistration { transport });
                 Ok(slot_ids)
             }
@@ -1856,7 +1914,7 @@ impl ModuleContext {
         slot_contexts: &mut SlotContextRegistry,
         base_connector: SharedConnector,
         reader_state: Arc<PcscReaderState>,
-        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, CcidFidoRegistration>,
         known_identity: Option<DeviceIdentity>,
     ) -> Result<Vec<CK_SLOT_ID>, Error> {
         let _operation = crate::logging::Operation::info(tracing::info_span!(
@@ -1996,7 +2054,7 @@ impl ModuleContext {
                     ))
                 }
                 CcidApplication::Fido2 => {
-                    let fido_slot = Fido2Slot::new_with_device(
+                    let (fido_slot, endpoint) = Fido2Slot::new_switchable_with_device(
                         application_connector,
                         application_aid,
                         reader_state.device.clone(),
@@ -2006,6 +2064,7 @@ impl ModuleContext {
                             key,
                             slot_id,
                             configuration.secure_channel.is_some(),
+                            endpoint,
                         ));
                     }
                     Box::new(fido_slot)
@@ -2064,9 +2123,16 @@ impl ModuleContext {
             slots = ?inserted_slot_ids,
             "CCID reader slots registered"
         );
-        for (key, slot_id, secure_channel) in reader_fido_slots {
+        for (key, slot_id, secure_channel, endpoint) in reader_fido_slots {
             if inserted_slot_ids.contains(&slot_id) {
-                ccid_fido_slots.insert(key, (slot_id, secure_channel));
+                ccid_fido_slots.insert(
+                    key,
+                    CcidFidoRegistration {
+                        slot_id,
+                        secure_channel,
+                        endpoint: Some(endpoint),
+                    },
+                );
             }
         }
         Ok(inserted_slot_ids)
@@ -2075,7 +2141,7 @@ impl ModuleContext {
     fn reconcile_ccid_readers(
         &self,
         slot_contexts: &mut SlotContextRegistry,
-        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)>,
+        ccid_fido_slots: &mut HashMap<PhysicalDeviceKey, CcidFidoRegistration>,
     ) -> Result<HashMap<PhysicalDeviceKey, Arc<DeviceContext>>, Error> {
         let readers = match self.enumerate_ccid_readers() {
             Ok(readers) => readers,
@@ -2090,11 +2156,11 @@ impl ModuleContext {
                 return Ok(HashMap::new());
             }
         };
-        let reader_names = readers
-            .iter()
-            .map(|reader| reader.connector.name())
-            .collect::<HashSet<_>>();
-        let mut enumerated_reader_names = reader_names.iter().cloned().collect::<Vec<_>>();
+        let mut readers = readers
+            .into_iter()
+            .map(|reader| (reader.connector.name(), reader))
+            .collect::<HashMap<_, _>>();
+        let mut enumerated_reader_names = readers.keys().cloned().collect::<Vec<_>>();
         enumerated_reader_names.sort();
         tracing::info!(
             target: "pkcs11rs::discovery",
@@ -2105,27 +2171,199 @@ impl ModuleContext {
             .ccid_readers
             .lock()
             .map_err(|_| Error::from(CKR_MUTEX_BAD))?;
-        for (name, reader) in inventory.iter() {
-            let present = reader_names.contains(name);
-            if let Some(presence) = &reader.inventory_presence {
-                presence.store(present, std::sync::atomic::Ordering::Release);
+        let mut ccid_devices = HashMap::new();
+        for (key, entry) in inventory.iter_mut() {
+            let Some(name) = entry.reader_name.clone() else {
+                #[cfg(target_os = "ios")]
+                if entry.using_fallback_connector {
+                    if let CcidInventoryKey::Serial(key) = key {
+                        ccid_devices.entry(key.clone()).or_insert_with(|| {
+                            entry
+                                .connector
+                                .as_ref()
+                                .expect("serial registrations have stable connectors")
+                                .reader_state()
+                                .device
+                                .clone()
+                        });
+                    }
+                    continue;
+                }
+                if let Some(connector) = &entry.connector {
+                    connector.mark_inventory_absent();
+                }
+                continue;
+            };
+            let Some(candidate) = readers.remove(&name) else {
+                #[cfg(target_os = "ios")]
+                if let (Some(connector), Some(fallback_connector)) =
+                    (&entry.connector, &entry.fallback_connector)
+                {
+                    if let Err(error) = connector.apply_reader(fallback_connector.clone()) {
+                        tracing::debug!(
+                            target: "pkcs11rs::discovery",
+                            reader = %name,
+                            ?error,
+                            "failed to fall back from USB to NFC transport"
+                        );
+                    } else {
+                        entry.reader_name = None;
+                        entry.using_fallback_connector = true;
+                        continue;
+                    }
+                }
+                if let Some(connector) = &entry.connector {
+                    connector.mark_inventory_absent();
+                }
+                if let Some(presence) = &entry.inventory_presence {
+                    presence.store(false, std::sync::atomic::Ordering::Release);
+                }
+                tracing::debug!(
+                    target: "pkcs11rs::discovery",
+                    reader = %name,
+                    slots = ?entry.slot_ids,
+                    present = false,
+                    "CCID registered device reconciled"
+                );
+                continue;
+            };
+
+            if let Some(connector) = &entry.connector {
+                connector.mark_inventory_present();
+                let device = connector.reader_state().device.clone();
+                let refreshed = device
+                    .lock_operation_with_message(
+                        crate::device::DeviceOperationKind::Ccid,
+                        "Checking token presence…",
+                    )
+                    .and_then(|_operation| connector.refresh());
+                if connector.take_mismatched_serial().is_some() {
+                    connector.mark_inventory_absent();
+                    entry.reader_name = None;
+                    readers.insert(name.clone(), candidate);
+                    tracing::info!(
+                        target: "pkcs11rs::discovery",
+                        reader = %name,
+                        slots = ?entry.slot_ids,
+                        "CCID reader now contains a different serial"
+                    );
+                    continue;
+                }
+                if let Err(error) = refreshed {
+                    tracing::debug!(
+                        target: "pkcs11rs::discovery",
+                        reader = %name,
+                        ?error,
+                        "CCID serial-owned device refresh failed"
+                    );
+                }
+                if connector.is_present()
+                    && let CcidInventoryKey::Serial(key) = key
+                {
+                    ccid_devices
+                        .entry(key.clone())
+                        .or_insert_with(|| connector.reader_state().device.clone());
+                }
+            } else if let Some(presence) = &entry.inventory_presence {
+                presence.store(true, std::sync::atomic::Ordering::Release);
             }
+
             tracing::debug!(
                 target: "pkcs11rs::discovery",
                 reader = %name,
-                slots = ?reader.slot_ids,
-                present,
-                "CCID registered reader reconciled"
+                slots = ?entry.slot_ids,
+                present = true,
+                "CCID registered device reconciled"
             );
         }
 
-        let mut ccid_devices = HashMap::new();
-        for reader in readers {
-            let name = reader.connector.name();
-            if inventory.contains_key(&name) {
+        for (name, reader) in readers {
+            let device = reader.reader_state.device.clone();
+            let discovered_identity = (|| {
+                let _operation = device.lock_operation_with_message(
+                    crate::device::DeviceOperationKind::Ccid,
+                    "Identifying token…",
+                )?;
+                reader.connector.refresh()?;
+                YubiKeyClient.discover_for_inventory(reader.connector.as_ref(), |serial| {
+                    inventory.contains_key(&CcidInventoryKey::Serial(
+                        PhysicalDeviceKey::YubicoSerial(serial.to_owned()),
+                    ))
+                })
+            })();
+
+            let Ok((serial, device_info)) = discovered_identity else {
+                let discovered = (|| {
+                    let _operation = device.lock_operation_with_message(
+                        crate::device::DeviceOperationKind::Ccid,
+                        "Discovering token applications…",
+                    )?;
+                    self.insert_ccid_reader_slots(
+                        slot_contexts,
+                        reader.connector.clone(),
+                        reader.reader_state.clone(),
+                        ccid_fido_slots,
+                        None,
+                    )
+                })();
+                match discovered {
+                    Ok(slot_ids) if !slot_ids.is_empty() => {
+                        inventory.insert(
+                            CcidInventoryKey::TransientReader(name.clone()),
+                            CcidReaderInventoryEntry {
+                                reader_name: Some(name),
+                                connector: None,
+                                #[cfg(target_os = "ios")]
+                                fallback_connector: None,
+                                #[cfg(target_os = "ios")]
+                                using_fallback_connector: false,
+                                inventory_presence: reader.inventory_presence,
+                                slot_ids,
+                            },
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => log!(1, "CCID reader {} discovery failed: {:?}", name, error),
+                }
+                continue;
+            };
+
+            let key = PhysicalDeviceKey::YubicoSerial(serial.clone());
+            let inventory_key = CcidInventoryKey::Serial(key.clone());
+            if let Some(entry) = inventory.get_mut(&inventory_key) {
+                let Some(connector) = &entry.connector else {
+                    continue;
+                };
+                if let Err(error) = connector.apply_reader(reader.connector) {
+                    log!(1, "CCID reader {} rebind failed: {:?}", name, error);
+                    continue;
+                }
+                entry.reader_name = Some(name);
+                #[cfg(target_os = "ios")]
+                {
+                    entry.using_fallback_connector = false;
+                }
+                ccid_devices
+                    .entry(key)
+                    .or_insert_with(|| connector.reader_state().device.clone());
                 continue;
             }
-            let device = reader.reader_state.device.clone();
+
+            let Some(info) = device_info else {
+                log!(1, "CCID reader {} lost its serial registration", name);
+                continue;
+            };
+            let identity = DeviceIdentity {
+                manufacturer: String::from("Yubico"),
+                product: info.part_number.unwrap_or_else(|| String::from("YubiKey")),
+                serial,
+                hardware_version: None,
+                firmware_version: info.version,
+            };
+
+            let connector = CcidDeviceConnector::new(identity.clone(), reader.connector);
+            let reader_state = connector.reader_state();
+            let device = reader_state.device.clone();
             let discovered = (|| {
                 let _operation = device.lock_operation_with_message(
                     crate::device::DeviceOperationKind::Ccid,
@@ -2133,28 +2371,27 @@ impl ModuleContext {
                 )?;
                 self.insert_ccid_reader_slots(
                     slot_contexts,
-                    reader.connector.clone(),
-                    reader.reader_state.clone(),
+                    connector.clone() as SharedConnector,
+                    reader_state,
                     ccid_fido_slots,
-                    None,
+                    Some(identity),
                 )
             })();
             match discovered {
                 Ok(slot_ids) if !slot_ids.is_empty() => {
-                    if let Some(key) = reader
-                        .reader_state
-                        .device
-                        .identity(reader.connector.connection_epoch())
-                        .physical_key()
-                    {
-                        ccid_devices
-                            .entry(key)
-                            .or_insert_with(|| reader.reader_state.device.clone());
-                    }
+                    ccid_devices
+                        .entry(key)
+                        .or_insert_with(|| connector.reader_state().device.clone());
                     inventory.insert(
-                        name,
+                        inventory_key,
                         CcidReaderInventoryEntry {
-                            inventory_presence: reader.inventory_presence,
+                            reader_name: Some(name),
+                            connector: Some(connector),
+                            #[cfg(target_os = "ios")]
+                            fallback_connector: None,
+                            #[cfg(target_os = "ios")]
+                            using_fallback_connector: false,
+                            inventory_presence: None,
                             slot_ids,
                         },
                     );
@@ -2244,7 +2481,7 @@ impl ModuleContext {
             // PC/SC hardware discovery.
             return Ok(true);
         }
-        let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, (CK_SLOT_ID, bool)> = HashMap::new();
+        let mut ccid_fido_slots: HashMap<PhysicalDeviceKey, CcidFidoRegistration> = HashMap::new();
         let ccid_devices = self.reconcile_ccid_readers(&mut slot_contexts, &mut ccid_fido_slots)?;
         #[cfg(not(feature = "native-hardware"))]
         let _ = ccid_devices;
@@ -2342,7 +2579,7 @@ impl ModuleContext {
                 device_info.as_ref(),
                 device,
             ));
-            let hid_slot = Fido2Slot::new_with_endpoint(endpoint);
+            let hid_slot = Fido2Slot::new_with_endpoint(endpoint.clone());
             if let Some(key) = hid_slot.physical_device_key() {
                 match resolve_fido_duplicate(&ccid_fido_slots, &key) {
                     FidoDuplicateResolution::KeepSecuredCcid(ccid_slot_id) => {
@@ -2355,16 +2592,20 @@ impl ModuleContext {
                         );
                         continue;
                     }
-                    FidoDuplicateResolution::ReplaceCcidWithHid(ccid_slot_id) => {
-                        slot_contexts.remove(&ccid_slot_id);
-                        ccid_fido_slots.remove(&key);
+                    FidoDuplicateResolution::PreferHid(ccid_slot_id) => {
+                        if let Some(registration) = ccid_fido_slots.get(&key) {
+                            if let Some(route) = &registration.endpoint {
+                                route.prefer(endpoint);
+                            }
+                        }
                         tracing::debug!(
                             target: "pkcs11rs::discovery",
                             device = %descriptor_name,
                             ccid_slot_id,
-                            outcome = "replaced duplicate CCID slot",
+                            outcome = "preferred HID for serial-owned FIDO slot",
                             "FIDO HID slot reconciliation completed"
                         );
+                        continue;
                     }
                     FidoDuplicateResolution::Independent => tracing::debug!(
                         target: "pkcs11rs::discovery",
@@ -2880,7 +3121,7 @@ impl ModuleContext {
                 let _operation = context
                     .device
                     .as_ref()
-                    .map(|device| device.lock_operation(context.device_operation_kind))
+                    .map(|device| device.lock_operation(context.slot.device_operation_kind()))
                     .transpose();
                 if _operation.is_err() {
                     continue;
@@ -2928,8 +3169,12 @@ impl ModuleContext {
             return self.refresh_registered_slots();
         }
         #[cfg(target_os = "ios")]
-        self.refresh_nfc_discovery()?;
-        #[cfg(not(feature = "abi-tests"))]
+        refresh_ios_smartcard_discovery(
+            initialized,
+            || self.refresh_ccid_discovery(),
+            || self.refresh_nfc_discovery(),
+        )?;
+        #[cfg(all(not(target_os = "ios"), not(feature = "abi-tests")))]
         if !initialized {
             self.refresh_ccid_discovery()?;
         }
@@ -2938,6 +3183,22 @@ impl ModuleContext {
         self.refresh_http_yubihsm_discovery()?;
         self.refresh_registered_slots()
     }
+}
+
+#[cfg(any(target_os = "ios", test))]
+fn refresh_ios_smartcard_discovery(
+    initialized: bool,
+    mut refresh_ccid: impl FnMut() -> Result<(), Error>,
+    mut refresh_nfc: impl FnMut() -> Result<(), Error>,
+) -> Result<(), Error> {
+    if !initialized {
+        // Reconcile non-interactive CCID locators before NFC discovery or
+        // registered-slot refresh. A newly attached USB view of a serial must
+        // replace its NFC fallback before any operation can request
+        // interactive NFC reacquisition.
+        refresh_ccid()?;
+    }
+    refresh_nfc()
 }
 
 #[cfg(any(test, feature = "abi-tests"))]
@@ -3070,6 +3331,97 @@ mod discovery_tests {
 
     fn key(serial: &str) -> PhysicalDeviceKey {
         PhysicalDeviceKey::YubicoSerial(serial.to_owned())
+    }
+
+    #[test]
+    fn later_ios_slot_list_avoided_nfc_before_and_after_explicit_reordering() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Route {
+            Nfc,
+            Usb,
+        }
+
+        struct RefreshModel {
+            route: std::cell::Cell<Route>,
+            initial_nfc_discovery_attempted: std::cell::Cell<bool>,
+            nfc_reacquisitions: std::cell::Cell<usize>,
+            events: std::cell::RefCell<Vec<&'static str>>,
+        }
+
+        impl RefreshModel {
+            fn after_initial_nfc_discovery() -> Self {
+                Self {
+                    route: std::cell::Cell::new(Route::Nfc),
+                    initial_nfc_discovery_attempted: std::cell::Cell::new(true),
+                    nfc_reacquisitions: std::cell::Cell::new(0),
+                    events: std::cell::RefCell::new(Vec::new()),
+                }
+            }
+
+            fn reconcile_usb(&self) -> Result<(), Error> {
+                self.events.borrow_mut().push("usb-reconciliation");
+                self.route.set(Route::Usb);
+                Ok(())
+            }
+
+            fn refresh_nfc_discovery(&self) -> Result<(), Error> {
+                self.events.borrow_mut().push("nfc-discovery");
+                if !self.initial_nfc_discovery_attempted.replace(true) {
+                    self.nfc_reacquisitions
+                        .set(self.nfc_reacquisitions.get() + 1);
+                }
+                Ok(())
+            }
+
+            fn refresh_registered_slot(&self) {
+                self.events.borrow_mut().push("registered-slot-refresh");
+                if self.route.get() == Route::Nfc {
+                    self.nfc_reacquisitions
+                        .set(self.nfc_reacquisitions.get() + 1);
+                }
+            }
+        }
+
+        // Before the explicit reorder, the one-shot NFC discovery check ran
+        // first on later C_GetSlotList calls. It was already a no-op, after
+        // which USB reconciliation preceded the operation-capable slot refresh.
+        let previous = RefreshModel::after_initial_nfc_discovery();
+        previous.refresh_nfc_discovery().unwrap();
+        previous.reconcile_usb().unwrap();
+        previous.refresh_registered_slot();
+
+        // The current sequence makes USB-first ordering direct rather than
+        // relying on the NFC discovery check being a one-shot no-op.
+        let current = RefreshModel::after_initial_nfc_discovery();
+
+        refresh_ios_smartcard_discovery(
+            false,
+            || current.reconcile_usb(),
+            || current.refresh_nfc_discovery(),
+        )
+        .unwrap();
+        current.refresh_registered_slot();
+
+        assert_eq!(
+            previous.events.into_inner(),
+            [
+                "nfc-discovery",
+                "usb-reconciliation",
+                "registered-slot-refresh"
+            ]
+        );
+        assert_eq!(
+            current.events.into_inner(),
+            [
+                "usb-reconciliation",
+                "nfc-discovery",
+                "registered-slot-refresh"
+            ]
+        );
+        assert_eq!(previous.route.get(), Route::Usb);
+        assert_eq!(current.route.get(), Route::Usb);
+        assert_eq!(previous.nfc_reacquisitions.get(), 0);
+        assert_eq!(current.nfc_reacquisitions.get(), 0);
     }
 
     #[cfg(not(feature = "abi-tests"))]
@@ -3516,17 +3868,31 @@ mod discovery_tests {
     }
 
     #[test]
-    fn native_hid_replaces_an_unsecured_ccid_view_of_the_same_fido_device() {
-        let slots = HashMap::from([(key("12345678"), (7, false))]);
+    fn native_hid_is_preferred_for_an_unsecured_ccid_view_of_the_same_fido_device() {
+        let slots = HashMap::from([(
+            key("12345678"),
+            CcidFidoRegistration {
+                slot_id: 7,
+                secure_channel: false,
+                endpoint: None,
+            },
+        )]);
         assert_eq!(
             resolve_fido_duplicate(&slots, &key("12345678")),
-            FidoDuplicateResolution::ReplaceCcidWithHid(7)
+            FidoDuplicateResolution::PreferHid(7)
         );
     }
 
     #[test]
     fn explicitly_secured_ccid_wins_over_hid_for_the_same_fido_device() {
-        let slots = HashMap::from([(key("12345678"), (7, true))]);
+        let slots = HashMap::from([(
+            key("12345678"),
+            CcidFidoRegistration {
+                slot_id: 7,
+                secure_channel: true,
+                endpoint: None,
+            },
+        )]);
         assert_eq!(
             resolve_fido_duplicate(&slots, &key("12345678")),
             FidoDuplicateResolution::KeepSecuredCcid(7)
@@ -3535,7 +3901,14 @@ mod discovery_tests {
 
     #[test]
     fn different_physical_serials_remain_independent() {
-        let slots = HashMap::from([(key("12345678"), (7, false))]);
+        let slots = HashMap::from([(
+            key("12345678"),
+            CcidFidoRegistration {
+                slot_id: 7,
+                secure_channel: false,
+                endpoint: None,
+            },
+        )]);
         assert_eq!(
             resolve_fido_duplicate(&slots, &key("87654321")),
             FidoDuplicateResolution::Independent

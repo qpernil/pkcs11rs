@@ -60,19 +60,31 @@ endpoint can reopen the same HID path and allocate a new channel after device
 reinsertion. Every `C_GetSlotList` refreshes the presence of registered HID and
 CCID FIDO slots. Native HID device inventory remains initial-only, so a new HID
 authenticator requires module reinitialization. CCID reader inventory is
-enumerated on every listing: a FIDO smart-card applet on a new reader, or on a
-reader that had not previously contributed any applet slot, can append a slot
-without reinitialization. A reader that already has slots retains its
-established applet topology and is not reinterpreted as a different card.
+enumerated on every listing. A newly identified physical serial can append a
+FIDO smart-card slot without reinitialization; a new reader name for a known
+serial merely rebinds its established applet topology and does not create
+another slot.
 
 Yubico's read-only configuration command supplies the physical serial used to
 correlate a YubiKey exposed through both USB interfaces. When both endpoints
-have the same validated physical serial, native HID replaces an unsecured
-CCID FIDO slot. A CCID FIDO slot with an explicitly configured secure channel
-instead takes precedence because HID cannot provide SCP03 or SCP11. If a
-stable physical identity is unavailable, both endpoints remain visible rather
-than risking an incorrect merge. Applet-specific serials are not used as
-physical-device identities.
+have the same validated physical serial, one stable FIDO slot prefers native
+HID when its CCID route has no configured secure-channel protocol. The slot
+retains CCID as a fallback, so moving the YubiKey from USB to a desktop NFC
+reader does not change its slot ID even though FIDO is then available only
+through the smart-card binding. A CCID FIDO route with an explicitly configured
+protocol instead takes precedence because HID cannot provide SCP03 or SCP11.
+
+Without that requirement, HID has three practical advantages: it is the
+native USB FIDO transport supported by far more authenticators, it has broader
+hardware validation in pkcs11rs, and it does not depend on PC/SC access to the
+smart-card reader. An exclusive PC/SC owner, such as a GnuPG `scdaemon`
+configuration that claims the reader exclusively, can make every CCID applet
+on that reader unavailable even when it is interested in the OpenPGP applet
+rather than FIDO. The separate native HID interface may remain available.
+
+If a stable physical identity is unavailable, both endpoints remain visible
+rather than risking an incorrect merge. Applet-specific serials are not used
+as physical-device identities.
 
 The same validated physical serial establishes an internal cross-interface
 operation gate for every pkcs11rs CCID applet on that YubiKey, not only a FIDO
@@ -484,8 +496,9 @@ allocation and reconnect, `authenticatorGetInfo`, PIN/UV protocols 1 and 2,
 PIN initialization and change through `C_SetPIN`, `C_Login`, resident
 credential creation through the gated fixture, read-only enumeration, and a
 one-shot GetAssertion. A dual-interface YubiKey has also verified that the
-validated physical serial collapses unsecured CCID and HID views to one HID
-slot. Additional robustness validation remains useful for:
+validated physical serial collapses a CCID view without a configured
+secure-channel protocol and its HID view to one slot. Additional
+robustness validation remains useful for:
 
 - USB CCID selection and the `U2F_V2` selection response on each pre-release,
   FIPS, and Security Key model of interest;

@@ -50,14 +50,59 @@ Backend slots contain an `Rc`-based graph for slot-local state. That graph is
 confined behind its `SlotContext` mutex. State shared between slots uses
 synchronized `Arc` handles instead.
 
-`C_GetSlotList` invokes the module discovery coordinator on both its first and
-subsequent calls. An inventory provider reports opaque,
-provider-defined slot IDs and current presence. Reconciliation combines that
-ID with the provider instance identity: known identities retain their PKCS #11
-slot IDs while absent, reappearing identities reuse those slots, and new
-identities receive new slots. Presence is therefore dynamic without
-renumbering or deleting a slot. Whether a slot reports `CKF_REMOVABLE_DEVICE`
-remains PKCS #11 backend metadata and is not part of discovery identity.
+## Discovery lifecycle and stable slots
+
+`C_Initialize` creates the module context from configuration, but normal slot
+discovery begins lazily when the application first calls `C_GetSlotList`.
+That first listing establishes the initial slot registry:
+
+- configured software slots are created and their stored objects are loaded;
+- current PC/SC or CryptoTokenKit readers are enumerated, their configured
+  applet AIDs are probed, and each recognized applet becomes a separate slot;
+- native FIDO HID devices are enumerated and reconciled with equivalent CCID
+  FIDO applets using the validated physical serial. One serial-owned FIDO slot
+  prefers HID when its CCID route has no configured secure-channel protocol,
+  but retains CCID as its fallback when HID is unavailable, such as after the
+  YubiKey moves to a desktop NFC reader. CCID remains preferred when a protocol
+  is configured because HID cannot provide SCP03 or SCP11. HID is otherwise
+  preferred because it is the common USB transport across FIDO authenticators,
+  has broader hardware coverage in pkcs11rs, and
+  remains available independently of PC/SC reader ownership. No secure
+  channel is active during this reconciliation; it is established lazily for
+  a subsequent operation;
+- on iOS, opt-in NFC discovery makes its single initial card request, scans a
+  stable serial, and registers the recognized applets against that serial; and
+- direct USB and configured HTTP YubiHSM inventories are reconciled and all
+  registered transports and presence states are refreshed.
+
+Later `C_GetSlotList` calls refresh the established model rather than repeating
+the complete initial pass. Reader inventory is enumerated again, but reader
+names are only transient locators. A newly encountered locator is identified
+by its physical serial: a known serial is rebound to its existing slots without
+re-probing applets, while a new serial is probed once and may append slots. USB
+and HTTP YubiHSM inventories are reconciled again, and registered transports
+are refreshed. Provider-wide
+native FIDO HID enumeration is initial-only, and the initial NFC identity scan
+is not repeated; a registered NFC transport may still reacquire and verify its
+bound serial when a slot-list refresh or device operation needs the card. The
+[iOS integration guide](ios-integration.md#when-the-nfc-ui-appears) distinguishes
+the exact UI triggers from the no-prompt reuse path.
+
+An inventory provider reports an opaque, provider-defined identity and current
+presence. Reconciliation combines that identity with the provider instance:
+known identities retain their PKCS #11 slot IDs while absent, reappearing
+identities reuse those slots, and new identities receive new slots. Successful
+slot registration is therefore stable until `C_Finalize`, while token presence
+is dynamic. `C_GetSlotList(CK_FALSE, ...)` includes retained absent slots;
+`C_GetSlotList(CK_TRUE, ...)` includes only slots currently reporting
+`CKF_TOKEN_PRESENT`. Initial CCID/HID reconciliation selects routes before the
+resulting slot list is exposed; later route availability does not change the
+serial-owned FIDO slot ID.
+
+`C_Finalize` drops the registry. A later initialization constructs a new one,
+so slot IDs are stable only within one initialize/finalize lifetime. Whether a
+slot reports `CKF_REMOVABLE_DEVICE` remains PKCS #11 backend metadata and is
+not part of discovery identity.
 
 Configured HTTP inventories use configuration-entry ordinal as their provider
 instance and YubiHSM serial as their stable slot ID, so duplicate configured
@@ -66,8 +111,9 @@ reattachment replaces the transport behind the existing slot even when the OS
 assigns a new USB device ID. Inventory requests and new-slot HSM initialization
 run without holding the slot-registry write lock; only registry snapshots and
 final insertion use it. Native PC/SC or iOS CryptoTokenKit reader inventory is
-enumerated on every listing, so new reader names can append applet slots.
-Existing PC/SC and HID slots refresh their transports on every listing. Native
+enumerated on every listing, so newly attached serials can append applet slots
+and known serials can acquire a different transport locator. Existing PC/SC
+and HID slots refresh their transports on every listing. Native
 HID provider-wide new-device inventory is still created only during module
 initialization.
 
@@ -128,14 +174,21 @@ establishes the configured secure channel. The transaction itself owns the
 selected AID and live SCP03 or SCP11 session; ending it destroys that entire
 state. Only validated SCP11 public-key material survives the boundary.
 
-Native PC/SC and native iOS CryptoTokenKit produce the same internal reader
-records. The UTF-8 reader name is the stable inventory key. Every
-`C_GetSlotList` enumerates the current names and probes any name that has not
-yet contributed a slot. New readers and cards inserted into previously empty
-readers can therefore append applet slots. Once a reader has contributed
-slots, its applet topology and slot IDs are stable for the module lifetime.
-Removal marks those slots absent, return of the same name reconnects them, and
-a replacement card does not morph the registry into another applet set. See
+Native PC/SC and native iOS CryptoTokenKit produce the same internal transport
+records. A reader or CryptoTokenKit slot name is only an enumeration locator,
+never PKCS #11 identity. PC/SC implementations use different naming and
+disambiguation rules, USB re-enumeration may change a name, and CryptoTokenKit
+NFC names are session-scoped. pkcs11rs therefore reads the YubiKey management
+serial and makes that serial own the stable applet topology and slot IDs.
+
+The first encounter with a serial probes its configured applet AIDs once. A
+later locator for the same serial is attached to those existing slots without
+repeating applet discovery; this includes movement between NFC and USB CCID.
+An established connection performs no discovery APDUs during an ordinary
+refresh. After reconnection, pkcs11rs reads only enough management information
+to validate the serial, and each real operation reselects its applet as part of
+normal transaction handling. Removal marks the serial's slots absent, while a
+different serial at a reused locator is treated as a different token. See
 [CCID applet configuration](ccid.md).
 
 The native iOS connector starts a worker lazily for each retained reader. The
@@ -173,9 +226,16 @@ USB HID discovery selects Usage Page `0xF1D0`, Usage `0x01`, allocates a
 channel with `CTAPHID_INIT`, requires the CBOR capability, and then runs
 `authenticatorGetInfo`. Yubico device information is read through the
 read-only vendor command before the slot is registered. If the same serial is
-already represented by a successfully selected smart-card FIDO applet, native
-HID replaces the unsecured CCID view. An explicitly configured CCID secure
-channel reverses that preference because HID cannot provide SCP03 or SCP11.
+already represented by a successfully selected smart-card FIDO applet, that
+same serial-owned slot prefers native HID when no secure-channel protocol is
+configured and falls back to CCID when HID is unavailable. An explicitly
+configured CCID secure-channel protocol reverses that preference because HID
+cannot provide SCP03 or SCP11.
+HID is the common USB transport across FIDO authenticators and has broader
+hardware validation in pkcs11rs. It is also independent of PC/SC reader
+ownership: another process holding the reader exclusively can prevent access
+to every CCID applet, even when that process is using a different applet, while
+the native HID interface may remain usable.
 Unknown or unvalidated identities remain separate rather than being merged.
 Applet serials remain applet metadata and cannot overwrite the physical
 device identity used for correlation. A native HID authenticator absent from

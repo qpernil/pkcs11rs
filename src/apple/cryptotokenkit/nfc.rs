@@ -513,7 +513,7 @@ impl NfcTransport {
 }
 
 impl DeviceOperationLifecycle for NfcTransport {
-    fn enter(&self, message: &str) -> Result<(), Error> {
+    fn enter(&self, _kind: crate::device::DeviceOperationKind, message: &str) -> Result<(), Error> {
         let mut ended = None;
         {
             let mut state = self.state.lock().map_err(|_| CKR_MUTEX_BAD)?;
@@ -546,7 +546,7 @@ impl DeviceOperationLifecycle for NfcTransport {
         Ok(())
     }
 
-    fn exit(&self) {
+    fn exit(&self, _kind: crate::device::DeviceOperationKind) {
         let mut ended = None;
         {
             let Ok(mut state) = self.state.lock() else {

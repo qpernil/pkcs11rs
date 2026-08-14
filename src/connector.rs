@@ -1,7 +1,5 @@
 use super::*;
-#[cfg(feature = "native-hardware")]
-use crate::device::DeviceOperationLifecycle;
-use crate::device::{DeviceContext, DeviceIdentity};
+use crate::device::{DeviceContext, DeviceIdentity, DeviceOperationLifecycle};
 #[cfg(feature = "native-hardware")]
 use std::sync::{OnceLock, Weak, mpsc};
 
@@ -25,6 +23,9 @@ pub(crate) trait Connector {
     fn connection_epoch(&self) -> u64 {
         0
     }
+    fn transport_verified_serial(&self) -> Option<String> {
+        None
+    }
     fn is_present(&self) -> bool;
     fn buffer_size(&self) -> usize;
     fn apdu_capabilities(&self) -> ApduCapabilities {
@@ -45,6 +46,16 @@ pub(crate) trait Connector {
     fn refresh(&self) -> Result<(), Error> {
         Ok(())
     }
+
+    fn stable_applet_topology(&self) -> bool {
+        false
+    }
+
+    fn begin_transport_operation(&self, _message: &str) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn end_transport_operation(&self) {}
 
     fn set_discovery_error(&self, _error: &Error) {}
     fn clear_discovery_error(&self) {}
@@ -290,6 +301,310 @@ pub(crate) struct PcscAppletConnector {
     pub(crate) applet: Arc<PcscAppletState>,
     pub(crate) secure_channels: Arc<SecureChannelConfiguration>,
     pub(crate) pinentry: Arc<pinentry::Pinentry>,
+}
+
+struct CcidDeviceBinding {
+    current: SharedConnector,
+    active: Option<SharedConnector>,
+    observed_connection_epoch: u64,
+    mismatched_serial: Option<String>,
+}
+
+/// A serial-owned CCID transport whose transient reader binding may change.
+/// Applet slots retain this connector while reader enumeration supplies fresh
+/// physical endpoints for the same YubiKey serial.
+pub(crate) struct CcidDeviceConnector {
+    identity: DeviceIdentity,
+    binding: Mutex<CcidDeviceBinding>,
+    inventory_present: std::sync::atomic::AtomicBool,
+    connection_epoch: std::sync::atomic::AtomicU64,
+    reader_state: Arc<PcscReaderState>,
+}
+
+struct CcidDeviceLifecycle {
+    connector: std::sync::Weak<CcidDeviceConnector>,
+}
+
+impl std::fmt::Debug for CcidDeviceLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CcidDeviceLifecycle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeviceOperationLifecycle for CcidDeviceLifecycle {
+    fn enter(&self, kind: crate::device::DeviceOperationKind, message: &str) -> Result<(), Error> {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return Ok(());
+        }
+        self.connector
+            .upgrade()
+            .ok_or(CKR_DEVICE_REMOVED)?
+            .begin_operation(message)
+    }
+
+    fn exit(&self, kind: crate::device::DeviceOperationKind) {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return;
+        }
+        if let Some(connector) = self.connector.upgrade() {
+            connector.end_operation();
+        }
+    }
+}
+
+impl CcidDeviceConnector {
+    pub(crate) fn new(identity: DeviceIdentity, current: SharedConnector) -> Arc<Self> {
+        let observed_connection_epoch = current.connection_epoch();
+        Arc::new_cyclic(|connector| {
+            let lifecycle = Arc::new(CcidDeviceLifecycle {
+                connector: connector.clone(),
+            });
+            let device = Arc::new(DeviceContext::with_lifecycle(identity.clone(), lifecycle));
+            Self {
+                identity,
+                binding: Mutex::new(CcidDeviceBinding {
+                    current,
+                    active: None,
+                    observed_connection_epoch,
+                    mismatched_serial: None,
+                }),
+                inventory_present: std::sync::atomic::AtomicBool::new(true),
+                connection_epoch: std::sync::atomic::AtomicU64::new(0),
+                reader_state: Arc::new(PcscReaderState::new(device)),
+            }
+        })
+    }
+
+    pub(crate) fn reader_state(&self) -> Arc<PcscReaderState> {
+        self.reader_state.clone()
+    }
+
+    pub(crate) fn apply_reader(&self, current: SharedConnector) -> Result<(), Error> {
+        let mut binding = self.binding.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        if binding.active.is_some() {
+            return Err(CKR_OPERATION_ACTIVE.into());
+        }
+        binding.observed_connection_epoch = current.connection_epoch();
+        binding.current = current;
+        binding.mismatched_serial = None;
+        self.inventory_present
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.connection_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    pub(crate) fn mark_inventory_absent(&self) {
+        self.inventory_present
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn mark_inventory_present(&self) {
+        self.inventory_present
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn take_mismatched_serial(&self) -> Option<String> {
+        self.binding
+            .lock()
+            .ok()
+            .and_then(|mut binding| binding.mismatched_serial.take())
+    }
+
+    fn selected_connector(&self) -> Result<SharedConnector, Error> {
+        let binding = self.binding.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        Ok(binding.active.as_ref().unwrap_or(&binding.current).clone())
+    }
+
+    fn begin_operation(&self, message: &str) -> Result<(), Error> {
+        if !self
+            .inventory_present
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            // Keep the serial-owned device gate usable while its CCID route is
+            // absent. A switchable FIDO slot may use this protected refresh to
+            // reconnect its HID route; ordinary CCID calls still fail when
+            // they reach the absent connector.
+            self.reader_state.begin_transaction()?;
+            return Ok(());
+        }
+        let current = {
+            let mut binding = self.binding.lock().map_err(|_| CKR_MUTEX_BAD)?;
+            if binding.active.is_some() {
+                return Err(CKR_OPERATION_ACTIVE.into());
+            }
+            let current = binding.current.clone();
+            binding.active = Some(current.clone());
+            current
+        };
+        self.reader_state.begin_transaction()?;
+        if let Err(error) = current.begin_transport_operation(message) {
+            self.reader_state.end_transaction();
+            if let Ok(mut binding) = self.binding.lock() {
+                binding.active = None;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn end_operation(&self) {
+        let current = self
+            .binding
+            .lock()
+            .ok()
+            .and_then(|mut binding| binding.active.take());
+        if let Some(current) = current {
+            current.end_transport_operation();
+        }
+        self.reader_state.end_transaction();
+    }
+
+    fn refresh_current(&self) -> Result<(), Error> {
+        if !self
+            .inventory_present
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(CKR_TOKEN_NOT_PRESENT.into());
+        }
+        let current = self.selected_connector()?;
+        current.refresh()?;
+        let current_epoch = current.connection_epoch();
+        let verify = {
+            let binding = self.binding.lock().map_err(|_| CKR_MUTEX_BAD)?;
+            current_epoch != binding.observed_connection_epoch
+        };
+        if !verify {
+            return Ok(());
+        }
+
+        let serial = match current.transport_verified_serial().map_or_else(
+            || crate::YubiKeyClient.discover_serial(current.as_ref()),
+            Ok,
+        ) {
+            Ok(serial) => serial,
+            Err(error) => {
+                self.inventory_present
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Err(error);
+            }
+        };
+        let mut binding = self.binding.lock().map_err(|_| CKR_MUTEX_BAD)?;
+        if serial != self.identity.serial {
+            binding.mismatched_serial = Some(serial);
+            self.inventory_present
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err(CKR_DEVICE_REMOVED.into());
+        }
+        binding.observed_connection_epoch = current_epoch;
+        self.connection_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for CcidDeviceConnector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CcidDeviceConnector")
+            .field("serial", &self.identity.serial)
+            .field(
+                "reader",
+                &self
+                    .binding
+                    .lock()
+                    .ok()
+                    .map(|binding| binding.current.name()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Connector for CcidDeviceConnector {
+    fn as_debug(&self) -> &dyn std::fmt::Debug {
+        self
+    }
+
+    fn device_context(&self) -> Option<Arc<DeviceContext>> {
+        Some(self.reader_state.device.clone())
+    }
+
+    fn manufacturer(&self) -> &str {
+        &self.identity.manufacturer
+    }
+
+    fn product(&self) -> &str {
+        &self.identity.product
+    }
+
+    fn name(&self) -> String {
+        format!("YubiKey CCID #{}", self.identity.serial)
+    }
+
+    fn major(&self) -> u8 {
+        self.identity
+            .firmware_version
+            .map_or(0, |version| version.0)
+    }
+
+    fn minor(&self) -> u8 {
+        self.identity.firmware_version.map_or(0, |version| {
+            version.1.saturating_mul(10).saturating_add(version.2)
+        })
+    }
+
+    fn hardware_version(&self) -> Option<(u8, u8)> {
+        self.identity.hardware_version
+    }
+
+    fn firmware_version(&self) -> Option<(u8, u8, u8)> {
+        self.identity.firmware_version
+    }
+
+    fn connection_epoch(&self) -> u64 {
+        self.connection_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn is_present(&self) -> bool {
+        self.inventory_present
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .selected_connector()
+                .is_ok_and(|connector| connector.is_present())
+    }
+
+    fn buffer_size(&self) -> usize {
+        self.selected_connector()
+            .map_or(4096, |connector| connector.buffer_size())
+    }
+
+    fn apdu_capabilities(&self) -> ApduCapabilities {
+        self.selected_connector()
+            .map_or(ApduCapabilities::SHORT_ONLY, |connector| {
+                connector.apdu_capabilities()
+            })
+    }
+
+    fn transmit<'a>(
+        &self,
+        send_buffer: &[u8],
+        receive_buffer: &'a mut [u8],
+        timeout: Duration,
+    ) -> Result<&'a [u8], Error> {
+        self.selected_connector()?
+            .transmit(send_buffer, receive_buffer, timeout)
+    }
+
+    fn refresh(&self) -> Result<(), Error> {
+        self.refresh_current()
+    }
+
+    fn stable_applet_topology(&self) -> bool {
+        true
+    }
 }
 
 impl std::fmt::Debug for PcscAppletConnector {
@@ -617,6 +932,11 @@ impl Connector for PcscAppletConnector {
             }
 
             self.clear_secure_channel_locked()?;
+            if self.base.stable_applet_topology() {
+                self.set_applet_presence(true);
+                self.forget_discovery_error();
+                return Ok(());
+            }
             match select_application(self.base.as_ref(), &self.application_aid) {
                 Ok(()) => {
                     let mut state = self.state.secure_channel()?;
@@ -1018,7 +1338,10 @@ impl PcscLifecycle {
 
 #[cfg(feature = "native-hardware")]
 impl DeviceOperationLifecycle for PcscLifecycle {
-    fn enter(&self, _message: &str) -> Result<(), Error> {
+    fn enter(&self, kind: crate::device::DeviceOperationKind, _message: &str) -> Result<(), Error> {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return Ok(());
+        }
         let reader_state = self.reader_state.upgrade().ok_or(CKR_DEVICE_ERROR)?;
         reader_state.begin_transaction()?;
         if let Err(error) = self.worker().and_then(PcscWorker::begin_operation) {
@@ -1028,7 +1351,10 @@ impl DeviceOperationLifecycle for PcscLifecycle {
         Ok(())
     }
 
-    fn exit(&self) {
+    fn exit(&self, kind: crate::device::DeviceOperationKind) {
+        if kind == crate::device::DeviceOperationKind::Hid {
+            return;
+        }
         if let Ok(worker) = self.worker() {
             if let Err(error) = worker.end_operation() {
                 tracing::debug!(
@@ -1110,6 +1436,21 @@ impl Connector for PcscConnector {
             .lock()
             .map(|state| state.apdu_capabilities)
             .unwrap_or(ApduCapabilities::SHORT_ONLY)
+    }
+    fn begin_transport_operation(&self, _message: &str) -> Result<(), Error> {
+        self.worker()?.begin_operation()
+    }
+    fn end_transport_operation(&self) {
+        if let Ok(worker) = self.worker() {
+            if let Err(error) = worker.end_operation() {
+                tracing::debug!(
+                    target: "pkcs11rs::transport",
+                    reader = %self.reader.to_string_lossy(),
+                    ?error,
+                    "failed to end PC/SC transport operation"
+                );
+            }
+        }
     }
     fn transmit<'a>(
         &self,
@@ -2160,6 +2501,145 @@ impl HttpConnector {
 mod tests {
     use super::*;
     use p256::pkcs8::EncodePrivateKey;
+
+    #[derive(Debug)]
+    struct SerialTestConnector {
+        name: String,
+        serial: Mutex<u32>,
+        epoch: std::sync::atomic::AtomicU64,
+        commands: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl SerialTestConnector {
+        fn new(name: &str, serial: u32, epoch: u64) -> Arc<Self> {
+            Arc::new(Self {
+                name: name.to_owned(),
+                serial: Mutex::new(serial),
+                epoch: std::sync::atomic::AtomicU64::new(epoch),
+                commands: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn reconnect_as(&self, serial: u32) {
+            *self.serial.lock().unwrap() = serial;
+            self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    impl Connector for SerialTestConnector {
+        fn as_debug(&self) -> &dyn std::fmt::Debug {
+            self
+        }
+
+        fn manufacturer(&self) -> &str {
+            "Yubico"
+        }
+
+        fn product(&self) -> &str {
+            "YubiKey"
+        }
+
+        fn name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn major(&self) -> u8 {
+            5
+        }
+
+        fn minor(&self) -> u8 {
+            70
+        }
+
+        fn connection_epoch(&self) -> u64 {
+            self.epoch.load(std::sync::atomic::Ordering::Acquire)
+        }
+
+        fn is_present(&self) -> bool {
+            true
+        }
+
+        fn buffer_size(&self) -> usize {
+            1024
+        }
+
+        fn transmit<'a>(
+            &self,
+            send_buffer: &[u8],
+            receive_buffer: &'a mut [u8],
+            _timeout: Duration,
+        ) -> Result<&'a [u8], Error> {
+            self.commands.lock().unwrap().push(send_buffer.to_vec());
+            let response = match send_buffer.get(1).copied() {
+                Some(0xa4) => [b"5.7.2".as_slice(), &[0x90, 0x00]].concat(),
+                Some(0x1d) => {
+                    let serial = self.serial.lock().unwrap().to_be_bytes();
+                    vec![
+                        6, 0x02, 4, serial[0], serial[1], serial[2], serial[3], 0x90, 0x00,
+                    ]
+                }
+                _ => vec![0x90, 0x00],
+            };
+            receive_buffer[..response.len()].copy_from_slice(&response);
+            Ok(&receive_buffer[..response.len()])
+        }
+    }
+
+    fn serial_identity(serial: u32) -> DeviceIdentity {
+        DeviceIdentity {
+            manufacturer: "Yubico".to_owned(),
+            product: "YubiKey".to_owned(),
+            serial: serial.to_string(),
+            hardware_version: None,
+            firmware_version: Some((5, 7, 2)),
+        }
+    }
+
+    #[test]
+    fn serial_owned_ccid_refresh_skips_applet_probes_and_validates_only_reconnects() {
+        let endpoint = SerialTestConnector::new("reader A", 1_363_530_508, 1);
+        let connector = CcidDeviceConnector::new(
+            serial_identity(1_363_530_508),
+            endpoint.clone() as SharedConnector,
+        );
+        let applet = PcscAppletConnector::new(
+            connector.clone() as SharedConnector,
+            &[0xa0, 0x00, 0x00, 0x03, 0x08],
+            None,
+            connector.reader_state(),
+        );
+
+        applet.refresh().unwrap();
+        assert!(endpoint.commands.lock().unwrap().is_empty());
+
+        endpoint.reconnect_as(1_363_530_508);
+        applet.refresh().unwrap();
+        let commands = endpoint.commands.lock().unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0][1], 0xa4);
+        assert_eq!(commands[1][1], 0x1d);
+    }
+
+    #[test]
+    fn serial_owned_ccid_rebind_ignores_reader_name_but_rejects_replacement() {
+        let first = SerialTestConnector::new("stack-one name", 12345678, 1);
+        let connector =
+            CcidDeviceConnector::new(serial_identity(12345678), first.clone() as SharedConnector);
+        let renamed = SerialTestConnector::new("stack-two disambiguated name 01", 12345678, 7);
+        connector
+            .apply_reader(renamed.clone() as SharedConnector)
+            .unwrap();
+        assert_eq!(connector.name(), "YubiKey CCID #12345678");
+        assert!(renamed.commands.lock().unwrap().is_empty());
+
+        renamed.reconnect_as(87654321);
+        assert!(connector.refresh().is_err());
+        assert!(!connector.is_present());
+        assert_eq!(
+            connector.take_mismatched_serial().as_deref(),
+            Some("87654321")
+        );
+    }
 
     fn test_http_client_identity() -> (Vec<u8>, zeroize::Zeroizing<Vec<u8>>) {
         let key = crate::certificate_builder::p256_key();

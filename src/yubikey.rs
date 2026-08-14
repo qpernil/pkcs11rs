@@ -62,64 +62,48 @@ pub(crate) struct DeviceInfo {
 
 pub(crate) struct Client;
 
+struct ManagementInformation {
+    select_version: Option<(u8, u8, u8)>,
+    raw_tlvs: Vec<(u8, Vec<u8>)>,
+    stopped_after_serial: bool,
+}
+
 impl Client {
+    /// Reads only as many management-information pages as are needed to find
+    /// the device serial. This is used to validate a reconnected transport
+    /// without repeating full device and applet discovery.
+    pub(crate) fn discover_serial(&self, connector: &dyn Connector) -> Result<String, Error> {
+        let information = read_management_information(connector, |_| true)?;
+        serial_from_tlvs(&information.raw_tlvs)?.ok_or_else(|| CKR_TOKEN_NOT_RECOGNIZED.into())
+    }
+
+    /// Reads a locator once, stopping after its serial when the serial is
+    /// already registered and continuing through all information pages only
+    /// for a genuinely new device.
+    pub(crate) fn discover_for_inventory(
+        &self,
+        connector: &dyn Connector,
+        serial_is_known: impl FnMut(&str) -> bool,
+    ) -> Result<(String, Option<DeviceInfo>), Error> {
+        let information = read_management_information(connector, serial_is_known)?;
+        let serial = serial_from_tlvs(&information.raw_tlvs)?
+            .ok_or_else(|| Error::from(CKR_TOKEN_NOT_RECOGNIZED))?;
+        if information.stopped_after_serial {
+            return Ok((serial, None));
+        }
+        let info = DeviceInfo::parse(information.select_version, information.raw_tlvs)?;
+        Ok((serial, Some(info)))
+    }
+
     pub(crate) fn discover(&self, connector: &dyn Connector) -> Result<DeviceInfo, Error> {
         log!(
             2,
             "YubiKey Management device-information discovery started on {}",
             connector.name()
         );
-        let select = CommandApdu {
-            cla: 0,
-            ins: 0xa4,
-            p1: 0x04,
-            p2: 0,
-            data: MANAGEMENT_AID.to_vec(),
-            le: Some(256),
-            extended: false,
-        };
-        let mut selected = connector.send_apdu(&select)?.require_success(&select)?.data;
-        if selected.ends_with(&[0x90, 0x00]) {
-            selected.truncate(selected.len() - 2);
-        }
-        let select_version = parse_select_version(&selected);
+        let information = read_management_information(connector, |_| false)?;
 
-        let mut raw_tlvs = Vec::new();
-        let mut page = 0u8;
-        loop {
-            let command = CommandApdu {
-                cla: 0,
-                ins: INS_READ_DEVICE_INFO,
-                p1: page,
-                p2: 0,
-                data: Vec::new(),
-                le: Some(256),
-                extended: false,
-            };
-            let response = connector
-                .send_apdu(&command)?
-                .require_success(&command)?
-                .data;
-            let body = response.get(1..).ok_or(CKR_DATA_INVALID)?;
-            if usize::from(response[0]) != body.len() {
-                return Err(CKR_DATA_INVALID.into());
-            }
-            let page_tlvs = parse_tlvs(body)?;
-            let more = page_tlvs
-                .iter()
-                .rev()
-                .find(|(tag, _)| *tag == TAG_MORE_DATA)
-                .map(|(_, value)| parse_integer(value))
-                .transpose()?
-                .unwrap_or(0);
-            raw_tlvs.extend(page_tlvs);
-            if more == 0 {
-                break;
-            }
-            page = page.checked_add(1).ok_or(CKR_DATA_LEN_RANGE)?;
-        }
-
-        let info = DeviceInfo::parse(select_version, raw_tlvs)?;
+        let info = DeviceInfo::parse(information.select_version, information.raw_tlvs)?;
         log!(
             2,
             "YubiKey Management device information on {}:\n{}",
@@ -158,6 +142,89 @@ impl Client {
         }
         DeviceInfo::parse(default_version, raw_tlvs)
     }
+}
+
+fn read_management_information(
+    connector: &dyn Connector,
+    mut stop_after_serial: impl FnMut(&str) -> bool,
+) -> Result<ManagementInformation, Error> {
+    let select = CommandApdu {
+        cla: 0,
+        ins: 0xa4,
+        p1: 0x04,
+        p2: 0,
+        data: MANAGEMENT_AID.to_vec(),
+        le: Some(256),
+        extended: false,
+    };
+    let mut selected = connector.send_apdu(&select)?.require_success(&select)?.data;
+    if selected.ends_with(&[0x90, 0x00]) {
+        selected.truncate(selected.len() - 2);
+    }
+    let select_version = parse_select_version(&selected);
+
+    let mut raw_tlvs = Vec::new();
+    let mut page = 0u8;
+    let mut serial_checked = false;
+    loop {
+        let command = CommandApdu {
+            cla: 0,
+            ins: INS_READ_DEVICE_INFO,
+            p1: page,
+            p2: 0,
+            data: Vec::new(),
+            le: Some(256),
+            extended: false,
+        };
+        let response = connector
+            .send_apdu(&command)?
+            .require_success(&command)?
+            .data;
+        let body = response.get(1..).ok_or(CKR_DATA_INVALID)?;
+        if usize::from(response[0]) != body.len() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        let page_tlvs = parse_tlvs(body)?;
+        let more = page_tlvs
+            .iter()
+            .rev()
+            .find(|(tag, _)| *tag == TAG_MORE_DATA)
+            .map(|(_, value)| parse_integer(value))
+            .transpose()?
+            .unwrap_or(0);
+        raw_tlvs.extend(page_tlvs);
+        if !serial_checked && let Some(serial) = serial_from_tlvs(&raw_tlvs)? {
+            serial_checked = true;
+            if stop_after_serial(&serial) {
+                return Ok(ManagementInformation {
+                    select_version,
+                    raw_tlvs,
+                    stopped_after_serial: true,
+                });
+            }
+        }
+        if more == 0 {
+            return Ok(ManagementInformation {
+                select_version,
+                raw_tlvs,
+                stopped_after_serial: false,
+            });
+        }
+        page = page.checked_add(1).ok_or(CKR_DATA_LEN_RANGE)?;
+    }
+}
+
+fn serial_from_tlvs(raw_tlvs: &[(u8, Vec<u8>)]) -> Result<Option<String>, Error> {
+    raw_tlvs
+        .iter()
+        .find(|(tag, _)| *tag == TAG_SERIAL)
+        .map(|(_, value)| parse_integer(value))
+        .transpose()
+        .map(|serial| {
+            serial
+                .filter(|serial| *serial != 0)
+                .map(|serial| serial.to_string())
+        })
 }
 
 impl DeviceInfo {
@@ -667,5 +734,67 @@ mod tests {
             commands: RefCell::new(Vec::new()),
         };
         assert!(Client.discover(&connector).is_err());
+    }
+
+    #[test]
+    fn serial_discovery_stops_on_the_first_page_containing_the_serial() {
+        let connector = ManagementConnector {
+            responses: RefCell::new(VecDeque::from([
+                [b"5.7.2".as_slice(), &[0x90, 0x00]].concat(),
+                response(&[
+                    tlv(TAG_SERIAL, &[0x51, 0x45, 0xd3, 0x0c]),
+                    tlv(TAG_MORE_DATA, &[1]),
+                ]),
+            ])),
+            commands: RefCell::new(Vec::new()),
+        };
+
+        assert_eq!(Client.discover_serial(&connector).unwrap(), "1363530508");
+        let commands = connector.commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0],
+            [vec![0, 0xa4, 0x04, 0, 8], MANAGEMENT_AID.to_vec(), vec![0]].concat()
+        );
+        assert_eq!(commands[1], vec![0, INS_READ_DEVICE_INFO, 0, 0, 0]);
+    }
+
+    #[test]
+    fn inventory_discovery_reuses_the_serial_scan_for_known_and_new_devices() {
+        let known = ManagementConnector {
+            responses: RefCell::new(VecDeque::from([
+                [b"5.7.2".as_slice(), &[0x90, 0x00]].concat(),
+                response(&[
+                    tlv(TAG_SERIAL, &[0x51, 0x45, 0xd3, 0x0c]),
+                    tlv(TAG_MORE_DATA, &[1]),
+                ]),
+            ])),
+            commands: RefCell::new(Vec::new()),
+        };
+        let (serial, info) = Client
+            .discover_for_inventory(&known, |serial| serial == "1363530508")
+            .unwrap();
+        assert_eq!(serial, "1363530508");
+        assert!(info.is_none());
+        assert_eq!(known.commands.borrow().len(), 2);
+
+        let new = ManagementConnector {
+            responses: RefCell::new(VecDeque::from([
+                [b"5.7.2".as_slice(), &[0x90, 0x00]].concat(),
+                response(&[
+                    tlv(TAG_SERIAL, &[0x51, 0x45, 0xd3, 0x0c]),
+                    tlv(TAG_MORE_DATA, &[1]),
+                ]),
+                response(&[tlv(TAG_PART_NUMBER, b"5060401")]),
+            ])),
+            commands: RefCell::new(Vec::new()),
+        };
+        let (serial, info) = Client.discover_for_inventory(&new, |_| false).unwrap();
+        assert_eq!(serial, "1363530508");
+        assert_eq!(info.unwrap().part_number.as_deref(), Some("5060401"));
+        let commands = new.commands.borrow();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[1], vec![0, INS_READ_DEVICE_INFO, 0, 0, 0]);
+        assert_eq!(commands[2], vec![0, INS_READ_DEVICE_INFO, 1, 0, 0]);
     }
 }

@@ -20,32 +20,42 @@ configured software slots or opt-in remote YubiHSM HTTP(S) connectors.
 
 Each applet is added as a separate PKCS #11 slot only when its configured AID
 can be selected successfully. Every `C_GetSlotList` asks the selected provider
-for its current reader inventory. A reader name that has not yet contributed a
-slot is probed for every configured applet. This lets newly attached readers,
-and cards inserted into readers that were previously empty or unavailable,
-append slots without `C_Finalize`/`C_Initialize`.
+for its current reader inventory. Reader names only locate candidates long
+enough to identify their physical YubiKey serial. They are not stable identity:
+different PC/SC implementations apply different naming and disambiguation
+rules, USB re-enumeration can rename the same reader, and CryptoTokenKit NFC
+slot names last only for one system NFC session.
 
-Once a reader name contributes at least one slot, that reader's applet topology
-and slot IDs remain stable for the module lifetime. Subsequent listings refresh
-token presence for those registered slots, as does opening a session. A removed
-reader or card therefore leaves its slots registered but absent; when the same
-reader name returns, those slots reconnect and reselect their own AIDs. A
-replacement card does not make an established reader morph into a different
-set of slots. Reinitialization is required only when the caller wants to forget
-that stable inventory and probe a known reader name as entirely new.
+The first encounter with a serial probes every configured applet and binds the
+resulting topology and slot IDs to that serial until `C_Finalize`. Later reader
+or CryptoTokenKit names that identify the same serial simply replace the
+transport behind those slots, including when the YubiKey moves between NFC and
+USB CCID. Applet discovery is not repeated. A normal refresh of an unchanged
+connection sends no discovery APDUs; after a connection is reacquired,
+pkcs11rs reads only enough YubiKey management data to validate the serial.
+Each actual applet operation still selects its AID inside its native smart-card
+transaction, which is normal PKCS #11 use rather than rediscovery.
+
+A removed token therefore leaves its slots registered but absent. A different
+serial appearing under a reused reader name does not inherit those slots; it is
+identified as another token and receives its own one-time applet probe.
+Reinitialization is required only when the caller wants to forget all retained
+serial-owned registrations.
 
 ## Native iOS readers
 
 An iOS build calls CryptoTokenKit directly through Rust Objective-C bindings.
 It obtains the current `TKSmartCardSlotManager` names on every slot-list
-refresh. The connector lazily starts one worker for each reader that contributes
-slots. That worker owns and reuses the reader's `TKSmartCard`, serializes its
+refresh. Those names are transient locators; the validated serial owns the
+slots. The connector lazily starts one worker for each active locator. That
+worker owns and reuses the reader's `TKSmartCard`, serializes its
 APDUs, and adapts asynchronous session and transmit completions to the
 synchronous PKCS #11 call. The non-exclusive `TKSmartCard` remains
 cached, but the current transport opens one exclusive CryptoTokenKit session
 at the first APDU of a device-backed PKCS #11 call and ends it when that call
-returns. A removed card invalidates the retained object; the worker resolves a
-new card by the same reader name when it returns.
+returns. A removed card invalidates the retained object; enumeration may
+resolve the same serial through the same or a different locator when it
+returns.
 Objective-C objects retained for card I/O stay confined to the worker that
 created them.
 
@@ -56,22 +66,27 @@ or transport implementation.
 
 Set `nfc.discovery` to `true` in the initialization JSON (or set
 `PKCS11RS_NFC_DISCOVERY=1`) to request one NFC card during the first
-`C_GetSlotList`. NFC discovery is disabled by default because it presents
-Apple's system UI. Because CryptoTokenKit NFC slot names are session-scoped,
+`C_GetSlotList`. The current CryptoTokenKit USB inventory is reconciled first,
+and later refreshes likewise attach newly available USB routes before any
+registered slot can request NFC reacquisition. NFC discovery is disabled by
+default because it presents Apple's system UI. Because CryptoTokenKit NFC slot names are session-scoped,
 pkcs11rs scans the selected card once and binds its device serial to stable
 logical slots until `C_Finalize`. Those slots then follow the ordinary USB slot
 model: registration is stable while physical token presence is refreshed
 independently. A replacement NFC session must verify the bound serial before
-carrying APDUs. After physical removal, the next `C_GetSlotList(CK_TRUE, ...)`
-asks for that serial again. Canceling the request leaves NFC absent, so HSM Auth
-ignores it when the same YubiKey is connected through USB. Canceling before
-discovery completes leaves no placeholder slot and is not retried by later
-slot-list polling. When the last operation finishes, the NFC session immediately
-becomes idle and remains available until the card is removed, the user cancels,
-or another operation reuses it. The initiating `C_GetSlotList` blocks while
-Apple's NFC UI is active and should therefore run on an application worker
-thread. Concurrent slot-list calls are serialized and cannot open duplicate NFC
-requests.
+carrying APDUs. After physical removal, the next `C_GetSlotList` refresh can
+ask for that serial again; this happens before the `CK_TRUE` or `CK_FALSE`
+token-present filter is applied. Canceling the request leaves NFC absent, so
+HSM Auth ignores it when the same YubiKey is connected through USB. Canceling
+before discovery completes leaves no placeholder slot and is not retried by
+later slot-list polling. When the last operation finishes, the NFC session
+immediately becomes idle and remains available until the card is removed, the
+user cancels, or another operation reuses it. The initiating `C_GetSlotList`
+blocks while Apple's NFC UI is active and should therefore run on an
+application worker thread. Concurrent slot-list calls are serialized and
+cannot open duplicate NFC requests. See
+[When the NFC UI appears](ios-integration.md#when-the-nfc-ui-appears) for the
+initial-discovery, reacquisition, reuse, and cancellation cases.
 
 This is a smart-card APDU backend, not general USB access. iOS does not expose
 the reader's USB interfaces or bulk endpoints through CryptoTokenKit.
@@ -98,7 +113,11 @@ transaction as a fallback. Another shared PC/SC client can therefore remain
 connected and use the card between pkcs11rs calls. An exclusive PC/SC owner can
 still prevent connection. Until the reader has contributed a slot, a later
 `C_GetSlotList` retries the applet probe. If the reader already has slots, they
-remain registered and report the failed connection as token absence.
+remain registered and report the failed connection as token absence. PC/SC
+ownership applies to the reader, not one selected applet: an exclusive client
+using OpenPGP can therefore also make PIV, YubiHSM Auth, Issuer SD, and FIDO
+over CCID unavailable through that reader. A separate native FIDO HID
+interface does not depend on PC/SC ownership.
 
 On macOS, GnuPG `scdaemon` is a common competing owner. It can use either its
 built-in CCID driver, which opens the USB CCID interface directly and bypasses

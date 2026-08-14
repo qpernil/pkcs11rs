@@ -17,7 +17,7 @@ enum WorkerRequest {
         reply: mpsc::SyncSender<()>,
     },
     Refresh {
-        reply: mpsc::SyncSender<Result<(), CK_RV>>,
+        reply: mpsc::SyncSender<Result<bool, CK_RV>>,
     },
     Transmit {
         command: Vec<u8>,
@@ -43,7 +43,7 @@ impl AppleCcidWorker {
         Ok(Self { requests })
     }
 
-    pub(super) fn refresh(&self) -> Result<(), Error> {
+    pub(super) fn refresh(&self) -> Result<bool, Error> {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.requests
             .send(WorkerRequest::Refresh { reply })
@@ -124,17 +124,18 @@ fn run_worker(
             WorkerRequest::Refresh { reply } => {
                 let result = if let Some(nfc) = &nfc {
                     if nfc.has_verified_card() {
-                        Ok(())
+                        Ok(false)
                     } else {
                         prepare_nfc_card(nfc, &mut card, &mut card_generation, DEFAULT_TIMEOUT)
+                            .map(|()| true)
                     }
                 } else if card.as_deref().is_some_and(card_is_valid) {
-                    Ok(())
+                    Ok(false)
                 } else {
                     match resolve_card(&reader_name) {
                         Ok(resolved) if card_is_valid(&resolved) => {
                             card = Some(resolved);
-                            Ok(())
+                            Ok(true)
                         }
                         Ok(resolved) => {
                             card = Some(resolved);

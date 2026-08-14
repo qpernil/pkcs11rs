@@ -231,7 +231,9 @@ identity until finalization, while PKCS #11 token presence follows whether
 CryptoTokenKit currently reports the card. A retained operation can reacquire
 only the same serial. USB CCID and NFC therefore share the same applet,
 transaction, secure-channel, and PKCS #11 implementation rather than using an
-application-supplied transport shim.
+application-supplied transport shim. The
+[iOS integration guide](docs/ios-integration.md#when-the-nfc-ui-appears)
+summarizes which initial and later calls can present the system NFC UI.
 
 The [iPhone smoke-test app](examples/ios/PKCS11RSPhoneSmoke) demonstrates
 linking the XCFramework from Swift while pkcs11rs itself enumerates local
@@ -552,15 +554,15 @@ builds enumerate readers through PC/SC on desktop platforms and CryptoTokenKit
 on iOS.
 
 Every `C_GetSlotList` enumerates the current native reader
-names. A reader is probed for its configured applets until it contributes at
-least one slot, so a new reader or a card inserted into a previously empty
-reader can append slots without reinitializing the module. Once a reader name
-has contributed slots, those slot IDs remain registered for the module
-lifetime. Later listings refresh their presence, and session opens reconnect
-and reselect the slot's AID. Removing the reader therefore marks its existing
-slots absent; returning the same reader name reuses them. Replacing a known
-reader's card does not reinterpret its established applet topology or remove
-its slots.
+names, but uses them only to locate candidates. PC/SC names are not portable or
+persistent: implementations use different naming and disambiguation rules, and
+USB re-enumeration can rename the same reader. The validated YubiKey serial
+instead owns the applet topology and slot IDs for the module lifetime. A new
+serial is probed once; a different PC/SC, CryptoTokenKit USB, or NFC locator for
+a known serial is rebound without repeating applet discovery. Later listings
+refresh presence, and real operations reconnect and reselect the slot's AID as
+normal PKCS #11 transaction handling. Removing the token therefore marks its
+existing slots absent without forgetting them.
 
 pkcs11rs opens PC/SC cards with `SCARD_SHARE_SHARED`. Each device-backed
 PKCS #11 call lazily begins one PC/SC transaction before its first APDU and

@@ -32,7 +32,7 @@ pub(crate) use crypto::{
 pub(crate) use ctap::CcidCtapTransport;
 #[cfg(feature = "native-hardware")]
 pub(crate) use ctap::HidFidoEndpoint;
-pub(crate) use ctap::{Fido2Slot, project_cose_public_key};
+pub(crate) use ctap::{Fido2Slot, SwitchableFidoEndpoint, project_cose_public_key};
 pub(crate) use openpgp::{OpenPgpSlot, openpgp_signature_requires_context_specific_login};
 pub(crate) use piv::{
     PivPublicKey, PivSlot, piv_algorithm_from_certificate, piv_ec_parameters,
