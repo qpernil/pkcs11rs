@@ -28,9 +28,18 @@ Simulator even though the Simulator has no USB CCID or NFC reader.
 The app recognizes exactly that owned software slot by its `Software token`
 model and `iPhone smoke` label. It initializes the token and user PIN when
 their standard flags require it, logs in with the prototype PIN `password`,
-and creates one persistent X25519 keypair with ID `iphone-smoke-x25519` when
-absent. Later refreshes and launches reuse the keypair. These state-changing
-calls are never applied to discovered hardware.
+and creates one persistent ML-DSA-87 keypair with ID
+`iphone-smoke-ml-dsa-87` when absent. It reports the generation time, then
+generates a fresh 32-byte message with `C_GenerateRandom`, signs it, and
+verifies it on every refresh while reporting both operation times. Later
+refreshes and launches reuse the keypair. These state-changing calls are never
+applied to discovered hardware.
+
+Generation timing surrounds the complete `C_GenerateKeyPair` call, including
+encrypted persistence. `C_GenerateRandom` runs outside the sign timer. Signing
+includes `C_SignInit`, the signature-length query, and the output-producing
+`C_Sign`; verification includes `C_VerifyInit` and `C_Verify`, and is considered
+successful only when `C_Verify` returns `CKR_OK`.
 
 The `public_discovery` prototype credential is required for the matching flow:
 it lets pkcs11rs expose the public companion objects on a YubiHSM before the

@@ -72,12 +72,21 @@ the app recognizes exactly that owned slot by its `Software token` model and
 login/`C_InitPIN` sequence is needed. Both profiles use the prototype PIN
 `password`. These initialization calls are never applied to discovered
 hardware. Before enumerating the software token's objects, the app logs in and
-searches for a private `CKK_EC_MONTGOMERY` key with the stable ID
-`iphone-smoke-x25519`. If it is absent, the app generates an X25519 keypair
-with both objects marked as token objects. It then enumerates the authenticated
-software session so both halves of the keypair appear in Inventory. Later
-refreshes and process launches find the persisted private key and do not
-generate another pair.
+searches for a `CKK_ML_DSA` keypair with parameter set ML-DSA-87 and stable ID
+`iphone-smoke-ml-dsa-87`. If it is absent, the app generates both objects as
+token objects and reports the key-generation time. On every refresh it uses
+`C_GenerateRandom` to create a fresh 32-byte message, signs it, verifies the
+signature, and reports both operation times and the signature length. It then
+enumerates the authenticated software session so both halves of the keypair
+appear in Inventory. Later refreshes and process launches reuse the persisted
+pair while repeating sign and verify.
+
+The generation measurement surrounds the complete `C_GenerateKeyPair` call,
+including encrypted token-object persistence. Random-message generation occurs
+before the sign timer. The sign measurement includes `C_SignInit`, the standard
+signature-length query, and the output-producing `C_Sign`; the verify
+measurement includes `C_VerifyInit` and `C_Verify`. The app reports timings as
+successful only when verification returns `CKR_OK`.
 
 After every public object inventory is complete, the app lists all discovered
 YubiHSM Auth credentials and selects the first one. For each YubiHSM slot it
@@ -155,8 +164,8 @@ The app does not modify objects on attached hardware. Its explicit YubiHSM Auth
 inspection login authenticates but remains read-only. Private hardware objects
 that require login are absent from the public-session view and may appear in
 the authenticated view. The named software slot is the deliberate exception:
-the app initializes it when necessary and creates the one persistent X25519
-keypair described above.
+the app initializes it when necessary and creates and exercises the one
+persistent ML-DSA-87 keypair described above.
 
 USB discovery requires a physical iPhone or iPad with a CCID-enabled key
 attached directly or through a USB-C adapter. NFC discovery likewise requires
