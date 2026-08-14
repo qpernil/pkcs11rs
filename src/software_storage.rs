@@ -10,7 +10,7 @@ use der::{
 };
 use minicbor::{Decoder, Encoder};
 use pkcs8::{
-    EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
+    DecodePrivateKey, EncodePrivateKey, EncryptedPrivateKeyInfoOwned, PrivateKeyInfoRef,
     pkcs5::pbes2,
     spki::{AlgorithmIdentifierOwned, AlgorithmIdentifierRef, ObjectIdentifier},
 };
@@ -61,6 +61,9 @@ const EXPORT_IV_LENGTH: usize = 16;
 const EC_PUBLIC_KEY_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 const ED25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
 const X25519_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.110");
+const ML_DSA_44_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.17");
+const ML_DSA_65_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
+const ML_DSA_87_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 const FRIENDLY_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.20");
 const LOCAL_KEY_ID_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.21");
 // UUIDv5(URL namespace,
@@ -1787,6 +1790,15 @@ fn record_unique_id(reference: &ContentReference) -> String {
 pub(crate) fn material_to_pkcs8(
     material: &SoftwarePrivateKeyMaterial,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let ml_dsa = match material {
+        SoftwarePrivateKeyMaterial::MlDsa44(key) => key.to_pkcs8_der().ok(),
+        SoftwarePrivateKeyMaterial::MlDsa65(key) => key.to_pkcs8_der().ok(),
+        SoftwarePrivateKeyMaterial::MlDsa87(key) => key.to_pkcs8_der().ok(),
+        _ => None,
+    };
+    if let Some(document) = ml_dsa {
+        return Ok(Zeroizing::new(document.as_bytes().to_vec()));
+    }
     if let SoftwarePrivateKeyMaterial::Rsa(key) = material {
         let pkcs1 = key
             .to_pkcs1_der()
@@ -1854,6 +1866,30 @@ fn ec_pkcs8(curve: EcCurve, scalar: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> 
 
 fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Error> {
     let info = PrivateKeyInfoRef::from_der(encoded).map_err(|_| CKR_DATA_INVALID)?;
+    if info.algorithm.oid == ML_DSA_44_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlDsa44)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
+    if info.algorithm.oid == ML_DSA_65_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlDsa65)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
+    if info.algorithm.oid == ML_DSA_87_OID {
+        if info.algorithm.parameters.is_some() {
+            return Err(CKR_DATA_INVALID.into());
+        }
+        return ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_pkcs8_der(encoded)
+            .map(SoftwarePrivateKeyMaterial::MlDsa87)
+            .map_err(|_| Error::from(CKR_DATA_INVALID));
+    }
     if info.algorithm.oid == pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1") {
         if info.algorithm.parameters != Some(AnyRef::NULL) {
             return Err(CKR_DATA_INVALID.into());
@@ -2092,6 +2128,15 @@ mod tests {
             ),
             SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from([7; 32])),
+            SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(
+                &ml_dsa::Seed::from([7; 32]),
+            )),
+            SoftwarePrivateKeyMaterial::MlDsa65(ml_dsa::SigningKey::from_seed(
+                &ml_dsa::Seed::from([7; 32]),
+            )),
+            SoftwarePrivateKeyMaterial::MlDsa87(ml_dsa::SigningKey::from_seed(
+                &ml_dsa::Seed::from([7; 32]),
+            )),
         ];
         for material in materials {
             let encoded = material_to_pkcs8(&material).unwrap();
@@ -2112,6 +2157,9 @@ mod tests {
                 info.algorithm.oid == EC_PUBLIC_KEY_OID
                     || info.algorithm.oid == ED25519_OID
                     || info.algorithm.oid == X25519_OID
+                    || info.algorithm.oid == ML_DSA_44_OID
+                    || info.algorithm.oid == ML_DSA_65_OID
+                    || info.algorithm.oid == ML_DSA_87_OID
                     || info.algorithm.oid == ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1")
             );
         }

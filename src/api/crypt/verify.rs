@@ -1,6 +1,7 @@
 use super::sign::{
     aes_cmac_length, aes_gmac_parameters, hmac_key_type_and_length, hmac_output_length,
-    software_aes_cmac, software_aes_gmac, software_hmac, yubihsm_aes_cmac, yubihsm_aes_gmac,
+    ml_dsa_parameters, software_aes_cmac, software_aes_gmac, software_hmac, yubihsm_aes_cmac,
+    yubihsm_aes_gmac,
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
@@ -45,7 +46,8 @@ fn verify_init(
         };
         let hmac_length = hmac_output_length(mechanism)?;
         let mac_length = hmac_length.or(aes_mac_length);
-        let pss = if mac_length.is_some() {
+        let ml_dsa = ml_dsa_parameters(mechanism)?;
+        let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
@@ -92,11 +94,13 @@ fn verify_init(
         let ecdsa_mechanism = mechanism.mechanism == CKM_ECDSA as CK_MECHANISM_TYPE
             || piv_is_hashed_ecdsa(mechanism.mechanism);
         let eddsa_mechanism = mechanism.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE;
+        let ml_dsa_mechanism = mechanism.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE;
         let aes_mac_mechanism = aes_mac_length.is_some();
         let hmac_mechanism = hmac_key_type_and_length(mechanism.mechanism);
         if !rsa_mechanism
             && !ecdsa_mechanism
             && !eddsa_mechanism
+            && !ml_dsa_mechanism
             && !aes_mac_mechanism
             && hmac_mechanism.is_none()
         {
@@ -165,6 +169,12 @@ fn verify_init(
                         asymmetric_key,
                         Some(KeyMaterial::Public(PublicKeyMaterial::Ec { .. }))
                     )))
+            || (ml_dsa_mechanism
+                && (object.key_type != CKK_ML_DSA as CK_KEY_TYPE
+                    || !matches!(
+                        asymmetric_key,
+                        Some(KeyMaterial::Public(PublicKeyMaterial::MlDsa { .. }))
+                    )))
         {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
         }
@@ -183,6 +193,7 @@ fn verify_init(
             mac_length,
             gmac,
             pss,
+            ml_dsa,
             piv_pin_policy: None,
             buffer: Vec::new(),
             result: None,
@@ -307,6 +318,19 @@ fn verify(
             );
         }
         match &operation.key {
+            KeyMaterial::Public(PublicKeyMaterial::MlDsa {
+                parameter_set,
+                public_key,
+            }) if operation.mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE => ml_dsa_verify(
+                *parameter_set,
+                public_key,
+                operation
+                    .ml_dsa
+                    .as_ref()
+                    .ok_or(CKR_MECHANISM_PARAM_INVALID)?,
+                data,
+                signature,
+            ),
             KeyMaterial::Public(PublicKeyMaterial::Ec { public_key, .. })
                 if operation.mechanism == CKM_EDDSA as CK_MECHANISM_TYPE =>
             {
@@ -334,6 +358,44 @@ fn verify(
             _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         }
     })
+}
+
+fn ml_dsa_verify(
+    parameter_set: CK_ML_DSA_PARAMETER_SET_TYPE,
+    public_key: &[u8],
+    parameters: &MlDsaSignatureParameters,
+    data: &[u8],
+    signature: &[u8],
+) -> Result<(), Error> {
+    macro_rules! verify {
+        ($params:ty, $signature_length:expr) => {{
+            if signature.len() != $signature_length {
+                return Err(CKR_SIGNATURE_LEN_RANGE.into());
+            }
+            let encoded = ml_dsa::EncodedVerifyingKey::<$params>::try_from(public_key)
+                .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
+            let key = ml_dsa::VerifyingKey::<$params>::decode(&encoded);
+            let signature = ml_dsa::Signature::<$params>::try_from(signature)
+                .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
+            if key.verify_with_context(data, &parameters.context, &signature) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID.into())
+            }
+        }};
+    }
+    match parameter_set {
+        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+            verify!(ml_dsa::MlDsa44, 2420)
+        }
+        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+            verify!(ml_dsa::MlDsa65, 3309)
+        }
+        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => {
+            verify!(ml_dsa::MlDsa87, 4627)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
 }
 
 fn yubihsm_hmac_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<(CK_KEY_TYPE, u8, usize)> {

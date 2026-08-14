@@ -72,6 +72,9 @@ fn software_sign_mechanism_supported(
         }
         SoftwarePrivateKeyMaterial::Ed25519(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
         SoftwarePrivateKeyMaterial::X25519(_) => false,
+        SoftwarePrivateKeyMaterial::MlDsa44(_)
+        | SoftwarePrivateKeyMaterial::MlDsa65(_)
+        | SoftwarePrivateKeyMaterial::MlDsa87(_) => mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE,
         _ => mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism),
     }
 }
@@ -81,6 +84,9 @@ fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, 
         SoftwarePrivateKeyMaterial::Rsa(key) => Ok(key.size()),
         SoftwarePrivateKeyMaterial::Ed25519(_) => Ok(64),
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::MlDsa44(_) => Ok(2420),
+        SoftwarePrivateKeyMaterial::MlDsa65(_) => Ok(3309),
+        SoftwarePrivateKeyMaterial::MlDsa87(_) => Ok(4627),
         _ => Ok(
             ec_parameters(key.weierstrass_curve().ok_or(CKR_KEY_TYPE_INCONSISTENT)?)?
                 .coordinate_length
@@ -93,6 +99,7 @@ fn software_sign(
     key: &SoftwarePrivateKeyMaterial,
     mechanism: CK_MECHANISM_TYPE,
     pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    ml_dsa: Option<&MlDsaSignatureParameters>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
     macro_rules! sign_ecdsa {
@@ -183,7 +190,80 @@ fn software_sign(
             Ok(signature.to_bytes().to_vec())
         }
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+        SoftwarePrivateKeyMaterial::MlDsa44(key) => ml_dsa_sign(key, ml_dsa, data),
+        SoftwarePrivateKeyMaterial::MlDsa65(key) => ml_dsa_sign(key, ml_dsa, data),
+        SoftwarePrivateKeyMaterial::MlDsa87(key) => ml_dsa_sign(key, ml_dsa, data),
     }
+}
+
+fn ml_dsa_sign<P: ml_dsa::MlDsaParams>(
+    key: &ml_dsa::SigningKey<P>,
+    parameters: Option<&MlDsaSignatureParameters>,
+    data: &[u8],
+) -> Result<Vec<u8>, Error> {
+    let parameters = parameters.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    let expanded = key.expanded_key();
+    let deterministic = || {
+        expanded
+            .sign_deterministic(data, &parameters.context)
+            .map(|signature| signature.encode().to_vec())
+            .map_err(|_| Error::from(CKR_FUNCTION_FAILED))
+    };
+    match parameters.hedge_variant {
+        x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => deterministic(),
+        x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => expanded
+            .sign_randomized(data, &parameters.context, &mut getrandom::SysRng)
+            .map(|signature| signature.encode().to_vec())
+            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG)),
+        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => expanded
+            .sign_randomized(data, &parameters.context, &mut getrandom::SysRng)
+            .map(|signature| signature.encode().to_vec())
+            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
+            .or_else(|_| deterministic()),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+}
+
+pub(super) fn ml_dsa_parameters(
+    mechanism: &CK_MECHANISM,
+) -> Result<Option<MlDsaSignatureParameters>, Error> {
+    if mechanism.mechanism != CKM_ML_DSA as CK_MECHANISM_TYPE {
+        return Ok(None);
+    }
+    if mechanism.pParameter.is_null() && mechanism.ulParameterLen == 0 {
+        return Ok(Some(MlDsaSignatureParameters {
+            hedge_variant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
+            context: Vec::new(),
+        }));
+    }
+    if mechanism.pParameter.is_null()
+        || mechanism.ulParameterLen as usize != std::mem::size_of::<CK_SIGN_ADDITIONAL_CONTEXT>()
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let parameters = unsafe {
+        _as_ref(mechanism.pParameter.cast::<CK_SIGN_ADDITIONAL_CONTEXT>())
+            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
+    };
+    if !matches!(
+        parameters.hedgeVariant,
+        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE
+            || x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE
+            || x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE
+    ) || parameters.ulContextLen > 255
+        || (parameters.pContext.is_null() && parameters.ulContextLen != 0)
+    {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
+    }
+    let context = unsafe {
+        from_raw_parts(parameters.pContext, parameters.ulContextLen as usize)
+            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?
+            .to_vec()
+    };
+    Ok(Some(MlDsaSignatureParameters {
+        hedge_variant: parameters.hedgeVariant,
+        context,
+    }))
 }
 
 pub(crate) fn hmac_key_type_and_length(
@@ -462,7 +542,8 @@ fn sign_init(
         };
         let hmac_length = hmac_output_length(mechanism)?;
         let mac_length = hmac_length.or(aes_mac_length);
-        let pss = if mac_length.is_some() {
+        let ml_dsa = ml_dsa_parameters(mechanism)?;
+        let pss = if mac_length.is_some() || ml_dsa.is_some() {
             None
         } else if mechanism.mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
             if mechanism.ulParameterLen as usize != std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() {
@@ -518,6 +599,7 @@ fn sign_init(
                     || x == CKM_ECDSA_SHA3_384 as CK_MECHANISM_TYPE
                     || x == CKM_ECDSA_SHA3_512 as CK_MECHANISM_TYPE
                     || x == CKM_EDDSA as CK_MECHANISM_TYPE
+                    || x == CKM_ML_DSA as CK_MECHANISM_TYPE
                     || x == CKM_SHA_1_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA256_HMAC as CK_MECHANISM_TYPE
                     || x == CKM_SHA384_HMAC as CK_MECHANISM_TYPE
@@ -554,6 +636,7 @@ fn sign_init(
             x if x == CKM_PKCS11RS_PREVIEW_SIGN => CKK_EC as CK_KEY_TYPE,
             x if x == CKM_PKCS11RS_FIDO_ASSERTION => 0,
             x if x == CKM_EDDSA as CK_MECHANISM_TYPE => CKK_EC_EDWARDS as CK_KEY_TYPE,
+            x if x == CKM_ML_DSA as CK_MECHANISM_TYPE => CKK_ML_DSA as CK_KEY_TYPE,
             x if x == CKM_AES_CMAC as CK_MECHANISM_TYPE
                 || x == CKM_AES_CMAC_GENERAL as CK_MECHANISM_TYPE
                 || x == CKM_AES_GMAC as CK_MECHANISM_TYPE =>
@@ -666,6 +749,7 @@ fn sign_init(
             mac_length,
             gmac,
             pss,
+            ml_dsa,
             piv_pin_policy: match &object.material {
                 KeyMaterial::PivPrivate { pin_policy, .. } => Some(*pin_policy),
                 _ => None,
@@ -891,9 +975,13 @@ fn sign(
 
         let signature_result = (|| -> Result<Vec<u8>, Error> {
             match &operation.key {
-                KeyMaterial::SoftwarePrivate(key) => {
-                    software_sign(key, operation.mechanism, operation.pss, data)
-                }
+                KeyMaterial::SoftwarePrivate(key) => software_sign(
+                    key,
+                    operation.mechanism,
+                    operation.pss,
+                    operation.ml_dsa.as_ref(),
+                    data,
+                ),
                 KeyMaterial::SoftwareSecret(key) => {
                     if hmac_key_type_and_length(operation.mechanism).is_some() {
                         let mut mac = software_hmac(key, operation.mechanism, data)?;

@@ -13,6 +13,7 @@ const PUBLIC_KEY_SCHEMA: &str = "pkcs11rs.public-key-material";
 const PUBLIC_KEY_SCHEMA_VERSION: u64 = 1;
 const PUBLIC_KEY_KIND_RSA: u64 = 1;
 const PUBLIC_KEY_KIND_EC: u64 = 2;
+const PUBLIC_KEY_KIND_ML_DSA: u64 = 3;
 const BACKED_KEY_SCHEMA: &str = "pkcs11rs.backed-key";
 
 pub(crate) struct EncodedBackedObject {
@@ -189,6 +190,15 @@ fn encode_public_key_material(object: &TokenObject) -> Result<Vec<u8>, Error> {
             parameters.clone(),
             public_key.clone(),
             object.key_type == CKK_EC as CK_KEY_TYPE,
+        ),
+        PublicKeyMaterial::MlDsa {
+            parameter_set,
+            public_key,
+        } => (
+            PUBLIC_KEY_KIND_ML_DSA,
+            vec![u8::try_from(*parameter_set).map_err(|_| Error::from(CKR_DATA_INVALID))?],
+            public_key.clone(),
+            false,
         ),
     };
     let rp_id = object.rp_id.clone();
@@ -508,6 +518,19 @@ fn decode_public_key_material(
             }
             KeyMaterial::Public(PublicKeyMaterial::Ec {
                 parameters: first,
+                public_key: second,
+            })
+        }
+        PUBLIC_KEY_KIND_ML_DSA if key_type == CKK_ML_DSA as CK_KEY_TYPE && !prefix => {
+            let [parameter_set] = first.as_slice() else {
+                return Err(CKR_DATA_INVALID.into());
+            };
+            let parameter_set = *parameter_set as CK_ML_DSA_PARAMETER_SET_TYPE;
+            if crate::ml_dsa_public_key_info(parameter_set, &second).is_none() {
+                return Err(CKR_DATA_INVALID.into());
+            }
+            KeyMaterial::Public(PublicKeyMaterial::MlDsa {
+                parameter_set,
                 public_key: second,
             })
         }

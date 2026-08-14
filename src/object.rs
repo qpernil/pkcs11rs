@@ -20,6 +20,7 @@ use rsa::{
     BigUint, RsaPrivateKey, RsaPublicKey,
     traits::{PrivateKeyParts, PublicKeyParts},
 };
+use signature::Keypair;
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
 
@@ -69,6 +70,10 @@ pub(crate) enum PublicKeyMaterial {
         parameters: Vec<u8>,
         public_key: Vec<u8>,
     },
+    MlDsa {
+        parameter_set: CK_ML_DSA_PARAMETER_SET_TYPE,
+        public_key: Vec<u8>,
+    },
 }
 
 #[derive(Clone)]
@@ -84,6 +89,9 @@ pub(crate) enum SoftwarePrivateKeyMaterial {
     BrainpoolP512(crate::brainpool512::SecretKey),
     Ed25519(ed25519_dalek::SigningKey),
     X25519(x25519_dalek::StaticSecret),
+    MlDsa44(ml_dsa::SigningKey<ml_dsa::MlDsa44>),
+    MlDsa65(ml_dsa::SigningKey<ml_dsa::MlDsa65>),
+    MlDsa87(ml_dsa::SigningKey<ml_dsa::MlDsa87>),
 }
 
 impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
@@ -100,6 +108,9 @@ impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
             Self::BrainpoolP512(_) => fmt.write_str("BrainpoolP512([REDACTED])"),
             Self::Ed25519(_) => fmt.write_str("Ed25519([REDACTED])"),
             Self::X25519(_) => fmt.write_str("X25519([REDACTED])"),
+            Self::MlDsa44(_) => fmt.write_str("MlDsa44([REDACTED])"),
+            Self::MlDsa65(_) => fmt.write_str("MlDsa65([REDACTED])"),
+            Self::MlDsa87(_) => fmt.write_str("MlDsa87([REDACTED])"),
         }
     }
 }
@@ -115,7 +126,12 @@ impl SoftwarePrivateKeyMaterial {
             Self::BrainpoolP256(_) => Some(crate::EcCurve::BrainpoolP256),
             Self::BrainpoolP384(_) => Some(crate::EcCurve::BrainpoolP384),
             Self::BrainpoolP512(_) => Some(crate::EcCurve::BrainpoolP512),
-            Self::Rsa(_) | Self::Ed25519(_) | Self::X25519(_) => None,
+            Self::Rsa(_)
+            | Self::Ed25519(_)
+            | Self::X25519(_)
+            | Self::MlDsa44(_)
+            | Self::MlDsa65(_)
+            | Self::MlDsa87(_) => None,
         }
     }
 
@@ -132,6 +148,7 @@ impl SoftwarePrivateKeyMaterial {
             | Self::BrainpoolP512(_) => CKK_EC as CK_KEY_TYPE,
             Self::Ed25519(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
             Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
+            Self::MlDsa44(_) | Self::MlDsa65(_) | Self::MlDsa87(_) => CKK_ML_DSA as CK_KEY_TYPE,
         }
     }
 
@@ -173,9 +190,22 @@ impl SoftwarePrivateKeyMaterial {
                     .to_vec(),
                 public_key: x25519_dalek::PublicKey::from(key).as_bytes().to_vec(),
             }),
+            Self::MlDsa44(key) => Ok(PublicKeyMaterial::MlDsa {
+                parameter_set: CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE,
+                public_key: key.verifying_key().encode().to_vec(),
+            }),
+            Self::MlDsa65(key) => Ok(PublicKeyMaterial::MlDsa {
+                parameter_set: CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE,
+                public_key: key.verifying_key().encode().to_vec(),
+            }),
+            Self::MlDsa87(key) => Ok(PublicKeyMaterial::MlDsa {
+                parameter_set: CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE,
+                public_key: key.verifying_key().encode().to_vec(),
+            }),
         }
     }
 
+    #[allow(deprecated)] // PKCS #11 CKA_VALUE requires the FIPS 204 expanded private key.
     pub(crate) fn private_value(&self) -> Option<Vec<u8>> {
         match self {
             Self::Rsa(_) => None,
@@ -189,6 +219,18 @@ impl SoftwarePrivateKeyMaterial {
             Self::BrainpoolP512(key) => Some(key.to_bytes().to_vec()),
             Self::Ed25519(key) => Some(key.to_bytes().to_vec()),
             Self::X25519(key) => Some(key.to_bytes().to_vec()),
+            Self::MlDsa44(key) => Some(key.expanded_key().to_expanded().to_vec()),
+            Self::MlDsa65(key) => Some(key.expanded_key().to_expanded().to_vec()),
+            Self::MlDsa87(key) => Some(key.expanded_key().to_expanded().to_vec()),
+        }
+    }
+
+    pub(crate) fn ml_dsa_seed(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::MlDsa44(key) => Some(key.as_seed().to_vec()),
+            Self::MlDsa65(key) => Some(key.as_seed().to_vec()),
+            Self::MlDsa87(key) => Some(key.as_seed().to_vec()),
+            _ => None,
         }
     }
 }
@@ -502,9 +544,16 @@ pub(crate) struct SignatureOperation {
     pub(crate) mac_length: Option<usize>,
     pub(crate) gmac: Option<GcmParameters>,
     pub(crate) pss: Option<(u8, u16, CK_MECHANISM_TYPE)>,
+    pub(crate) ml_dsa: Option<MlDsaSignatureParameters>,
     pub(crate) piv_pin_policy: Option<u8>,
     pub(crate) buffer: Vec<u8>,
     pub(crate) result: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MlDsaSignatureParameters {
+    pub(crate) hedge_variant: CK_HEDGE_TYPE,
+    pub(crate) context: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -739,6 +788,23 @@ fn is_ec_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
     )
 }
 
+fn is_ml_dsa_public_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
+fn is_ml_dsa_private_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
+    matches!(
+        attribute_type,
+        x if x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            || x == CKA_SEED as CK_ATTRIBUTE_TYPE
+            || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+    )
+}
+
 const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_CLASS as CK_ATTRIBUTE_TYPE,
     CKA_TOKEN as CK_ATTRIBUTE_TYPE,
@@ -805,6 +871,8 @@ const PKCS11_OBJECT_ATTRIBUTE_TYPES: &[CK_ATTRIBUTE_TYPE] = &[
     CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE,
     CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
     CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+    CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE,
+    CKA_SEED as CK_ATTRIBUTE_TYPE,
     CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
 ];
 
@@ -936,6 +1004,28 @@ pub(crate) fn ec_public_key_info(
     subject_public_key.extend_from_slice(public_key);
     algorithm.extend(der_tlv(0x03, &subject_public_key));
     Some(der_tlv(0x30, &algorithm))
+}
+
+pub(crate) fn ml_dsa_public_key_info(
+    parameter_set: CK_ML_DSA_PARAMETER_SET_TYPE,
+    public_key: &[u8],
+) -> Option<Vec<u8>> {
+    macro_rules! encode {
+        ($params:ty) => {{
+            use ml_dsa::pkcs8::EncodePublicKey;
+            let encoded = ml_dsa::EncodedVerifyingKey::<$params>::try_from(public_key).ok()?;
+            ml_dsa::VerifyingKey::<$params>::decode(&encoded)
+                .to_public_key_der()
+                .ok()
+                .map(|document| document.as_bytes().to_vec())
+        }};
+    }
+    match parameter_set {
+        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa44),
+        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa65),
+        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa87),
+        _ => None,
+    }
 }
 
 pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -1084,6 +1174,9 @@ impl TokenObject {
                         {
                             is_ec_public_attribute(attribute_type)
                         }
+                        x if x == CKK_ML_DSA as CK_KEY_TYPE => {
+                            is_ml_dsa_public_attribute(attribute_type)
+                        }
                         _ => false,
                     }
             }
@@ -1099,6 +1192,9 @@ impl TokenObject {
                             || x == CKK_EC_MONTGOMERY as CK_KEY_TYPE =>
                         {
                             is_ec_private_attribute(attribute_type)
+                        }
+                        x if x == CKK_ML_DSA as CK_KEY_TYPE => {
+                            is_ml_dsa_private_attribute(attribute_type)
                         }
                         _ => false,
                     }
@@ -1178,6 +1274,10 @@ impl TokenObject {
             {
                 attribute_type == CKA_VALUE as CK_ATTRIBUTE_TYPE
             }
+            x if x == CKK_ML_DSA as CK_KEY_TYPE => matches!(
+                attribute_type,
+                x if x == CKA_SEED as CK_ATTRIBUTE_TYPE || x == CKA_VALUE as CK_ATTRIBUTE_TYPE
+            ),
             _ => false,
         }
     }
@@ -1223,6 +1323,10 @@ impl TokenObject {
                     parameters,
                     public_key,
                 } => ec_public_key_info(self.key_type, Some(parameters), public_key),
+                PublicKeyMaterial::MlDsa {
+                    parameter_set,
+                    public_key,
+                } => ml_dsa_public_key_info(*parameter_set, public_key),
             };
         }
         None
@@ -1649,6 +1753,18 @@ impl TokenObject {
                     },
                 }
             }
+            x if x == CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE => {
+                match self.projected_public_key().ok() {
+                    Some(PublicKeyMaterial::MlDsa { parameter_set, .. }) => {
+                        Some(ulong_attribute(parameter_set))
+                    }
+                    _ => None,
+                }
+            }
+            x if x == CKA_SEED as CK_ATTRIBUTE_TYPE => match &self.material {
+                KeyMaterial::SoftwarePrivate(key) => key.ml_dsa_seed(),
+                _ => None,
+            },
             x if x == CKA_YUBICO_HSMAUTH_ALGORITHM => match &self.material {
                 KeyMaterial::HsmAuthCredential { algorithm, .. } => {
                     Some(ulong_attribute(*algorithm as CK_ULONG))
@@ -1701,6 +1817,11 @@ impl TokenObject {
                 match &self.material {
                     KeyMaterial::SoftwarePrivate(key) if x == CKA_VALUE as CK_ATTRIBUTE_TYPE => {
                         key.private_value()
+                    }
+                    KeyMaterial::Public(PublicKeyMaterial::MlDsa { public_key, .. })
+                        if x == CKA_VALUE as CK_ATTRIBUTE_TYPE =>
+                    {
+                        Some(public_key.clone())
                     }
                     KeyMaterial::SoftwareSecret(value)
                     | KeyMaterial::Secret(value)
@@ -2445,5 +2566,40 @@ pub(crate) fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<b
         x if x == CK_FALSE as CK_BBOOL => Ok(false),
         x if x == CK_TRUE as CK_BBOOL => Ok(true),
         _ => Err(CKR_ATTRIBUTE_VALUE_INVALID as CK_RV),
+    }
+}
+
+#[cfg(test)]
+mod ml_dsa_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn ml_dsa_44_key_generation_matches_nist_acvp_fips_204() {
+        // NIST ACVP-Server, ML-DSA-keyGen-FIPS204, tgId 1 / tcId 1, pinned at:
+        // https://github.com/usnistgov/ACVP-Server/blob/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ML-DSA-keyGen-FIPS204/{prompt,expectedResults}.json
+        // The assertion uses SHA-256(pk) only to keep a 1,312-byte public-key literal out of
+        // the source; the digest was computed directly from that expectedResults.json value.
+        let seed: [u8; 32] =
+            crate::parse_hex("7194B13C95231010AFD2C909992BD2003BA6F437C3886BDBE3F6B867A14BA161")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let material = SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(
+            &ml_dsa::Seed::from(seed),
+        ));
+        let PublicKeyMaterial::MlDsa {
+            parameter_set,
+            public_key,
+        } = material.public_key().unwrap()
+        else {
+            panic!("ML-DSA key projected to the wrong public-key type");
+        };
+        assert_eq!(parameter_set, CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE);
+        assert_eq!(
+            Sha256::digest(public_key).as_slice(),
+            crate::parse_hex("838b88b6ac41e2c60698173e08ca173d0b0d2839205806e56a8a3d53195f3a03")
+                .unwrap()
+        );
     }
 }

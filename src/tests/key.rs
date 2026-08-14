@@ -17,7 +17,11 @@ fn generate_software_key_pair(
     }
     if let Some(parameters) = parameters {
         public_template.push(bytes_attribute(
-            CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE,
+            if mechanism_type == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE {
+                CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE
+            } else {
+                CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE
+            },
             parameters,
         ));
     }
@@ -147,6 +151,169 @@ fn sign_and_verify(
         ),
         CKR_OK as CK_RV
     );
+}
+
+fn ml_dsa_signature(
+    session: CK_SESSION_HANDLE,
+    private: CK_OBJECT_HANDLE,
+    message: &[u8],
+    context: &mut [u8],
+    hedge_variant: CK_HEDGE_TYPE,
+) -> Vec<u8> {
+    let mut additional = CK_SIGN_ADDITIONAL_CONTEXT {
+        hedgeVariant: hedge_variant,
+        pContext: context.as_mut_ptr(),
+        ulContextLen: context.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ML_DSA as CK_MECHANISM_TYPE,
+        pParameter: (&mut additional as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast(),
+        ulParameterLen: std::mem::size_of::<CK_SIGN_ADDITIONAL_CONTEXT>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, private),
+        CKR_OK as CK_RV
+    );
+    let mut signature_length = 0;
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            std::ptr::null_mut(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    let mut signature = vec![0; signature_length as usize];
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_length,
+        ),
+        CKR_OK as CK_RV
+    );
+    signature.truncate(signature_length as usize);
+    signature
+}
+
+#[test]
+fn software_ml_dsa_context_and_hedging_follow_pkcs11_3_2() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    install_software_private_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+    let mut parameter_set = crate::ulong_attribute(CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE);
+    let (public, private) = generate_software_key_pair(
+        TEST_SESSION_HANDLE,
+        CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+        Some(&mut parameter_set),
+    );
+    with_test_slot_context(TEST_SLOT_ID, |context| {
+        let public_object = context.resolve_object(public).unwrap().unwrap();
+        let private_object = context.resolve_object(private).unwrap().unwrap();
+        for object in [&public_object, &private_object] {
+            assert_eq!(
+                object.attribute_value(CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE),
+                Some(crate::ulong_attribute(
+                    CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE
+                ))
+            );
+        }
+        assert_eq!(
+            public_object
+                .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+                .unwrap()
+                .len(),
+            1312
+        );
+        assert_eq!(
+            private_object
+                .attribute_value(CKA_SEED as CK_ATTRIBUTE_TYPE)
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(
+            private_object
+                .attribute_value(CKA_VALUE as CK_ATTRIBUTE_TYPE)
+                .unwrap()
+                .len(),
+            2560
+        );
+    });
+    let message = b"PKCS #11 ML-DSA context test";
+    let mut context = b"pkcs11rs-test".to_vec();
+    let first = ml_dsa_signature(
+        TEST_SESSION_HANDLE,
+        private,
+        message,
+        &mut context,
+        CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE,
+    );
+    let second = ml_dsa_signature(
+        TEST_SESSION_HANDLE,
+        private,
+        message,
+        &mut context,
+        CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE,
+    );
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 2420);
+
+    let mut additional = CK_SIGN_ADDITIONAL_CONTEXT {
+        hedgeVariant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
+        pContext: context.as_mut_ptr(),
+        ulContextLen: context.len() as CK_ULONG,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_ML_DSA as CK_MECHANISM_TYPE,
+        pParameter: (&mut additional as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast(),
+        ulParameterLen: std::mem::size_of::<CK_SIGN_ADDITIONAL_CONTEXT>() as CK_ULONG,
+    };
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, public),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            TEST_SESSION_HANDLE,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            first.as_ptr().cast_mut(),
+            first.len() as CK_ULONG,
+        ),
+        CKR_OK as CK_RV
+    );
+
+    let mut wrong_context = b"wrong-context".to_vec();
+    let mut wrong_additional = CK_SIGN_ADDITIONAL_CONTEXT {
+        hedgeVariant: CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE,
+        pContext: wrong_context.as_mut_ptr(),
+        ulContextLen: wrong_context.len() as CK_ULONG,
+    };
+    mechanism.pParameter = (&mut wrong_additional as *mut CK_SIGN_ADDITIONAL_CONTEXT).cast();
+    assert_eq!(
+        crate::api::C_VerifyInit(TEST_SESSION_HANDLE, &mut mechanism, public),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Verify(
+            TEST_SESSION_HANDLE,
+            message.as_ptr().cast_mut(),
+            message.len() as CK_ULONG,
+            first.as_ptr().cast_mut(),
+            first.len() as CK_ULONG,
+        ),
+        CKR_SIGNATURE_INVALID as CK_RV
+    );
+    finalize_for_test();
 }
 
 #[test]
@@ -1816,6 +1983,21 @@ fn software_session_key_pairs_cover_every_supported_curve() {
                 .unwrap()
                 .to_vec(),
             CKM_EDDSA as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ulong_attribute(CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE),
+            CKM_ML_DSA as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ulong_attribute(CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE),
+            CKM_ML_DSA as CK_MECHANISM_TYPE,
+        ),
+        (
+            CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE,
+            crate::ulong_attribute(CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE),
+            CKM_ML_DSA as CK_MECHANISM_TYPE,
         ),
     ] {
         let (public, private) =
