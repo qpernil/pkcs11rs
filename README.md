@@ -850,6 +850,12 @@ one in-process YubiKey FIDO2 applet and disables USB, HTTP, and PC/SC hardware
 discovery. The mock is visible only through pkcs11rs; it does not install a
 virtual reader or card.
 
+The logical authenticator is provided by `virtual-yubikey-core` from the
+[`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
+`pkcs11rs` follows that repository's `main` branch, while `Cargo.lock` records
+the exact core commit validated by this checkout. Run
+`cargo update -p virtual-yubikey-core` to advance the recorded revision.
+
 ```sh
 cargo build --release --features mock-yubikey
 pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots

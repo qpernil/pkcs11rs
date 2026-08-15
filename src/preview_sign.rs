@@ -16,9 +16,6 @@ pub use arkg::{
     ARKG_P256_ALGORITHM, ARKG_P256_ESP256_ALGORITHM, ARKG_PUBLIC_KEY_TYPE, ArkgP256DerivedKey,
     ArkgP256PublicSeed, ESP256_ALGORITHM,
 };
-#[cfg(feature = "mock-yubikey")]
-pub(crate) use arkg::{mock_preview_sign, mock_preview_sign_seed_cose};
-
 const REGISTRATION_SCHEMA: &str = "pkcs11rs.preview-sign.registration";
 const DERIVED_KEY_SCHEMA: &str = "pkcs11rs.preview-sign.derived-key";
 const SCHEMA_VERSION: u64 = 1;
