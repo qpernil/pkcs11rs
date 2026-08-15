@@ -2049,6 +2049,91 @@ mod fido2_hardware {
         })
     }
 
+    fn read_attribute(
+        session: CK_SESSION_HANDLE,
+        object: CK_OBJECT_HANDLE,
+        type_: CK_ATTRIBUTE_TYPE,
+    ) -> Vec<u8> {
+        let mut attribute = CK_ATTRIBUTE {
+            type_,
+            pValue: std::ptr::null_mut(),
+            ulValueLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        let mut value = vec![0; attribute.ulValueLen as usize];
+        attribute.pValue = value.as_mut_ptr().cast();
+        assert_eq!(
+            crate::api::C_GetAttributeValue(session, object, &mut attribute, 1),
+            CKR_OK as CK_RV
+        );
+        value
+    }
+
+    fn delete_fido2_test_credential(
+        slot_id: CK_SLOT_ID,
+        pin: &[u8],
+        credential_id: &[u8],
+    ) -> Result<(), crate::Error> {
+        crate::with_context(|context| {
+            let slot_contexts = context
+                .slot_contexts
+                .read()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            let child = slot_contexts.get(&slot_id).ok_or(CKR_SLOT_ID_INVALID)?;
+            let mut child = child
+                .lock()
+                .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+            child
+                ._get_slot_mut(slot_id)?
+                .delete_fido2_test_credential(pin, credential_id)
+        })
+    }
+
+    struct PreviewCredentialCleanup {
+        slot_id: CK_SLOT_ID,
+        pin: zeroize::Zeroizing<Vec<u8>>,
+        credential_id: Vec<u8>,
+        armed: bool,
+    }
+
+    impl PreviewCredentialCleanup {
+        fn new(slot_id: CK_SLOT_ID, pin: &[u8], credential_id: &[u8]) -> Self {
+            Self {
+                slot_id,
+                pin: zeroize::Zeroizing::new(pin.to_vec()),
+                credential_id: credential_id.to_vec(),
+                armed: true,
+            }
+        }
+
+        fn delete_and_verify(&mut self) {
+            delete_fido2_test_credential(self.slot_id, &self.pin, &self.credential_id)
+                .expect("failed to delete the previewSign parent credential");
+            let error = delete_fido2_test_credential(self.slot_id, &self.pin, &self.credential_id)
+                .expect_err("the deleted previewSign credential was accepted a second time");
+            assert_eq!(CK_RV::from(error), CKR_DEVICE_ERROR as CK_RV);
+            self.armed = false;
+        }
+    }
+
+    impl Drop for PreviewCredentialCleanup {
+        fn drop(&mut self) {
+            if self.armed {
+                if let Err(error) =
+                    delete_fido2_test_credential(self.slot_id, &self.pin, &self.credential_id)
+                {
+                    eprintln!(
+                        "failed to clean up previewSign credential {:02x?}: {error:?}",
+                        self.credential_id
+                    );
+                }
+            }
+        }
+    }
+
     fn paired_hid_fido_and_piv_slot_ids() -> (CK_SLOT_ID, CK_SLOT_ID) {
         let selector = std::env::var("PKCS11RS_FIDO2_TEST_SOURCE").ok();
         crate::with_context(|context| {
@@ -2804,6 +2889,357 @@ mod fido2_hardware {
                 .to_cbor()
                 .expect("previewSign wrapper encoding failed")
                 .len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "completes and cleans up a persistent previewSign credential through live hardware"]
+    fn completes_preview_sign_pkcs11_cycle_on_hardware() {
+        let Ok(pin) = std::env::var(CURRENT_PIN_ENV) else {
+            eprintln!("skipped previewSign hardware cycle; set {CURRENT_PIN_ENV} to enable it");
+            return;
+        };
+        let mut pin = zeroize::Zeroizing::new(pin.into_bytes());
+        let _guard = TEST_LOCK.lock().unwrap();
+        finalize_for_test();
+        assert_eq!(initialize_direct_hardware(false), CKR_OK as CK_RV);
+        let slot_id = fido2_slot_id();
+
+        let mut mechanism_count = 0;
+        assert_eq!(
+            crate::C_GetMechanismList(slot_id, std::ptr::null_mut(), &mut mechanism_count),
+            CKR_OK as CK_RV
+        );
+        let mut mechanisms = vec![0; mechanism_count as usize];
+        assert_eq!(
+            crate::C_GetMechanismList(slot_id, mechanisms.as_mut_ptr(), &mut mechanism_count,),
+            CKR_OK as CK_RV
+        );
+        for required in [
+            crate::CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+            crate::CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+            crate::CKM_PKCS11RS_PREVIEW_SIGN,
+            crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+        ] {
+            assert!(
+                mechanisms.contains(&required),
+                "FIDO slot does not advertise required mechanism {required:#x}"
+            );
+        }
+
+        let mut session = CK_INVALID_HANDLE as CK_SESSION_HANDLE;
+        assert_eq!(
+            crate::api::C_OpenSession(
+                slot_id,
+                (CKF_SERIAL_SESSION | CKF_RW_SESSION) as CK_FLAGS,
+                std::ptr::null_mut(),
+                None,
+                &mut session,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Login(
+                session,
+                CKU_USER as CK_USER_TYPE,
+                pin.as_mut_ptr(),
+                pin.len() as CK_ULONG,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let mut mechanism = CK_MECHANISM {
+            mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_KEY_PAIR_GEN,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut ec = CKK_EC as CK_ULONG;
+        let mut token = CK_TRUE as CK_BBOOL;
+        let mut private = CK_TRUE as CK_BBOOL;
+        let mut public_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+        ];
+        let mut private_template = [
+            scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut token),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+        ];
+        let mut credential_public_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        let mut credential_private_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_GenerateKeyPair(
+                session,
+                &mut mechanism,
+                public_template.as_mut_ptr(),
+                public_template.len() as CK_ULONG,
+                private_template.as_mut_ptr(),
+                private_template.len() as CK_ULONG,
+                &mut credential_public_key,
+                &mut credential_private_key,
+            ),
+            CKR_OK as CK_RV
+        );
+        assert_ne!(credential_public_key, credential_private_key);
+
+        let registration_encoded = read_attribute(
+            session,
+            credential_private_key,
+            crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+        );
+        let registration =
+            crate::preview_sign::PreviewSignRegistration::from_cbor(&registration_encoded)
+                .expect("hardware returned an invalid previewSign registration wrapper");
+        let mut cleanup =
+            PreviewCredentialCleanup::new(slot_id, &pin, registration.credential_id());
+
+        let mut class = CKO_PRIVATE_KEY as CK_ULONG;
+        let mut registration_key_type = crate::CKK_PKCS11RS_PREVIEW_SIGN_REGISTRATION as CK_ULONG;
+        let mut session_object = CK_FALSE as CK_BBOOL;
+        let mut derive = CK_TRUE as CK_BBOOL;
+        let mut registration_value = registration_encoded.clone();
+        let mut registration_template = [
+            scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+            scalar_attribute(
+                CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE,
+                &mut registration_key_type,
+            ),
+            scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_object),
+            scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+            scalar_attribute(CKA_DERIVE as CK_ATTRIBUTE_TYPE, &mut derive),
+            bytes_attribute(
+                crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+                &mut registration_value,
+            ),
+        ];
+        let mut registration_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+        assert_eq!(
+            crate::api::C_CreateObject(
+                session,
+                registration_template.as_mut_ptr(),
+                registration_template.len() as CK_ULONG,
+                &mut registration_key,
+            ),
+            CKR_OK as CK_RV
+        );
+
+        let mut sign = CK_TRUE as CK_BBOOL;
+        let mut verify = CK_TRUE as CK_BBOOL;
+        let digest: [u8; 32] = sha2::Sha256::digest(b"pkcs11rs previewSign hardware cycle").into();
+        let mut derived_encodings = Vec::new();
+        let mut public_points = Vec::new();
+        let mut signatures = Vec::new();
+        let mut projected_keys = Vec::new();
+        let mut session_objects = Vec::new();
+
+        for context in [
+            b"pkcs11rs previewSign hardware key one".as_slice(),
+            b"pkcs11rs previewSign hardware key two".as_slice(),
+        ] {
+            let mut derivation_context = context.to_vec();
+            mechanism = CK_MECHANISM {
+                mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN_DERIVE,
+                pParameter: derivation_context.as_mut_ptr().cast(),
+                ulParameterLen: derivation_context.len() as CK_ULONG,
+            };
+            let mut derived_template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+                scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_object),
+                scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+                scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+            ];
+            let mut signing_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_DeriveKey(
+                    session,
+                    &mut mechanism,
+                    registration_key,
+                    derived_template.as_mut_ptr(),
+                    derived_template.len() as CK_ULONG,
+                    &mut signing_key,
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                read_attribute(
+                    session,
+                    signing_key,
+                    crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+                ),
+                registration_encoded
+            );
+            let derived_encoded = read_attribute(
+                session,
+                signing_key,
+                crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+            );
+            crate::preview_sign::PreviewSignDerivedKeyRecord::from_cbor(&derived_encoded)
+                .expect("hardware derivation produced an invalid derived-key wrapper");
+            assert_eq!(
+                crate::api::C_DestroyObject(session, signing_key),
+                CKR_OK as CK_RV
+            );
+
+            let mut restored_registration = registration_encoded.clone();
+            let mut restored_derived = derived_encoded.clone();
+            let mut restore_template = [
+                scalar_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
+                scalar_attribute(CKA_KEY_TYPE as CK_ATTRIBUTE_TYPE, &mut ec),
+                scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_object),
+                scalar_attribute(CKA_PRIVATE as CK_ATTRIBUTE_TYPE, &mut private),
+                scalar_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+                bytes_attribute(
+                    crate::CKA_PKCS11RS_PREVIEW_SIGN_REGISTRATION,
+                    &mut restored_registration,
+                ),
+                bytes_attribute(
+                    crate::CKA_PKCS11RS_PREVIEW_SIGN_DERIVED_KEY,
+                    &mut restored_derived,
+                ),
+            ];
+            let mut restored_signing_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_CreateObject(
+                    session,
+                    restore_template.as_mut_ptr(),
+                    restore_template.len() as CK_ULONG,
+                    &mut restored_signing_key,
+                ),
+                CKR_OK as CK_RV
+            );
+
+            let mut project = CK_MECHANISM {
+                mechanism: crate::CKM_PKCS11RS_PROJECT_PUBLIC_KEY,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            let mut projected_template = [
+                scalar_attribute(CKA_TOKEN as CK_ATTRIBUTE_TYPE, &mut session_object),
+                scalar_attribute(CKA_VERIFY as CK_ATTRIBUTE_TYPE, &mut verify),
+            ];
+            let mut projected_key = CK_INVALID_HANDLE as CK_OBJECT_HANDLE;
+            assert_eq!(
+                crate::api::C_DeriveKey(
+                    session,
+                    &mut project,
+                    restored_signing_key,
+                    projected_template.as_mut_ptr(),
+                    projected_template.len() as CK_ULONG,
+                    &mut projected_key,
+                ),
+                CKR_OK as CK_RV
+            );
+
+            mechanism = CK_MECHANISM {
+                mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            assert_eq!(
+                crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
+                CKR_OK as CK_RV
+            );
+            let mut signature_length = 0;
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    digest.as_ptr().cast_mut(),
+                    digest.len() as CK_ULONG,
+                    std::ptr::null_mut(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(signature_length, 64);
+            let mut signature = vec![0; signature_length as usize];
+            assert_eq!(
+                crate::api::C_Sign(
+                    session,
+                    digest.as_ptr().cast_mut(),
+                    digest.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    &mut signature_length,
+                ),
+                CKR_OK as CK_RV
+            );
+            signature.truncate(signature_length as usize);
+
+            let mut verify_mechanism = CK_MECHANISM {
+                mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
+                pParameter: std::ptr::null_mut(),
+                ulParameterLen: 0,
+            };
+            assert_eq!(
+                crate::api::C_VerifyInit(session, &mut verify_mechanism, projected_key),
+                CKR_OK as CK_RV
+            );
+            assert_eq!(
+                crate::api::C_Verify(
+                    session,
+                    digest.as_ptr().cast_mut(),
+                    digest.len() as CK_ULONG,
+                    signature.as_mut_ptr(),
+                    signature.len() as CK_ULONG,
+                ),
+                CKR_OK as CK_RV
+            );
+
+            derived_encodings.push(derived_encoded);
+            public_points.push(read_attribute(
+                session,
+                projected_key,
+                CKA_EC_POINT as CK_ATTRIBUTE_TYPE,
+            ));
+            signatures.push(signature);
+            projected_keys.push(projected_key);
+            session_objects.extend([projected_key, restored_signing_key]);
+        }
+
+        assert_ne!(derived_encodings[0], derived_encodings[1]);
+        assert_ne!(public_points[0], public_points[1]);
+        assert_ne!(signatures[0], signatures[1]);
+        let mut verify_mechanism = CK_MECHANISM {
+            mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        assert_eq!(
+            crate::api::C_VerifyInit(session, &mut verify_mechanism, projected_keys[0]),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                session,
+                digest.as_ptr().cast_mut(),
+                digest.len() as CK_ULONG,
+                signatures[1].as_ptr().cast_mut(),
+                signatures[1].len() as CK_ULONG,
+            ),
+            CKR_SIGNATURE_INVALID as CK_RV
+        );
+
+        session_objects.push(registration_key);
+        for object in session_objects {
+            assert_eq!(
+                crate::api::C_DestroyObject(session, object),
+                CKR_OK as CK_RV
+            );
+        }
+        assert_eq!(crate::api::C_Logout(session), CKR_OK as CK_RV);
+        assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+        cleanup.delete_and_verify();
+        assert_eq!(
+            crate::api::C_Finalize(std::ptr::null_mut()),
+            CKR_OK as CK_RV
+        );
+
+        eprintln!(
+            "completed two-key previewSign hardware cycle and deleted parent credential: registration {} bytes, derived wrappers {:?}, signatures {:?}, serial hint {:?}",
+            registration_encoded.len(),
+            derived_encodings.iter().map(Vec::len).collect::<Vec<_>>(),
+            signatures.iter().map(Vec::len).collect::<Vec<_>>(),
+            registration.token_serial_hint(),
         );
     }
 

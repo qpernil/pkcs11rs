@@ -1729,6 +1729,12 @@ fn destroy_object(
         if ctx.destroy_backed_object(object, &stored_object)? {
             return Ok(());
         }
+        if let KeyMaterial::FidoPreviewCredential { registration } = &stored_object.material {
+            ctx._get_slot_mut(slot_id)?
+                .fido_delete_preview_credential(registration)?;
+            ctx.remove_object_handle(object);
+            return Ok(());
+        }
         if stored_object.token
             && matches!(
                 stored_object.material,

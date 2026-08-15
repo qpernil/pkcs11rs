@@ -710,6 +710,39 @@ impl Client {
         })
     }
 
+    pub(crate) fn delete_credential(
+        &self,
+        info: &AuthenticatorInfo,
+        authorization: &CredentialAuthorization,
+        credential_id: &[u8],
+    ) -> Result<(), CtapError> {
+        let command = info
+            .credential_management_command()
+            .ok_or(CtapError::Transport(CKR_FUNCTION_NOT_SUPPORTED.into()))?;
+        let response = self.exchange(
+            command,
+            &encode_delete_credential(authorization, credential_id)?,
+        )?;
+        if !response.is_empty() {
+            return Err(CtapError::Malformed(
+                "unexpected deleteCredential response data",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    pub(crate) fn delete_test_credential(
+        &self,
+        info: &AuthenticatorInfo,
+        pin: &[u8],
+        credential_id: &[u8],
+    ) -> Result<(), CtapError> {
+        let authorization =
+            self.authorize_with_pin(info, pin, PERMISSION_CREDENTIAL_MANAGEMENT, None)?;
+        self.delete_credential(info, &authorization, credential_id)
+    }
+
     pub(crate) fn enumerate_credentials(
         &self,
         info: &AuthenticatorInfo,
@@ -1767,6 +1800,39 @@ fn encode_enumerate_credentials_begin(
     Ok(output)
 }
 
+fn encode_delete_credential(
+    authorization: &CredentialAuthorization,
+    credential_id: &[u8],
+) -> Result<Vec<u8>, CtapError> {
+    let subcommand = 0x06;
+    let mut parameters = Vec::new();
+    Encoder::new(&mut parameters)
+        .map(1)?
+        .u8(0x02)?
+        .map(2)?
+        .str("id")?
+        .bytes(credential_id)?
+        .str("type")?
+        .str("public-key")?;
+    let mut message = Vec::with_capacity(1 + parameters.len());
+    message.push(subcommand);
+    message.extend_from_slice(&parameters);
+    let auth = authorization
+        .protocol
+        .authenticate(&authorization.token, &message)?;
+
+    let mut output = Vec::new();
+    let mut encoder = Encoder::new(&mut output);
+    encoder.map(4)?.u8(0x01)?.u8(subcommand)?.u8(0x02)?;
+    encoder.writer_mut().extend_from_slice(&parameters);
+    encoder
+        .u8(0x03)?
+        .u8(authorization.protocol.id())?
+        .u8(0x04)?
+        .bytes(&auth)?;
+    Ok(output)
+}
+
 fn encode_management_next(subcommand: u8) -> Result<Vec<u8>, CtapError> {
     let mut output = Vec::new();
     Encoder::new(&mut output).map(1)?.u8(0x01)?.u8(subcommand)?;
@@ -2414,6 +2480,26 @@ mod tests {
         );
         assert_eq!(encode_management_next(3).unwrap(), [0xa1, 0x01, 0x03]);
         assert_eq!(encode_management_next(5).unwrap(), [0xa1, 0x01, 0x05]);
+
+        let credential_id = [0xa5; 32];
+        let delete = encode_delete_credential(&authorization, &credential_id).unwrap();
+        let mut decoder = Decoder::new(&delete);
+        assert_eq!(decoder.map().unwrap(), Some(4));
+        assert_eq!(decoder.u8().unwrap(), 1);
+        assert_eq!(decoder.u8().unwrap(), 6);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.map().unwrap(), Some(1));
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.map().unwrap(), Some(2));
+        assert_eq!(decoder.str().unwrap(), "id");
+        assert_eq!(decoder.bytes().unwrap(), credential_id);
+        assert_eq!(decoder.str().unwrap(), "type");
+        assert_eq!(decoder.str().unwrap(), "public-key");
+        assert_eq!(decoder.u8().unwrap(), 3);
+        assert_eq!(decoder.u8().unwrap(), 2);
+        assert_eq!(decoder.u8().unwrap(), 4);
+        assert_eq!(decoder.bytes().unwrap().len(), 32);
+        assert_eq!(decoder.position(), delete.len());
     }
 
     #[test]

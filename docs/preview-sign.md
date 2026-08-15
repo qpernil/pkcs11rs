@@ -199,6 +199,10 @@ The initial lifecycle is:
 4. `C_Sign` with `CKM_PKCS11RS_PREVIEW_SIGN` sends the parent credential ID,
    signing-key handle, 32-byte ESP256 digest, and preserved COSE_Sign_Args to
    GetAssertion. It returns the 64-byte raw P-256 `r || s` signature.
+5. Destroying the generated private parent-credential object while logged in
+   sends authenticated CTAP `deleteCredential`. Destroying imported
+   registration or derived-key wrappers affects only their configured PKCS #11
+   storage lifetime.
 
 A saved derived signing key can be restored directly with `C_CreateObject`.
 The template must contain both exact vendor attributes: the registration
@@ -232,26 +236,51 @@ content-addressed data is rejected rather than treated as an empty store.
 
 ## Hardware status
 
-Positive hardware validation is deferred. The connected pre-release YubiKey
-used during development did not advertise `previewSign` in
-`authenticatorGetInfo`. A one-time forced make-credential probe returned CTAP
-success but omitted both required previewSign outputs, so the device had
-ignored the unknown extension and created only an ordinary persistent FIDO
-credential. The probe must not be interpreted as previewSign support and is
-not repeated by the reusable hardware test.
+The complete production discovery, CTAPHID transport, CTAP, previewSign, and
+PKCS #11 path has passed against `virtual-yubikey` running as a Raspberry Pi USB
+gadget. The ignored Rust test and opt-in Python `ctypes` test check mechanism
+discovery and PIN login, create one persistent parent credential, export and
+import its registration wrapper, derive and restore two signing keys from
+distinct application contexts, project their distinct public keys, sign
+through the authenticator, and verify both 64-byte ECDSA signatures through
+PKCS #11. Each test also rejects one signature under the other public key.
 
-The ignored test now refuses to send a make-credential request unless GetInfo
-advertises `previewSign`. It is additionally gated by the presence of
-`PKCS11RS_FIDO2_TEST_PIN`; set that variable to an empty value only for an
-authenticator with no PIN:
+Both tests are self-cleaning. Their imported registration and derived keys are
+session objects. The external Python client deletes the parent credential by
+calling `C_DestroyObject` on its generated private object; the Rust test then
+uses its lower-level test hook to require a second deletion to return no
+credential, so a cleanup implementation that merely reports success cannot
+pass. The virtual authenticator retains credentials only in runner memory; no
+disk state is involved.
+
+The test refuses to send make-credential unless `authenticatorGetInfo`
+advertises `previewSign`. It is gated by `PKCS11RS_FIDO2_TEST_PIN`, and
+`PKCS11RS_FIDO2_TEST_SOURCE` should identify the intended device when more than
+one FIDO authenticator is attached:
 
 ```sh
-PKCS11RS_FIDO2_TEST_PIN='' \
-  cargo test creates_preview_sign_registration -- --ignored --nocapture
+PKCS11RS_FIDO2_TEST_SOURCE=12345678 \
+PKCS11RS_FIDO2_TEST_PIN=123456 \
+  cargo test completes_preview_sign_pkcs11_cycle_on_hardware \
+    -- --ignored --nocapture
 ```
 
-Open hardware questions include positive registration vectors from a
-compatible pre-release device, attestation verification and trust policy,
-end-to-end ARKG derivation/signing interoperability, ticket lifetime and replay
-properties, and whether the validated physical YubiKey serial is sufficient
-routing metadata for the configured local provider.
+The external-library test loads the built `.dylib`, `.so`, or `.dll` through
+Python rather than linking the Rust implementation into its test process:
+
+```sh
+PKCS11RS_RUN_HARDWARE_TESTS=1 \
+PKCS11RS_FIDO2_TEST_SOURCE=12345678 \
+PKCS11RS_FIDO2_TEST_PIN=123456 \
+  python3 -m unittest \
+    test_hardware.HardwareDiscoveryTests.test_preview_sign_two_key_cycle -v
+```
+
+This validates the full host stack against independently running virtual
+firmware, not a physical previewSign-capable YubiKey. The pre-release YubiKey
+used earlier did not advertise `previewSign`; a one-time forced probe returned
+success while omitting the extension outputs and therefore did not establish
+support. Physical-device questions still include positive vectors,
+attestation trust policy, ticket lifetime and replay behavior, and whether a
+validated physical serial is sufficient routing metadata for a configured
+local provider.
