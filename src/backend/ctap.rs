@@ -330,11 +330,10 @@ impl FidoEndpoint for SwitchableFidoEndpoint {
     }
 
     fn refresh(&self) -> Result<(), Error> {
-        if let Some(preferred) = self.routes.preferred.borrow().clone()
-            && preferred.refresh().is_ok()
-            && preferred.is_present()
-        {
-            return Ok(());
+        if let Some(preferred) = self.routes.preferred.borrow().clone() {
+            if preferred.refresh().is_ok() && preferred.is_present() {
+                return Ok(());
+            }
         }
         self.routes.ccid.refresh()
     }

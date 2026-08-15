@@ -193,14 +193,16 @@ fn read_management_information(
             .transpose()?
             .unwrap_or(0);
         raw_tlvs.extend(page_tlvs);
-        if !serial_checked && let Some(serial) = serial_from_tlvs(&raw_tlvs)? {
-            serial_checked = true;
-            if stop_after_serial(&serial) {
-                return Ok(ManagementInformation {
-                    select_version,
-                    raw_tlvs,
-                    stopped_after_serial: true,
-                });
+        if !serial_checked {
+            if let Some(serial) = serial_from_tlvs(&raw_tlvs)? {
+                serial_checked = true;
+                if stop_after_serial(&serial) {
+                    return Ok(ManagementInformation {
+                        select_version,
+                        raw_tlvs,
+                        stopped_after_serial: true,
+                    });
+                }
             }
         }
         if more == 0 {

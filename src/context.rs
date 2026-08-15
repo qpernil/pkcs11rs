@@ -2257,12 +2257,12 @@ impl ModuleContext {
                         "CCID serial-owned device refresh failed"
                     );
                 }
-                if connector.is_present()
-                    && let CcidInventoryKey::Serial(key) = key
-                {
-                    ccid_devices
-                        .entry(key.clone())
-                        .or_insert_with(|| connector.reader_state().device.clone());
+                if connector.is_present() {
+                    if let CcidInventoryKey::Serial(key) = key {
+                        ccid_devices
+                            .entry(key.clone())
+                            .or_insert_with(|| connector.reader_state().device.clone());
+                    }
                 }
             } else if let Some(presence) = &entry.inventory_presence {
                 presence.store(true, std::sync::atomic::Ordering::Release);
