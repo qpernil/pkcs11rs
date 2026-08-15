@@ -3168,6 +3168,11 @@ impl ModuleContext {
             let _ = initialized;
             return self.refresh_registered_slots();
         }
+        #[cfg(feature = "mock-yubikey")]
+        {
+            let _ = initialized;
+            return self.refresh_registered_slots();
+        }
         #[cfg(target_os = "ios")]
         refresh_ios_smartcard_discovery(
             initialized,

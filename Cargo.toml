@@ -27,7 +27,7 @@ crate-type = ["cdylib", "staticlib"]
 [features]
 default = ["native-hardware"]
 abi-tests = []
-mock-yubikey = []
+mock-yubikey = ["dep:virtual-yubikey-core"]
 native-hardware = ["dep:hidapi", "dep:pcsc", "dep:pkcs11rs-local-hardware"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -51,6 +51,7 @@ pkcs11rs-local-hardware = { path = "crates/pkcs11rs-local-hardware", optional = 
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
+virtual-yubikey-core = { git = "https://github.com/qpernil/virtual-yubikey", branch = "main", optional = true }
 zeroize = "1.9.0"
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "derive", "std"] }
