@@ -516,6 +516,7 @@ pub(crate) struct Fido2Slot {
     client: CtapClient,
     info: RefCell<Option<AuthenticatorInfo>>,
     credentials: RefCell<Vec<DiscoverableCredential>>,
+    credential_management_authorization: RefCell<Option<CredentialAuthorization>>,
     preview_authorization: RefCell<Option<CredentialAuthorization>>,
     authenticated: Cell<bool>,
 }
@@ -557,6 +558,7 @@ impl Fido2Slot {
             client: CtapClient::new(transport),
             info: RefCell::new(None),
             credentials: RefCell::new(Vec::new()),
+            credential_management_authorization: RefCell::new(None),
             preview_authorization: RefCell::new(None),
             authenticated: Cell::new(false),
         }
@@ -922,6 +924,7 @@ impl Slot for Fido2Slot {
     fn login(&mut self, pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
         self.preview_authorization.get_mut().take();
         self.endpoint.clear();
         self.endpoint.prepare()?;
@@ -935,17 +938,20 @@ impl Slot for Fido2Slot {
             if !supports_credential_management && !supports_preview_sign {
                 return Err(Error::from(CKR_FUNCTION_NOT_SUPPORTED));
             }
-            let credentials = if supports_credential_management {
-                let authorization = self
-                    .client
-                    .authorize_credential_enumeration(&info, pin)
-                    .map_err(CtapError::into_pkcs11)?;
-                self.client
-                    .enumerate_credentials(&info, &authorization)
-                    .map_err(CtapError::into_pkcs11)?
-            } else {
-                Vec::new()
-            };
+            let (credentials, credential_management_authorization) =
+                if supports_credential_management {
+                    let authorization = self
+                        .client
+                        .authorize_credential_enumeration(&info, pin)
+                        .map_err(CtapError::into_pkcs11)?;
+                    let credentials = self
+                        .client
+                        .enumerate_credentials(&info, &authorization)
+                        .map_err(CtapError::into_pkcs11)?;
+                    (credentials, Some(authorization))
+                } else {
+                    (Vec::new(), None)
+                };
             let preview_authorization = if supports_preview_sign {
                 Some(
                     self.client
@@ -955,11 +961,17 @@ impl Slot for Fido2Slot {
             } else {
                 None
             };
-            Ok((credentials, preview_authorization))
+            Ok((
+                credentials,
+                credential_management_authorization,
+                preview_authorization,
+            ))
         })();
         match result {
-            Ok((credentials, preview_authorization)) => {
+            Ok((credentials, credential_management_authorization, preview_authorization)) => {
                 *self.credentials.get_mut() = credentials;
+                *self.credential_management_authorization.get_mut() =
+                    credential_management_authorization;
                 *self.preview_authorization.get_mut() = preview_authorization;
                 self.authenticated.set(true);
                 Ok(())
@@ -974,6 +986,7 @@ impl Slot for Fido2Slot {
     fn logout(&mut self) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
         self.preview_authorization.get_mut().take();
         self.endpoint.clear();
         Ok(())
@@ -1032,6 +1045,7 @@ impl Slot for Fido2Slot {
     fn set_pin(&mut self, old_pin: &[u8], new_pin: &[u8]) -> Result<(), Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
         self.preview_authorization.get_mut().take();
         self.endpoint.clear();
         self.endpoint.prepare()?;
@@ -1067,6 +1081,8 @@ impl Slot for Fido2Slot {
     ) -> Result<crate::ctap::VerifiedMakeCredential, Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
+        self.preview_authorization.get_mut().take();
         self.endpoint.clear();
         self.endpoint.prepare()?;
         let result = (|| {
@@ -1086,6 +1102,8 @@ impl Slot for Fido2Slot {
     ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
+        self.preview_authorization.get_mut().take();
         self.endpoint.clear();
         self.endpoint.prepare()?;
         let result = (|| {
@@ -1102,9 +1120,32 @@ impl Slot for Fido2Slot {
         result
     }
 
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn delete_fido2_test_credential(
+        &mut self,
+        pin: &[u8],
+        credential_id: &[u8],
+    ) -> Result<(), Error> {
+        self.authenticated.set(false);
+        self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
+        self.preview_authorization.get_mut().take();
+        self.endpoint.clear();
+        self.endpoint.prepare()?;
+        let result = (|| {
+            let info = self.discovered_info()?;
+            self.client
+                .delete_test_credential(&info, pin, credential_id)
+                .map_err(CtapError::into_pkcs11)
+        })();
+        self.endpoint.clear();
+        result
+    }
+
     fn clear_session(&mut self) {
         self.authenticated.set(false);
         self.credentials.get_mut().clear();
+        self.credential_management_authorization.get_mut().take();
         self.preview_authorization.get_mut().take();
         self.endpoint.clear();
     }
@@ -1143,6 +1184,21 @@ impl Slot for Fido2Slot {
                 to_be_signed,
                 additional_args_cbor,
             )
+            .map_err(CtapError::into_pkcs11)
+    }
+
+    fn fido_delete_preview_credential(
+        &mut self,
+        registration: &crate::preview_sign::PreviewSignRegistration,
+    ) -> Result<(), Error> {
+        let info = self.discovered_info()?;
+        let authorization = self
+            .credential_management_authorization
+            .get_mut()
+            .as_ref()
+            .ok_or(CKR_USER_NOT_LOGGED_IN)?;
+        self.client
+            .delete_credential(&info, authorization, registration.credential_id())
             .map_err(CtapError::into_pkcs11)
     }
 

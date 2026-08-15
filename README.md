@@ -139,7 +139,7 @@ locking, session ownership, transport sharing, and cache boundaries.
 | iOS | Release device and Apple Silicon Simulator libraries are packaged as an XCFramework in GitHub Actions. Local CCID access uses CryptoTokenKit directly from Rust. |
 | MSRV | An all-features build is checked with Rust 1.85. |
 | Dependencies | Advisories and accepted licenses are checked with `cargo-deny`. |
-| Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. The Python smoke test covers production slot and token metadata. |
+| Live hardware | Ignored and explicitly gated Rust tests cover discovery, login, PIN changes, provisioning, and selected cross-device cryptographic operations on attached YubiKey and YubiHSM devices. Python tests cover production slot and token metadata plus an independently gated, self-cleaning previewSign cycle through the dynamic-library ABI. |
 
 CI runs the complete platform suites on 64-bit `x86_64` Linux and Windows and
 `aarch64` macOS. Additional all-features compilation checks cover `aarch64`
@@ -725,12 +725,19 @@ See the [OASIS profile test runner](conformance/README.md) for individual test
 commands, live-module provisioning requirements, result provenance, and the
 qualification boundary.
 
-Live hardware tests are excluded from normal test runs. Run the Python
-read-only smoke test explicitly:
+Live hardware tests are excluded from normal test runs. Run the Python smoke
+tests explicitly:
 
 ```sh
 PKCS11RS_RUN_HARDWARE_TESTS=1 python3 test_hardware.py
 ```
+
+Those tests remain read-only unless a mutating test's additional variables are
+set. The previewSign dynamic-library test requires an exact
+`PKCS11RS_FIDO2_TEST_SOURCE` serial and `PKCS11RS_FIDO2_TEST_PIN`; it creates one
+parent credential, derives and exercises two signing keys, and deletes the
+parent before returning. Its exact command and qualification boundary are in
+[Experimental FIDO previewSign](docs/preview-sign.md#hardware-status).
 
 Rust hardware tests are individually ignored. Run a named test rather than
 the entire ignored set: several tests provision, change, or deliberately

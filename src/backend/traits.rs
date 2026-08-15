@@ -150,6 +150,14 @@ pub(crate) trait Slot {
     ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
+    #[cfg(all(test, not(feature = "abi-tests")))]
+    fn delete_fido2_test_credential(
+        &mut self,
+        _pin: &[u8],
+        _credential_id: &[u8],
+    ) -> Result<(), Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
     fn fido_preview_sign_registration(
         &mut self,
     ) -> Result<crate::preview_sign::PreviewSignRegistration, Error> {
@@ -161,6 +169,12 @@ pub(crate) trait Slot {
         _to_be_signed: &[u8],
         _additional_args_cbor: &[u8],
     ) -> Result<Vec<u8>, Error> {
+        Err(CKR_FUNCTION_NOT_SUPPORTED.into())
+    }
+    fn fido_delete_preview_credential(
+        &mut self,
+        _registration: &crate::preview_sign::PreviewSignRegistration,
+    ) -> Result<(), Error> {
         Err(CKR_FUNCTION_NOT_SUPPORTED.into())
     }
     fn fido_get_assertion(

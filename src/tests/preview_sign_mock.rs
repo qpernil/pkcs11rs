@@ -539,6 +539,25 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
 
+    assert_eq!(
+        crate::api::C_DestroyObject(session, credential_private_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_SignInit(session, &mut mechanism, restored_signing_key),
+        CKR_OK as CK_RV
+    );
+    assert_eq!(
+        crate::api::C_Sign(
+            session,
+            digest.as_ptr().cast_mut(),
+            digest.len() as CK_ULONG,
+            signature.as_mut_ptr(),
+            &mut signature_len,
+        ),
+        CKR_DEVICE_ERROR as CK_RV
+    );
+
     super::with_test_slot_context(slot, |context| {
         context.refresh_slot_token_objects(slot).unwrap();
         assert!(context.resolve_object(registration_key).unwrap().is_some());
