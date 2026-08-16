@@ -52,15 +52,117 @@ fn main() {
         Some("bindings") => bindings(&args),
         Some("ios") => ios(&args),
         Some("load-shared-library") => load_shared_library(&args),
+        Some("virtual-yubikey") => virtual_yubikey(&args),
         _ => usage(),
     }
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]"
+        "usage: cargo xtask bindings [--check]\n       cargo xtask ios [--release] [--output PATH]\n       cargo xtask load-shared-library [--release]\n       cargo xtask virtual-yubikey <local|git>"
     );
     process::exit(2);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VirtualYubikeySource {
+    Git,
+    Local,
+}
+
+fn virtual_yubikey(args: &[String]) {
+    let source = match args {
+        [source] if source == "local" => VirtualYubikeySource::Local,
+        [source] if source == "git" => VirtualYubikeySource::Git,
+        [help] if help == "--help" || help == "-h" => {
+            println!("usage: cargo xtask virtual-yubikey <local|git>");
+            return;
+        }
+        _ => usage(),
+    };
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask directory has a parent")
+        .to_path_buf();
+
+    if source == VirtualYubikeySource::Local {
+        for crate_path in [
+            "../virtual-yubikey/crates/virtual-yubikey-core/Cargo.toml",
+            "../virtual-yubikey/crates/virtual-yubikey-crypto/Cargo.toml",
+        ] {
+            let path = root.join(crate_path);
+            if !path.is_file() {
+                eprintln!(
+                    "{} is missing; clone virtual-yubikey beside pkcs11rs first",
+                    path.display()
+                );
+                process::exit(1);
+            }
+        }
+    }
+
+    let patch = root.join("xtask/virtual-yubikey-local.patch");
+    if !patch.is_file() {
+        eprintln!("{} is missing", patch.display());
+        process::exit(1);
+    }
+    let reverse = source == VirtualYubikeySource::Git;
+    match check_git_patch(&root, &patch, reverse) {
+        Ok(()) => {
+            run_command(&mut git_patch_command(&root, &patch, reverse, false));
+            println!(
+                "switched virtual-yubikey dependencies to {} sources in {}",
+                source.label(),
+                root.join("Cargo.toml").display()
+            );
+        }
+        Err(_) if check_git_patch(&root, &patch, !reverse).is_ok() => println!(
+            "virtual-yubikey dependencies already use {} sources",
+            source.label()
+        ),
+        Err(error) => {
+            eprintln!(
+                "cannot switch virtual-yubikey dependencies to {} sources; the patch conflicts:\n{}",
+                source.label(),
+                error.trim()
+            );
+            process::exit(1);
+        }
+    }
+}
+
+impl VirtualYubikeySource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Git => "Git",
+            Self::Local => "local",
+        }
+    }
+}
+
+fn git_patch_command(root: &Path, patch: &Path, reverse: bool, check: bool) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root).arg("apply").arg("--unidiff-zero");
+    if check {
+        command.arg("--check");
+    }
+    if reverse {
+        command.arg("--reverse");
+    }
+    command.arg(patch);
+    command
+}
+
+fn check_git_patch(root: &Path, patch: &Path, reverse: bool) -> Result<(), String> {
+    let mut command = git_patch_command(root, patch, reverse, true);
+    let output = command
+        .output()
+        .map_err(|error| format!("start {command:?}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
 }
 
 fn bindings(args: &[String]) {
@@ -364,4 +466,22 @@ fn load_shared_library(args: &[String]) {
     assert_eq!(initialize_result, CKR_OK, "C_Initialize");
     assert_eq!(slot_list_result, CKR_OK, "C_GetSlotList");
     assert_eq!(finalize_result, CKR_OK, "C_Finalize");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_yubikey_patch_matches_the_manifest() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask directory has a parent")
+            .to_path_buf();
+        let patch = root.join("xtask/virtual-yubikey-local.patch");
+        assert!(
+            check_git_patch(&root, &patch, false).is_ok()
+                || check_git_patch(&root, &patch, true).is_ok()
+        );
+    }
 }
