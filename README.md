@@ -860,11 +860,12 @@ virtual reader or card.
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
 The neutral `virtual-yubikey-crypto` crate from the same repository supplies
-the software ECDSA, Ed25519, and ML-DSA signing and verification primitives
-used by both the virtual authenticator and pkcs11rs. PKCS #11-specific
-mechanism handling remains in this repository; algorithms not yet covered by
-the shared crate, including the broader PKCS #11 RSA profiles, keep their local
-implementations.
+the software ECDSA, Ed25519, ML-DSA, and RSA signing and verification primitives
+used by both the virtual authenticator and pkcs11rs. Its general RSA layer
+covers raw signatures, caller-controlled PKCS #1 v1.5 payloads, all supported
+SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS with independent message hash,
+MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and
+error mapping remain in this repository.
 `pkcs11rs` follows that repository's `main` branch, while `Cargo.lock` records
 the exact commit validated by this checkout. Advance the recorded revision
 with:

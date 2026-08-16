@@ -6,6 +6,10 @@ use super::sign::{
 use crate::backed_object::projected_public_key_material;
 use crate::*;
 use virtual_yubikey_crypto::post_quantum::{MlDsaError, MlDsaParameterSet, verify_ml_dsa};
+use virtual_yubikey_crypto::rsa_signing::{
+    RsaSignatureError, rsa_verify_pkcs1v15_digest, rsa_verify_pkcs1v15_payload,
+    rsa_verify_pss_digest, rsa_verify_raw,
+};
 
 ffi_entry_point! {
     pub fn C_VerifyInit(
@@ -427,32 +431,25 @@ fn verify_rsa_signature(
     if signature.len() != public_key.size() {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
-    let recovered =
-        if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE || piv_is_pss_mechanism(mechanism) {
-            rsa_public_operation(public_key, signature)
-        } else {
-            rsa_pkcs1_recover(public_key, signature)
-        }
-        .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-    let expected = if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-        if data.len() > public_key.size() {
-            return Err(CKR_DATA_LEN_RANGE.into());
-        }
-        let mut expected = vec![0; public_key.size() - data.len()];
-        expected.extend_from_slice(data);
-        expected
+    let result = if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
+        rsa_verify_raw(public_key, data, signature)
     } else if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
-        data.to_vec()
+        rsa_verify_pkcs1v15_payload(public_key, data, signature)
     } else if piv_is_hashed_rsa_pkcs(mechanism) {
         let digest = hash(
             piv_hash_mechanism(mechanism).ok_or(CKR_MECHANISM_INVALID)?,
             data,
         )?;
-        piv_digest_info(mechanism, digest.as_ref()).ok_or(CKR_MECHANISM_INVALID)?
+        rsa_verify_pkcs1v15_digest(
+            public_key,
+            shared_rsa_hash_algorithm(mechanism)?,
+            &digest,
+            signature,
+        )
     } else if piv_is_pss_mechanism(mechanism) {
-        let (mgf, salt_length, hash_mechanism) = pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        let parameters = shared_rsa_pss_parameters(pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?)?;
         let digest = if mechanism == CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE {
-            let expected_length = digest_for_hash_mechanism(hash_mechanism)?.size();
+            let expected_length = parameters.hash.output_length();
             if data.len() != expected_length {
                 return Err(CKR_DATA_LEN_RANGE.into());
             }
@@ -464,23 +461,26 @@ fn verify_rsa_signature(
             )?
             .to_vec()
         };
-        if !verify_rsa_pss(
-            &recovered,
-            &digest,
-            hash_mechanism,
-            mgf,
-            salt_length as usize,
-        )? {
-            return Err(CKR_SIGNATURE_INVALID.into());
-        }
-        return Ok(());
+        rsa_verify_pss_digest(public_key, parameters, &digest, signature)
     } else {
         return Err(CKR_MECHANISM_INVALID.into());
     };
-    if recovered != expected {
-        return Err(CKR_SIGNATURE_INVALID.into());
+    result.map_err(shared_rsa_verification_error)
+}
+
+fn shared_rsa_verification_error(error: RsaSignatureError) -> Error {
+    match error {
+        RsaSignatureError::InputTooLong | RsaSignatureError::InvalidDigestLength => {
+            CKR_DATA_LEN_RANGE.into()
+        }
+        RsaSignatureError::InvalidKey => CKR_KEY_TYPE_INCONSISTENT.into(),
+        RsaSignatureError::InvalidSignature | RsaSignatureError::InputOutOfRange => {
+            CKR_SIGNATURE_INVALID.into()
+        }
+        RsaSignatureError::RandomnessUnavailable | RsaSignatureError::OperationFailed => {
+            CKR_FUNCTION_FAILED.into()
+        }
     }
-    Ok(())
 }
 
 ffi_entry_point! {

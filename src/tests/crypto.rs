@@ -1146,6 +1146,115 @@ pub fn verify_accepts_matching_rsa_signature() {
 }
 
 #[test]
+pub fn software_rsa_round_trips_every_supported_signature_form() {
+    fn round_trip(mechanism: &mut CK_MECHANISM, data: &mut [u8]) {
+        assert_eq!(
+            crate::api::C_SignInit(TEST_SESSION_HANDLE, mechanism, 2),
+            CKR_OK as CK_RV,
+            "sign initialization failed for mechanism {:#x}",
+            mechanism.mechanism
+        );
+        let mut signature_length = 0;
+        assert_eq!(
+            crate::api::C_Sign(
+                TEST_SESSION_HANDLE,
+                data.as_mut_ptr(),
+                data.len() as CK_ULONG,
+                std::ptr::null_mut(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV
+        );
+        let mut signature = vec![0; signature_length as usize];
+        assert_eq!(
+            crate::api::C_Sign(
+                TEST_SESSION_HANDLE,
+                data.as_mut_ptr(),
+                data.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                &mut signature_length,
+            ),
+            CKR_OK as CK_RV,
+            "signing failed for mechanism {:#x}",
+            mechanism.mechanism
+        );
+        assert_eq!(
+            crate::api::C_VerifyInit(TEST_SESSION_HANDLE, mechanism, 1),
+            CKR_OK as CK_RV
+        );
+        assert_eq!(
+            crate::api::C_Verify(
+                TEST_SESSION_HANDLE,
+                data.as_mut_ptr(),
+                data.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                signature_length,
+            ),
+            CKR_OK as CK_RV,
+            "verification failed for mechanism {:#x}",
+            mechanism.mechanism
+        );
+    }
+
+    let _guard = TEST_LOCK.lock().unwrap();
+    finalize_for_test();
+    assert_eq!(
+        crate::api::C_Initialize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+    let mechanisms = [
+        CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+    ]
+    .into_iter()
+    .chain(crate::HASHED_RSA_PKCS_MECHANISMS)
+    .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+    .map(|mechanism| (mechanism, (CKF_SIGN | CKF_VERIFY) as CK_FLAGS))
+    .collect::<Vec<_>>();
+    install_test_slot_with_backend(
+        TEST_SLOT_ID,
+        Box::new(test_slot_with_mechanisms(true, &mechanisms)),
+    );
+    install_test_session(TEST_SLOT_ID, TEST_SESSION_HANDLE);
+
+    for mechanism_type in [
+        CKM_RSA_X_509 as CK_MECHANISM_TYPE,
+        CKM_RSA_PKCS as CK_MECHANISM_TYPE,
+    ]
+    .into_iter()
+    .chain(crate::HASHED_RSA_PKCS_MECHANISMS)
+    .chain(crate::HASHED_RSA_PSS_MECHANISMS)
+    {
+        let mut mechanism = CK_MECHANISM {
+            mechanism: mechanism_type,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut message = b"shared RSA PKCS11 integration".to_vec();
+        round_trip(&mut mechanism, &mut message);
+    }
+
+    let mut parameters = CK_RSA_PKCS_PSS_PARAMS {
+        hashAlg: CKM_SHA256 as CK_MECHANISM_TYPE,
+        mgf: CKG_MGF1_SHA3_384 as CK_RSA_PKCS_MGF_TYPE,
+        sLen: 17,
+    };
+    let mut mechanism = CK_MECHANISM {
+        mechanism: CKM_RSA_PKCS_PSS as CK_MECHANISM_TYPE,
+        pParameter: (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast(),
+        ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
+    };
+    let mut digest = <sha2::Sha256 as sha2::Digest>::digest(b"custom PSS parameters").to_vec();
+    round_trip(&mut mechanism, &mut digest);
+
+    assert_eq!(
+        crate::api::C_Finalize(std::ptr::null_mut()),
+        CKR_OK as CK_RV
+    );
+}
+
+#[test]
 pub fn verify_accepts_yubihsm_rsa_public_material() {
     let _guard = TEST_LOCK.lock().unwrap();
     finalize_for_test();
