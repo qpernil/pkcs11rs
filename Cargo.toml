@@ -52,6 +52,7 @@ ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 flate2 = "1.1.9"
 unicode-normalization = "0.1.25"
 virtual-yubikey-core = { git = "https://github.com/qpernil/virtual-yubikey", branch = "main", optional = true }
+virtual-yubikey-crypto = { git = "https://github.com/qpernil/virtual-yubikey", branch = "main" }
 zeroize = "1.9.0"
 const-oid = "0.10.2"
 der = { version = "0.8.1", features = ["alloc", "derive", "std"] }

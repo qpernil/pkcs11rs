@@ -7,6 +7,12 @@ use super::{
     },
 };
 use crate::*;
+use virtual_yubikey_crypto::{
+    post_quantum::{MlDsaError, MlDsaParameterSet, MlDsaPrivateKey, MlDsaRandomization},
+    software_signing::{
+        SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningKey as SharedSigningKey,
+    },
+};
 
 const AES_CMAC_LENGTH: usize = 16;
 
@@ -115,6 +121,23 @@ fn software_sign(
             Ok(signature.to_bytes().to_vec())
         }};
     }
+    fn shared_prehash(
+        algorithm: SharedSigningAlgorithm,
+        serialized: &[u8],
+        digest: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let key = SharedSigningKey::from_serialized(algorithm, serialized)
+            .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
+        key.sign_prehash(algorithm, digest)
+            .map(|signature| signature.into_bytes())
+            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
+    }
+    let digest = || {
+        piv_hash_mechanism(mechanism)
+            .map(|digest| hash(digest, data).map(|value| value.to_vec()))
+            .transpose()
+            .map(|digest| digest.unwrap_or_else(|| data.to_vec()))
+    };
     match key {
         SoftwarePrivateKeyMaterial::Rsa(key) => {
             let digest = piv_hash_mechanism(mechanism)
@@ -152,18 +175,26 @@ fn software_sign(
         SoftwarePrivateKeyMaterial::P224(key) => {
             sign_ecdsa!(key, p224::NistP224, p224::ecdsa::Signature)
         }
-        SoftwarePrivateKeyMaterial::P256(key) => {
-            sign_ecdsa!(key, p256::NistP256, p256::ecdsa::Signature)
-        }
-        SoftwarePrivateKeyMaterial::P384(key) => {
-            sign_ecdsa!(key, p384::NistP384, p384::ecdsa::Signature)
-        }
-        SoftwarePrivateKeyMaterial::P521(key) => {
-            sign_ecdsa!(key, p521::NistP521, p521::ecdsa::Signature)
-        }
-        SoftwarePrivateKeyMaterial::K256(key) => {
-            sign_ecdsa!(key, k256::Secp256k1, k256::ecdsa::Signature)
-        }
+        SoftwarePrivateKeyMaterial::P256(key) => shared_prehash(
+            SharedSigningAlgorithm::EcdsaP256Sha256,
+            key.to_bytes().as_ref(),
+            &digest()?,
+        ),
+        SoftwarePrivateKeyMaterial::P384(key) => shared_prehash(
+            SharedSigningAlgorithm::EcdsaP384Sha384,
+            key.to_bytes().as_ref(),
+            &digest()?,
+        ),
+        SoftwarePrivateKeyMaterial::P521(key) => shared_prehash(
+            SharedSigningAlgorithm::EcdsaP521Sha512,
+            key.to_bytes().as_ref(),
+            &digest()?,
+        ),
+        SoftwarePrivateKeyMaterial::K256(key) => shared_prehash(
+            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
+            key.to_bytes().as_ref(),
+            &digest()?,
+        ),
         SoftwarePrivateKeyMaterial::BrainpoolP256(key) => {
             sign_ecdsa!(
                 key,
@@ -186,32 +217,61 @@ fn software_sign(
             )
         }
         SoftwarePrivateKeyMaterial::Ed25519(key) => {
-            let signature: ed25519_dalek::Signature = signature::Signer::sign(key, data);
-            Ok(signature.to_bytes().to_vec())
+            let algorithm = SharedSigningAlgorithm::Ed25519;
+            let key = SharedSigningKey::from_serialized(algorithm, &key.to_bytes())
+                .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
+            key.sign_message(algorithm, data)
+                .map(|signature| signature.into_bytes())
+                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))
         }
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        SoftwarePrivateKeyMaterial::MlDsa44(key) => ml_dsa_sign(key, ml_dsa, data),
-        SoftwarePrivateKeyMaterial::MlDsa65(key) => ml_dsa_sign(key, ml_dsa, data),
-        SoftwarePrivateKeyMaterial::MlDsa87(key) => ml_dsa_sign(key, ml_dsa, data),
+        SoftwarePrivateKeyMaterial::MlDsa44(_)
+        | SoftwarePrivateKeyMaterial::MlDsa65(_)
+        | SoftwarePrivateKeyMaterial::MlDsa87(_) => shared_ml_dsa_sign(key, ml_dsa, data),
         SoftwarePrivateKeyMaterial::MlKem512(_)
         | SoftwarePrivateKeyMaterial::MlKem768(_)
         | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
-fn ml_dsa_sign<P: ml_dsa::MlDsaParams>(
-    key: &ml_dsa::SigningKey<P>,
+fn shared_ml_dsa_sign(
+    key: &SoftwarePrivateKeyMaterial,
     parameters: Option<&MlDsaSignatureParameters>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    ml_dsa_sign_with_randomizer(key, parameters, data, |expanded, data, context| {
-        expanded
-            .sign_randomized(data, context, &mut getrandom::SysRng)
-            .map(|signature| signature.encode().to_vec())
-            .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))
-    })
+    let (parameter_set, seed) = match key {
+        SoftwarePrivateKeyMaterial::MlDsa44(key) => {
+            (MlDsaParameterSet::MlDsa44, key.as_seed().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::MlDsa65(key) => {
+            (MlDsaParameterSet::MlDsa65, key.as_seed().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::MlDsa87(key) => {
+            (MlDsaParameterSet::MlDsa87, key.as_seed().to_vec())
+        }
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    let parameters = parameters.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    let randomization = match parameters.hedge_variant {
+        x if x == CKH_DETERMINISTIC_REQUIRED as CK_HEDGE_TYPE => MlDsaRandomization::Deterministic,
+        x if x == CKH_HEDGE_REQUIRED as CK_HEDGE_TYPE => MlDsaRandomization::Randomized,
+        x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => MlDsaRandomization::HedgePreferred,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    MlDsaPrivateKey::from_seed_slice(parameter_set, &seed)
+        .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?
+        .sign(data, &parameters.context, randomization)
+        .map_err(|error| match error {
+            MlDsaError::RandomnessUnavailable => Error::from(CKR_RANDOM_NO_RNG),
+            MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),
+            MlDsaError::InvalidSeedLength => Error::from(CKR_KEY_TYPE_INCONSISTENT),
+            MlDsaError::InvalidPublicKey
+            | MlDsaError::InvalidSignature
+            | MlDsaError::SigningFailed => Error::from(CKR_FUNCTION_FAILED),
+        })
 }
 
+#[cfg(test)]
 fn ml_dsa_sign_with_randomizer<P: ml_dsa::MlDsaParams>(
     key: &ml_dsa::SigningKey<P>,
     parameters: Option<&MlDsaSignatureParameters>,

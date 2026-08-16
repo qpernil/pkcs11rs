@@ -7892,15 +7892,16 @@ fn hardware_composite_signing_matches_advertisement_in_both_directions() {
                 crate::api::C_VerifyInit(session_handle, &mut mechanism, public),
                 CKR_OK as CK_RV
             );
+            let verify = crate::api::C_Verify(
+                session_handle,
+                message.as_mut_ptr(),
+                message.len() as CK_ULONG,
+                signature.as_mut_ptr(),
+                signature_length,
+            );
             assert_eq!(
-                crate::api::C_Verify(
-                    session_handle,
-                    message.as_mut_ptr(),
-                    message.len() as CK_ULONG,
-                    signature.as_mut_ptr(),
-                    signature_length,
-                ),
-                CKR_OK as CK_RV
+                verify, CKR_OK as CK_RV,
+                "verification failed for composite mechanism {mechanism_type:#x}"
             );
         }
     }

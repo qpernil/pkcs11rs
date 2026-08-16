@@ -1596,6 +1596,7 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "virtual-yubikey-core",
+ "virtual-yubikey-crypto",
  "x25519-dalek",
  "x509-cert",
  "zeroize",
@@ -2617,17 +2618,38 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "virtual-yubikey-core"
 version = "0.1.0"
-source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#918820d8c22ab33212ef023ddb8ea19415cfd47c"
+source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#08025c5cb2a92c8a8c6ca8a0e6892034d8edfab4"
 dependencies = [
  "aes 0.8.4",
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
+ "k256",
  "minicbor",
  "p256",
+ "p384",
+ "p521",
  "sha2 0.11.0",
  "signature 3.0.0",
  "subtle",
+ "virtual-yubikey-crypto",
+ "zeroize",
+]
+
+[[package]]
+name = "virtual-yubikey-crypto"
+version = "0.1.0"
+source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#08025c5cb2a92c8a8c6ca8a0e6892034d8edfab4"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "k256",
+ "ml-dsa",
+ "p256",
+ "p384",
+ "p521",
+ "rsa",
+ "signature 3.0.0",
  "zeroize",
 ]
 
