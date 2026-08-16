@@ -614,7 +614,7 @@ impl Client {
         Ok(response)
     }
 
-    #[cfg(all(test, not(feature = "abi-tests")))]
+    #[cfg(test)]
     pub(crate) fn create_discoverable_test_credential(
         &self,
         info: &AuthenticatorInfo,
