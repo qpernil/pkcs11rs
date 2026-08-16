@@ -5,6 +5,7 @@ use super::sign::{
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
+use virtual_yubikey_crypto::post_quantum::{MlDsaError, MlDsaParameterSet, verify_ml_dsa};
 
 ffi_entry_point! {
     pub fn C_VerifyInit(
@@ -367,35 +368,35 @@ fn ml_dsa_verify(
     data: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
-    macro_rules! verify {
-        ($params:ty, $signature_length:expr) => {{
-            if signature.len() != $signature_length {
-                return Err(CKR_SIGNATURE_LEN_RANGE.into());
-            }
-            let encoded = ml_dsa::EncodedVerifyingKey::<$params>::try_from(public_key)
-                .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-            let key = ml_dsa::VerifyingKey::<$params>::decode(&encoded);
-            let signature = ml_dsa::Signature::<$params>::try_from(signature)
-                .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-            if key.verify_with_context(data, &parameters.context, &signature) {
-                Ok(())
-            } else {
-                Err(CKR_SIGNATURE_INVALID.into())
-            }
-        }};
+    let parameter_set = match parameter_set {
+        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa44,
+        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa65,
+        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa87,
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    if signature.len() != parameter_set.signature_length() {
+        return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
-    match parameter_set {
-        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-            verify!(ml_dsa::MlDsa44, 2420)
-        }
-        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-            verify!(ml_dsa::MlDsa65, 3309)
-        }
-        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-            verify!(ml_dsa::MlDsa87, 4627)
-        }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    if public_key.len() != parameter_set.public_key_length() {
+        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
+    verify_ml_dsa(
+        parameter_set,
+        public_key,
+        data,
+        &parameters.context,
+        signature,
+    )
+    .map_err(|error| match error {
+        MlDsaError::InvalidPublicKey | MlDsaError::InvalidSeedLength => {
+            Error::from(CKR_KEY_TYPE_INCONSISTENT)
+        }
+        MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),
+        MlDsaError::InvalidSignature => Error::from(CKR_SIGNATURE_INVALID),
+        MlDsaError::RandomnessUnavailable | MlDsaError::SigningFailed => {
+            Error::from(CKR_FUNCTION_FAILED)
+        }
+    })
 }
 
 fn yubihsm_hmac_mechanism(mechanism: CK_MECHANISM_TYPE) -> Option<(CK_KEY_TYPE, u8, usize)> {

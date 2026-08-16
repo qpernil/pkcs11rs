@@ -1,5 +1,9 @@
 use crate::*;
 use num_bigint_dig::traits::ModInverse;
+use virtual_yubikey_crypto::software_signing::{
+    EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey,
+    SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningError,
+};
 
 pub(crate) fn openpgp_sign_mechanism_supported(
     algorithm: OpenPgpAlgorithm,
@@ -687,22 +691,34 @@ pub(crate) fn verify_ecdsa(
     if signature.len() != parameters.coordinate_length * 2 {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
+    let verify_shared = |curve, algorithm| {
+        let mut uncompressed = Vec::with_capacity(1 + public_key.len());
+        uncompressed.push(0x04);
+        uncompressed.extend_from_slice(public_key);
+        SharedPublicKey::Ec {
+            curve,
+            uncompressed,
+        }
+        .verify_prehash(algorithm, digest, signature)
+        .map_err(shared_verification_error)
+    };
     match curve {
         EcCurve::P224 => {
             verify_rustcrypto_ecdsa!(p224::NistP224, public_key, digest, signature)
         }
         EcCurve::P256 => {
-            verify_rustcrypto_ecdsa!(p256::NistP256, public_key, digest, signature)
+            verify_shared(SharedEcCurve::P256, SharedSigningAlgorithm::EcdsaP256Sha256)
         }
         EcCurve::P384 => {
-            verify_rustcrypto_ecdsa!(p384::NistP384, public_key, digest, signature)
+            verify_shared(SharedEcCurve::P384, SharedSigningAlgorithm::EcdsaP384Sha384)
         }
         EcCurve::P521 => {
-            verify_rustcrypto_ecdsa!(p521::NistP521, public_key, digest, signature)
+            verify_shared(SharedEcCurve::P521, SharedSigningAlgorithm::EcdsaP521Sha512)
         }
-        EcCurve::K256 => {
-            verify_rustcrypto_ecdsa!(k256::Secp256k1, public_key, digest, signature)
-        }
+        EcCurve::K256 => verify_shared(
+            SharedEcCurve::Secp256k1,
+            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
+        ),
         EcCurve::BrainpoolP256 => {
             verify_rustcrypto_ecdsa!(bp256::BrainpoolP256r1, public_key, digest, signature)
         }
@@ -756,15 +772,23 @@ pub(crate) fn verify_ed25519(
     if public_key.len() != 32 || signature.len() != 64 {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
-    let key_bytes: &[u8; 32] = public_key
+    let key_bytes: [u8; 32] = public_key
         .try_into()
         .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
-        .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-    let signature = ed25519_dalek::Signature::from_slice(signature)
-        .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-    signature::Verifier::verify(&key, data, &signature)
-        .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))
+    SharedPublicKey::Ed25519(key_bytes)
+        .verify_message(SharedSigningAlgorithm::Ed25519, data, signature)
+        .map_err(shared_verification_error)
+}
+
+fn shared_verification_error(error: SoftwareSigningError) -> Error {
+    match error {
+        SoftwareSigningError::InvalidSignature => CKR_SIGNATURE_INVALID.into(),
+        SoftwareSigningError::AlgorithmMismatch
+        | SoftwareSigningError::InvalidPublicKey
+        | SoftwareSigningError::InvalidPrivateKey => CKR_KEY_TYPE_INCONSISTENT.into(),
+        SoftwareSigningError::RandomnessUnavailable => CKR_RANDOM_NO_RNG.into(),
+        SoftwareSigningError::SigningFailed => CKR_FUNCTION_FAILED.into(),
+    }
 }
 
 pub(crate) fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
