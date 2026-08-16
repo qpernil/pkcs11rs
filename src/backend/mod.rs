@@ -25,9 +25,11 @@ pub(crate) use crypto::{
     openpgp_ec_coordinate_length, openpgp_ec_params, openpgp_sign_mechanism_supported,
     openpgp_signature, piv_digest_info, piv_hash_mechanism, piv_is_hashed_ecdsa,
     piv_is_hashed_rsa_pkcs, piv_is_pss_mechanism, pss_hash_mechanism, rsa_pkcs1_encrypt,
-    rsa_pkcs1_recover, rsa_pkcs1_sign, rsa_private_operation, rsa_public_operation,
-    validate_ec_public_point, verify_ecdsa, verify_ed25519, verify_rsa_pss,
+    rsa_private_operation, rsa_public_operation, shared_rsa_hash_algorithm,
+    shared_rsa_pss_parameters, validate_ec_public_point, verify_ecdsa, verify_ed25519,
 };
+#[cfg(test)]
+pub(crate) use crypto::{rsa_pkcs1_sign, verify_rsa_pss};
 #[cfg(all(test, feature = "mock-yubikey"))]
 pub(crate) use ctap::CcidCtapTransport;
 #[cfg(feature = "native-hardware")]

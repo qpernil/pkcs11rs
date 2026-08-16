@@ -1,5 +1,8 @@
 use crate::*;
 use num_bigint_dig::traits::ModInverse;
+use virtual_yubikey_crypto::rsa_signing::{
+    RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
+};
 use virtual_yubikey_crypto::software_signing::{
     EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey,
     SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningError,
@@ -261,6 +264,93 @@ pub(crate) fn mgf_digest(mgf: u8, hash: CK_MECHANISM_TYPE) -> Result<MessageDige
         40 => Ok(MessageDigest::sha3_512()),
         _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
     }
+}
+
+pub(crate) fn shared_rsa_hash_algorithm(
+    mechanism: CK_MECHANISM_TYPE,
+) -> Result<SharedRsaHashAlgorithm, Error> {
+    match mechanism {
+        x if x == CKM_SHA_1 as CK_MECHANISM_TYPE
+            || x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA1_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha1)
+        }
+        x if x == CKM_SHA224 as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA224_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha224)
+        }
+        x if x == CKM_SHA256 as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA256_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha256)
+        }
+        x if x == CKM_SHA384 as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA384_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha384)
+        }
+        x if x == CKM_SHA512 as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA512_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha512)
+        }
+        x if x == CKM_SHA3_224 as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_224_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha3_224)
+        }
+        x if x == CKM_SHA3_256 as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_256_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha3_256)
+        }
+        x if x == CKM_SHA3_384 as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_384_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha3_384)
+        }
+        x if x == CKM_SHA3_512 as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE
+            || x == CKM_SHA3_512_RSA_PKCS_PSS as CK_MECHANISM_TYPE =>
+        {
+            Ok(SharedRsaHashAlgorithm::Sha3_512)
+        }
+        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    }
+}
+
+pub(crate) fn shared_rsa_pss_parameters(
+    pss: (u8, u16, CK_MECHANISM_TYPE),
+) -> Result<SharedRsaPssParameters, Error> {
+    let (mgf, salt_length, hash_mechanism) = pss;
+    let hash = shared_rsa_hash_algorithm(hash_mechanism)?;
+    let mgf_hash = match mgf {
+        0 => hash,
+        32 => SharedRsaHashAlgorithm::Sha1,
+        33 => SharedRsaHashAlgorithm::Sha256,
+        34 => SharedRsaHashAlgorithm::Sha384,
+        35 => SharedRsaHashAlgorithm::Sha512,
+        36 => SharedRsaHashAlgorithm::Sha224,
+        37 => SharedRsaHashAlgorithm::Sha3_224,
+        38 => SharedRsaHashAlgorithm::Sha3_256,
+        39 => SharedRsaHashAlgorithm::Sha3_384,
+        40 => SharedRsaHashAlgorithm::Sha3_512,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
+    };
+    Ok(SharedRsaPssParameters {
+        hash,
+        mgf_hash,
+        salt_length: usize::from(salt_length),
+    })
 }
 
 pub(crate) fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
@@ -896,6 +986,7 @@ pub(crate) fn rsa_pkcs1_encrypt(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<
     rsa_public_operation(key, &encoded)
 }
 
+#[cfg(test)]
 pub(crate) fn rsa_pkcs1_sign(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, Error> {
     let size = key.size();
     if input.len() > size.saturating_sub(11) {
@@ -908,22 +999,7 @@ pub(crate) fn rsa_pkcs1_sign(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8
     rsa_private_operation(key, &encoded)
 }
 
-pub(crate) fn rsa_pkcs1_recover(key: &RsaPublicKey, signature: &[u8]) -> Result<Vec<u8>, Error> {
-    let encoded = rsa_public_operation(key, signature)?;
-    if encoded.len() < 11 || encoded[..2] != [0, 1] {
-        return Err(CKR_SIGNATURE_INVALID.into());
-    }
-    let separator = encoded[2..]
-        .iter()
-        .position(|byte| *byte != 0xff)
-        .map(|position| position + 2)
-        .ok_or(CKR_SIGNATURE_INVALID)?;
-    if separator < 10 || encoded[separator] != 0 {
-        return Err(CKR_SIGNATURE_INVALID.into());
-    }
-    Ok(encoded[separator + 1..].to_vec())
-}
-
+#[cfg(test)]
 pub(crate) fn verify_rsa_pss(
     encoded: &[u8],
     digest: &[u8],

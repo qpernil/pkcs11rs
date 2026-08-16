@@ -9,6 +9,10 @@ use super::{
 use crate::*;
 use virtual_yubikey_crypto::{
     post_quantum::{MlDsaError, MlDsaParameterSet, MlDsaPrivateKey, MlDsaRandomization},
+    rsa_signing::{
+        RsaSignatureError, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
+        rsa_sign_pss_digest, rsa_sign_raw,
+    },
     software_signing::{
         SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningKey as SharedSigningKey,
     },
@@ -143,34 +147,22 @@ fn software_sign(
             let digest = piv_hash_mechanism(mechanism)
                 .map(|digest| hash(digest, data).map(|value| value.to_vec()))
                 .transpose()?;
-            if piv_is_pss_mechanism(mechanism) {
-                let (mgf, salt_length, hash_mechanism) = pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let result = if piv_is_pss_mechanism(mechanism) {
+                let parameters =
+                    shared_rsa_pss_parameters(pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?)?;
                 let digest = digest.as_deref().unwrap_or(data);
-                let encoded = encode_rsa_pss(
-                    digest,
-                    key.size(),
-                    hash_mechanism,
-                    mgf,
-                    salt_length as usize,
-                )?;
-                rsa_private_operation(key, &encoded)
+                rsa_sign_pss_digest(key, parameters, digest)
             } else if piv_is_hashed_rsa_pkcs(mechanism) {
                 let digest = digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                let digest_info =
-                    piv_digest_info(mechanism, digest).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                rsa_pkcs1_sign(key, &digest_info)
+                rsa_sign_pkcs1v15_digest(key, shared_rsa_hash_algorithm(mechanism)?, digest)
             } else if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
-                rsa_pkcs1_sign(key, data)
+                rsa_sign_pkcs1v15_payload(key, data)
             } else if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-                if data.len() > key.size() {
-                    return Err(CKR_DATA_LEN_RANGE.into());
-                }
-                let mut encoded = vec![0; key.size() - data.len()];
-                encoded.extend_from_slice(data);
-                rsa_private_operation(key, &encoded)
+                rsa_sign_raw(key, data)
             } else {
-                Err(CKR_MECHANISM_INVALID.into())
-            }
+                return Err(CKR_MECHANISM_INVALID.into());
+            };
+            result.map_err(shared_rsa_signing_error)
         }
         SoftwarePrivateKeyMaterial::P224(key) => {
             sign_ecdsa!(key, p224::NistP224, p224::ecdsa::Signature)
@@ -231,6 +223,20 @@ fn software_sign(
         SoftwarePrivateKeyMaterial::MlKem512(_)
         | SoftwarePrivateKeyMaterial::MlKem768(_)
         | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    }
+}
+
+fn shared_rsa_signing_error(error: RsaSignatureError) -> Error {
+    match error {
+        RsaSignatureError::InputTooLong | RsaSignatureError::InvalidDigestLength => {
+            CKR_DATA_LEN_RANGE.into()
+        }
+        RsaSignatureError::InputOutOfRange => CKR_DATA_INVALID.into(),
+        RsaSignatureError::InvalidKey => CKR_KEY_TYPE_INCONSISTENT.into(),
+        RsaSignatureError::RandomnessUnavailable => CKR_RANDOM_NO_RNG.into(),
+        RsaSignatureError::InvalidSignature | RsaSignatureError::OperationFailed => {
+            CKR_FUNCTION_FAILED.into()
+        }
     }
 }
 
