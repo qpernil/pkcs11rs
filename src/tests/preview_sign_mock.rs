@@ -130,6 +130,41 @@ fn open_logged_in_mock(storage: &TestFidoStorage) -> (CK_SLOT_ID, CK_SESSION_HAN
     (slot, session)
 }
 
+fn create_mock_resident_credential(slot: CK_SLOT_ID) -> Vec<u8> {
+    crate::with_context(|context| {
+        let slot_contexts = context
+            .slot_contexts
+            .read()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+        let child = slot_contexts.get(&slot).ok_or(CKR_SLOT_ID_INVALID)?;
+        let mut child = child
+            .lock()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+        child
+            ._get_slot_mut(slot)?
+            .create_fido2_test_credential(b"123456")
+            .map(|credential| credential.credential_id)
+    })
+    .expect("failed to create resident credential in virtual YubiKey")
+}
+
+fn delete_mock_resident_credential(slot: CK_SLOT_ID, credential_id: &[u8]) {
+    crate::with_context(|context| {
+        let slot_contexts = context
+            .slot_contexts
+            .read()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+        let child = slot_contexts.get(&slot).ok_or(CKR_SLOT_ID_INVALID)?;
+        let mut child = child
+            .lock()
+            .map_err(|_| crate::Error::from(CKR_MUTEX_BAD))?;
+        child
+            ._get_slot_mut(slot)?
+            .delete_fido2_test_credential(b"123456", credential_id)
+    })
+    .expect("failed to remove resident credential from virtual YubiKey");
+}
+
 fn find_objects(
     session: CK_SESSION_HANDLE,
     template: &mut [CK_ATTRIBUTE],
@@ -897,6 +932,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
         crate::api::C_GetSlotList(CK_TRUE as CK_BBOOL, &mut slot, &mut slot_count),
         CKR_OK as CK_RV
     );
+    let credential_id = create_mock_resident_credential(slot);
     let mut session = 0;
     assert_eq!(
         crate::api::C_OpenSession(
@@ -921,9 +957,11 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
 
     let mut class = CKO_PRIVATE_KEY as CK_ULONG;
     let mut sign = CK_TRUE as CK_BBOOL;
+    let mut rp_id = crate::ctap::FIDO2_TEST_RP_ID.as_bytes().to_vec();
     let mut find_template = [
         ulong_attribute(CKA_CLASS as CK_ATTRIBUTE_TYPE, &mut class),
         bool_attribute(CKA_SIGN as CK_ATTRIBUTE_TYPE, &mut sign),
+        bytes_attribute(crate::CKA_PKCS11RS_FIDO_RP_ID, &mut rp_id),
     ];
     assert_eq!(
         crate::api::C_FindObjectsInit(
@@ -951,7 +989,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
     );
     assert_eq!(
         read_attribute(session, private_key, crate::CKA_PKCS11RS_FIDO_RP_ID),
-        b"example.com"
+        crate::ctap::FIDO2_TEST_RP_ID.as_bytes()
     );
 
     let mut project_mechanism = CK_MECHANISM {
@@ -1109,6 +1147,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
         CKR_OPERATION_NOT_INITIALIZED as CK_RV
     );
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
+    delete_mock_resident_credential(slot, &credential_id);
     assert_eq!(
         crate::api::C_Finalize(std::ptr::null_mut()),
         CKR_OK as CK_RV

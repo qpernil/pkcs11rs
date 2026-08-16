@@ -156,6 +156,10 @@ mod tests {
         let info = client.get_info().unwrap();
         assert!(info.option("clientPin"));
 
+        client
+            .create_discoverable_test_credential(&info, b"123456")
+            .unwrap();
+
         let authorization = client
             .authorize_credential_enumeration(&info, b"123456")
             .unwrap();
@@ -163,15 +167,15 @@ mod tests {
         assert_eq!(credentials.len(), 1);
         assert_eq!(
             credentials[0].relying_party.id.as_deref(),
-            Some("example.com")
+            Some(crate::ctap::FIDO2_TEST_RP_ID)
         );
         let assertion_authorization = client
-            .authorize_assertion(&info, b"123456", "example.com")
+            .authorize_assertion(&info, b"123456", crate::ctap::FIDO2_TEST_RP_ID)
             .unwrap();
         client
             .get_assertion(
                 &assertion_authorization,
-                "example.com",
+                crate::ctap::FIDO2_TEST_RP_ID,
                 &credentials[0].credential_id,
                 &[0x33; 32],
             )
