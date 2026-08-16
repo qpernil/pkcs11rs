@@ -874,6 +874,28 @@ with:
 cargo update -p virtual-yubikey-core -p virtual-yubikey-crypto
 ```
 
+For joint development with a sibling `../virtual-yubikey` checkout, switch both
+dependencies to visible path entries in `Cargo.toml`:
+
+```sh
+cargo xtask virtual-yubikey local
+```
+
+The xtask applies the checked-in
+[`virtual-yubikey-local.patch`](xtask/virtual-yubikey-local.patch) forward with
+`git apply`. Unrelated manifest edits are preserved. The command refuses to
+modify a dependency entry that has itself changed or when only one of the two
+entries is already switched. Return to the normal Git dependencies by applying
+the same patch in reverse:
+
+```sh
+cargo xtask virtual-yubikey git
+```
+
+The next unlocked Cargo command refreshes `Cargo.lock` for the selected source.
+Keep the Git form in committed changes so fresh checkouts and CI remain
+self-contained.
+
 ```sh
 cargo build --release --features mock-yubikey
 pkcs11-tool --module target/release/libpkcs11rs.dylib --list-slots
