@@ -6,6 +6,7 @@ use super::object::{
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
+use virtual_yubikey_crypto::software_key_agreement::{derive_weierstrass, derive_x25519};
 use zeroize::Zeroize;
 
 ffi_entry_point! {
@@ -1580,32 +1581,27 @@ fn project_public_key_object(
     Ok(projected)
 }
 
-fn software_ecdh(key: &SoftwarePrivateKeyMaterial, public_data: &[u8]) -> Result<Vec<u8>, Error> {
+fn software_ecdh(
+    key: &SoftwarePrivateKeyMaterial,
+    public_data: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     macro_rules! derive {
-        ($key:expr, $curve:ty) => {{
-            let peer = elliptic_curve::PublicKey::<$curve>::from_sec1_bytes(public_data)
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            Ok(
-                elliptic_curve::ecdh::diffie_hellman($key.to_nonzero_scalar(), peer.as_affine())
-                    .raw_secret_bytes()
-                    .to_vec(),
-            )
-        }};
+        ($key:expr) => {
+            derive_weierstrass($key, public_data)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
+        };
     }
     match key {
-        SoftwarePrivateKeyMaterial::P224(key) => derive!(key, p224::NistP224),
-        SoftwarePrivateKeyMaterial::P256(key) => derive!(key, p256::NistP256),
-        SoftwarePrivateKeyMaterial::P384(key) => derive!(key, p384::NistP384),
-        SoftwarePrivateKeyMaterial::P521(key) => derive!(key, p521::NistP521),
-        SoftwarePrivateKeyMaterial::K256(key) => derive!(key, k256::Secp256k1),
-        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => {
-            derive!(key, bp256::BrainpoolP256r1)
-        }
-        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => {
-            derive!(key, bp384::BrainpoolP384r1)
-        }
-        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => {
-            derive!(key, crate::brainpool512::BrainpoolP512r1)
+        SoftwarePrivateKeyMaterial::P224(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::P256(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::P384(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::P521(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::K256(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => derive!(key),
+        SoftwarePrivateKeyMaterial::X25519(key) => {
+            derive_x25519(key, public_data).map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
@@ -1974,45 +1970,34 @@ fn derive_key(
             derived_secret_object(templ, expected_length, maximum_length, software_secret)?;
         validate_new_object_access(&derived_object, flags, logged_in)?;
 
-        let mut derived =
-            Zeroizing::new(match source {
-                DeriveSource::Software(key) => match key.as_ref() {
-                    SoftwarePrivateKeyMaterial::X25519(key) => {
-                        let peer: [u8; 32] = public_data
-                            .try_into()
-                            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-                        key.diffie_hellman(&x25519_dalek::PublicKey::from(peer))
-                            .as_bytes()
-                            .to_vec()
-                    }
-                    key => software_ecdh(key, public_data)?,
-                },
-                DeriveSource::Piv {
-                    slot,
-                    algorithm,
-                    pin_policy,
-                } => ctx._get_session(session_handle)?.1.piv_decipher(
-                    slot,
-                    algorithm,
-                    public_data,
-                    pin_policy,
-                )?,
-                DeriveSource::OpenPgp {
-                    key_ref,
-                    algorithm,
-                    pin_policy,
-                } => ctx._get_session(session_handle)?.1.openpgp_derive(
-                    key_ref,
-                    algorithm,
-                    public_data,
-                    pin_policy,
-                )?,
-                DeriveSource::YubiHsm { id, .. } => {
-                    ctx._get_session(session_handle)?.1.yubihsm_command(
-                        &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
-                    )?
-                }
-            });
+        let mut derived = match source {
+            DeriveSource::Software(key) => software_ecdh(key.as_ref(), public_data)?,
+            DeriveSource::Piv {
+                slot,
+                algorithm,
+                pin_policy,
+            } => Zeroizing::new(ctx._get_session(session_handle)?.1.piv_decipher(
+                slot,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?),
+            DeriveSource::OpenPgp {
+                key_ref,
+                algorithm,
+                pin_policy,
+            } => Zeroizing::new(ctx._get_session(session_handle)?.1.openpgp_derive(
+                key_ref,
+                algorithm,
+                public_data,
+                pin_policy,
+            )?),
+            DeriveSource::YubiHsm { id, .. } => {
+                Zeroizing::new(ctx._get_session(session_handle)?.1.yubihsm_command(
+                    &YubiHsmCommand::key_data(YubiHsmCommandCode::DeriveEcdh, id, public_data)?,
+                )?)
+            }
+        };
         if derived.len() != expected_length {
             return Err(CKR_DEVICE_ERROR.into());
         }
