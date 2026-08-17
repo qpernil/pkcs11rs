@@ -2618,7 +2618,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "virtual-yubikey-core"
 version = "0.1.0"
-source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#cfa7aa549b0215310576cf9f8f926b56647b1bf3"
+source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#481231d65e95e04b9786322692e7eaa7bb51aebc"
 dependencies = [
  "aes 0.8.4",
  "getrandom 0.4.3",
@@ -2639,7 +2639,7 @@ dependencies = [
 [[package]]
 name = "virtual-yubikey-crypto"
 version = "0.1.0"
-source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#cfa7aa549b0215310576cf9f8f926b56647b1bf3"
+source = "git+https://github.com/qpernil/virtual-yubikey?branch=main#481231d65e95e04b9786322692e7eaa7bb51aebc"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
@@ -2653,6 +2653,7 @@ dependencies = [
  "sha2 0.11.0",
  "sha3 0.12.0",
  "signature 3.0.0",
+ "x25519-dalek",
  "zeroize",
 ]
 
