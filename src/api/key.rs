@@ -6,7 +6,7 @@ use super::object::{
 };
 use crate::*;
 use p256::elliptic_curve::Generate;
-use virtual_yubikey_crypto::software_key_agreement::{derive_weierstrass, derive_x25519};
+use software_key_core::software_key_agreement::{derive_weierstrass, derive_x25519};
 use zeroize::Zeroize;
 
 ffi_entry_point! {

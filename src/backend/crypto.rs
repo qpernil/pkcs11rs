@@ -1,9 +1,9 @@
 use crate::*;
 use num_bigint_dig::traits::ModInverse;
-use virtual_yubikey_crypto::rsa_signing::{
+use software_key_core::rsa_signing::{
     RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
 };
-use virtual_yubikey_crypto::software_signing::{
+use software_key_core::software_signing::{
     EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey,
     SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningError,
 };

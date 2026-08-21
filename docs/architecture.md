@@ -150,6 +150,12 @@ GetAssertion mechanism for operational resident credentials; it cannot be
 confused with a bare EC or RSA signing mechanism because its input and
 structured output are separately defined.
 
+Reusable protocol-neutral signing, verification, key serialization, and raw
+key-agreement operations live in the sibling `software-key-core` crate.
+pkcs11rs retains mechanism parsing, attribute and authorization policy,
+persistence, operation state, and `CKR_*` error mapping. Device protocol cores
+retain their identifiers, wire encodings, and device-specific policy.
+
 The `abi-tests` feature uses synthetic slots that identify the real backend
 kind they model. Production dispatch therefore does not contain a generic
 test-slot branch.
