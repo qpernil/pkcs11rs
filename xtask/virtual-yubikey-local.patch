@@ -1,9 +1,0 @@
-diff --git a/Cargo.toml b/Cargo.toml
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -54 +54 @@
--virtual-yubikey-core = { git = "https://github.com/qpernil/virtual-yubikey", branch = "main", optional = true }
-+virtual-yubikey-core = { path = "../virtual-yubikey/crates/virtual-yubikey-core", optional = true }
-@@ -55 +55 @@
--virtual-yubikey-crypto = { git = "https://github.com/qpernil/virtual-yubikey", branch = "main" }
-+virtual-yubikey-crypto = { path = "../virtual-yubikey/crates/virtual-yubikey-crypto" }

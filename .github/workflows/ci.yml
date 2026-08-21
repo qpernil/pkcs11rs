@@ -12,6 +12,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+
       - name: Install Python
         uses: actions/setup-python@v7
         with:
@@ -67,6 +70,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+
       - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@1.85.0
 
@@ -90,17 +96,23 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          path: pkcs11rs
+
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git virtual-yubikey
 
       - name: Check workspace advisories and licenses
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses
+          manifest-path: ./pkcs11rs/Cargo.toml
 
       - name: Check binding generator advisories and licenses
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses
-          manifest-path: ./xtask/Cargo.toml
+          manifest-path: ./pkcs11rs/xtask/Cargo.toml
 
   macos:
     runs-on: macos-latest
@@ -108,6 +120,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
 
       - name: Install Python
         uses: actions/setup-python@v7
@@ -194,6 +209,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
+
       - name: Install Linux native dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -218,6 +236,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Check out first-party dependencies
+        run: git clone --depth 1 https://github.com/qpernil/virtual-yubikey.git ../virtual-yubikey
 
       - name: Install Python
         uses: actions/setup-python@v7
