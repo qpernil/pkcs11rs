@@ -171,6 +171,15 @@ libcurl.
 
 ## Build
 
+The first-party `virtual-yubikey` crates are sibling path dependencies. Clone
+both repositories into the same parent directory:
+
+```sh
+git clone https://github.com/qpernil/virtual-yubikey.git
+git clone https://github.com/qpernil/pkcs11rs.git
+cd pkcs11rs
+```
+
 ```sh
 cargo build --locked
 ```
@@ -865,36 +874,10 @@ used by both the virtual authenticator and pkcs11rs. Its general RSA layer
 covers raw signatures, caller-controlled PKCS #1 v1.5 payloads, all supported
 SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS with independent message hash,
 MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and
-error mapping remain in this repository.
-`pkcs11rs` follows that repository's `main` branch, while `Cargo.lock` records
-the exact commit validated by this checkout. Advance the recorded revision
-with:
-
-```sh
-cargo update -p virtual-yubikey-core -p virtual-yubikey-crypto
-```
-
-For joint development with a sibling `../virtual-yubikey` checkout, switch both
-dependencies to visible path entries in `Cargo.toml`:
-
-```sh
-cargo xtask virtual-yubikey local
-```
-
-The xtask applies the checked-in
-[`virtual-yubikey-local.patch`](xtask/virtual-yubikey-local.patch) forward with
-`git apply`. Unrelated manifest edits are preserved. The command refuses to
-modify a dependency entry that has itself changed or when only one of the two
-entries is already switched. Return to the normal Git dependencies by applying
-the same patch in reverse:
-
-```sh
-cargo xtask virtual-yubikey git
-```
-
-The next unlocked Cargo command refreshes `Cargo.lock` for the selected source.
-Keep the Git form in committed changes so fresh checkouts and CI remain
-self-contained.
+error mapping remain in this repository. The required sibling layout described
+under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
+always see first-party edits immediately; there is no dependency-source switch
+or generated override.
 
 ```sh
 cargo build --release --features mock-yubikey
