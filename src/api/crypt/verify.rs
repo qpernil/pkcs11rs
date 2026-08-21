@@ -5,8 +5,8 @@ use super::sign::{
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
-use virtual_yubikey_crypto::post_quantum::{MlDsaError, MlDsaParameterSet, verify_ml_dsa};
-use virtual_yubikey_crypto::rsa_signing::{
+use software_key_core::post_quantum::{MlDsaError, MlDsaParameterSet, verify_ml_dsa};
+use software_key_core::rsa_signing::{
     RsaSignatureError, rsa_verify_pkcs1v15_digest, rsa_verify_pkcs1v15_payload,
     rsa_verify_pss_digest, rsa_verify_raw,
 };
