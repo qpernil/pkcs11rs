@@ -1589,6 +1589,7 @@ dependencies = [
  "sha2 0.11.0",
  "sha3 0.12.0",
  "signature 3.0.0",
+ "software-key-core",
  "spki 0.8.0",
  "subtle",
  "tracing",
@@ -1596,7 +1597,6 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "virtual-yubikey-core",
- "virtual-yubikey-crypto",
  "x25519-dalek",
  "x509-cert",
  "zeroize",
@@ -2224,6 +2224,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "software-key-core"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.4.3",
+ "k256",
+ "ml-dsa",
+ "p256",
+ "p384",
+ "p521",
+ "rsa",
+ "sha1",
+ "sha2 0.11.0",
+ "sha3 0.12.0",
+ "signature 3.0.0",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2630,28 +2650,8 @@ dependencies = [
  "p521",
  "sha2 0.11.0",
  "signature 3.0.0",
+ "software-key-core",
  "subtle",
- "virtual-yubikey-crypto",
- "zeroize",
-]
-
-[[package]]
-name = "virtual-yubikey-crypto"
-version = "0.1.0"
-dependencies = [
- "ed25519-dalek",
- "getrandom 0.4.3",
- "k256",
- "ml-dsa",
- "p256",
- "p384",
- "p521",
- "rsa",
- "sha1",
- "sha2 0.11.0",
- "sha3 0.12.0",
- "signature 3.0.0",
- "x25519-dalek",
  "zeroize",
 ]
 

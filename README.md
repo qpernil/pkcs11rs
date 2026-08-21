@@ -171,13 +171,15 @@ libcurl.
 
 ## Build
 
-The first-party `virtual-yubikey` crates are sibling path dependencies. Clone
-both repositories into the same parent directory:
+The first-party `software-key-core` and `virtual-yubikey-core` crates are
+sibling path dependencies. Keep all three working repositories in the same
+parent directory:
 
-```sh
-git clone https://github.com/qpernil/virtual-yubikey.git
-git clone https://github.com/qpernil/pkcs11rs.git
-cd pkcs11rs
+```text
+works/
+├── pkcs11rs/
+├── software-key-core/
+└── virtual-yubikey/
 ```
 
 ```sh
@@ -868,9 +870,9 @@ virtual reader or card.
 
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
-The neutral `virtual-yubikey-crypto` crate from the same repository supplies
-the software ECDSA, Ed25519, ML-DSA, and RSA signing and verification primitives
-used by both the virtual authenticator and pkcs11rs. Its general RSA layer
+The neutral sibling `software-key-core` crate supplies the software ECDSA,
+Ed25519, ML-DSA, and RSA signing and verification primitives used by both the
+virtual authenticator and pkcs11rs. Its general RSA layer
 covers raw signatures, caller-controlled PKCS #1 v1.5 payloads, all supported
 SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS with independent message hash,
 MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and

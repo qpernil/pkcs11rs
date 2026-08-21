@@ -7,7 +7,7 @@ use super::{
     },
 };
 use crate::*;
-use virtual_yubikey_crypto::{
+use software_key_core::{
     post_quantum::{MlDsaError, MlDsaParameterSet, MlDsaPrivateKey, MlDsaRandomization},
     rsa_signing::{
         RsaSignatureError, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
