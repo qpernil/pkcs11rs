@@ -1109,7 +1109,7 @@ fn software_generate_key_pair(
                     SoftwarePrivateKeyMaterial::BrainpoolP384(bp384::r1::SecretKey::generate())
                 }
                 EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
-                    crate::brainpool512::SecretKey::generate(),
+                    software_key_core::brainpool512::SecretKey::generate(),
                 ),
             };
             (CKK_EC as CK_KEY_TYPE, material)

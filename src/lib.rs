@@ -180,7 +180,6 @@ mod device;
 use ctap::{AuthenticatorInfo, Client as CtapClient, CtapError, CtapTransport};
 
 mod backed_object;
-mod brainpool512;
 pub mod key_metadata;
 pub mod preview_sign;
 pub mod storage;
