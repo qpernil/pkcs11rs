@@ -92,7 +92,7 @@ pub(crate) enum SoftwarePrivateKeyMaterial {
     K256(k256::SecretKey),
     BrainpoolP256(bp256::r1::SecretKey),
     BrainpoolP384(bp384::r1::SecretKey),
-    BrainpoolP512(crate::brainpool512::SecretKey),
+    BrainpoolP512(software_key_core::brainpool512::SecretKey),
     Ed25519(ed25519_dalek::SigningKey),
     X25519(x25519_dalek::StaticSecret),
     MlDsa44(ml_dsa::SigningKey<ml_dsa::MlDsa44>),

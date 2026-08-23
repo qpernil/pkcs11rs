@@ -2020,7 +2020,7 @@ fn material_from_ec_scalar(
         EcCurve::BrainpoolP256 => key!(BrainpoolP256, bp256::r1::SecretKey),
         EcCurve::BrainpoolP384 => key!(BrainpoolP384, bp384::r1::SecretKey),
         EcCurve::BrainpoolP512 => {
-            key!(BrainpoolP512, crate::brainpool512::SecretKey)
+            key!(BrainpoolP512, software_key_core::brainpool512::SecretKey)
         }
     })
 }
@@ -2179,7 +2179,7 @@ mod tests {
                 bp384::r1::SecretKey::from_slice(&scalar(48)).unwrap(),
             ),
             SoftwarePrivateKeyMaterial::BrainpoolP512(
-                crate::brainpool512::SecretKey::from_slice(&scalar(64)).unwrap(),
+                software_key_core::brainpool512::SecretKey::from_slice(&scalar(64)).unwrap(),
             ),
             SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from([7; 32])),

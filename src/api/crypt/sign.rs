@@ -204,8 +204,8 @@ fn software_sign(
         SoftwarePrivateKeyMaterial::BrainpoolP512(key) => {
             sign_ecdsa!(
                 key,
-                crate::brainpool512::BrainpoolP512r1,
-                crate::brainpool512::Signature
+                software_key_core::brainpool512::BrainpoolP512r1,
+                software_key_core::brainpool512::Signature
             )
         }
         SoftwarePrivateKeyMaterial::Ed25519(key) => {

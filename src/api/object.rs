@@ -1472,7 +1472,7 @@ fn build_imported_key_material(
                             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                     ),
                     EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
-                        crate::brainpool512::SecretKey::from_slice(&scalar)
+                        software_key_core::brainpool512::SecretKey::from_slice(&scalar)
                             .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
                     ),
                 }
