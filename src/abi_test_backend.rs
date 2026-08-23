@@ -780,12 +780,6 @@ fn abi_yubihsm_public_key(key: &p256::ecdsa::SigningKey) -> p256::ecdsa::Verifyi
 }
 
 #[cfg(feature = "abi-tests")]
-fn abi_yubihsm_device_public_key() -> Result<Vec<u8>, Error> {
-    let key = abi_yubihsm_private_key(1)?;
-    Ok(certificate_builder::p256_public_point(key.verifying_key()))
-}
-
-#[cfg(feature = "abi-tests")]
 fn abi_yubihsm_certificate(
     public_key: &p256::ecdsa::VerifyingKey,
     signer: &p256::ecdsa::SigningKey,

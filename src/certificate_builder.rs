@@ -42,6 +42,7 @@ pub(crate) fn rsa_key() -> RsaPrivateKey {
     .clone()
 }
 
+#[cfg(test)]
 pub(crate) fn p256_public_point(key: &VerifyingKey) -> Vec<u8> {
     key.to_sec1_point(false).as_bytes().to_vec()
 }

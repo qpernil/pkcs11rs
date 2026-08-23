@@ -1,8 +1,9 @@
 use super::*;
+use virtual_yubihsm_core::{
+    Device as VirtualYubiHsm, DeviceConfig as VirtualYubiHsmConfig, Frame as VirtualYubiHsmFrame,
+};
 
-const RESPONSE_BIT: u8 = 0x80;
 const COMMAND_ERROR: u8 = 0x7f;
-const CARD_CHALLENGE: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
 
 #[derive(Clone, Debug)]
 struct NativeObject {
@@ -13,10 +14,7 @@ struct NativeObject {
 
 #[derive(Debug)]
 pub(super) struct AbiYubiHsmConnector {
-    serial: u32,
-    sessions: RefCell<HashMap<u8, YubiHsmSecureSession>>,
-    expected_host_cryptograms: RefCell<HashMap<u8, [u8; 8]>>,
-    next_sid: Cell<u8>,
+    device: RefCell<VirtualYubiHsm>,
     objects: RefCell<HashMap<(u8, u16), NativeObject>>,
     concurrency: Option<(Arc<AbiYubiHsmConcurrencyState>, usize)>,
 }
@@ -30,120 +28,52 @@ impl AbiYubiHsmConnector {
             .strip_prefix("HSM")
             .and_then(|serial| serial.parse().ok())
             .ok_or(CKR_ARGUMENTS_BAD)?;
-        Ok(Self {
+        let config = VirtualYubiHsmConfig {
+            version: [2, 4, 0],
             serial,
-            sessions: RefCell::new(HashMap::new()),
-            expected_host_cryptograms: RefCell::new(HashMap::new()),
-            next_sid: Cell::new(1),
+            log_capacity: 62,
+            algorithms: vec![
+                YUBIHSM_ALGO_RSA_PKCS1_SHA1,
+                YUBIHSM_ALGO_RSA_PKCS1_SHA256,
+                YUBIHSM_ALGO_RSA_OAEP_SHA1,
+                YUBIHSM_ALGO_RSA_2048,
+                YUBIHSM_ALGO_AES128_CCM_WRAP,
+                YUBIHSM_ALGO_AES128,
+                YUBIHSM_ALGO_AES_ECB,
+                YUBIHSM_ALGO_AES_CBC,
+                YUBIHSM_ALGO_AES_KWP,
+                YUBIHSM_ALGO_HMAC_SHA256,
+            ],
+            part_number: *b"ABI YubiHSM\0\0",
+        };
+        let mut device_private = [0; 32];
+        device_private[31] = 1;
+        let device =
+            VirtualYubiHsm::factory_default_with_device_static_private(config, device_private)
+                .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
+        Ok(Self {
+            device: RefCell::new(device),
             objects: RefCell::new(initial_objects()?),
             concurrency,
         })
     }
 
     fn reply(&self, request: &[u8]) -> Result<Vec<u8>, Error> {
-        let (command, data) = parse_frame(request)?;
-        match YubiHsmCommandCode::try_from(command)? {
-            YubiHsmCommandCode::CreateSession => {
-                let sid = self.allocate_sid()?;
-                let (session, expected, response) = YubiHsmSecureSession::peer_begin_symmetric(
-                    request,
-                    b"password",
-                    sid,
-                    CARD_CHALLENGE,
-                )?;
-                self.sessions.try_borrow_mut()?.insert(sid, session);
-                self.expected_host_cryptograms
-                    .try_borrow_mut()?
-                    .insert(sid, expected);
-                Ok(response)
-            }
-            YubiHsmCommandCode::AuthenticateSession => {
-                let sid = *data.first().ok_or(CKR_DEVICE_ERROR)?;
-                let expected = self
-                    .expected_host_cryptograms
-                    .try_borrow_mut()?
-                    .remove(&sid)
-                    .ok_or(CKR_DEVICE_ERROR)?;
-                let mut sessions = self.sessions.try_borrow_mut()?;
-                let session = sessions.get_mut(&sid).ok_or(CKR_SESSION_CLOSED)?;
-                let response = session.peer_authenticate_symmetric(request, &expected, &[])?;
-                if !session.is_valid() {
-                    sessions.remove(&sid);
-                }
-                Ok(response)
-            }
-            YubiHsmCommandCode::SessionMessage => {
-                let sid = *data.first().ok_or(CKR_DEVICE_ERROR)?;
-                let mut sessions = self.sessions.try_borrow_mut()?;
-                let session = sessions.get_mut(&sid).ok_or(CKR_SESSION_CLOSED)?;
-                let response = session.peer_exchange(request, |command, data| {
-                    self.handle_command(YubiHsmCommandCode::try_from(command)?, data)
-                        .map(|response| (command | RESPONSE_BIT, response))
-                        .or_else(|error| {
-                            let code = device_error(&error);
-                            Ok((COMMAND_ERROR, vec![code]))
-                        })
-                });
-                let response = match response {
-                    Ok(response) => response,
-                    Err(error) => {
-                        sessions.remove(&sid);
-                        return Err(error);
-                    }
-                };
-                if !session.is_valid() {
-                    sessions.remove(&sid);
-                }
-                Ok(response)
-            }
-            YubiHsmCommandCode::GetDeviceInfo => {
-                let response = match data.as_slice() {
-                    [] => [
-                        &[2, 4, 0][..],
-                        &self.serial.to_be_bytes(),
-                        &[62, 3],
-                        &[
-                            YUBIHSM_ALGO_RSA_PKCS1_SHA1,
-                            YUBIHSM_ALGO_RSA_PKCS1_SHA256,
-                            YUBIHSM_ALGO_RSA_OAEP_SHA1,
-                            YUBIHSM_ALGO_RSA_2048,
-                            YUBIHSM_ALGO_AES128_CCM_WRAP,
-                            YUBIHSM_ALGO_AES128,
-                            YUBIHSM_ALGO_AES_ECB,
-                            YUBIHSM_ALGO_AES_CBC,
-                            YUBIHSM_ALGO_AES_KWP,
-                            YUBIHSM_ALGO_HMAC_SHA256,
-                        ],
-                    ]
-                    .concat(),
-                    [1] => b"ABI YubiHSM".to_vec(),
-                    _ => return Err(CKR_DEVICE_ERROR.into()),
-                };
-                frame(command | RESPONSE_BIT, &response)
-            }
-            YubiHsmCommandCode::GetDevicePublicKey => {
-                let mut key = abi_yubihsm_device_public_key()?;
-                let first = key.first_mut().ok_or(CKR_DEVICE_ERROR)?;
-                *first = YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION;
-                frame(command | RESPONSE_BIT, &key)
-            }
-            _ => Err(CKR_DEVICE_ERROR.into()),
-        }
-    }
-
-    fn allocate_sid(&self) -> Result<u8, Error> {
-        let sessions = self
-            .sessions
-            .try_borrow()
+        let mut device = self
+            .device
+            .try_borrow_mut()
             .map_err(|_| Error::from(CKR_CANT_LOCK))?;
-        for _ in 0..u8::MAX {
-            let sid = self.next_sid.get();
-            self.next_sid.set(sid.wrapping_add(1).max(1));
-            if !sessions.contains_key(&sid) {
-                return Ok(sid);
-            }
-        }
-        Err(CKR_SESSION_COUNT.into())
+        Ok(device.handle_encoded_with(request, |_, request| {
+            let response = YubiHsmCommandCode::try_from(request.command)
+                .and_then(|command| self.handle_command(command, &request.data));
+            Some(match response {
+                Ok(data) => VirtualYubiHsmFrame::response(request.command, data),
+                Err(error) => VirtualYubiHsmFrame {
+                    command: COMMAND_ERROR,
+                    data: vec![device_error(&error)],
+                },
+            })
+        }))
     }
 
     fn handle_command(&self, command: YubiHsmCommandCode, data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -480,24 +410,6 @@ fn encode_object_info(info: &YubiHsmObjectInfo) -> Result<Vec<u8>, Error> {
     encoded[18..18 + info.label.len()].copy_from_slice(info.label.as_bytes());
     encoded[58..].copy_from_slice(&info.delegated_capabilities);
     Ok(encoded)
-}
-
-fn parse_frame(encoded: &[u8]) -> Result<(u8, Vec<u8>), Error> {
-    let command = *encoded.first().ok_or(CKR_DEVICE_ERROR)?;
-    let length = encoded
-        .get(1..3)
-        .and_then(|length| length.try_into().ok())
-        .map(u16::from_be_bytes)
-        .ok_or(CKR_DEVICE_ERROR)? as usize;
-    if encoded.len() != 3 + length {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    Ok((command, encoded[3..].to_vec()))
-}
-
-fn frame(command: u8, data: &[u8]) -> Result<Vec<u8>, Error> {
-    let length = u16::try_from(data.len()).map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-    Ok([&[command][..], &length.to_be_bytes(), data].concat())
 }
 
 fn read_id(data: &[u8]) -> Result<u16, Error> {

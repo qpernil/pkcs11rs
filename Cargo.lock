@@ -595,6 +595,7 @@ dependencies = [
  "const-oid 0.10.2",
  "der_derive",
  "flagset",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -706,6 +707,7 @@ dependencies = [
  "group",
  "hkdf",
  "hybrid-array",
+ "pem-rfc7468",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
  "sec1",
@@ -1516,6 +1518,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1596,6 +1607,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "ureq",
+ "virtual-yubihsm-core",
  "virtual-yubikey-core",
  "x25519-dalek",
  "x509-cert",
@@ -2634,6 +2646,24 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtual-yubihsm-core"
+version = "0.1.0"
+dependencies = [
+ "aes 0.8.4",
+ "cmac",
+ "getrandom 0.4.3",
+ "hmac",
+ "p256",
+ "pbkdf2",
+ "serde",
+ "sha1",
+ "sha2 0.11.0",
+ "software-key-core",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "virtual-yubikey-core"
