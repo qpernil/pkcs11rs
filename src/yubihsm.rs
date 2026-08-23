@@ -280,7 +280,7 @@ impl std::fmt::Debug for SecureSession {
 }
 
 impl SecureSession {
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(test)]
     pub(crate) fn peer_begin_symmetric(
         encoded: &[u8],
         password: &[u8],
@@ -319,7 +319,7 @@ impl SecureSession {
         ))
     }
 
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(test)]
     pub(crate) fn new_peer(
         sid: u8,
         s_enc: [u8; AES_BLOCK_SIZE],
@@ -339,7 +339,7 @@ impl SecureSession {
         }
     }
 
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(test)]
     fn peer_request(&mut self, encoded: &[u8], command: u8) -> Result<Vec<u8>, Error> {
         if !self.valid {
             return Err(CKR_SESSION_CLOSED.into());
@@ -362,7 +362,7 @@ impl SecureSession {
         Ok(frame.data[..payload_length].to_vec())
     }
 
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(test)]
     pub(crate) fn peer_authenticate_symmetric(
         &mut self,
         encoded: &[u8],
@@ -391,7 +391,7 @@ impl SecureSession {
         .map(|frame| frame.encode())
     }
 
-    #[cfg(any(test, feature = "abi-tests"))]
+    #[cfg(test)]
     pub(crate) fn peer_exchange(
         &mut self,
         encoded: &[u8],
