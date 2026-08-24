@@ -8689,8 +8689,8 @@ fn public_key_projection_creates_an_independent_operational_session_object() {
             .find(|(_, object)| object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS)
             .unwrap();
         let private = match &object.material {
-            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(
-                private,
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                crate::SoftwareSigningKey::Rsa(private),
             )) => private.as_ref().clone(),
             _ => panic!("default private key must be RSA"),
         };

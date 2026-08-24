@@ -1548,7 +1548,7 @@ impl Connector for AsymmetricHsmAuthPeer {
         let host_static = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
         let ephemeral_secret = p256_ecdh(&self.ephemeral_key, &device_ephemeral)?;
         let static_secret = p256_ecdh(&host_static, &device_static)?;
-        let keys = x963_session_keys(&ephemeral_secret, &static_secret);
+        let keys = x963_session_keys(&ephemeral_secret, &static_secret)?;
         let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
         receipt_input.extend_from_slice(&context[P256_PUBLIC_KEY_LENGTH..]);
         receipt_input.extend_from_slice(&context[..P256_PUBLIC_KEY_LENGTH]);

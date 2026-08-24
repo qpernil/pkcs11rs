@@ -1,32 +1,21 @@
 use crate::{CKR_FUNCTION_FAILED, Error};
 use p256::SecretKey;
-use sha2::Sha256;
+use software_key_core::secure_channel::{
+    yubico_password_kdf as shared_yubico_password_kdf,
+    yubico_password_p256_key as shared_yubico_password_p256_key,
+};
 use zeroize::Zeroizing;
 
-const SALT: &[u8] = b"Yubico";
-const ITERATIONS: usize = 10_000;
 const OUTPUT_LENGTH: usize = 32;
 
 pub(crate) fn yubico_password_kdf(
     password: &[u8],
 ) -> Result<Zeroizing<[u8; OUTPUT_LENGTH]>, Error> {
-    let mut output = Zeroizing::new([0; OUTPUT_LENGTH]);
-    pbkdf2::pbkdf2_hmac::<Sha256>(password, SALT, ITERATIONS as u32, output.as_mut());
-    Ok(output)
+    Ok(shared_yubico_password_kdf(password))
 }
 
 pub(crate) fn yubico_password_p256_key(password: &[u8]) -> Result<SecretKey, Error> {
-    let mut input = Zeroizing::new(Vec::with_capacity(password.len() + 1));
-    input.extend_from_slice(password);
-    input.push(0);
-    for counter in 0..=u8::MAX {
-        *input.last_mut().ok_or(CKR_FUNCTION_FAILED)? = counter;
-        let private = yubico_password_kdf(&input)?;
-        if let Ok(key) = SecretKey::from_slice(private.as_slice()) {
-            return Ok(key);
-        }
-    }
-    Err(CKR_FUNCTION_FAILED.into())
+    shared_yubico_password_p256_key(password).map_err(|_| CKR_FUNCTION_FAILED.into())
 }
 
 #[cfg(test)]

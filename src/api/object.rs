@@ -403,7 +403,9 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&without_touch)?;
-        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) = parsed.material
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::Rsa(key),
+        )) = parsed.material
         else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
@@ -413,7 +415,9 @@ pub(crate) fn openpgp_private_import(templ: &[CK_ATTRIBUTE]) -> Result<OpenPgpIm
         }
         (
             OpenPgpAlgorithm::Rsa { bits },
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)),
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::Rsa(key),
+            )),
         )
     } else {
         let private = required_template_value(templ, CKA_VALUE as CK_ATTRIBUTE_TYPE)?;
@@ -582,7 +586,9 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             .copied()
             .collect::<Vec<_>>();
         let parsed = parse_create_object_template(&filtered)?;
-        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) = parsed.material
+        let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::Rsa(key),
+        )) = parsed.material
         else {
             return Err(CKR_TEMPLATE_INCONSISTENT.into());
         };
@@ -652,47 +658,48 @@ fn piv_private_import(templ: &[CK_ATTRIBUTE]) -> Result<PivImport, Error> {
             }
             let mut scalar = vec![0; length - private.len()];
             scalar.extend_from_slice(&private);
-            let public = if algorithm == piv::Algorithm::EccP256 {
-                let key = p256::SecretKey::from_slice(&scalar)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p256::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&key.public_key(), false)
-                    .as_bytes()
-                    .to_vec()
+            let signing_algorithm = if algorithm == piv::Algorithm::EccP256 {
+                SoftwareSigningAlgorithm::EcdsaP256Sha256
             } else {
-                let key = p384::SecretKey::from_slice(&scalar)
-                    .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-                p384::elliptic_curve::sec1::ToSec1Point::to_sec1_point(&key.public_key(), false)
-                    .as_bytes()
-                    .to_vec()
+                SoftwareSigningAlgorithm::EcdsaP384Sha384
+            };
+            let public = match SoftwareSigningKey::from_serialized(signing_algorithm, &scalar)
+                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+                .public_key()
+            {
+                SoftwarePublicKey::Ec { uncompressed, .. } => uncompressed,
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
             (algorithm, 0x06, MetadataPublicKey::Ec(public))
         } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let private_bytes: &[u8; 32] = private
-                .as_slice()
-                .try_into()
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            let key = ed25519_dalek::SigningKey::from_bytes(private_bytes);
+            let public = match SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::Ed25519,
+                &private,
+            )
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?
+            .public_key()
+            {
+                SoftwarePublicKey::Ed25519(public) => public.to_vec(),
+                _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
+            };
             (
                 piv::Algorithm::Ed25519,
                 0x07,
-                MetadataPublicKey::Raw(key.verifying_key().to_bytes().to_vec()),
+                MetadataPublicKey::Raw(public),
             )
         } else if key_type == CKK_EC_MONTGOMERY as CK_KEY_TYPE {
             if private.len() != 32 {
                 return Err(CKR_KEY_SIZE_RANGE.into());
             }
-            let private_bytes: [u8; 32] = private
-                .as_slice()
-                .try_into()
+            let key = SoftwareX25519Key::from_serialized(&private)
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            let key = x25519_dalek::StaticSecret::from(private_bytes);
             (
                 piv::Algorithm::X25519,
                 0x08,
-                MetadataPublicKey::Raw(x25519_dalek::PublicKey::from(&key).as_bytes().to_vec()),
+                MetadataPublicKey::Raw(key.public_key().to_vec()),
             )
         } else {
             return Err(CKR_KEY_TYPE_INCONSISTENT.into());
@@ -1076,9 +1083,9 @@ fn yubihsm_import_command(
     object: &TokenObject,
 ) -> Result<(YubiHsmCommand, CK_OBJECT_CLASS, u8), Error> {
     match &object.material {
-        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
-            if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS =>
-        {
+        KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::Rsa(key),
+        )) if object.class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS => {
             let (algorithm, component_length) = match key.size() {
                 256 => (YUBIHSM_ALGO_RSA_2048, 128),
                 384 => (YUBIHSM_ALGO_RSA_3072, 192),
@@ -1420,7 +1427,9 @@ fn build_imported_key_material(
                     .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
             key.precompute()
                 .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?;
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(Box::new(key)))
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::Rsa(Box::new(key)),
+            ))
         }
         (class, key_type)
             if class == CKO_PRIVATE_KEY as CK_OBJECT_CLASS
@@ -1442,40 +1451,10 @@ fn build_imported_key_material(
                     .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
                 let scalar =
                     padded_private_scalar(&value, ec_parameters(curve)?.coordinate_length)?;
-                match curve {
-                    EcCurve::P224 => SoftwarePrivateKeyMaterial::P224(
-                        p224::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::P256 => SoftwarePrivateKeyMaterial::P256(
-                        p256::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::P384 => SoftwarePrivateKeyMaterial::P384(
-                        p384::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::P521 => SoftwarePrivateKeyMaterial::P521(
-                        p521::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::K256 => SoftwarePrivateKeyMaterial::K256(
-                        k256::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::BrainpoolP256 => SoftwarePrivateKeyMaterial::BrainpoolP256(
-                        bp256::r1::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::BrainpoolP384 => SoftwarePrivateKeyMaterial::BrainpoolP384(
-                        bp384::r1::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                    EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
-                        software_key_core::brainpool512::SecretKey::from_slice(&scalar)
-                            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
-                    ),
-                }
+                SoftwarePrivateKeyMaterial::Signing(
+                    SoftwareSigningKey::from_serialized(shared_signing_algorithm(curve), &scalar)
+                        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                )
             } else if key_type == CKK_EC_EDWARDS as CK_KEY_TYPE {
                 if parameters.as_slice()
                     != piv_ec_parameters(piv::Algorithm::Ed25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
@@ -1489,7 +1468,10 @@ fn build_imported_key_material(
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&value))
+                SoftwarePrivateKeyMaterial::Signing(
+                    SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &value)
+                        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                )
             } else {
                 if parameters.as_slice()
                     != piv_ec_parameters(piv::Algorithm::X25519).ok_or(CKR_CURVE_NOT_SUPPORTED)?
@@ -1503,7 +1485,10 @@ fn build_imported_key_material(
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(value))
+                SoftwarePrivateKeyMaterial::X25519(
+                    SoftwareX25519Key::from_serialized(&value)
+                        .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))?,
+                )
             };
             KeyMaterial::SoftwarePrivate(material)
         }

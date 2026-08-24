@@ -822,7 +822,9 @@ pub(crate) fn openpgp_private_key_template(
     match (algorithm, material) {
         (
             OpenPgpAlgorithm::Rsa { bits },
-            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)),
+            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::Rsa(key),
+            )),
         ) => {
             if key.size() * 8 != bits
                 || algorithm_attributes.len() < 6

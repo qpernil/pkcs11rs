@@ -16,11 +16,15 @@ use crate::{
     piv_effective_pin_policy, piv_public_key_from_certificate, send_yubihsm_secure_command,
     yubihsm_capabilities_to_attributes, yubihsm_capability, yubihsm_ec_parameters,
 };
-use rsa::{
-    BigUint, RsaPrivateKey, RsaPublicKey,
-    traits::{PrivateKeyParts, PublicKeyParts},
+use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
+use software_key_core::{
+    post_quantum::{MlDsaParameterSet, ml_dsa_public_key_info as shared_ml_dsa_public_key_info},
+    software_key_agreement::SoftwareX25519Key,
+    software_signing::{
+        EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey, SoftwareSigningAlgorithm,
+        SoftwareSigningKey, SoftwareSigningKeyKind,
+    },
 };
-use signature::Keypair;
 use std::{cell::RefCell, rc::Rc, slice};
 use zeroize::Zeroizing;
 
@@ -84,20 +88,8 @@ pub(crate) enum PublicKeyMaterial {
 
 #[derive(Clone)]
 pub(crate) enum SoftwarePrivateKeyMaterial {
-    Rsa(Box<RsaPrivateKey>),
-    P224(p224::SecretKey),
-    P256(p256::SecretKey),
-    P384(p384::SecretKey),
-    P521(p521::SecretKey),
-    K256(k256::SecretKey),
-    BrainpoolP256(bp256::r1::SecretKey),
-    BrainpoolP384(bp384::r1::SecretKey),
-    BrainpoolP512(software_key_core::brainpool512::SecretKey),
-    Ed25519(ed25519_dalek::SigningKey),
-    X25519(x25519_dalek::StaticSecret),
-    MlDsa44(ml_dsa::SigningKey<ml_dsa::MlDsa44>),
-    MlDsa65(ml_dsa::SigningKey<ml_dsa::MlDsa65>),
-    MlDsa87(ml_dsa::SigningKey<ml_dsa::MlDsa87>),
+    Signing(SoftwareSigningKey),
+    X25519(SoftwareX25519Key),
     MlKem512(ml_kem::DecapsulationKey<ml_kem::MlKem512>),
     MlKem768(ml_kem::DecapsulationKey<ml_kem::MlKem768>),
     MlKem1024(ml_kem::DecapsulationKey<ml_kem::MlKem1024>),
@@ -106,20 +98,8 @@ pub(crate) enum SoftwarePrivateKeyMaterial {
 impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rsa(key) => fmt.debug_tuple("Rsa").field(&key.size()).finish(),
-            Self::P224(_) => fmt.write_str("P224([REDACTED])"),
-            Self::P256(_) => fmt.write_str("P256([REDACTED])"),
-            Self::P384(_) => fmt.write_str("P384([REDACTED])"),
-            Self::P521(_) => fmt.write_str("P521([REDACTED])"),
-            Self::K256(_) => fmt.write_str("K256([REDACTED])"),
-            Self::BrainpoolP256(_) => fmt.write_str("BrainpoolP256([REDACTED])"),
-            Self::BrainpoolP384(_) => fmt.write_str("BrainpoolP384([REDACTED])"),
-            Self::BrainpoolP512(_) => fmt.write_str("BrainpoolP512([REDACTED])"),
-            Self::Ed25519(_) => fmt.write_str("Ed25519([REDACTED])"),
+            Self::Signing(key) => fmt.debug_tuple("Signing").field(key).finish(),
             Self::X25519(_) => fmt.write_str("X25519([REDACTED])"),
-            Self::MlDsa44(_) => fmt.write_str("MlDsa44([REDACTED])"),
-            Self::MlDsa65(_) => fmt.write_str("MlDsa65([REDACTED])"),
-            Self::MlDsa87(_) => fmt.write_str("MlDsa87([REDACTED])"),
             Self::MlKem512(_) => fmt.write_str("MlKem512([REDACTED])"),
             Self::MlKem768(_) => fmt.write_str("MlKem768([REDACTED])"),
             Self::MlKem1024(_) => fmt.write_str("MlKem1024([REDACTED])"),
@@ -129,94 +109,69 @@ impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
 
 impl SoftwarePrivateKeyMaterial {
     pub(crate) fn weierstrass_curve(&self) -> Option<crate::EcCurve> {
-        match self {
-            Self::P224(_) => Some(crate::EcCurve::P224),
-            Self::P256(_) => Some(crate::EcCurve::P256),
-            Self::P384(_) => Some(crate::EcCurve::P384),
-            Self::P521(_) => Some(crate::EcCurve::P521),
-            Self::K256(_) => Some(crate::EcCurve::K256),
-            Self::BrainpoolP256(_) => Some(crate::EcCurve::BrainpoolP256),
-            Self::BrainpoolP384(_) => Some(crate::EcCurve::BrainpoolP384),
-            Self::BrainpoolP512(_) => Some(crate::EcCurve::BrainpoolP512),
-            Self::Rsa(_)
-            | Self::Ed25519(_)
-            | Self::X25519(_)
-            | Self::MlDsa44(_)
-            | Self::MlDsa65(_)
-            | Self::MlDsa87(_)
-            | Self::MlKem512(_)
-            | Self::MlKem768(_)
-            | Self::MlKem1024(_) => None,
+        let Self::Signing(key) = self else {
+            return None;
+        };
+        match key.kind() {
+            SoftwareSigningKeyKind::Ec(curve) => Some(local_ec_curve(curve)),
+            SoftwareSigningKeyKind::Ed25519
+            | SoftwareSigningKeyKind::Rsa
+            | SoftwareSigningKeyKind::MlDsa(_) => None,
         }
     }
 
     pub(crate) fn key_type(&self) -> CK_KEY_TYPE {
         match self {
-            Self::Rsa(_) => CKK_RSA as CK_KEY_TYPE,
-            Self::P224(_)
-            | Self::P256(_)
-            | Self::P384(_)
-            | Self::P521(_)
-            | Self::K256(_)
-            | Self::BrainpoolP256(_)
-            | Self::BrainpoolP384(_)
-            | Self::BrainpoolP512(_) => CKK_EC as CK_KEY_TYPE,
-            Self::Ed25519(_) => CKK_EC_EDWARDS as CK_KEY_TYPE,
+            Self::Signing(key) => match key.kind() {
+                SoftwareSigningKeyKind::Ec(_) => CKK_EC as CK_KEY_TYPE,
+                SoftwareSigningKeyKind::Ed25519 => CKK_EC_EDWARDS as CK_KEY_TYPE,
+                SoftwareSigningKeyKind::Rsa => CKK_RSA as CK_KEY_TYPE,
+                SoftwareSigningKeyKind::MlDsa(_) => CKK_ML_DSA as CK_KEY_TYPE,
+            },
             Self::X25519(_) => CKK_EC_MONTGOMERY as CK_KEY_TYPE,
-            Self::MlDsa44(_) | Self::MlDsa65(_) | Self::MlDsa87(_) => CKK_ML_DSA as CK_KEY_TYPE,
             Self::MlKem512(_) | Self::MlKem768(_) | Self::MlKem1024(_) => CKK_ML_KEM as CK_KEY_TYPE,
         }
     }
 
     pub(crate) fn public_key(&self) -> Result<PublicKeyMaterial, Error> {
-        macro_rules! weierstrass {
-            ($key:expr, $curve:expr) => {{
-                let encoded =
-                    elliptic_curve::sec1::ToSec1Point::to_sec1_point(&$key.public_key(), false);
-                let public_key = encoded
-                    .as_bytes()
-                    .strip_prefix(&[0x04])
-                    .ok_or(CKR_DATA_INVALID)?
-                    .to_vec();
-                Ok(PublicKeyMaterial::Ec {
-                    parameters: crate::ec_curve_parameters($curve).to_vec(),
-                    public_key,
-                })
-            }};
-        }
         match self {
-            Self::Rsa(key) => Ok(PublicKeyMaterial::Rsa(RsaPublicKey::from(key.as_ref()))),
-            Self::P224(key) => weierstrass!(key, crate::EcCurve::P224),
-            Self::P256(key) => weierstrass!(key, crate::EcCurve::P256),
-            Self::P384(key) => weierstrass!(key, crate::EcCurve::P384),
-            Self::P521(key) => weierstrass!(key, crate::EcCurve::P521),
-            Self::K256(key) => weierstrass!(key, crate::EcCurve::K256),
-            Self::BrainpoolP256(key) => weierstrass!(key, crate::EcCurve::BrainpoolP256),
-            Self::BrainpoolP384(key) => weierstrass!(key, crate::EcCurve::BrainpoolP384),
-            Self::BrainpoolP512(key) => weierstrass!(key, crate::EcCurve::BrainpoolP512),
-            Self::Ed25519(key) => Ok(PublicKeyMaterial::Ec {
-                parameters: crate::piv_ec_parameters(piv::Algorithm::Ed25519)
-                    .ok_or(CKR_CURVE_NOT_SUPPORTED)?
-                    .to_vec(),
-                public_key: key.verifying_key().to_bytes().to_vec(),
-            }),
+            Self::Signing(key) => match key.public_key() {
+                SharedPublicKey::Ec {
+                    curve,
+                    uncompressed,
+                } => Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::ec_curve_parameters(local_ec_curve(curve)).to_vec(),
+                    public_key: uncompressed
+                        .strip_prefix(&[0x04])
+                        .ok_or(CKR_DATA_INVALID)?
+                        .to_vec(),
+                }),
+                SharedPublicKey::Ed25519(public_key) => Ok(PublicKeyMaterial::Ec {
+                    parameters: crate::piv_ec_parameters(piv::Algorithm::Ed25519)
+                        .ok_or(CKR_CURVE_NOT_SUPPORTED)?
+                        .to_vec(),
+                    public_key: public_key.to_vec(),
+                }),
+                SharedPublicKey::MlDsa {
+                    parameter_set,
+                    public_key,
+                } => Ok(PublicKeyMaterial::MlDsa {
+                    parameter_set: local_ml_dsa_parameter_set(parameter_set),
+                    public_key,
+                }),
+                SharedPublicKey::Rsa { modulus, exponent } => Ok(PublicKeyMaterial::Rsa(
+                    RsaPublicKey::new(
+                        BigUint::from_bytes_be(&modulus),
+                        BigUint::from_bytes_be(&exponent),
+                    )
+                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+                )),
+            },
             Self::X25519(key) => Ok(PublicKeyMaterial::Ec {
                 parameters: crate::piv_ec_parameters(piv::Algorithm::X25519)
                     .ok_or(CKR_CURVE_NOT_SUPPORTED)?
                     .to_vec(),
-                public_key: x25519_dalek::PublicKey::from(key).as_bytes().to_vec(),
-            }),
-            Self::MlDsa44(key) => Ok(PublicKeyMaterial::MlDsa {
-                parameter_set: CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE,
-                public_key: key.verifying_key().encode().to_vec(),
-            }),
-            Self::MlDsa65(key) => Ok(PublicKeyMaterial::MlDsa {
-                parameter_set: CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE,
-                public_key: key.verifying_key().encode().to_vec(),
-            }),
-            Self::MlDsa87(key) => Ok(PublicKeyMaterial::MlDsa {
-                parameter_set: CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE,
-                public_key: key.verifying_key().encode().to_vec(),
+                public_key: key.public_key().to_vec(),
             }),
             Self::MlKem512(key) => Ok(PublicKeyMaterial::MlKem {
                 parameter_set: CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE,
@@ -233,23 +188,11 @@ impl SoftwarePrivateKeyMaterial {
         }
     }
 
-    #[allow(deprecated)] // PKCS #11 CKA_VALUE requires the FIPS 204 expanded private key.
+    #[allow(deprecated)] // PKCS #11 CKA_VALUE requires expanded ML-KEM private keys.
     pub(crate) fn private_value(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Rsa(_) => None,
-            Self::P224(key) => Some(key.to_bytes().to_vec()),
-            Self::P256(key) => Some(key.to_bytes().to_vec()),
-            Self::P384(key) => Some(key.to_bytes().to_vec()),
-            Self::P521(key) => Some(key.to_bytes().to_vec()),
-            Self::K256(key) => Some(key.to_bytes().to_vec()),
-            Self::BrainpoolP256(key) => Some(key.to_bytes().to_vec()),
-            Self::BrainpoolP384(key) => Some(key.to_bytes().to_vec()),
-            Self::BrainpoolP512(key) => Some(key.to_bytes().to_vec()),
-            Self::Ed25519(key) => Some(key.to_bytes().to_vec()),
-            Self::X25519(key) => Some(key.to_bytes().to_vec()),
-            Self::MlDsa44(key) => Some(key.expanded_key().to_expanded().to_vec()),
-            Self::MlDsa65(key) => Some(key.expanded_key().to_expanded().to_vec()),
-            Self::MlDsa87(key) => Some(key.expanded_key().to_expanded().to_vec()),
+            Self::Signing(key) => key.private_value().map(|value| value.to_vec()),
+            Self::X25519(key) => Some(key.serialized().to_vec()),
             Self::MlKem512(key) => {
                 Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
             }
@@ -264,9 +207,7 @@ impl SoftwarePrivateKeyMaterial {
 
     pub(crate) fn ml_dsa_seed(&self) -> Option<Vec<u8>> {
         match self {
-            Self::MlDsa44(key) => Some(key.as_seed().to_vec()),
-            Self::MlDsa65(key) => Some(key.as_seed().to_vec()),
-            Self::MlDsa87(key) => Some(key.as_seed().to_vec()),
+            Self::Signing(SoftwareSigningKey::MlDsa(key)) => Some(key.seed().to_vec()),
             _ => None,
         }
     }
@@ -278,6 +219,40 @@ impl SoftwarePrivateKeyMaterial {
             Self::MlKem1024(key) => key.to_seed().map(|seed| seed.to_vec()),
             _ => None,
         }
+    }
+}
+
+pub(crate) fn local_ec_curve(curve: SharedEcCurve) -> crate::EcCurve {
+    match curve {
+        SharedEcCurve::P224 => crate::EcCurve::P224,
+        SharedEcCurve::P256 => crate::EcCurve::P256,
+        SharedEcCurve::P384 => crate::EcCurve::P384,
+        SharedEcCurve::P521 => crate::EcCurve::P521,
+        SharedEcCurve::Secp256k1 => crate::EcCurve::K256,
+        SharedEcCurve::BrainpoolP256 => crate::EcCurve::BrainpoolP256,
+        SharedEcCurve::BrainpoolP384 => crate::EcCurve::BrainpoolP384,
+        SharedEcCurve::BrainpoolP512 => crate::EcCurve::BrainpoolP512,
+    }
+}
+
+pub(crate) fn shared_signing_algorithm(curve: crate::EcCurve) -> SoftwareSigningAlgorithm {
+    match curve {
+        crate::EcCurve::P224 => SoftwareSigningAlgorithm::EcdsaP224Sha224,
+        crate::EcCurve::P256 => SoftwareSigningAlgorithm::EcdsaP256Sha256,
+        crate::EcCurve::P384 => SoftwareSigningAlgorithm::EcdsaP384Sha384,
+        crate::EcCurve::P521 => SoftwareSigningAlgorithm::EcdsaP521Sha512,
+        crate::EcCurve::K256 => SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256,
+        crate::EcCurve::BrainpoolP256 => SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+        crate::EcCurve::BrainpoolP384 => SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+        crate::EcCurve::BrainpoolP512 => SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+    }
+}
+
+fn local_ml_dsa_parameter_set(parameter_set: MlDsaParameterSet) -> CK_ML_DSA_PARAMETER_SET_TYPE {
+    match parameter_set {
+        MlDsaParameterSet::MlDsa44 => CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE,
+        MlDsaParameterSet::MlDsa65 => CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE,
+        MlDsaParameterSet::MlDsa87 => CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE,
     }
 }
 
@@ -1075,22 +1050,13 @@ pub(crate) fn ml_dsa_public_key_info(
     parameter_set: CK_ML_DSA_PARAMETER_SET_TYPE,
     public_key: &[u8],
 ) -> Option<Vec<u8>> {
-    macro_rules! encode {
-        ($params:ty) => {{
-            use ml_dsa::pkcs8::EncodePublicKey;
-            let encoded = ml_dsa::EncodedVerifyingKey::<$params>::try_from(public_key).ok()?;
-            ml_dsa::VerifyingKey::<$params>::decode(&encoded)
-                .to_public_key_der()
-                .ok()
-                .map(|document| document.as_bytes().to_vec())
-        }};
-    }
-    match parameter_set {
-        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa44),
-        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa65),
-        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => encode!(ml_dsa::MlDsa87),
-        _ => None,
-    }
+    let parameter_set = match parameter_set {
+        x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa44,
+        x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa65,
+        x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => MlDsaParameterSet::MlDsa87,
+        _ => return None,
+    };
+    shared_ml_dsa_public_key_info(parameter_set, public_key).ok()
 }
 
 pub(crate) fn ml_kem_public_key_info(
@@ -1753,39 +1719,45 @@ impl TokenObject {
                 }
             }
             x if x == CKA_PRIVATE_EXPONENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    Some(key.d().to_bytes_be())
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[0].to_vec()),
                 _ => None,
             },
             x if x == CKA_PRIME_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    key.primes().first().map(BigUint::to_bytes_be)
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[1].to_vec()),
                 _ => None,
             },
             x if x == CKA_PRIME_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    key.primes().get(1).map(BigUint::to_bytes_be)
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[2].to_vec()),
                 _ => None,
             },
             x if x == CKA_EXPONENT_1 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    key.dp().map(BigUint::to_bytes_be)
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[3].to_vec()),
                 _ => None,
             },
             x if x == CKA_EXPONENT_2 as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    key.dq().map(BigUint::to_bytes_be)
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[4].to_vec()),
                 _ => None,
             },
             x if x == CKA_COEFFICIENT as CK_ATTRIBUTE_TYPE => match &self.material {
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                    key.qinv().map(|value| value.to_signed_bytes_be())
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(key)) => key
+                    .rsa_private_components()
+                    .ok()
+                    .map(|values| values[5].to_vec()),
                 _ => None,
             },
             x if x == CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE => {
@@ -2708,9 +2680,13 @@ mod post_quantum_tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let material = SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(
-            &ml_dsa::Seed::from(seed),
-        ));
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+                &seed,
+            )
+            .unwrap(),
+        );
         let PublicKeyMaterial::MlDsa {
             parameter_set,
             public_key,

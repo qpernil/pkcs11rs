@@ -219,15 +219,17 @@ pub(crate) fn piv_public_key_from_certificate(
         piv::Algorithm::EccP256 | piv::Algorithm::EccP384 => {
             let coordinate_length = piv_ec_coordinate_length(algorithm).unwrap_or_default();
             let point = certificate_key;
-            match algorithm {
-                piv::Algorithm::EccP256 => p256::PublicKey::from_sec1_bytes(&point)
-                    .map(|_| ())
-                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
-                piv::Algorithm::EccP384 => p384::PublicKey::from_sec1_bytes(&point)
-                    .map(|_| ())
-                    .map_err(|_| Error::from(CKR_DATA_INVALID))?,
+            let curve = match algorithm {
+                piv::Algorithm::EccP256 => software_key_core::software_signing::EcCurve::P256,
+                piv::Algorithm::EccP384 => software_key_core::software_signing::EcCurve::P384,
                 _ => return Err(CKR_DATA_INVALID.into()),
+            };
+            software_key_core::software_signing::SoftwarePublicKey::Ec {
+                curve,
+                uncompressed: point.clone(),
             }
+            .validate()
+            .map_err(|_| Error::from(CKR_DATA_INVALID))?;
             if point.len() != coordinate_length * 2 + 1 || point[0] != 0x04 {
                 return Err(CKR_DEVICE_ERROR.into());
             }

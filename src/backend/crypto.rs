@@ -1,5 +1,4 @@
 use crate::*;
-use num_bigint_dig::traits::ModInverse;
 use software_key_core::rsa_signing::{
     RsaHashAlgorithm as SharedRsaHashAlgorithm, RsaPssParameters as SharedRsaPssParameters,
 };
@@ -446,15 +445,19 @@ pub(crate) fn ec_curve_parameters(curve: EcCurve) -> &'static [u8] {
 }
 
 pub(crate) struct EcParameters {
+    #[cfg(test)]
     pub(crate) p: BigUint,
+    #[cfg(test)]
     a: BigUint,
-    b: BigUint,
+    #[cfg(test)]
     pub(crate) gx: BigUint,
+    #[cfg(test)]
     pub(crate) gy: BigUint,
     pub(crate) n: BigUint,
     pub(crate) coordinate_length: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct EcPointValue {
     pub(crate) x: BigUint,
@@ -542,16 +545,20 @@ pub(crate) fn ec_parameters(curve: EcCurve) -> Result<EcParameters, Error> {
         ),
     };
     Ok(EcParameters {
+        #[cfg(test)]
         p: biguint_hex(values.0)?,
+        #[cfg(test)]
         a: biguint_hex(values.1)?,
-        b: biguint_hex(values.2)?,
+        #[cfg(test)]
         gx: biguint_hex(values.3)?,
+        #[cfg(test)]
         gy: biguint_hex(values.4)?,
         n: biguint_hex(values.5)?,
         coordinate_length: values.6,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> BigUint {
     if left >= right {
         (left - right) % modulus
@@ -560,6 +567,7 @@ pub(crate) fn mod_sub(left: &BigUint, right: &BigUint, modulus: &BigUint) -> Big
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ec_infinity() -> EcPointValue {
     EcPointValue {
         x: BigUint::from(0u8),
@@ -568,6 +576,7 @@ pub(crate) fn ec_infinity() -> EcPointValue {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ec_double(point: &EcPointValue, parameters: &EcParameters) -> EcPointValue {
     let zero = BigUint::from(0u8);
     if point.z == zero || point.y == zero {
@@ -592,6 +601,7 @@ pub(crate) fn ec_double(point: &EcPointValue, parameters: &EcParameters) -> EcPo
     EcPointValue { x, y, z }
 }
 
+#[cfg(test)]
 pub(crate) fn ec_add(
     left: &EcPointValue,
     right: &EcPointValue,
@@ -653,119 +663,29 @@ pub(crate) fn ec_multiply(
     result
 }
 
-fn ec_multiply_sum(
-    left_scalar: &BigUint,
-    left_point: &EcPointValue,
-    right_scalar: &BigUint,
-    right_point: &EcPointValue,
-    parameters: &EcParameters,
-) -> EcPointValue {
-    let left = left_scalar.to_bytes_be();
-    let right = right_scalar.to_bytes_be();
-    let length = left.len().max(right.len());
-    let left_offset = length - left.len();
-    let right_offset = length - right.len();
-    let combined_point = ec_add(left_point, right_point, parameters);
-    let mut result = ec_infinity();
-    for index in 0..length {
-        let left_byte = if index < left_offset {
-            0
-        } else {
-            left[index - left_offset]
-        };
-        let right_byte = if index < right_offset {
-            0
-        } else {
-            right[index - right_offset]
-        };
-        for bit in (0..8).rev() {
-            result = ec_double(&result, parameters);
-            let left_set = left_byte & (1 << bit) != 0;
-            let right_set = right_byte & (1 << bit) != 0;
-            result = match (left_set, right_set) {
-                (false, false) => result,
-                (true, false) => ec_add(&result, left_point, parameters),
-                (false, true) => ec_add(&result, right_point, parameters),
-                (true, true) => ec_add(&result, &combined_point, parameters),
-            };
-        }
+fn shared_ec_profile(curve: EcCurve) -> (SharedEcCurve, SharedSigningAlgorithm) {
+    match curve {
+        EcCurve::P224 => (SharedEcCurve::P224, SharedSigningAlgorithm::EcdsaP224Sha224),
+        EcCurve::P256 => (SharedEcCurve::P256, SharedSigningAlgorithm::EcdsaP256Sha256),
+        EcCurve::P384 => (SharedEcCurve::P384, SharedSigningAlgorithm::EcdsaP384Sha384),
+        EcCurve::P521 => (SharedEcCurve::P521, SharedSigningAlgorithm::EcdsaP521Sha512),
+        EcCurve::K256 => (
+            SharedEcCurve::Secp256k1,
+            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
+        ),
+        EcCurve::BrainpoolP256 => (
+            SharedEcCurve::BrainpoolP256,
+            SharedSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+        ),
+        EcCurve::BrainpoolP384 => (
+            SharedEcCurve::BrainpoolP384,
+            SharedSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+        ),
+        EcCurve::BrainpoolP512 => (
+            SharedEcCurve::BrainpoolP512,
+            SharedSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+        ),
     }
-    result
-}
-
-fn verify_generic_ecdsa(
-    parameters: EcParameters,
-    public_key: &[u8],
-    digest: &[u8],
-    signature: &[u8],
-) -> Result<(), Error> {
-    // All values used below are public. The variable-time BigUint arithmetic is
-    // therefore appropriate here, but must not be reused for private-key work.
-    let coordinate_length = parameters.coordinate_length;
-    let q = EcPointValue {
-        x: BigUint::from_bytes_be(&public_key[..coordinate_length]),
-        y: BigUint::from_bytes_be(&public_key[coordinate_length..]),
-        z: BigUint::from(1u8),
-    };
-    if q.x >= parameters.p || q.y >= parameters.p {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-    }
-    let lhs = (&q.y * &q.y) % &parameters.p;
-    let rhs = (((&q.x * &q.x * &q.x) + (&parameters.a * &q.x)) + &parameters.b) % &parameters.p;
-    if lhs != rhs {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
-    }
-    let r = BigUint::from_bytes_be(&signature[..coordinate_length]);
-    let s = BigUint::from_bytes_be(&signature[coordinate_length..]);
-    let zero = BigUint::from(0u8);
-    if r == zero || r >= parameters.n || s == zero || s >= parameters.n {
-        return Err(CKR_SIGNATURE_INVALID.into());
-    }
-    let mut z = BigUint::from_bytes_be(digest);
-    let n_bits = parameters.n.bits();
-    if digest.len() * 8 > n_bits {
-        z >>= digest.len() * 8 - n_bits;
-    }
-    let w = s
-        .mod_inverse(&parameters.n)
-        .and_then(|inverse| inverse.to_biguint())
-        .ok_or(CKR_SIGNATURE_INVALID)?;
-    let u1 = (z * &w) % &parameters.n;
-    let u2 = (&r * &w) % &parameters.n;
-    let generator = EcPointValue {
-        x: parameters.gx.clone(),
-        y: parameters.gy.clone(),
-        z: BigUint::from(1u8),
-    };
-    let point = ec_multiply_sum(&u1, &generator, &u2, &q, &parameters);
-    if point.z == zero {
-        return Err(CKR_SIGNATURE_INVALID.into());
-    }
-    let inverse = point
-        .z
-        .mod_inverse(&parameters.p)
-        .and_then(|inverse| inverse.to_biguint())
-        .ok_or(CKR_SIGNATURE_INVALID)?;
-    let x = (&point.x * &inverse * &inverse) % &parameters.p;
-    if x % &parameters.n == r {
-        Ok(())
-    } else {
-        Err(CKR_SIGNATURE_INVALID.into())
-    }
-}
-
-macro_rules! verify_rustcrypto_ecdsa {
-    ($curve:ty, $public_key:expr, $digest:expr, $signature:expr) => {{
-        let mut encoded_public_key = Vec::with_capacity(1 + $public_key.len());
-        encoded_public_key.push(0x04);
-        encoded_public_key.extend_from_slice($public_key);
-        let verifying_key = ecdsa::VerifyingKey::<$curve>::from_sec1_bytes(&encoded_public_key)
-            .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-        let signature = ecdsa::Signature::<$curve>::from_slice($signature)
-            .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))?;
-        signature::hazmat::PrehashVerifier::verify_prehash(&verifying_key, $digest, &signature)
-            .map_err(|_| Error::from(CKR_SIGNATURE_INVALID))
-    }};
 }
 
 pub(crate) fn verify_ecdsa(
@@ -781,42 +701,16 @@ pub(crate) fn verify_ecdsa(
     if signature.len() != parameters.coordinate_length * 2 {
         return Err(CKR_SIGNATURE_LEN_RANGE.into());
     }
-    let verify_shared = |curve, algorithm| {
-        let mut uncompressed = Vec::with_capacity(1 + public_key.len());
-        uncompressed.push(0x04);
-        uncompressed.extend_from_slice(public_key);
-        SharedPublicKey::Ec {
-            curve,
-            uncompressed,
-        }
-        .verify_prehash(algorithm, digest, signature)
-        .map_err(shared_verification_error)
-    };
-    match curve {
-        EcCurve::P224 => {
-            verify_rustcrypto_ecdsa!(p224::NistP224, public_key, digest, signature)
-        }
-        EcCurve::P256 => {
-            verify_shared(SharedEcCurve::P256, SharedSigningAlgorithm::EcdsaP256Sha256)
-        }
-        EcCurve::P384 => {
-            verify_shared(SharedEcCurve::P384, SharedSigningAlgorithm::EcdsaP384Sha384)
-        }
-        EcCurve::P521 => {
-            verify_shared(SharedEcCurve::P521, SharedSigningAlgorithm::EcdsaP521Sha512)
-        }
-        EcCurve::K256 => verify_shared(
-            SharedEcCurve::Secp256k1,
-            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
-        ),
-        EcCurve::BrainpoolP256 => {
-            verify_rustcrypto_ecdsa!(bp256::BrainpoolP256r1, public_key, digest, signature)
-        }
-        EcCurve::BrainpoolP384 => {
-            verify_rustcrypto_ecdsa!(bp384::BrainpoolP384r1, public_key, digest, signature)
-        }
-        EcCurve::BrainpoolP512 => verify_generic_ecdsa(parameters, public_key, digest, signature),
+    let (curve, algorithm) = shared_ec_profile(curve);
+    let mut uncompressed = Vec::with_capacity(1 + public_key.len());
+    uncompressed.push(0x04);
+    uncompressed.extend_from_slice(public_key);
+    SharedPublicKey::Ec {
+        curve,
+        uncompressed,
     }
+    .verify_prehash(algorithm, digest, signature)
+    .map_err(shared_verification_error)
 }
 
 pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(), Error> {
@@ -824,18 +718,13 @@ pub(crate) fn validate_ec_public_point(curve: EcCurve, point: &[u8]) -> Result<(
     if point.len() != 1 + parameters.coordinate_length * 2 || point[0] != 0x04 {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     }
-    let x = BigUint::from_bytes_be(&point[1..1 + parameters.coordinate_length]);
-    let y = BigUint::from_bytes_be(&point[1 + parameters.coordinate_length..]);
-    if x >= parameters.p || y >= parameters.p {
-        return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+    let (curve, _) = shared_ec_profile(curve);
+    SharedPublicKey::Ec {
+        curve,
+        uncompressed: point.to_vec(),
     }
-    let lhs = (&y * &y) % &parameters.p;
-    let rhs = (((&x * &x * &x) + (&parameters.a * &x)) + &parameters.b) % &parameters.p;
-    if lhs == rhs {
-        Ok(())
-    } else {
-        Err(CKR_KEY_TYPE_INCONSISTENT.into())
-    }
+    .validate()
+    .map_err(shared_verification_error)
 }
 
 pub(crate) fn ec_curve_from_parameters(parameters: &[u8]) -> Result<EcCurve, Error> {

@@ -16,7 +16,7 @@ use p256::{
     ecdh::diffie_hellman,
     elliptic_curve::{Generate, sec1::ToSec1Point},
 };
-use sha2::{Digest, Sha256};
+use software_key_core::secure_channel::x963_kdf_sha256;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -826,7 +826,7 @@ impl SecureSession {
             let device_ephemeral_public = &handshake.context[P256_PUBLIC_KEY_LENGTH..];
             let device_ephemeral_key = parse_p256_public_key(device_ephemeral_public)?;
             let ephemeral_secret = p256_ecdh(host_ephemeral_key, &device_ephemeral_key)?;
-            let session_keys = x963_session_keys(&ephemeral_secret, static_secret);
+            let session_keys = x963_session_keys(&ephemeral_secret, static_secret)?;
 
             let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
             receipt_input.extend_from_slice(device_ephemeral_public);
@@ -1039,19 +1039,17 @@ fn p256_ecdh(private: &P256SecretKey, public: &P256PublicKey) -> Result<Zeroizin
     Ok(secret)
 }
 
-fn x963_session_keys(ephemeral: &[u8], static_secret: &[u8]) -> Zeroizing<[u8; 64]> {
-    let mut output = Zeroizing::new([0; 64]);
-    for (index, chunk) in output.chunks_mut(32).enumerate() {
-        let mut input = Zeroizing::new(Vec::with_capacity(
-            ephemeral.len() + static_secret.len() + 4 + SCP11_SHARED_INFO.len(),
-        ));
-        input.extend_from_slice(ephemeral);
-        input.extend_from_slice(static_secret);
-        input.extend_from_slice(&((index + 1) as u32).to_be_bytes());
-        input.extend_from_slice(&SCP11_SHARED_INFO);
-        chunk.copy_from_slice(&Sha256::digest(&input));
-    }
-    output
+fn x963_session_keys(ephemeral: &[u8], static_secret: &[u8]) -> Result<Zeroizing<[u8; 64]>, Error> {
+    let mut shared_secret =
+        Zeroizing::new(Vec::with_capacity(ephemeral.len() + static_secret.len()));
+    shared_secret.extend_from_slice(ephemeral);
+    shared_secret.extend_from_slice(static_secret);
+    x963_kdf_sha256(&shared_secret, &SCP11_SHARED_INFO, 64)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?
+        .as_slice()
+        .try_into()
+        .map(Zeroizing::new)
+        .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 fn secure_message_length(data_length: usize) -> usize {
