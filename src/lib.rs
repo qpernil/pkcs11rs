@@ -19,6 +19,13 @@ use rsa::{
     BigUint, RsaPrivateKey, RsaPublicKey,
     traits::{PrivateKeyParts, PublicKeyParts},
 };
+pub(crate) use software_key_core::{
+    post_quantum::{MlDsaParameterSet, MlDsaPrivateKey},
+    software_key_agreement::SoftwareX25519Key,
+    software_signing::{
+        SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey, SoftwareSigningKeyKind,
+    },
+};
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},

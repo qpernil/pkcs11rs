@@ -364,8 +364,9 @@ fn crypt_init(
                     } else {
                         matches!(
                             object.material,
-                            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(_))
-                                | KeyMaterial::YubiHsm { .. }
+                            KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                                SoftwareSigningKey::Rsa(_),
+                            )) | KeyMaterial::YubiHsm { .. }
                                 | KeyMaterial::PivPrivate { .. }
                                 | KeyMaterial::OpenPgpPrivate { .. }
                         )
@@ -1440,11 +1441,9 @@ fn crypt(
         } else {
             match &operation.key {
                 KeyMaterial::Public(PublicKeyMaterial::Rsa(key)) => key.size(),
-                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
-                    if !encrypting =>
-                {
-                    key.size()
-                }
+                KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                    SoftwareSigningKey::Rsa(key),
+                )) if !encrypting => key.size(),
                 KeyMaterial::PivPrivate { .. } | KeyMaterial::OpenPgpPrivate { .. }
                     if !encrypting =>
                 {
@@ -1486,9 +1485,9 @@ fn crypt(
                     }
                 }
                 match &operation.key {
-                    KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(key))
-                        if !encrypting =>
-                    {
+                    KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                        SoftwareSigningKey::Rsa(key),
+                    )) if !encrypting => {
                         if input.len() != key.size() {
                             return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
                         }

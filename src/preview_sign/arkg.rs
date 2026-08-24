@@ -2,18 +2,13 @@
 
 use super::{PreviewSignDerivedKeyRecord, PreviewSignError, PreviewSignRegistration};
 use crate::storage::ContentReference;
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use minicbor::{Decoder, Encoder};
-use p256::{
-    FieldBytes, ProjectivePoint, PublicKey, Scalar,
-    elliptic_curve::{
-        Group,
-        group::ff::{Field, PrimeField},
-        sec1::ToSec1Point,
-    },
+use p256::PublicKey;
+use software_key_core::arkg::{
+    ARKG_P256_MAX_CONTEXT_LENGTH as MAX_CONTEXT_LENGTH, ARKG_P256_MIN_IKM_LENGTH as MIN_IKM_LENGTH,
+    ARKG_P256_POINT_LENGTH as P256_POINT_LENGTH, ARKG_P256_TICKET_LENGTH as ARKG_TICKET_LENGTH,
+    arkg_p256_derive_public,
 };
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 /// Experimental COSE algorithm identifier for ESP256-split with ARKG-P256.
 pub const ARKG_P256_ESP256_ALGORITHM: i64 = -65_539;
@@ -26,19 +21,6 @@ pub const ESP256_ALGORITHM: i64 = -9;
 
 const COSE_EC2_KEY_TYPE: i64 = 2;
 const COSE_P256_CURVE: i64 = 1;
-const MAX_CONTEXT_LENGTH: usize = 64;
-const MIN_IKM_LENGTH: usize = 32;
-const P256_POINT_LENGTH: usize = 65;
-const ARKG_TICKET_LENGTH: usize = 16 + P256_POINT_LENGTH;
-const HASH_TO_SCALAR_LENGTH: usize = 48;
-
-const DERIVE_KEY_KEM_LABEL: &[u8] = b"ARKG-Derive-Key-KEM.";
-const DERIVE_KEY_BL_LABEL: &[u8] = b"ARKG-Derive-Key-BL.";
-const KEM_KEY_GENERATION_LABEL: &[u8] = b"ARKG-KEM-ECDH-KG.ARKG-ECDH.ARKG-P256";
-const ECDH_AUGMENTED_DST: &[u8] = b"ARKG-ECDH.ARKG-P256";
-const KEM_MAC_LABEL: &[u8] = b"ARKG-KEM-HMAC-mac.";
-const KEM_SHARED_LABEL: &[u8] = b"ARKG-KEM-HMAC-shared.";
-const BLINDING_PRF_LABEL: &[u8] = b"ARKG-BL-EC.ARKG-P256";
 
 /// A validated ARKG-P256 public seed returned by `previewSign` registration.
 ///
@@ -337,45 +319,25 @@ fn derive_public_key(
     input_keying_material: &[u8],
     context: &[u8],
 ) -> Result<ArkgP256DerivedKey, PreviewSignError> {
-    let context_length = u8::try_from(context.len())
-        .map_err(|_| PreviewSignError::Malformed("ARKG context length overflow"))?;
-    let mut context_prime = Vec::with_capacity(1 + context.len());
-    context_prime.push(context_length);
-    context_prime.extend_from_slice(context);
-    let context_kem = concatenate(&[DERIVE_KEY_KEM_LABEL, &context_prime]);
-    let context_bl = concatenate(&[DERIVE_KEY_BL_LABEL, &context_prime]);
-
-    let ephemeral_scalar = hash_to_scalar(input_keying_material, KEM_KEY_GENERATION_LABEL)?;
-    if bool::from(ephemeral_scalar.is_zero()) {
-        return Err(PreviewSignError::Malformed(
-            "ARKG KEM derived the zero scalar",
-        ));
-    }
-    let ephemeral_public_key =
-        projective_to_uncompressed(ProjectivePoint::GENERATOR * ephemeral_scalar)?;
-    let shared_point = seed.kem_public_key.to_projective() * ephemeral_scalar;
-    let shared_point = projective_to_uncompressed(shared_point)?;
-    let mut shared_secret = Zeroizing::new([0u8; 32]);
-    shared_secret.copy_from_slice(&shared_point[1..33]);
-
-    let mac_info = concatenate(&[KEM_MAC_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
-    let mac_key = hkdf_sha256(&shared_secret[..], &mac_info)?;
-    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&mac_key[..])
-        .map_err(|_| PreviewSignError::Malformed("ARKG HMAC key is invalid"))?;
-    mac.update(&ephemeral_public_key);
-    let tag = mac.finalize().into_bytes();
-
-    let shared_info = concatenate(&[KEM_SHARED_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
-    let blinding_input = hkdf_sha256(&shared_secret[..], &shared_info)?;
-    let blinding_dst = concatenate(&[BLINDING_PRF_LABEL, &context_bl]);
-    let tau = hash_to_scalar(&blinding_input[..], &blinding_dst)?;
-
-    let derived_point = seed.blinding_public_key.to_projective() + ProjectivePoint::GENERATOR * tau;
-    let public_key_sec1 = projective_to_uncompressed(derived_point)?;
-
-    let mut ticket = [0u8; ARKG_TICKET_LENGTH];
-    ticket[..16].copy_from_slice(&tag[..16]);
-    ticket[16..].copy_from_slice(&ephemeral_public_key);
+    let derived = arkg_p256_derive_public(
+        &seed.blinding_public_key.to_sec1_bytes(),
+        &seed.kem_public_key.to_sec1_bytes(),
+        input_keying_material,
+        context,
+    )
+    .map_err(|error| {
+        PreviewSignError::Malformed(match error {
+            software_key_core::arkg::ArkgP256Error::ContextTooLong => {
+                "ARKG derivation context is longer than 64 bytes"
+            }
+            software_key_core::arkg::ArkgP256Error::InputKeyingMaterialTooShort => {
+                "ARKG-P256 input keying material is shorter than 32 bytes"
+            }
+            _ => "ARKG-P256 public derivation failed",
+        })
+    })?;
+    let public_key_sec1 = derived.public_key;
+    let ticket = derived.ticket;
 
     let verification_key_cose = encode_verification_key(&public_key_sec1)?;
     let signing_arguments_cbor = encode_signing_arguments(&ticket, context)?;
@@ -386,105 +348,6 @@ fn derive_public_key(
         context: context.to_vec(),
         signing_arguments_cbor,
     })
-}
-
-fn hkdf_sha256(
-    input_keying_material: &[u8],
-    info: &[u8],
-) -> Result<Zeroizing<[u8; 32]>, PreviewSignError> {
-    let hkdf = Hkdf::<Sha256>::new(None, input_keying_material);
-    let mut output = Zeroizing::new([0u8; 32]);
-    hkdf.expand(info, &mut *output)
-        .map_err(|_| PreviewSignError::Malformed("ARKG HKDF output length is invalid"))?;
-    Ok(output)
-}
-
-fn hash_to_scalar(message: &[u8], domain: &[u8]) -> Result<Scalar, PreviewSignError> {
-    if domain.len() > u8::MAX as usize {
-        return Err(PreviewSignError::Malformed(
-            "ARKG hash-to-scalar domain is too long",
-        ));
-    }
-
-    let mut domain_prime = Vec::with_capacity(domain.len() + 1);
-    domain_prime.extend_from_slice(domain);
-    domain_prime.push(
-        u8::try_from(domain.len())
-            .map_err(|_| PreviewSignError::Malformed("ARKG domain length overflow"))?,
-    );
-
-    let mut b0_hasher = Sha256::new();
-    b0_hasher.update([0u8; 64]);
-    b0_hasher.update(message);
-    b0_hasher.update([0, HASH_TO_SCALAR_LENGTH as u8]);
-    b0_hasher.update([0]);
-    b0_hasher.update(&domain_prime);
-    let b0 = b0_hasher.finalize();
-
-    let mut b1_hasher = Sha256::new();
-    b1_hasher.update(b0);
-    b1_hasher.update([1]);
-    b1_hasher.update(&domain_prime);
-    let b1 = b1_hasher.finalize();
-
-    let mut xored = [0u8; 32];
-    for (output, (left, right)) in xored.iter_mut().zip(b0.iter().zip(b1.iter())) {
-        *output = left ^ right;
-    }
-    let mut b2_hasher = Sha256::new();
-    b2_hasher.update(xored);
-    b2_hasher.update([2]);
-    b2_hasher.update(&domain_prime);
-    let b2 = b2_hasher.finalize();
-
-    let mut uniform = [0u8; HASH_TO_SCALAR_LENGTH];
-    uniform[..32].copy_from_slice(&b1);
-    uniform[32..].copy_from_slice(&b2[..16]);
-    reduce_48_bytes(&uniform)
-}
-
-fn reduce_48_bytes(uniform: &[u8; HASH_TO_SCALAR_LENGTH]) -> Result<Scalar, PreviewSignError> {
-    let high = scalar_from_24_bytes(&uniform[..24])?;
-    let low = scalar_from_24_bytes(&uniform[24..])?;
-    let mut two_to_192_bytes = FieldBytes::default();
-    two_to_192_bytes[7] = 1;
-    let two_to_192 = Option::<Scalar>::from(Scalar::from_repr(two_to_192_bytes)).ok_or(
-        PreviewSignError::Malformed("ARKG scalar reduction constant is invalid"),
-    )?;
-    Ok(high * two_to_192 + low)
-}
-
-fn scalar_from_24_bytes(input: &[u8]) -> Result<Scalar, PreviewSignError> {
-    if input.len() != 24 {
-        return Err(PreviewSignError::Malformed(
-            "ARKG scalar reduction input has invalid length",
-        ));
-    }
-    let mut bytes = FieldBytes::default();
-    bytes[8..].copy_from_slice(input);
-    Option::<Scalar>::from(Scalar::from_repr(bytes)).ok_or(PreviewSignError::Malformed(
-        "ARKG scalar reduction input is out of range",
-    ))
-}
-
-fn projective_to_uncompressed(
-    point: ProjectivePoint,
-) -> Result<[u8; P256_POINT_LENGTH], PreviewSignError> {
-    if bool::from(point.is_identity()) {
-        return Err(PreviewSignError::Malformed(
-            "ARKG derivation produced the identity point",
-        ));
-    }
-    let encoded = point.to_affine().to_sec1_point(false);
-    let bytes = encoded.as_bytes();
-    if bytes.len() != P256_POINT_LENGTH {
-        return Err(PreviewSignError::Malformed(
-            "ARKG P-256 point has invalid length",
-        ));
-    }
-    let mut output = [0u8; P256_POINT_LENGTH];
-    output.copy_from_slice(bytes);
-    Ok(output)
 }
 
 fn encode_verification_key(
@@ -664,21 +527,13 @@ pub(super) fn validate_derived_key_record(
     )?)
 }
 
-fn concatenate(parts: &[&[u8]]) -> Vec<u8> {
-    let length = parts.iter().map(|part| part.len()).sum();
-    let mut output = Vec::with_capacity(length);
-    for part in parts {
-        output.extend_from_slice(part);
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
+    use sha2::{Digest, Sha256};
     use signature::hazmat::{PrehashSigner, PrehashVerifier};
-    use subtle::ConstantTimeEq;
+    use software_key_core::arkg::{ArkgP256Error, arkg_p256_derive_private};
 
     const BLINDING_PUBLIC_KEY: &str = "046d3bdf31d0db48988f16d47048fdd24123cd286e42d0512daa9f726b4ecf18df\
          65ed42169c69675f936ff7de5f9bd93adbc8ea73036b16e8d90adbfabdaddba7";
@@ -715,15 +570,15 @@ mod tests {
     /// authenticator. Keeping this beside the protocol vectors prevents
     /// private-seed operations from becoming part of the production API.
     struct MockPreviewSignAuthenticator {
-        blinding_private_key: Scalar,
-        kem_private_key: Scalar,
+        blinding_private_key: [u8; 32],
+        kem_private_key: [u8; 32],
     }
 
     impl MockPreviewSignAuthenticator {
         fn from_vector() -> Self {
             Self {
-                blinding_private_key: scalar_from_hex(BLINDING_PRIVATE_KEY),
-                kem_private_key: scalar_from_hex(KEM_PRIVATE_KEY),
+                blinding_private_key: decode_hex(BLINDING_PRIVATE_KEY).try_into().unwrap(),
+                kem_private_key: decode_hex(KEM_PRIVATE_KEY).try_into().unwrap(),
             }
         }
 
@@ -732,46 +587,18 @@ mod tests {
             signing_arguments_cbor: &[u8],
         ) -> Result<SigningKey, &'static str> {
             let (ticket, context) = decode_mock_signing_arguments(signing_arguments_cbor)?;
-            let ephemeral_public_key =
-                PublicKey::from_sec1_bytes(&ticket[16..]).map_err(|_| "invalid ticket point")?;
-            let shared_point = ephemeral_public_key.to_projective() * self.kem_private_key;
-            let shared_point =
-                projective_to_uncompressed(shared_point).map_err(|_| "invalid shared point")?;
-            let mut shared_secret = Zeroizing::new([0u8; 32]);
-            shared_secret.copy_from_slice(&shared_point[1..33]);
-
-            let context_length =
-                u8::try_from(context.len()).map_err(|_| "context length overflow")?;
-            if context.len() > MAX_CONTEXT_LENGTH {
-                return Err("context is too long");
-            }
-            let mut context_prime = Vec::with_capacity(1 + context.len());
-            context_prime.push(context_length);
-            context_prime.extend_from_slice(&context);
-            let context_kem = concatenate(&[DERIVE_KEY_KEM_LABEL, &context_prime]);
-            let mac_info = concatenate(&[KEM_MAC_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
-            let mac_key = hkdf_sha256(&shared_secret[..], &mac_info).map_err(|_| "HKDF failed")?;
-            let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&mac_key[..])
-                .map_err(|_| "invalid HMAC key")?;
-            mac.update(&ticket[16..]);
-            let expected_tag = mac.finalize().into_bytes();
-            if !bool::from(ticket[..16].ct_eq(&expected_tag[..16])) {
-                return Err("ticket authentication failed");
-            }
-
-            let shared_info = concatenate(&[KEM_SHARED_LABEL, ECDH_AUGMENTED_DST, &context_kem]);
-            let blinding_input =
-                hkdf_sha256(&shared_secret[..], &shared_info).map_err(|_| "HKDF failed")?;
-            let context_bl = concatenate(&[DERIVE_KEY_BL_LABEL, &context_prime]);
-            let blinding_dst = concatenate(&[BLINDING_PRF_LABEL, &context_bl]);
-            let tau =
-                hash_to_scalar(&blinding_input[..], &blinding_dst).map_err(|_| "PRF failed")?;
-            let private_key = self.blinding_private_key + tau;
-            if bool::from(private_key.is_zero()) {
-                return Err("derived private key is zero");
-            }
-
-            SigningKey::from_bytes(&private_key.to_bytes()).map_err(|_| "invalid signing key")
+            let private_key = arkg_p256_derive_private(
+                &self.blinding_private_key,
+                &self.kem_private_key,
+                &ticket,
+                &context,
+            )
+            .map_err(|error| match error {
+                ArkgP256Error::TicketAuthenticationFailed => "ticket authentication failed",
+                ArkgP256Error::InvalidTicketPoint => "invalid ticket point",
+                _ => "private derivation failed",
+            })?;
+            SigningKey::from_slice(&private_key[..]).map_err(|_| "invalid signing key")
         }
 
         fn sign_digest(
@@ -799,11 +626,6 @@ mod tests {
                 u8::try_from((high << 4) | low).unwrap()
             })
             .collect()
-    }
-
-    fn scalar_from_hex(input: &str) -> Scalar {
-        let bytes: [u8; 32] = decode_hex(input).try_into().unwrap();
-        Option::<Scalar>::from(Scalar::from_repr(bytes.into())).unwrap()
     }
 
     fn decode_mock_signing_arguments(

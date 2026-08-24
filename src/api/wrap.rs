@@ -871,8 +871,9 @@ fn unwrap_key(
                     {
                         return Err(CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into());
                     }
-                    let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(private_key)) =
-                        &wrapper.material
+                    let KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                        SoftwareSigningKey::Rsa(private_key),
+                    )) = &wrapper.material
                     else {
                         return Err(CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT.into());
                     };

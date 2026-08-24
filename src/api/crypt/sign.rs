@@ -8,14 +8,8 @@ use super::{
 };
 use crate::*;
 use software_key_core::{
-    post_quantum::{MlDsaError, MlDsaParameterSet, MlDsaPrivateKey, MlDsaRandomization},
-    rsa_signing::{
-        RsaSignatureError, rsa_sign_pkcs1v15_digest, rsa_sign_pkcs1v15_payload,
-        rsa_sign_pss_digest, rsa_sign_raw,
-    },
-    software_signing::{
-        SoftwareSigningAlgorithm as SharedSigningAlgorithm, SoftwareSigningKey as SharedSigningKey,
-    },
+    post_quantum::{MlDsaError, MlDsaRandomization},
+    software_signing::SoftwareSigningAlgorithm as SharedSigningAlgorithm,
 };
 
 const AES_CMAC_LENGTH: usize = 16;
@@ -74,34 +68,57 @@ fn software_sign_mechanism_supported(
     mechanism: CK_MECHANISM_TYPE,
 ) -> bool {
     match key {
-        SoftwarePrivateKeyMaterial::Rsa(_) => {
-            mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
-                || mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
-                || piv_is_hashed_rsa_pkcs(mechanism)
-                || piv_is_pss_mechanism(mechanism)
-        }
-        SoftwarePrivateKeyMaterial::Ed25519(_) => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+        SoftwarePrivateKeyMaterial::Signing(key) => match key.kind() {
+            SoftwareSigningKeyKind::Rsa => {
+                mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE
+                    || mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE
+                    || piv_is_hashed_rsa_pkcs(mechanism)
+                    || piv_is_pss_mechanism(mechanism)
+            }
+            SoftwareSigningKeyKind::Ed25519 => mechanism == CKM_EDDSA as CK_MECHANISM_TYPE,
+            SoftwareSigningKeyKind::MlDsa(_) => mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE,
+            SoftwareSigningKeyKind::Ec(_) => {
+                mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism)
+            }
+        },
         SoftwarePrivateKeyMaterial::X25519(_) => false,
-        SoftwarePrivateKeyMaterial::MlDsa44(_)
-        | SoftwarePrivateKeyMaterial::MlDsa65(_)
-        | SoftwarePrivateKeyMaterial::MlDsa87(_) => mechanism == CKM_ML_DSA as CK_MECHANISM_TYPE,
-        _ => mechanism == CKM_ECDSA as CK_MECHANISM_TYPE || piv_is_hashed_ecdsa(mechanism),
+        SoftwarePrivateKeyMaterial::MlKem512(_)
+        | SoftwarePrivateKeyMaterial::MlKem768(_)
+        | SoftwarePrivateKeyMaterial::MlKem1024(_) => false,
     }
 }
 
 fn software_signature_length(key: &SoftwarePrivateKeyMaterial) -> Result<usize, Error> {
     match key {
-        SoftwarePrivateKeyMaterial::Rsa(key) => Ok(key.size()),
-        SoftwarePrivateKeyMaterial::Ed25519(_) => Ok(64),
+        SoftwarePrivateKeyMaterial::Signing(key) => match key.kind() {
+            SoftwareSigningKeyKind::Rsa => {
+                key.rsa_size().map_err(|_| CKR_KEY_TYPE_INCONSISTENT.into())
+            }
+            SoftwareSigningKeyKind::Ed25519 => Ok(64),
+            SoftwareSigningKeyKind::MlDsa(parameter_set) => Ok(parameter_set.signature_length()),
+            SoftwareSigningKeyKind::Ec(curve) => Ok(ec_parameters(match curve {
+                software_key_core::software_signing::EcCurve::P224 => EcCurve::P224,
+                software_key_core::software_signing::EcCurve::P256 => EcCurve::P256,
+                software_key_core::software_signing::EcCurve::P384 => EcCurve::P384,
+                software_key_core::software_signing::EcCurve::P521 => EcCurve::P521,
+                software_key_core::software_signing::EcCurve::Secp256k1 => EcCurve::K256,
+                software_key_core::software_signing::EcCurve::BrainpoolP256 => {
+                    EcCurve::BrainpoolP256
+                }
+                software_key_core::software_signing::EcCurve::BrainpoolP384 => {
+                    EcCurve::BrainpoolP384
+                }
+                software_key_core::software_signing::EcCurve::BrainpoolP512 => {
+                    EcCurve::BrainpoolP512
+                }
+            })?
+            .coordinate_length
+                * 2),
+        },
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        SoftwarePrivateKeyMaterial::MlDsa44(_) => Ok(2420),
-        SoftwarePrivateKeyMaterial::MlDsa65(_) => Ok(3309),
-        SoftwarePrivateKeyMaterial::MlDsa87(_) => Ok(4627),
-        _ => Ok(
-            ec_parameters(key.weierstrass_curve().ok_or(CKR_KEY_TYPE_INCONSISTENT)?)?
-                .coordinate_length
-                * 2,
-        ),
+        SoftwarePrivateKeyMaterial::MlKem512(_)
+        | SoftwarePrivateKeyMaterial::MlKem768(_)
+        | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
@@ -112,30 +129,6 @@ fn software_sign(
     ml_dsa: Option<&MlDsaSignatureParameters>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    macro_rules! sign_ecdsa {
-        ($key:expr, $curve:ty, $signature:ty) => {{
-            let digest = piv_hash_mechanism(mechanism)
-                .map(|digest| hash(digest, data).map(|value| value.to_vec()))
-                .transpose()?
-                .unwrap_or_else(|| data.to_vec());
-            let signing_key = ecdsa::SigningKey::<$curve>::from($key.clone());
-            let signature: $signature =
-                signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest)
-                    .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-            Ok(signature.to_bytes().to_vec())
-        }};
-    }
-    fn shared_prehash(
-        algorithm: SharedSigningAlgorithm,
-        serialized: &[u8],
-        digest: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        let key = SharedSigningKey::from_serialized(algorithm, serialized)
-            .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-        key.sign_prehash(algorithm, digest)
-            .map(|signature| signature.into_bytes())
-            .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
-    }
     let digest = || {
         piv_hash_mechanism(mechanism)
             .map(|digest| hash(digest, data).map(|value| value.to_vec()))
@@ -143,7 +136,9 @@ fn software_sign(
             .map(|digest| digest.unwrap_or_else(|| data.to_vec()))
     };
     match key {
-        SoftwarePrivateKeyMaterial::Rsa(key) => {
+        SoftwarePrivateKeyMaterial::Signing(key)
+            if matches!(key.kind(), SoftwareSigningKeyKind::Rsa) =>
+        {
             let digest = piv_hash_mechanism(mechanism)
                 .map(|digest| hash(digest, data).map(|value| value.to_vec()))
                 .transpose()?;
@@ -151,110 +146,79 @@ fn software_sign(
                 let parameters =
                     shared_rsa_pss_parameters(pss.ok_or(CKR_MECHANISM_PARAM_INVALID)?)?;
                 let digest = digest.as_deref().unwrap_or(data);
-                rsa_sign_pss_digest(key, parameters, digest)
+                key.sign_rsa_pss_digest(
+                    parameters.hash,
+                    parameters.mgf_hash,
+                    parameters.salt_length,
+                    digest,
+                )
+                .map(|value| value.into_bytes())
             } else if piv_is_hashed_rsa_pkcs(mechanism) {
                 let digest = digest.as_deref().ok_or(CKR_MECHANISM_PARAM_INVALID)?;
-                rsa_sign_pkcs1v15_digest(key, shared_rsa_hash_algorithm(mechanism)?, digest)
+                key.sign_rsa_pkcs1v15_digest(shared_rsa_hash_algorithm(mechanism)?, digest)
+                    .map(|value| value.into_bytes())
             } else if mechanism == CKM_RSA_PKCS as CK_MECHANISM_TYPE {
-                rsa_sign_pkcs1v15_payload(key, data)
+                key.sign_rsa_pkcs1v15_payload(data)
+                    .map(|value| value.into_bytes())
             } else if mechanism == CKM_RSA_X_509 as CK_MECHANISM_TYPE {
-                rsa_sign_raw(key, data)
+                key.sign_rsa_raw(data).map(|value| value.into_bytes())
             } else {
                 return Err(CKR_MECHANISM_INVALID.into());
             };
-            result.map_err(shared_rsa_signing_error)
+            result.map_err(shared_signing_error)
         }
-        SoftwarePrivateKeyMaterial::P224(key) => {
-            sign_ecdsa!(key, p224::NistP224, p224::ecdsa::Signature)
-        }
-        SoftwarePrivateKeyMaterial::P256(key) => shared_prehash(
-            SharedSigningAlgorithm::EcdsaP256Sha256,
-            key.to_bytes().as_ref(),
-            &digest()?,
-        ),
-        SoftwarePrivateKeyMaterial::P384(key) => shared_prehash(
-            SharedSigningAlgorithm::EcdsaP384Sha384,
-            key.to_bytes().as_ref(),
-            &digest()?,
-        ),
-        SoftwarePrivateKeyMaterial::P521(key) => shared_prehash(
-            SharedSigningAlgorithm::EcdsaP521Sha512,
-            key.to_bytes().as_ref(),
-            &digest()?,
-        ),
-        SoftwarePrivateKeyMaterial::K256(key) => shared_prehash(
-            SharedSigningAlgorithm::EcdsaSecp256k1Sha256,
-            key.to_bytes().as_ref(),
-            &digest()?,
-        ),
-        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => {
-            sign_ecdsa!(
-                key,
-                bp256::BrainpoolP256r1,
-                ecdsa::Signature<bp256::BrainpoolP256r1>
-            )
-        }
-        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => {
-            sign_ecdsa!(
-                key,
-                bp384::BrainpoolP384r1,
-                ecdsa::Signature<bp384::BrainpoolP384r1>
-            )
-        }
-        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => {
-            sign_ecdsa!(
-                key,
-                software_key_core::brainpool512::BrainpoolP512r1,
-                software_key_core::brainpool512::Signature
-            )
-        }
-        SoftwarePrivateKeyMaterial::Ed25519(key) => {
+        SoftwarePrivateKeyMaterial::Signing(key)
+            if matches!(key.kind(), SoftwareSigningKeyKind::Ed25519) =>
+        {
             let algorithm = SharedSigningAlgorithm::Ed25519;
-            let key = SharedSigningKey::from_serialized(algorithm, &key.to_bytes())
-                .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
             key.sign_message(algorithm, data)
                 .map(|signature| signature.into_bytes())
                 .map_err(|_| Error::from(CKR_FUNCTION_FAILED))
         }
+        SoftwarePrivateKeyMaterial::Signing(key)
+            if matches!(key.kind(), SoftwareSigningKeyKind::Ec(_)) =>
+        {
+            let SoftwareSigningKeyKind::Ec(curve) = key.kind() else {
+                return Err(CKR_KEY_TYPE_INCONSISTENT.into());
+            };
+            let algorithm = shared_signing_algorithm(local_ec_curve(curve));
+            key.sign_prehash(algorithm, &digest()?)
+                .map(|signature| signature.into_bytes())
+                .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))
+        }
         SoftwarePrivateKeyMaterial::X25519(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-        SoftwarePrivateKeyMaterial::MlDsa44(_)
-        | SoftwarePrivateKeyMaterial::MlDsa65(_)
-        | SoftwarePrivateKeyMaterial::MlDsa87(_) => shared_ml_dsa_sign(key, ml_dsa, data),
+        SoftwarePrivateKeyMaterial::Signing(key)
+            if matches!(key.kind(), SoftwareSigningKeyKind::MlDsa(_)) =>
+        {
+            shared_ml_dsa_sign(key, ml_dsa, data)
+        }
+        SoftwarePrivateKeyMaterial::Signing(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
         SoftwarePrivateKeyMaterial::MlKem512(_)
         | SoftwarePrivateKeyMaterial::MlKem768(_)
         | SoftwarePrivateKeyMaterial::MlKem1024(_) => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }
 
-fn shared_rsa_signing_error(error: RsaSignatureError) -> Error {
+fn shared_signing_error(error: software_key_core::software_signing::SoftwareSigningError) -> Error {
+    use software_key_core::software_signing::SoftwareSigningError;
     match error {
-        RsaSignatureError::InputTooLong | RsaSignatureError::InvalidDigestLength => {
-            CKR_DATA_LEN_RANGE.into()
+        SoftwareSigningError::AlgorithmMismatch | SoftwareSigningError::InvalidPrivateKey => {
+            CKR_KEY_TYPE_INCONSISTENT.into()
         }
-        RsaSignatureError::InputOutOfRange => CKR_DATA_INVALID.into(),
-        RsaSignatureError::InvalidKey => CKR_KEY_TYPE_INCONSISTENT.into(),
-        RsaSignatureError::RandomnessUnavailable => CKR_RANDOM_NO_RNG.into(),
-        RsaSignatureError::InvalidSignature | RsaSignatureError::OperationFailed => {
-            CKR_FUNCTION_FAILED.into()
-        }
+        SoftwareSigningError::RandomnessUnavailable => CKR_RANDOM_NO_RNG.into(),
+        SoftwareSigningError::InvalidPublicKey
+        | SoftwareSigningError::InvalidSignature
+        | SoftwareSigningError::SigningFailed => CKR_FUNCTION_FAILED.into(),
     }
 }
 
 fn shared_ml_dsa_sign(
-    key: &SoftwarePrivateKeyMaterial,
+    key: &SoftwareSigningKey,
     parameters: Option<&MlDsaSignatureParameters>,
     data: &[u8],
 ) -> Result<Vec<u8>, Error> {
-    let (parameter_set, seed) = match key {
-        SoftwarePrivateKeyMaterial::MlDsa44(key) => {
-            (MlDsaParameterSet::MlDsa44, key.as_seed().to_vec())
-        }
-        SoftwarePrivateKeyMaterial::MlDsa65(key) => {
-            (MlDsaParameterSet::MlDsa65, key.as_seed().to_vec())
-        }
-        SoftwarePrivateKeyMaterial::MlDsa87(key) => {
-            (MlDsaParameterSet::MlDsa87, key.as_seed().to_vec())
-        }
+    let key = match key {
+        SoftwareSigningKey::MlDsa(key) => key,
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     };
     let parameters = parameters.ok_or(CKR_MECHANISM_PARAM_INVALID)?;
@@ -264,9 +228,7 @@ fn shared_ml_dsa_sign(
         x if x == CKH_HEDGE_PREFERRED as CK_HEDGE_TYPE => MlDsaRandomization::HedgePreferred,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
     };
-    MlDsaPrivateKey::from_seed_slice(parameter_set, &seed)
-        .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?
-        .sign(data, &parameters.context, randomization)
+    key.sign(data, &parameters.context, randomization)
         .map_err(|error| match error {
             MlDsaError::RandomnessUnavailable => Error::from(CKR_RANDOM_NO_RNG),
             MlDsaError::InvalidContext => Error::from(CKR_MECHANISM_PARAM_INVALID),

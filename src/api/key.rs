@@ -5,8 +5,7 @@ use super::object::{
     yubihsm_hardware_import_object, yubihsm_id, yubihsm_object_parameters,
 };
 use crate::*;
-use p256::elliptic_curve::Generate;
-use software_key_core::software_key_agreement::{derive_weierstrass, derive_x25519};
+use software_key_core::software_key_agreement::derive_with_signing_key;
 use zeroize::Zeroize;
 
 ffi_entry_point! {
@@ -1082,13 +1081,12 @@ fn software_generate_key_pair(
                     return Err(CKR_ATTRIBUTE_VALUE_INVALID.into());
                 }
             }
-            let mut key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, bits as usize)
-                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
-            key.precompute()
-                .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?;
             (
                 CKK_RSA as CK_KEY_TYPE,
-                SoftwarePrivateKeyMaterial::Rsa(Box::new(key)),
+                SoftwarePrivateKeyMaterial::Signing(
+                    SoftwareSigningKey::generate_rsa(bits as usize)
+                        .map_err(|_| Error::from(CKR_FUNCTION_FAILED))?,
+                ),
             )
         }
         x if x == CKM_EC_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
@@ -1096,22 +1094,10 @@ fn software_generate_key_pair(
                 required_template_value(public_template, CKA_EC_PARAMS as CK_ATTRIBUTE_TYPE)?;
             let curve = ec_curve_from_parameters(&parameters)
                 .map_err(|_| Error::from(CKR_CURVE_NOT_SUPPORTED))?;
-            let material = match curve {
-                EcCurve::P224 => SoftwarePrivateKeyMaterial::P224(p224::SecretKey::generate()),
-                EcCurve::P256 => SoftwarePrivateKeyMaterial::P256(p256::SecretKey::generate()),
-                EcCurve::P384 => SoftwarePrivateKeyMaterial::P384(p384::SecretKey::generate()),
-                EcCurve::P521 => SoftwarePrivateKeyMaterial::P521(p521::SecretKey::generate()),
-                EcCurve::K256 => SoftwarePrivateKeyMaterial::K256(k256::SecretKey::generate()),
-                EcCurve::BrainpoolP256 => {
-                    SoftwarePrivateKeyMaterial::BrainpoolP256(bp256::r1::SecretKey::generate())
-                }
-                EcCurve::BrainpoolP384 => {
-                    SoftwarePrivateKeyMaterial::BrainpoolP384(bp384::r1::SecretKey::generate())
-                }
-                EcCurve::BrainpoolP512 => SoftwarePrivateKeyMaterial::BrainpoolP512(
-                    software_key_core::brainpool512::SecretKey::generate(),
-                ),
-            };
+            let material = SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::generate(shared_signing_algorithm(curve))
+                    .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+            );
             (CKK_EC as CK_KEY_TYPE, material)
         }
         x if x == CKM_EC_EDWARDS_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
@@ -1122,11 +1108,12 @@ fn software_generate_key_pair(
             {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
-            let mut seed = Zeroizing::new([0u8; 32]);
-            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
             (
                 CKK_EC_EDWARDS as CK_KEY_TYPE,
-                SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&seed)),
+                SoftwarePrivateKeyMaterial::Signing(
+                    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::Ed25519)
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                ),
             )
         }
         x if x == CKM_EC_MONTGOMERY_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
@@ -1137,11 +1124,11 @@ fn software_generate_key_pair(
             {
                 return Err(CKR_CURVE_NOT_SUPPORTED.into());
             }
-            let mut scalar = Zeroizing::new([0u8; 32]);
-            getrandom::fill(scalar.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
             (
                 CKK_EC_MONTGOMERY as CK_KEY_TYPE,
-                SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from(*scalar)),
+                SoftwarePrivateKeyMaterial::X25519(
+                    SoftwareX25519Key::generate().map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                ),
             )
         }
         x if x == CKM_ML_DSA_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
@@ -1150,21 +1137,22 @@ fn software_generate_key_pair(
                     .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
             )
             .map_err(Error::from)?;
-            let mut seed = Zeroizing::new([0u8; 32]);
-            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-            let seed = ml_dsa::Seed::from(*seed);
-            let material = match parameter_set {
+            let parameter_set = match parameter_set {
                 x if x == CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(&seed))
+                    MlDsaParameterSet::MlDsa44
                 }
                 x if x == CKP_ML_DSA_65 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlDsa65(ml_dsa::SigningKey::from_seed(&seed))
+                    MlDsaParameterSet::MlDsa65
                 }
                 x if x == CKP_ML_DSA_87 as CK_ML_DSA_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlDsa87(ml_dsa::SigningKey::from_seed(&seed))
+                    MlDsaParameterSet::MlDsa87
                 }
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
+            let material = SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::generate(SoftwareSigningAlgorithm::MlDsa(parameter_set))
+                    .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+            );
             (CKK_ML_DSA as CK_KEY_TYPE, material)
         }
         x if x == CKM_ML_KEM_KEY_PAIR_GEN as CK_MECHANISM_TYPE => {
@@ -1585,24 +1573,12 @@ fn software_ecdh(
     key: &SoftwarePrivateKeyMaterial,
     public_data: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    macro_rules! derive {
-        ($key:expr) => {
-            derive_weierstrass($key, public_data)
-                .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
-        };
-    }
     match key {
-        SoftwarePrivateKeyMaterial::P224(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::P256(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::P384(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::P521(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::K256(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::BrainpoolP256(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::BrainpoolP384(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::BrainpoolP512(key) => derive!(key),
-        SoftwarePrivateKeyMaterial::X25519(key) => {
-            derive_x25519(key, public_data).map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID))
-        }
+        SoftwarePrivateKeyMaterial::Signing(key) => derive_with_signing_key(key, public_data)
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
+        SoftwarePrivateKeyMaterial::X25519(key) => key
+            .derive(public_data)
+            .map_err(|_| Error::from(CKR_ATTRIBUTE_VALUE_INVALID)),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }

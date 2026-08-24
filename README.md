@@ -171,15 +171,16 @@ libcurl.
 
 ## Build
 
-The first-party `software-key-core` and `virtual-yubikey-core` crates are
-sibling path dependencies. Keep all three working repositories in the same
+The first-party `software-key-core`, `virtual-yubikey-core`, and
+`virtual-yubihsm-core` crates are sibling path dependencies. Keep all four working repositories in the same
 parent directory:
 
 ```text
 works/
 ├── pkcs11rs/
 ├── software-key-core/
-└── virtual-yubikey/
+├── virtual-yubikey/
+└── virtual-yubihsm/
 ```
 
 ```sh
@@ -870,13 +871,13 @@ virtual reader or card.
 
 The logical authenticator is provided by `virtual-yubikey-core` from the
 [`virtual-yubikey`](https://github.com/qpernil/virtual-yubikey) repository.
-The neutral sibling `software-key-core` crate supplies the software ECDSA,
-Ed25519, ML-DSA, and RSA signing and verification primitives used by both the
-virtual authenticator and pkcs11rs. Its general RSA layer
+The neutral sibling `software-key-core` crate supplies the software key
+ownership, signing, verification, key agreement, AES/SCP03 helpers, password
+KDFs, and ARKG-P256 derivation used by pkcs11rs and the virtual devices. Its general RSA layer
 covers raw signatures, caller-controlled PKCS #1 v1.5 payloads, all supported
 SHA-1/SHA-2/SHA-3 DigestInfo encodings, and PSS with independent message hash,
 MGF1 hash, and salt length. PKCS #11-specific mechanism parsing, policy, and
-error mapping remain in this repository. The required sibling layout described
+error mapping, COSE/CBOR, object storage, and session state remain in this repository. The required sibling layout described
 under [Build](#build) means ordinary Cargo commands, tests, and IDE analysis
 always see first-party edits immediately; there is no dependency-source switch
 or generated override.

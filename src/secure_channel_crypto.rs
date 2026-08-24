@@ -1,14 +1,16 @@
-use crate::{
-    CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID,
-    error::Error,
+use crate::{CKR_ARGUMENTS_BAD, CKR_DATA_LEN_RANGE, CKR_ENCRYPTED_DATA_INVALID, error::Error};
+use software_key_core::{
+    secure_channel::{
+        SecureChannelCryptoError, pad_iso7816 as shared_pad_iso7816, scp03_kdf as shared_scp03_kdf,
+        unpad_iso7816 as shared_unpad_iso7816,
+    },
+    software_symmetric::{
+        SoftwareSymmetricError, aes_cmac as shared_aes_cmac, decrypt_aes_cbc, decrypt_aes_ecb,
+        encrypt_aes_block, encrypt_aes_cbc, encrypt_aes_ecb,
+    },
 };
-use aes::{
-    Aes128, Aes192, Aes256,
-    cipher::{Block, BlockDecrypt, BlockEncrypt, BlockSizeUser, KeyInit, consts::U16},
-};
-use cmac::{Cmac, Mac};
 
-pub(crate) const AES_BLOCK_SIZE: usize = 16;
+pub(crate) use software_key_core::software_symmetric::AES_BLOCK_SIZE;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
@@ -16,38 +18,43 @@ pub(crate) enum Direction {
     Decrypt,
 }
 
-pub(crate) fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
-    macro_rules! calculate {
-        ($cipher:ty) => {{
-            let mut mac = <Cmac<$cipher> as Mac>::new_from_slice(key)
-                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-            mac.update(data);
-            let bytes = mac.finalize().into_bytes();
-            let mut output = [0; AES_BLOCK_SIZE];
-            output.copy_from_slice(&bytes);
-            Ok(output)
-        }};
+fn map_symmetric_error(error: SoftwareSymmetricError) -> Error {
+    match error {
+        SoftwareSymmetricError::InvalidKeyLength | SoftwareSymmetricError::InvalidIvLength => {
+            CKR_ARGUMENTS_BAD.into()
+        }
+        SoftwareSymmetricError::InvalidDataLength => CKR_DATA_LEN_RANGE.into(),
+        SoftwareSymmetricError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
     }
+}
 
-    match key.len() {
-        16 => calculate!(Aes128),
-        24 => calculate!(Aes192),
-        32 => calculate!(Aes256),
-        _ => Err(CKR_ARGUMENTS_BAD.into()),
+fn map_secure_channel_error(error: SecureChannelCryptoError) -> Error {
+    match error {
+        SecureChannelCryptoError::InvalidDataLength
+        | SecureChannelCryptoError::KeyDerivationFailed => CKR_ARGUMENTS_BAD.into(),
+        SecureChannelCryptoError::InvalidPadding => CKR_ENCRYPTED_DATA_INVALID.into(),
+        SecureChannelCryptoError::OutputTooLong => CKR_DATA_LEN_RANGE.into(),
+        SecureChannelCryptoError::Symmetric(error) => map_symmetric_error(error),
     }
+}
+
+pub(crate) fn aes_cmac(key: &[u8], data: &[u8]) -> Result<[u8; AES_BLOCK_SIZE], Error> {
+    shared_aes_cmac(key, data).map_err(map_symmetric_error)
 }
 
 pub(crate) fn aes_encrypt_block(
     key: &[u8],
     block: &[u8; AES_BLOCK_SIZE],
 ) -> Result<[u8; AES_BLOCK_SIZE], Error> {
-    aes_ecb(key, block, Direction::Encrypt)?
-        .try_into()
-        .map_err(|_| CKR_DEVICE_ERROR.into())
+    encrypt_aes_block(key, block).map_err(map_symmetric_error)
 }
 
 pub(crate) fn aes_ecb(key: &[u8], data: &[u8], direction: Direction) -> Result<Vec<u8>, Error> {
-    crypt(key, None, data, direction)
+    match direction {
+        Direction::Encrypt => encrypt_aes_ecb(key, data),
+        Direction::Decrypt => decrypt_aes_ecb(key, data),
+    }
+    .map_err(map_symmetric_error)
 }
 
 pub(crate) fn aes_cbc(
@@ -56,100 +63,19 @@ pub(crate) fn aes_cbc(
     data: &[u8],
     direction: Direction,
 ) -> Result<Vec<u8>, Error> {
-    if iv.len() != AES_BLOCK_SIZE {
-        return Err(CKR_ARGUMENTS_BAD.into());
+    match direction {
+        Direction::Encrypt => encrypt_aes_cbc(key, iv, data),
+        Direction::Decrypt => decrypt_aes_cbc(key, iv, data),
     }
-    crypt(key, Some(iv), data, direction)
-}
-
-fn crypt(
-    key: &[u8],
-    iv: Option<&[u8]>,
-    data: &[u8],
-    direction: Direction,
-) -> Result<Vec<u8>, Error> {
-    if !crate::is_multiple_of(data.len(), AES_BLOCK_SIZE) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-
-    fn apply<C>(
-        key: &[u8],
-        iv: Option<&[u8]>,
-        data: &[u8],
-        direction: Direction,
-    ) -> Result<Vec<u8>, Error>
-    where
-        C: BlockEncrypt + BlockDecrypt + BlockSizeUser<BlockSize = U16> + KeyInit,
-    {
-        let cipher = C::new_from_slice(key).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        let mut output = Vec::with_capacity(data.len());
-        let mut chaining = iv.map(|value| {
-            let mut block = [0; AES_BLOCK_SIZE];
-            block.copy_from_slice(value);
-            block
-        });
-
-        for input in data.chunks_exact(AES_BLOCK_SIZE) {
-            let mut block = Block::<C>::default();
-            block.copy_from_slice(input);
-            match direction {
-                Direction::Encrypt => {
-                    if let Some(previous) = chaining {
-                        for (byte, previous) in block.iter_mut().zip(previous) {
-                            *byte ^= previous;
-                        }
-                    }
-                    cipher.encrypt_block(&mut block);
-                    if chaining.is_some() {
-                        let mut ciphertext = [0; AES_BLOCK_SIZE];
-                        ciphertext.copy_from_slice(&block);
-                        chaining = Some(ciphertext);
-                    }
-                    output.extend_from_slice(&block);
-                }
-                Direction::Decrypt => {
-                    let mut ciphertext = [0; AES_BLOCK_SIZE];
-                    ciphertext.copy_from_slice(&block);
-                    cipher.decrypt_block(&mut block);
-                    if let Some(previous) = chaining {
-                        for (byte, previous) in block.iter_mut().zip(previous) {
-                            *byte ^= previous;
-                        }
-                        chaining = Some(ciphertext);
-                    }
-                    output.extend_from_slice(&block);
-                }
-            }
-        }
-        Ok(output)
-    }
-
-    match key.len() {
-        16 => apply::<Aes128>(key, iv, data, direction),
-        24 => apply::<Aes192>(key, iv, data, direction),
-        32 => apply::<Aes256>(key, iv, data, direction),
-        _ => Err(CKR_ARGUMENTS_BAD.into()),
-    }
+    .map_err(map_symmetric_error)
 }
 
 pub(crate) fn pad_iso7816(data: &[u8]) -> Vec<u8> {
-    let padded_len = (data.len() + 1).div_ceil(AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
-    let mut padded = Vec::with_capacity(padded_len);
-    padded.extend_from_slice(data);
-    padded.push(0x80);
-    padded.resize(padded_len, 0);
-    padded
+    shared_pad_iso7816(data)
 }
 
-pub(crate) fn unpad_iso7816(mut data: Vec<u8>) -> Result<Vec<u8>, Error> {
-    let Some(marker) = data.iter().rposition(|byte| *byte != 0) else {
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    };
-    if data[marker] != 0x80 {
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    data.truncate(marker);
-    Ok(data)
+pub(crate) fn unpad_iso7816(data: Vec<u8>) -> Result<Vec<u8>, Error> {
+    shared_unpad_iso7816(data).map_err(map_secure_channel_error)
 }
 
 pub(crate) fn scp03_kdf(
@@ -158,28 +84,7 @@ pub(crate) fn scp03_kdf(
     context: &[u8],
     output_bits: u16,
 ) -> Result<Vec<u8>, Error> {
-    if output_bits == 0 || !crate::is_multiple_of(output_bits, 8) {
-        return Err(CKR_ARGUMENTS_BAD.into());
-    }
-    let output_len = output_bits as usize / 8;
-    let iterations = output_len.div_ceil(AES_BLOCK_SIZE);
-    if iterations > u8::MAX as usize {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-
-    let mut output = Vec::with_capacity(iterations * AES_BLOCK_SIZE);
-    for counter in 1..=iterations {
-        let mut input = Vec::with_capacity(16 + context.len());
-        input.extend_from_slice(&[0; 11]);
-        input.push(constant);
-        input.push(0);
-        input.extend_from_slice(&output_bits.to_be_bytes());
-        input.push(counter as u8);
-        input.extend_from_slice(context);
-        output.extend_from_slice(&aes_cmac(key, &input)?);
-    }
-    output.truncate(output_len);
-    Ok(output)
+    shared_scp03_kdf(key, constant, context, output_bits).map_err(map_secure_channel_error)
 }
 
 #[cfg(test)]

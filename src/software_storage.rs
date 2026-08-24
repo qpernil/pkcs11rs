@@ -1,7 +1,9 @@
 use crate::{
     CKR_DATA_INVALID, CKR_DEVICE_ERROR, CKR_ENCRYPTED_DATA_INVALID, CKR_PIN_INCORRECT,
-    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyMaterial, SoftwarePrivateKeyMaterial,
-    TokenObject, ec_curve_from_parameters, ec_curve_parameters, secure_channel_crypto,
+    CKR_PIN_LEN_RANGE, EcCurve, Error, GcmParameters, KeyMaterial, MlDsaParameterSet,
+    MlDsaPrivateKey, SoftwarePrivateKeyMaterial, SoftwareSigningAlgorithm, SoftwareSigningKey,
+    SoftwareX25519Key, TokenObject, ec_curve_from_parameters, ec_curve_parameters,
+    secure_channel_crypto, shared_signing_algorithm,
 };
 use der::{
     Decode, Encode, SecretDocument, Sequence, Tag, ValueOrd,
@@ -1814,19 +1816,28 @@ fn record_unique_id(reference: &ContentReference) -> String {
 pub(crate) fn material_to_pkcs8(
     material: &SoftwarePrivateKeyMaterial,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let ml_dsa = match material {
-        SoftwarePrivateKeyMaterial::MlDsa44(key) => key.to_pkcs8_der().ok(),
-        SoftwarePrivateKeyMaterial::MlDsa65(key) => key.to_pkcs8_der().ok(),
-        SoftwarePrivateKeyMaterial::MlDsa87(key) => key.to_pkcs8_der().ok(),
-        SoftwarePrivateKeyMaterial::MlKem512(key) => key.to_pkcs8_der().ok(),
-        SoftwarePrivateKeyMaterial::MlKem768(key) => key.to_pkcs8_der().ok(),
-        SoftwarePrivateKeyMaterial::MlKem1024(key) => key.to_pkcs8_der().ok(),
+    let post_quantum = match material {
+        SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::MlDsa(key)) => {
+            key.to_pkcs8_der().ok().map(|encoded| encoded.to_vec())
+        }
+        SoftwarePrivateKeyMaterial::MlKem512(key) => key
+            .to_pkcs8_der()
+            .ok()
+            .map(|encoded| encoded.as_bytes().to_vec()),
+        SoftwarePrivateKeyMaterial::MlKem768(key) => key
+            .to_pkcs8_der()
+            .ok()
+            .map(|encoded| encoded.as_bytes().to_vec()),
+        SoftwarePrivateKeyMaterial::MlKem1024(key) => key
+            .to_pkcs8_der()
+            .ok()
+            .map(|encoded| encoded.as_bytes().to_vec()),
         _ => None,
     };
-    if let Some(document) = ml_dsa {
-        return Ok(Zeroizing::new(document.as_bytes().to_vec()));
+    if let Some(document) = post_quantum {
+        return Ok(Zeroizing::new(document));
     }
-    if let SoftwarePrivateKeyMaterial::Rsa(key) = material {
+    if let SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(key)) = material {
         let pkcs1 = key
             .to_pkcs1_der()
             .map_err(|_| Error::from(CKR_DATA_INVALID))?;
@@ -1846,8 +1857,10 @@ pub(crate) fn material_to_pkcs8(
         return ec_pkcs8(curve, scalar.as_ref());
     }
     let (oid, value) = match material {
-        SoftwarePrivateKeyMaterial::Ed25519(key) => (ED25519_OID, key.to_bytes().to_vec()),
-        SoftwarePrivateKeyMaterial::X25519(key) => (X25519_OID, key.to_bytes().to_vec()),
+        SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Ed25519(key)) => {
+            (ED25519_OID, key.to_bytes().to_vec())
+        }
+        SoftwarePrivateKeyMaterial::X25519(key) => (X25519_OID, key.serialized().to_vec()),
         _ => return Err(CKR_DATA_INVALID.into()),
     };
     let value = Zeroizing::new(value);
@@ -1897,24 +1910,27 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlDsa44)
+        return MlDsaPrivateKey::from_pkcs8_der(MlDsaParameterSet::MlDsa44, encoded)
+            .map(SoftwareSigningKey::MlDsa)
+            .map(SoftwarePrivateKeyMaterial::Signing)
             .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_DSA_65_OID {
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlDsa65)
+        return MlDsaPrivateKey::from_pkcs8_der(MlDsaParameterSet::MlDsa65, encoded)
+            .map(SoftwareSigningKey::MlDsa)
+            .map(SoftwarePrivateKeyMaterial::Signing)
             .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_DSA_87_OID {
         if info.algorithm.parameters.is_some() {
             return Err(CKR_DATA_INVALID.into());
         }
-        return ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_pkcs8_der(encoded)
-            .map(SoftwarePrivateKeyMaterial::MlDsa87)
+        return MlDsaPrivateKey::from_pkcs8_der(MlDsaParameterSet::MlDsa87, encoded)
+            .map(SoftwareSigningKey::MlDsa)
+            .map(SoftwarePrivateKeyMaterial::Signing)
             .map_err(|_| Error::from(CKR_DATA_INVALID));
     }
     if info.algorithm.oid == ML_KEM_512_OID {
@@ -1948,7 +1964,9 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         let mut key = RsaPrivateKey::from_pkcs1_der(info.private_key.as_bytes())
             .map_err(|_| CKR_DATA_INVALID)?;
         key.precompute().map_err(|_| CKR_DATA_INVALID)?;
-        return Ok(SoftwarePrivateKeyMaterial::Rsa(Box::new(key)));
+        return Ok(SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::Rsa(Box::new(key)),
+        ));
     }
     if info.algorithm.oid == EC_PUBLIC_KEY_OID {
         let parameters = info.algorithm.parameters.as_ref().ok_or(CKR_DATA_INVALID)?;
@@ -1978,14 +1996,14 @@ fn material_from_pkcs8(encoded: &[u8]) -> Result<SoftwarePrivateKeyMaterial, Err
         return Err(CKR_DATA_INVALID.into());
     }
     if info.algorithm.oid == ED25519_OID {
-        return Ok(SoftwarePrivateKeyMaterial::Ed25519(
-            ed25519_dalek::SigningKey::from_bytes(&value),
-        ));
+        return SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::Ed25519, &value)
+            .map(SoftwarePrivateKeyMaterial::Signing)
+            .map_err(|_| CKR_DATA_INVALID.into());
     }
     if info.algorithm.oid == X25519_OID {
-        return Ok(SoftwarePrivateKeyMaterial::X25519(
-            x25519_dalek::StaticSecret::from(value),
-        ));
+        return SoftwareX25519Key::from_serialized(&value)
+            .map(SoftwarePrivateKeyMaterial::X25519)
+            .map_err(|_| CKR_DATA_INVALID.into());
     }
     Err(CKR_DATA_INVALID.into())
 }
@@ -2004,25 +2022,9 @@ fn material_from_ec_scalar(
     curve: EcCurve,
     scalar: &[u8],
 ) -> Result<SoftwarePrivateKeyMaterial, Error> {
-    macro_rules! key {
-        ($variant:ident, $type:path) => {
-            SoftwarePrivateKeyMaterial::$variant(
-                <$type>::from_slice(scalar).map_err(|_| Error::from(CKR_DATA_INVALID))?,
-            )
-        };
-    }
-    Ok(match curve {
-        EcCurve::P224 => key!(P224, p224::SecretKey),
-        EcCurve::P256 => key!(P256, p256::SecretKey),
-        EcCurve::P384 => key!(P384, p384::SecretKey),
-        EcCurve::P521 => key!(P521, p521::SecretKey),
-        EcCurve::K256 => key!(K256, k256::SecretKey),
-        EcCurve::BrainpoolP256 => key!(BrainpoolP256, bp256::r1::SecretKey),
-        EcCurve::BrainpoolP384 => key!(BrainpoolP384, bp384::r1::SecretKey),
-        EcCurve::BrainpoolP512 => {
-            key!(BrainpoolP512, software_key_core::brainpool512::SecretKey)
-        }
-    })
+    SoftwareSigningKey::from_serialized(shared_signing_algorithm(curve), scalar)
+        .map(SoftwarePrivateKeyMaterial::Signing)
+        .map_err(|_| CKR_DATA_INVALID.into())
 }
 
 #[cfg(test)]
@@ -2165,33 +2167,46 @@ mod tests {
     fn every_software_private_material_round_trips_through_standard_pkcs8() {
         let mut rsa = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
         rsa.precompute().unwrap();
+        let signing = |algorithm, value: Vec<u8>| {
+            SoftwarePrivateKeyMaterial::Signing(
+                SoftwareSigningKey::from_serialized(algorithm, &value).unwrap(),
+            )
+        };
         let materials = vec![
-            SoftwarePrivateKeyMaterial::Rsa(Box::new(rsa)),
-            SoftwarePrivateKeyMaterial::P224(p224::SecretKey::from_slice(&scalar(28)).unwrap()),
-            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap()),
-            SoftwarePrivateKeyMaterial::P384(p384::SecretKey::from_slice(&scalar(48)).unwrap()),
-            SoftwarePrivateKeyMaterial::P521(p521::SecretKey::from_slice(&scalar(66)).unwrap()),
-            SoftwarePrivateKeyMaterial::K256(k256::SecretKey::from_slice(&scalar(32)).unwrap()),
-            SoftwarePrivateKeyMaterial::BrainpoolP256(
-                bp256::r1::SecretKey::from_slice(&scalar(32)).unwrap(),
+            SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(Box::new(rsa))),
+            signing(SoftwareSigningAlgorithm::EcdsaP224Sha224, scalar(28)),
+            signing(SoftwareSigningAlgorithm::EcdsaP256Sha256, scalar(32)),
+            signing(SoftwareSigningAlgorithm::EcdsaP384Sha384, scalar(48)),
+            signing(SoftwareSigningAlgorithm::EcdsaP521Sha512, scalar(66)),
+            signing(SoftwareSigningAlgorithm::EcdsaSecp256k1Sha256, scalar(32)),
+            signing(
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP256Sha256,
+                scalar(32),
             ),
-            SoftwarePrivateKeyMaterial::BrainpoolP384(
-                bp384::r1::SecretKey::from_slice(&scalar(48)).unwrap(),
+            signing(
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP384Sha384,
+                scalar(48),
             ),
-            SoftwarePrivateKeyMaterial::BrainpoolP512(
-                software_key_core::brainpool512::SecretKey::from_slice(&scalar(64)).unwrap(),
+            signing(
+                SoftwareSigningAlgorithm::EcdsaBrainpoolP512Sha512,
+                scalar(64),
             ),
-            SoftwarePrivateKeyMaterial::Ed25519(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
-            SoftwarePrivateKeyMaterial::X25519(x25519_dalek::StaticSecret::from([7; 32])),
-            SoftwarePrivateKeyMaterial::MlDsa44(ml_dsa::SigningKey::from_seed(
-                &ml_dsa::Seed::from([7; 32]),
-            )),
-            SoftwarePrivateKeyMaterial::MlDsa65(ml_dsa::SigningKey::from_seed(
-                &ml_dsa::Seed::from([7; 32]),
-            )),
-            SoftwarePrivateKeyMaterial::MlDsa87(ml_dsa::SigningKey::from_seed(
-                &ml_dsa::Seed::from([7; 32]),
-            )),
+            signing(SoftwareSigningAlgorithm::Ed25519, vec![7; 32]),
+            SoftwarePrivateKeyMaterial::X25519(
+                SoftwareX25519Key::from_serialized(&[7; 32]).unwrap(),
+            ),
+            signing(
+                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa44),
+                vec![7; 32],
+            ),
+            signing(
+                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa65),
+                vec![7; 32],
+            ),
+            signing(
+                SoftwareSigningAlgorithm::MlDsa(MlDsaParameterSet::MlDsa87),
+                vec![7; 32],
+            ),
             SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(
                 ml_kem::Seed::from([7; 64]),
             )),
@@ -2209,8 +2224,8 @@ mod tests {
             assert_eq!(decoded.key_type(), material.key_type());
             match (&material, &decoded) {
                 (
-                    SoftwarePrivateKeyMaterial::Rsa(expected),
-                    SoftwarePrivateKeyMaterial::Rsa(actual),
+                    SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(expected)),
+                    SoftwarePrivateKeyMaterial::Signing(SoftwareSigningKey::Rsa(actual)),
                 ) => {
                     assert_eq!(actual.n(), expected.n());
                     assert_eq!(actual.d(), expected.d());
@@ -2343,8 +2358,13 @@ mod tests {
 
     #[test]
     fn exported_encrypted_private_key_info_round_trips_attributed_pkcs8() {
-        let material =
-            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &scalar(32),
+            )
+            .unwrap(),
+        );
         let mut original = object(material);
         original.extractable = true;
         original.never_extractable = false;
@@ -2425,8 +2445,13 @@ mod tests {
         assert_eq!(so_public.as_ref(), user_public.as_ref());
         assert_ne!(user_public.as_ref(), key.as_ref());
 
-        let material =
-            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &scalar(32),
+            )
+            .unwrap(),
+        );
         let original = object(material);
         let (stored, reference) = store.put_object(7, &key, &original).unwrap();
         assert_eq!(stored.label, original.label);
@@ -2608,8 +2633,13 @@ mod tests {
 
     #[test]
     fn pkcs8_attributes_preserve_non_bmp_labels_and_reject_conflicts() {
-        let material =
-            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &scalar(32),
+            )
+            .unwrap(),
+        );
         let mut non_bmp = object(material);
         non_bmp.label = String::from("caller 🔐 label");
         let encoded = encode_stored_private_key_info(&non_bmp).unwrap();
@@ -2625,8 +2655,13 @@ mod tests {
         assert_eq!(decoded.label, non_bmp.label);
         assert_eq!(decoded.id, non_bmp.id);
 
-        let material =
-            SoftwarePrivateKeyMaterial::P256(p256::SecretKey::from_slice(&scalar(32)).unwrap());
+        let material = SoftwarePrivateKeyMaterial::Signing(
+            SoftwareSigningKey::from_serialized(
+                SoftwareSigningAlgorithm::EcdsaP256Sha256,
+                &scalar(32),
+            )
+            .unwrap(),
+        );
         let ordinary = object(material);
         let encoded = encode_stored_private_key_info(&ordinary).unwrap();
         let mut info = StoredPrivateKeyInfo::from_der(encoded.as_ref()).unwrap();

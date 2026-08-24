@@ -3278,9 +3278,9 @@ pub(crate) fn default_objects() -> Result<HashMap<CK_OBJECT_HANDLE, TokenObject>
                 creator_session: None,
                 public_key: Some(PublicKeyMaterial::Rsa(RsaPublicKey::from(&private_key))),
                 rp_id: None,
-                material: KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Rsa(Box::new(
-                    private_key,
-                ))),
+                material: KeyMaterial::SoftwarePrivate(SoftwarePrivateKeyMaterial::Signing(
+                    crate::SoftwareSigningKey::Rsa(Box::new(private_key)),
+                )),
             },
         ),
     ]);

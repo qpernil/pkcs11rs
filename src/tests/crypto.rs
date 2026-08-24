@@ -778,9 +778,9 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
 
     let private_key = with_test_slot_context(TEST_SLOT_ID, |context| {
         match &context.memory_objects.get(&2).unwrap().material {
-            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(key)) => {
-                key.clone()
-            }
+            crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                crate::SoftwareSigningKey::Rsa(key),
+            )) => key.clone(),
             _ => panic!("test private key is not RSA"),
         }
     });

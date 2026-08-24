@@ -1533,7 +1533,9 @@ pub fn create_object_requires_and_imports_real_key_material() {
     let imported = crate::parse_create_object_template(&private_template).unwrap();
     assert!(matches!(
         imported.material,
-        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Rsa(_))
+        crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+            crate::SoftwareSigningKey::Rsa(_)
+        ))
     ));
     assert_eq!(
         imported.attribute_value(CKA_PUBLIC_KEY_INFO as CK_ATTRIBUTE_TYPE),
@@ -1732,13 +1734,19 @@ fn software_ec_private_imports_use_curve_specific_material() {
         assert!(matches!(
             (&object.material, algorithm),
             (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::P256(_)),
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                    crate::SoftwareSigningKey::P256(_)
+                )),
                 crate::piv::Algorithm::EccP256
             ) | (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::P384(_)),
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                    crate::SoftwareSigningKey::P384(_)
+                )),
                 crate::piv::Algorithm::EccP384
             ) | (
-                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Ed25519(_)),
+                crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::Signing(
+                    crate::SoftwareSigningKey::Ed25519(_)
+                )),
                 crate::piv::Algorithm::Ed25519
             ) | (
                 crate::KeyMaterial::SoftwarePrivate(crate::SoftwarePrivateKeyMaterial::X25519(_)),
