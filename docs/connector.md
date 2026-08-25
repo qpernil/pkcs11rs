@@ -145,7 +145,7 @@ test that remaining path from another computer, request the real connector
 with a new cache-busting value after wake:
 
 ```text
-http://192.0.2.169:12345/v1/devices?probe=1
+http://192.0.2.90:12345/v1/devices?probe=1
 ```
 
 A newly started command-line HTTP client with `Connection: close` gives the
