@@ -1597,10 +1597,10 @@ mod hardware_provisioning {
                 id: authkey_id,
                 label: &label,
                 domains: AUTHENTICATION_KEY_DOMAINS,
-                capabilities: [0; 8],
+                capabilities: crate::yubihsm_capabilities(&[0x00, 0x01, 0x27]),
                 algorithm: crate::YUBIHSM_ALGO_EC_P256_YUBICO_AUTHENTICATION,
             },
-            delegated_capabilities: [0; 8],
+            delegated_capabilities: crate::yubihsm_capabilities(&[0x00, 0x01, 0x27]),
         };
         let command = crate::YubiHsmCommand::put_delegated_object(
             crate::YubiHsmCommandCode::PutAuthenticationKey,

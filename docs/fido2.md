@@ -522,7 +522,7 @@ robustness validation remains useful for:
 
 Yubico SDK 1.17 added the WebAuthn `previewSign` extension and explicitly warns
 that the associated ARKG preview code is experimental, not production
-cryptographic guidance. pkcs11rs now has an isolated request encoder,
+cryptographic guidance. pkcs11rs has an isolated request encoder,
 structural registration parser, canonical
 [previewSign persistence model](preview-sign.md), protocol vectors, and an
 ignored capability-gated registration test. It also exposes an experimental
@@ -530,9 +530,9 @@ vendor PKCS #11 flow and a complete in-process mock. Registration and derived
 metadata use the [content-addressed CBOR storage boundary](storage.md).
 Applications can export and strictly re-import both wrappers with
 `C_CreateObject`. Setting `PKCS11RS_TOKEN_STORAGE` installs an applet- and
-serial-scoped local provider on validated YubiKey slots; the older
-`PKCS11RS_FIDO2_STORAGE` setting remains a FIDO-only compatibility path. Backed
-token objects are restored automatically after module finalization. Positive
+serial-scoped local provider on validated YubiKey slots;
+`PKCS11RS_FIDO2_STORAGE` is supported as a FIDO-only compatibility setting.
+Backed token objects are restored automatically after module finalization. Positive
 hardware qualification of that serial binding and the previewSign flow
 remains deferred.
 

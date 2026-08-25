@@ -2490,6 +2490,7 @@ impl YubiHsmSlot {
             .metadata_objects_in_format(&old_objects, YubiHsmMetadataPhysicalFormat::LegacyMdb1)?
             .is_empty();
         let mut old_references = Vec::new();
+        let mut old_canonical_info = Vec::new();
         for (id, sequence) in &old_canonical_objects {
             let info = self
                 .cached_object_info(*id, YUBIHSM_OPAQUE, Some(*sequence))?
@@ -2499,6 +2500,7 @@ impl YubiHsmSlot {
             if !old_references.contains(&reference) {
                 old_references.push(reference);
             }
+            old_canonical_info.push(info);
         }
 
         if metadata.is_empty() && !has_legacy_metadata {
@@ -2518,8 +2520,16 @@ impl YubiHsmSlot {
         {
             return Ok(());
         }
-        let new_reference =
-            StorageProvider::put(self, &value).map_err(crate::backed_object::storage_error)?;
+        let new_reference = match old_canonical_info.first() {
+            Some(existing) => match self.try_update_storage_object(existing, &value)? {
+                Some(reference) => reference,
+                None => StorageProvider::put(self, &value)
+                    .map_err(crate::backed_object::storage_error)?,
+            },
+            None => {
+                StorageProvider::put(self, &value).map_err(crate::backed_object::storage_error)?
+            }
+        };
         for reference in old_references {
             if reference != new_reference {
                 StorageProvider::delete(self, &reference)
@@ -2741,9 +2751,9 @@ impl YubiHsmSlot {
             YubiHsmMetadataPhysicalFormat::CanonicalCbor,
         );
         let capabilities = if yubihsm_capability(&target.capabilities, 0x10) {
-            yubihsm_capabilities(&[0x10])
+            yubihsm_capabilities(&[0x00, 0x01, 0x10, 0x27])
         } else {
-            [0; 8]
+            yubihsm_capabilities(&[0x00, 0x01, 0x27])
         };
         let response = send_yubihsm_secure_command(
             self.connector.as_ref(),
@@ -2828,7 +2838,7 @@ impl YubiHsmSlot {
                     id,
                     label: &label,
                     domains,
-                    capabilities: [0; 8],
+                    capabilities: yubihsm_capabilities(&[0x00, 0x01, 0x27]),
                     algorithm: YUBIHSM_ALGO_OPAQUE_DATA,
                 },
                 object,
@@ -2837,6 +2847,46 @@ impl YubiHsmSlot {
         let id = parse_yubihsm_object_id(&response)?;
         self.forget_cached_object(id, YUBIHSM_OPAQUE)?;
         Ok(id)
+    }
+
+    fn try_update_storage_object(
+        &self,
+        existing: &YubiHsmObjectInfo,
+        object: &[u8],
+    ) -> Result<Option<ContentReference>, Error> {
+        let command = YubiHsmCommand::put_object(
+            YubiHsmCommandCode::PutOpaque,
+            &YubiHsmObjectParameters {
+                id: existing.id,
+                label: &existing.label,
+                domains: existing.domains,
+                capabilities: existing.capabilities,
+                algorithm: existing.algorithm,
+            },
+            object,
+        )?;
+        let response = match send_yubihsm_secure_command(
+            self.connector.as_ref(),
+            self.session.as_ref(),
+            &command,
+        ) {
+            Ok(response) => response,
+            Err(Error::Generic(rv)) if rv == CKR_ATTRIBUTE_VALUE_INVALID as CK_RV => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if parse_yubihsm_object_id(&response)? != existing.id {
+            return Err(CKR_DEVICE_ERROR.into());
+        }
+
+        self.forget_cached_object(existing.id, YUBIHSM_OPAQUE)?;
+        let reference = ContentReference::for_object(object);
+        self.metadata_storage_writes
+            .try_borrow_mut()
+            .map_err(|_| Error::from(CKR_CANT_LOCK))?
+            .insert(reference.clone(), existing.id);
+        Ok(Some(reference))
     }
 }
 

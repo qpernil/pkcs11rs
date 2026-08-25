@@ -219,7 +219,7 @@ Legacy inspection, migration, and removal are reserved for separate maintenance
 tooling with an explicit apply step. Runtime PKCS #11 operations never perform
 that normalization implicitly.
 
-All new records are canonical CBOR. Target-linked metadata uses the
+pkcs11rs-owned records are canonical CBOR. Target-linked metadata uses the
 `pkcs11rs metadata 0x...` label, standalone public keys use
 `pkcs11rs stored ...`, and MDB1 objects retain Yubico's
 `Meta object for 0x...` label. The separate namespaces make ownership clear in
@@ -227,10 +227,13 @@ All new records are canonical CBOR. Target-linked metadata uses the
 unfamiliar canonical CBOR as MDB1.
 
 Provider mutation requires a secure session with the applicable YubiHSM
-capabilities. Metadata replacement remains failure-safe: the new canonical
-companion is written before older pkcs11rs companions are removed, and a later
-update repairs ambiguity left by a failed deletion. Legacy companions are not
-part of the provider's list, get, put, delete, or replacement lifecycle.
+capabilities. Metadata replacement first submits the new value under one
+existing canonical companion's ID and exact object policy. A device that
+accepts replacement updates that companion directly. An Object Exists response
+selects a create-before-delete fallback; any other failure leaves the existing
+companions untouched. Successful replacement removes redundant pkcs11rs
+companions. Legacy companions are not part of the provider's list, get, put,
+delete, or replacement lifecycle.
 Canonical metadata can contain sparse private-key overrides and a complete
 public aspect. Presence of validated public key material creates a genuine
 public token object; removing that public object removes only the public aspect

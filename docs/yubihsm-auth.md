@@ -297,17 +297,19 @@ login, or a successful mutation.
 Metadata is linked from the target's native cache entry. The companion's
 contents identify the target object type, ID, and sequence, while its own
 sequence identifies the current companion incarnation. A link contributes
-attribute overrides only when its target sequence matches the current target
-entry; this prevents reused object IDs from inheriting obsolete attributes.
+attribute overrides only when its target sequence matches the target entry;
+this prevents reused object IDs from inheriting obsolete attributes.
 Domains must also match. Invalid metadata is hidden. Canonical metadata is
 authoritative whenever any pkcs11rs-namespaced companion exists; legacy
 metadata is considered only in its absence. Multiple valid companions within
-the selected namespace are ambiguous until a later attribute update repairs
-the pkcs11rs namespace. `C_SetAttributeValue` writes a replacement canonical
-metadata object before removing older canonical companions, and creating an
-object automatically creates metadata when requested attributes cannot be
-encoded by the native YubiHSM object. New metadata uses YubiHSM
-auto-allocation. Metadata is not created when native attributes suffice, and
+the selected namespace are ambiguous until an attribute update resolves the
+pkcs11rs namespace. `C_SetAttributeValue` first submits the new value under one
+canonical companion's existing ID and exact policy. A device that accepts
+replacement updates that companion directly. An Object Exists response selects
+a create-before-delete fallback; other failures preserve the existing
+companions. Creating an object automatically creates metadata when requested
+attributes cannot be encoded by the native YubiHSM object. Metadata is not
+created when native attributes suffice, and
 setting the final override back to its native value deletes an otherwise empty
 record. A private and its linked public aspect share one record.
 
@@ -431,7 +433,7 @@ Legacy `MDB1` key metadata is converted to the canonical logical model on the
 fly only when no pkcs11rs metadata exists for the target. It is read-only
 compatibility input: pkcs11rs never writes, rewrites, or deletes legacy
 companions. Legacy public ID and label fields remain identity compatibility
-data and never create a public token object. All new records use canonical CBOR
+data and never create a public token object. pkcs11rs-owned records use canonical CBOR
 and the `pkcs11rs metadata 0x...` namespace. MDB1 records retain Yubico's
 `Meta object for 0x...` convention. This prevents Yubico's PKCS #11 module
 from treating unfamiliar canonical CBOR as MDB1 and makes ownership apparent
