@@ -1826,7 +1826,8 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         .map(|(_, value)| value.clone())
         .collect::<Vec<_>>();
     assert!(!metadata_puts.is_empty());
-    assert!(metadata_puts.iter().all(|value| value[..2] == [0, 0]));
+    assert!(metadata_puts.iter().any(|value| value[..2] == [0, 0]));
+    assert!(metadata_puts.iter().any(|value| value[..2] != [0, 0]));
     with_test_slot_context(SLOT_ID, |context| {
         context.refresh_slot_token_objects(SLOT_ID).unwrap();
     });
@@ -3475,12 +3476,12 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         .iter()
         .position(|(command, _)| *command == crate::yubihsm::CommandCode::PutOpaque as u8)
         .unwrap();
-    let delete_index = public_commands
-        .iter()
-        .position(|(command, _)| *command == crate::yubihsm::CommandCode::DeleteObject as u8)
-        .unwrap();
-    assert!(put_index < delete_index);
-    assert_eq!(&public_commands[put_index].1[..2], &[0, 0]);
+    assert_ne!(&public_commands[put_index].1[..2], &[0, 0]);
+    assert!(
+        !public_commands
+            .iter()
+            .any(|(command, _)| *command == crate::yubihsm::CommandCode::DeleteObject as u8)
+    );
     assert_eq!(
         find_yubihsm_object(
             session,
@@ -3529,6 +3530,11 @@ fn assert_yubihsm_metadata_attributes_drive_search_and_operations(public_discove
         destroy_commands
             .iter()
             .any(|(command, _)| *command == crate::yubihsm::CommandCode::PutOpaque as u8)
+    );
+    assert!(
+        !destroy_commands
+            .iter()
+            .any(|(command, _)| *command == crate::yubihsm::CommandCode::DeleteObject as u8)
     );
     assert!(
         find_yubihsm_object(

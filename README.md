@@ -618,7 +618,7 @@ Detailed configuration:
 - [Vendor extension API index](docs/extensions.md)
 - [iPhone smoke test](examples/ios/PKCS11RSPhoneSmoke/README.md)
 - [Objective-C iPhone smoke test](examples/ios/PKCS11RSObjCSmoke/README.md)
-- [Software secret-key design history](docs/software-secret-keys-plan.md)
+- [Software secret-key design](docs/software-secret-keys-plan.md)
 - [Provider abstraction roadmap](docs/provider-abstraction-plan.md)
 - [CCID discovery, AID overrides, and diagnostics](docs/ccid.md)
 - [YubiHSM and YubiHSM Auth login](docs/yubihsm-auth.md)

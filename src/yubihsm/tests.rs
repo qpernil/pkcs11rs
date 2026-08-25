@@ -138,6 +138,7 @@ pub(crate) struct ProtocolPeer {
     closed_sessions: Cell<usize>,
     connection_epoch: Cell<u64>,
     fail_next_put_opaque: Cell<bool>,
+    supports_opaque_update: Cell<bool>,
     fail_delete_opaque: RefCell<HashSet<u16>>,
     last_wrapped_object: RefCell<Option<ObjectInfo>>,
     product: &'static str,
@@ -193,6 +194,7 @@ impl ProtocolPeer {
             closed_sessions: Cell::new(0),
             connection_epoch: Cell::new(0),
             fail_next_put_opaque: Cell::new(false),
+            supports_opaque_update: Cell::new(true),
             fail_delete_opaque: RefCell::new(HashSet::new()),
             last_wrapped_object: RefCell::new(None),
             product: "YubiHSM",
@@ -826,6 +828,38 @@ impl ProtocolPeer {
                             } else {
                                 let requested =
                                     u16::from_be_bytes(inner.data[..2].try_into().unwrap());
+                                if requested != 0
+                                    && self.metadata_objects.borrow().contains_key(&requested)
+                                {
+                                    if !self.supports_opaque_update.get() {
+                                        return Ok((COMMAND_ERROR, vec![0x11]));
+                                    }
+                                    let label = inner.data[2..42]
+                                        .split(|byte| *byte == 0)
+                                        .next()
+                                        .and_then(|label| std::str::from_utf8(label).ok())
+                                        .ok_or(CKR_DEVICE_ERROR)?
+                                        .to_owned();
+                                    let mut objects = self.metadata_objects.borrow_mut();
+                                    let (info, stored) = objects.get_mut(&requested).unwrap();
+                                    if info.label != label
+                                        || info.domains
+                                            != u16::from_be_bytes(
+                                                inner.data[42..44].try_into().unwrap(),
+                                            )
+                                        || info.capabilities != inner.data[44..52]
+                                        || info.algorithm != inner.data[52]
+                                    {
+                                        return Ok((COMMAND_ERROR, vec![0x12]));
+                                    }
+                                    *stored = inner.data[53..].to_vec();
+                                    info.length = stored.len() as u16;
+                                    info.sequence = info.sequence.wrapping_add(1);
+                                    return Ok((
+                                        inner.command | RESPONSE_BIT,
+                                        requested.to_be_bytes().to_vec(),
+                                    ));
+                                }
                                 let id = if requested == 0 {
                                     (1..=u16::MAX)
                                         .find(|candidate| {
@@ -2272,7 +2306,14 @@ fn deleting_the_only_public_aspect_leaves_a_canonical_legacy_shadow() {
         })
         .unwrap();
 
+    let update_start = peer.inner_commands.borrow().len();
     Slot::yubihsm_destroy_public_projection(&slot, 7, &public.unique_id).unwrap();
+    let commands = peer.inner_commands.borrow();
+    let update = &commands[update_start..];
+    assert_eq!(update.len(), 1);
+    assert_eq!(update[0].0, CommandCode::PutOpaque as u8);
+    assert_ne!(&update[0].1[..2], &[0, 0]);
+    drop(commands);
     let canonical = peer
         .metadata_objects
         .borrow()
@@ -2403,6 +2444,7 @@ fn yubihsm_duplicate_legacy_metadata_is_shadowed_without_public_discovery_creden
 
 fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     let peer = Rc::new(ProtocolPeer::new());
+    peer.supports_opaque_update.set(false);
     peer.add_public_certificate_pair();
     replace_metadata(
         peer.as_ref(),
@@ -2489,7 +2531,12 @@ fn assert_metadata_replacement_is_failure_safe(public_discovery: bool) {
     let failed_delete_commands = peer.inner_commands.borrow();
     let failed_delete = &failed_delete_commands[failed_delete_start..];
     assert_eq!(failed_delete[0].0, CommandCode::PutOpaque as u8);
-    assert_eq!(&failed_delete[0].1[..2], &[0, 0]);
+    assert_eq!(
+        u16::from_be_bytes(failed_delete[0].1[..2].try_into().unwrap()),
+        canonical_id
+    );
+    assert_eq!(failed_delete[1].0, CommandCode::PutOpaque as u8);
+    assert_eq!(&failed_delete[1].1[..2], &[0, 0]);
     assert!(failed_delete[1..].iter().any(|(command, data)| *command
         == CommandCode::DeleteObject as u8
         && u16::from_be_bytes(data[..2].try_into().unwrap()) == canonical_id));

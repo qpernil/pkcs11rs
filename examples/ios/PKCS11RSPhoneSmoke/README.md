@@ -244,7 +244,7 @@ in the
 
 ## Future Swift client package
 
-The smoke app now exercises enough of the Cryptoki client surface to serve as
+The smoke app exercises enough of the Cryptoki client surface to serve as
 the prototype and first integration test for a separate, vendor-neutral Swift
 Package Manager wrapper. That package should consume the standard PKCS #11 C
 ABI rather than introduce another pkcs11rs-specific ABI. Its initial scope
