@@ -201,7 +201,7 @@ Build the XCFramework before opening the Xcode project:
 cargo xtask ios --release
 ```
 
-The app defaults to `http://192.168.1.169:12345`. Override that URL with the
+The app defaults to `http://192.168.1.90:12345`. Override that URL with the
 `PKCS11RS_YUBIHSM_URLS` launch environment variable or change
 `fallbackConnectorURL` in `PKCS11RSPhoneSmoke/App.swift`. The environment
 variable is only an input to this smoke-test UI; the module itself receives the
