@@ -4,8 +4,8 @@ use der::{
     Decode, Encode,
     asn1::{ObjectIdentifier as DerObjectIdentifier, OctetStringRef},
 };
-use p256::ecdsa::VerifyingKey as P256VerifyingKey;
 use rustls_pki_types::{CertificateDer, TrustAnchor, UnixTime};
+use software_key_core::software_signing::{EcCurve, SoftwarePublicKey};
 use std::collections::HashSet;
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
@@ -136,7 +136,12 @@ impl ParsedCertificate {
             .subject_public_key
             .as_bytes()
             .ok_or(CKR_ARGUMENTS_BAD)?;
-        P256VerifyingKey::from_sec1_bytes(point).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        SoftwarePublicKey::Ec {
+            curve: EcCurve::P256,
+            uncompressed: point.to_vec(),
+        }
+        .validate()
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         Ok(point.to_vec())
     }
 }
@@ -380,6 +385,10 @@ pub(crate) fn public_key_info(encoded: &[u8]) -> Result<Vec<u8>, Error> {
         .subject_public_key_info()
         .to_der()
         .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+pub(crate) fn p256_public_point(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    ParsedCertificate::parse(&decode(encoded)?)?.p256_public_point()
 }
 
 pub(crate) fn public_key_parts(

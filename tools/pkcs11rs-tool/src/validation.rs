@@ -1,12 +1,13 @@
 use const_oid::ObjectIdentifier;
 use der::{Decode, Encode};
-use p256::pkcs8::{DecodePrivateKey, EncodePublicKey};
 use rustls::{
     crypto::ring::default_provider,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, TrustAnchor, UnixTime},
     sign::CertifiedKey,
 };
-use spki::DecodePublicKey;
+use software_key_core::software_signing::{
+    EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey,
+};
 use std::{collections::HashSet, path::Path};
 use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
 use x509_cert::{
@@ -15,6 +16,8 @@ use x509_cert::{
 };
 
 const CLIENT_AUTH: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.2");
+const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const P256_CURVE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Purpose {
@@ -270,14 +273,7 @@ fn validate_scp11_leaf(certificate: &ParsedCertificate) -> Result<(), String> {
     {
         return Err("SCP11 OCE leaf does not permit key agreement".to_owned());
     }
-    let subject_public_key = certificate
-        .certificate
-        .tbs_certificate()
-        .subject_public_key_info()
-        .to_der()
-        .map_err(|error| format!("encode SCP11 OCE public key: {error}"))?;
-    p256::PublicKey::from_public_key_der(&subject_public_key)
-        .map_err(|_| "SCP11 OCE leaf does not contain a P-256 public key".to_owned())?;
+    p256_public_point(&certificate.certificate)?;
     Ok(())
 }
 
@@ -301,20 +297,22 @@ fn validate_decrypted_key(
     require_p256: bool,
 ) -> Result<(), String> {
     if require_p256 {
-        let private_key = p256::SecretKey::from_pkcs8_der(decrypted)
-            .map_err(|_| "SCP11 OCE private key is not a P-256 PKCS #8 key".to_owned())?;
+        let private_key = SoftwareSigningKey::from_pkcs8_der(
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            decrypted,
+        )
+        .map_err(|_| "SCP11 OCE private key is not a P-256 PKCS #8 key".to_owned())?;
         let certificate = Certificate::from_der(&certificates[0])
             .map_err(|error| format!("parse leaf certificate: {error}"))?;
-        let certificate_key = certificate
-            .tbs_certificate()
-            .subject_public_key_info()
-            .to_der()
-            .map_err(|error| format!("encode leaf public key: {error}"))?;
-        let private_key = private_key
-            .public_key()
-            .to_public_key_der()
-            .map_err(|error| format!("encode private-key public component: {error}"))?;
-        if private_key.as_bytes() != certificate_key {
+        let certificate_key = p256_public_point(&certificate)?;
+        let SoftwarePublicKey::Ec {
+            curve: EcCurve::P256,
+            uncompressed: private_key,
+        } = private_key.public_key()
+        else {
+            return Err("SCP11 OCE private key is not P-256".to_owned());
+        };
+        if private_key != certificate_key {
             return Err("private key does not match the leaf certificate".to_owned());
         }
         return Ok(());
@@ -331,6 +329,30 @@ fn validate_decrypted_key(
     certified_key
         .keys_match()
         .map_err(|_| "private key does not match the leaf certificate".to_owned())
+}
+
+fn p256_public_point(certificate: &Certificate) -> Result<Vec<u8>, String> {
+    let spki = certificate.tbs_certificate().subject_public_key_info();
+    let parameters = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|parameters| parameters.decode_as::<ObjectIdentifier>().ok());
+    if spki.algorithm.oid != EC_PUBLIC_KEY || parameters != Some(P256_CURVE) {
+        return Err("certificate does not contain a P-256 public key".to_owned());
+    }
+    let point = spki
+        .subject_public_key
+        .as_bytes()
+        .ok_or_else(|| "certificate P-256 public key is not byte-aligned".to_owned())?
+        .to_vec();
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.clone(),
+    }
+    .validate()
+    .map_err(|_| "certificate contains an invalid P-256 public key".to_owned())?;
+    Ok(point)
 }
 
 enum PathUsage {

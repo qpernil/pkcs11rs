@@ -5,11 +5,9 @@ use crate::{
     scp03::{CommandApdu, Scp03Session},
     secure_channel_crypto::aes_cmac,
 };
-use p256::{
-    PublicKey as P256PublicKey, SecretKey as P256SecretKey,
-    ecdh::diffie_hellman,
-    elliptic_curve::{Generate, sec1::ToSec1Point},
-    pkcs8::{DecodePrivateKey, DecodePublicKey},
+use software_key_core::{
+    software_key_agreement::derive_with_signing_key,
+    software_signing::{EcCurve, SoftwarePublicKey, SoftwareSigningAlgorithm, SoftwareSigningKey},
 };
 use std::fs;
 use subtle::ConstantTimeEq;
@@ -70,14 +68,14 @@ impl Scp11Variant {
 struct Scp11aHostCredentials {
     key_version: u8,
     key_id: u8,
-    private_key: P256SecretKey,
+    private_key: SoftwareSigningKey,
     certificates: Vec<Vec<u8>>,
 }
 
 pub(crate) struct Scp11KeySet {
     variant: Scp11Variant,
     key_version: u8,
-    card_public_key: Option<P256PublicKey>,
+    card_public_key: Option<Vec<u8>>,
     certificate_trust: Option<crate::certificate_chain::CertificateTrust>,
     host: Option<Scp11aHostCredentials>,
 }
@@ -163,7 +161,7 @@ impl Scp11KeySet {
         connector: &dyn Connector,
     ) -> Result<Scp03Session, Error> {
         let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
-        let ephemeral = P256SecretKey::generate();
+        let ephemeral = p256_key()?;
         self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
     }
 
@@ -181,7 +179,7 @@ impl Scp11KeySet {
         }
         if let Some(point) = cached_public_point {
             let card_public_key = parse_public_point(point)?;
-            let ephemeral = P256SecretKey::generate();
+            let ephemeral = p256_key()?;
             return self
                 .establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
                 .map(|session| (session, None));
@@ -202,8 +200,8 @@ impl Scp11KeySet {
             &certificates?,
             self.certificate_trust.as_ref().ok_or(CKR_ARGUMENTS_BAD)?,
         )?;
-        let ephemeral = P256SecretKey::generate();
-        let point = encode_public_point(&card_public_key);
+        let ephemeral = p256_key()?;
+        let point = card_public_key.clone();
         self.establish_with_ephemeral_and_card_key(connector, ephemeral, &card_public_key)
             .map(|session| (session, Some(point)))
     }
@@ -223,7 +221,7 @@ impl Scp11KeySet {
     fn establish_with_ephemeral(
         &self,
         connector: &dyn Connector,
-        ephemeral: P256SecretKey,
+        ephemeral: SoftwareSigningKey,
     ) -> Result<Scp03Session, Error> {
         let card_public_key = self.card_public_key.as_ref().ok_or(CKR_ARGUMENTS_BAD)?;
         self.establish_with_ephemeral_and_card_key(connector, ephemeral, card_public_key)
@@ -232,11 +230,11 @@ impl Scp11KeySet {
     fn establish_with_ephemeral_and_card_key(
         &self,
         connector: &dyn Connector,
-        ephemeral: P256SecretKey,
-        card_public_key: &P256PublicKey,
+        ephemeral: SoftwareSigningKey,
+        card_public_key: &[u8],
     ) -> Result<Scp03Session, Error> {
         self.upload_host_certificates(connector)?;
-        let host_ephemeral_point = encode_private_public_point(&ephemeral);
+        let host_ephemeral_point = encode_private_public_point(&ephemeral)?;
         let request_data = authentication_data(&host_ephemeral_point, self.variant.parameter())?;
         let authenticate = CommandApdu {
             cla: 0x80,
@@ -321,18 +319,19 @@ impl Scp11aHostCredentials {
             pinentry,
             "Unlock the SCP11 OCE private key",
         )?;
-        let private_key = P256SecretKey::from_pkcs8_der(&encoded_key)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+        let private_key = SoftwareSigningKey::from_pkcs8_der(
+            SoftwareSigningAlgorithm::EcdsaP256Sha256,
+            &encoded_key,
+        )
+        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
 
         let certificate_bundle = fs::read(&configuration.certificate_bundle)
             .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
         let certificates = crate::certificate_chain::decode_bundle(&certificate_bundle)?;
-        let leaf_key =
-            P256PublicKey::from_public_key_der(&crate::certificate_chain::public_key_info(
-                certificates.first().ok_or(CKR_ARGUMENTS_BAD)?,
-            )?)
-            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-        if encode_private_public_point(&private_key) != encode_public_point(&leaf_key) {
+        let leaf_key = crate::certificate_chain::p256_public_point(
+            certificates.first().ok_or(CKR_ARGUMENTS_BAD)?,
+        )?;
+        if encode_private_public_point(&private_key)? != leaf_key {
             return Err(CKR_ARGUMENTS_BAD.into());
         }
 
@@ -345,34 +344,46 @@ impl Scp11aHostCredentials {
     }
 }
 
-fn parse_public_point(encoded: &[u8]) -> Result<P256PublicKey, Error> {
+fn parse_public_point(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     if encoded.len() != 65 || encoded.first() != Some(&0x04) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
-    P256PublicKey::from_sec1_bytes(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: encoded.to_vec(),
+    }
+    .validate()
+    .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    Ok(encoded.to_vec())
 }
 
 fn card_public_key_from_certificates(
     certificates: &[Vec<u8>],
     trust: &crate::certificate_chain::CertificateTrust,
-) -> Result<P256PublicKey, Error> {
+) -> Result<Vec<u8>, Error> {
     parse_public_point(&trust.validate_p256_public_point(certificates)?)
 }
 
-fn encode_private_public_point(key: &P256SecretKey) -> Vec<u8> {
-    encode_public_point(&key.public_key())
+fn p256_key() -> Result<SoftwareSigningKey, Error> {
+    SoftwareSigningKey::generate(SoftwareSigningAlgorithm::EcdsaP256Sha256)
+        .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
-fn encode_public_point(key: &P256PublicKey) -> Vec<u8> {
-    key.to_sec1_point(false).as_bytes().to_vec()
+fn encode_private_public_point(key: &SoftwareSigningKey) -> Result<Vec<u8>, Error> {
+    let SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed,
+    } = key.public_key()
+    else {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    };
+    Ok(uncompressed)
 }
 
-fn ecdh(private: &P256SecretKey, peer: &P256PublicKey) -> Result<Vec<u8>, Error> {
-    Ok(
-        diffie_hellman(private.to_nonzero_scalar(), peer.as_affine())
-            .raw_secret_bytes()
-            .to_vec(),
-    )
+fn ecdh(private: &SoftwareSigningKey, peer: &[u8]) -> Result<Vec<u8>, Error> {
+    derive_with_signing_key(private, peer)
+        .map(|secret| secret.to_vec())
+        .map_err(|_| CKR_ARGUMENTS_BAD.into())
 }
 
 fn authentication_data(host_ephemeral_point: &[u8], parameter: u8) -> Result<Vec<u8>, Error> {

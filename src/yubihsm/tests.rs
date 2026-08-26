@@ -62,8 +62,9 @@ const RFC3394_AES_128_KEY: [u8; 16] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ];
 
-fn test_private_key(encoded: &[u8]) -> Result<P256SecretKey, Error> {
-    P256SecretKey::from_slice(encoded).map_err(|_| Error::from(CKR_DEVICE_ERROR))
+fn test_private_key(encoded: &[u8]) -> Result<SoftwareSigningKey, Error> {
+    SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::EcdsaP256Sha256, encoded)
+        .map_err(|_| Error::from(CKR_DEVICE_ERROR))
 }
 const RFC7748_ALICE_PRIVATE_KEY: [u8; 32] = [
     0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
@@ -1495,7 +1496,7 @@ impl Connector for SymmetricHsmAuthPeer {
 
 #[derive(Debug)]
 struct AsymmetricHsmAuthPeer {
-    ephemeral_key: P256SecretKey,
+    ephemeral_key: SoftwareSigningKey,
     public_key: Vec<u8>,
     fail_calculate: bool,
 }
@@ -1577,11 +1578,11 @@ impl Connector for AsymmetricHsmAuthPeer {
         {
             return Err(CKR_DATA_INVALID.into());
         }
-        let device_ephemeral = parse_p256_public_key(&context[P256_PUBLIC_KEY_LENGTH..])?;
-        let device_static = parse_p256_public_key(device_public_key)?;
+        parse_p256_public_key(&context[P256_PUBLIC_KEY_LENGTH..])?;
+        parse_p256_public_key(device_public_key)?;
         let host_static = crate::yubico_kdf::yubico_password_p256_key(PASSWORD)?;
-        let ephemeral_secret = p256_ecdh(&self.ephemeral_key, &device_ephemeral)?;
-        let static_secret = p256_ecdh(&host_static, &device_static)?;
+        let ephemeral_secret = p256_ecdh(&self.ephemeral_key, &context[P256_PUBLIC_KEY_LENGTH..])?;
+        let static_secret = p256_ecdh(&host_static, device_public_key)?;
         let keys = x963_session_keys(&ephemeral_secret, &static_secret)?;
         let mut receipt_input = Vec::with_capacity(P256_PUBLIC_KEY_LENGTH * 2);
         receipt_input.extend_from_slice(&context[P256_PUBLIC_KEY_LENGTH..]);

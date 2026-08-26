@@ -1,9 +1,12 @@
 use crate::{CKR_ARGUMENTS_BAD, CKR_PIN_INCORRECT, Error};
-use minicbor::{Decoder, Encoder};
-use p256::{
-    PublicKey,
-    pkcs8::{DecodePublicKey, EncodePublicKey},
+use const_oid::ObjectIdentifier;
+use der::{
+    Decode, Encode,
+    asn1::{Any, BitString},
 };
+use minicbor::{Decoder, Encoder};
+use software_key_core::software_signing::{EcCurve, SoftwarePublicKey};
+use spki::{AlgorithmIdentifierOwned, SubjectPublicKeyInfoOwned};
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -17,6 +20,8 @@ const TRUST_RECORD_SCHEMA: &str = "pkcs11rs.yubihsm-device-trust";
 const TRUST_RECORD_VERSION: u64 = 1;
 const TRUST_RECORD_PUBLIC_KEY: u8 = 1;
 const TRUST_RECORD_ATTESTATION_CERTIFICATE: u8 = 2;
+const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const P256_CURVE: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 const YUBICO_ROOT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/certificates/yubihsm/yubihsm2-attestation-root.der"
@@ -207,24 +212,14 @@ pub(crate) fn decode_trust_record(encoded: &[u8]) -> Result<Vec<u8>, Error> {
     }
 
     let pinned = match kind {
-        TRUST_RECORD_PUBLIC_KEY => {
-            let key = PublicKey::from_public_key_der(payload)
-                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-            let canonical = key
-                .to_public_key_der()
-                .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-            if canonical.as_bytes() != payload {
-                return Err(CKR_ARGUMENTS_BAD.into());
-            }
-            canonical.as_bytes().to_vec()
-        }
+        TRUST_RECORD_PUBLIC_KEY => canonical_device_spki(payload)?,
         TRUST_RECORD_ATTESTATION_CERTIFICATE => {
             let certificate = crate::certificate_chain::decode(payload)?;
             if certificate != payload {
                 return Err(CKR_ARGUMENTS_BAD.into());
             }
             let pinned = crate::certificate_chain::public_key_info(&certificate)?;
-            PublicKey::from_public_key_der(&pinned).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+            canonical_device_spki(&pinned)?;
             pinned
         }
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
@@ -285,11 +280,54 @@ pub(crate) fn install_attestation(
 }
 
 pub(crate) fn device_spki(encoded_public_point: &[u8]) -> Result<Vec<u8>, Error> {
-    let key = PublicKey::from_sec1_bytes(encoded_public_point)
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
-    key.to_public_key_der()
-        .map(|document| document.as_bytes().to_vec())
-        .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: encoded_public_point.to_vec(),
+    }
+    .validate()
+    .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    SubjectPublicKeyInfoOwned {
+        algorithm: AlgorithmIdentifierOwned {
+            oid: EC_PUBLIC_KEY,
+            parameters: Some(
+                Any::encode_from(&P256_CURVE).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
+            ),
+        },
+        subject_public_key: BitString::from_bytes(encoded_public_point)
+            .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?,
+    }
+    .to_der()
+    .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))
+}
+
+fn canonical_device_spki(encoded: &[u8]) -> Result<Vec<u8>, Error> {
+    let spki =
+        SubjectPublicKeyInfoOwned::from_der(encoded).map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    if spki.algorithm.oid != EC_PUBLIC_KEY
+        || spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.decode_as::<ObjectIdentifier>().ok())
+            != Some(P256_CURVE)
+    {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    let point = spki
+        .subject_public_key
+        .as_bytes()
+        .ok_or(CKR_ARGUMENTS_BAD)?;
+    SoftwarePublicKey::Ec {
+        curve: EcCurve::P256,
+        uncompressed: point.to_vec(),
+    }
+    .validate()
+    .map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    let canonical = spki.to_der().map_err(|_| Error::from(CKR_ARGUMENTS_BAD))?;
+    if canonical != encoded {
+        return Err(CKR_ARGUMENTS_BAD.into());
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]

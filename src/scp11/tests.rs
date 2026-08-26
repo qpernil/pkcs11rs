@@ -42,14 +42,16 @@ impl Connector for ScriptedConnector {
     }
 }
 
-fn private_key(scalar: u32) -> P256SecretKey {
+fn private_key(scalar: u32) -> SoftwareSigningKey {
     let mut encoded = [0; 32];
     encoded[28..].copy_from_slice(&scalar.to_be_bytes());
-    P256SecretKey::from_slice(&encoded).unwrap()
+    SoftwareSigningKey::from_serialized(SoftwareSigningAlgorithm::EcdsaP256Sha256, &encoded)
+        .unwrap()
 }
 
 fn signing_key(scalar: u32) -> SigningKey {
-    SigningKey::from(private_key(scalar))
+    let serialized = private_key(scalar).serialized().unwrap();
+    SigningKey::from(p256::SecretKey::from_slice(&serialized).unwrap())
 }
 
 fn certificate_chain(leaf_signer: &SigningKey) -> Vec<Vec<u8>> {
