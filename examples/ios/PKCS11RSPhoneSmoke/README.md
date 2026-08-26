@@ -206,6 +206,9 @@ The app defaults to `http://192.168.1.90:12345`. Override that URL with the
 `fallbackConnectorURL` in `PKCS11RSPhoneSmoke/App.swift`. The environment
 variable is only an input to this smoke-test UI; the module itself receives the
 URL through the JSON passed to `C_Initialize`.
+The app does not persist the compiled fallback or a launch-environment
+override. Only a connector URL explicitly stored under
+`PKCS11RSConnectorURL` overrides the fallback on later launches.
 
 For prototype discovery, the app also passes `yubihsm.public_discovery` as
 `0001password`: authentication object ID `0001` followed by the default

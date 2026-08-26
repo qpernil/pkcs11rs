@@ -303,7 +303,6 @@ static NSData *PKCS11RSAttributeData(CK_ATTRIBUTE attribute, NSData *storage) {
     if (url == nil) {
         url = PKCS11RSFallbackConnectorURL;
     }
-    [defaults setObject:url forKey:PKCS11RSConnectorURLKey];
 
     NSURL *applicationSupport =
         [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory
