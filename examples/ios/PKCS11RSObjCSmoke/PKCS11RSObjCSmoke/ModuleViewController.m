@@ -3,7 +3,7 @@
 #import "ModuleViewController.h"
 
 static NSString *const PKCS11RSConnectorURLKey = @"PKCS11RSConnectorURL";
-static NSString *const PKCS11RSFallbackConnectorURL = @"http://192.168.1.90:12345";
+static NSString *const PKCS11RSFallbackConnectorURL = @"http://plankan-9.duckdns.org:12345";
 static NSString *const PKCS11RSSoftwareTokenName = @"iPhone smoke";
 static NSString *const PKCS11RSSoftwareTokenModel = @"Software token";
 static NSString *const PKCS11RSSoftwareTokenPIN = @"password";
