@@ -454,9 +454,7 @@ fn cmac_with_encryptor(
         | BlockCipherModeError::InvalidIvLength
         | BlockCipherModeError::InvalidDataLength
         | BlockCipherModeError::InvalidCounterBits
-        | BlockCipherModeError::InputTooLong => {
-            unreachable!("AES-CMAC cannot produce a counter error")
-        }
+        | BlockCipherModeError::InputTooLong => CKR_DEVICE_ERROR.into(),
     })
 }
 

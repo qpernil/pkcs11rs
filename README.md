@@ -289,6 +289,45 @@ Start a loopback HTTP connector with:
 cargo run -p pkcs11rs-connector
 ```
 
+On Unix hosts, the optional `embedded-virtual-yubihsm` feature lets the same
+connector serve one or more headless `virtual-yubihsm-core` devices alongside
+physical USB devices:
+
+```sh
+cargo run -p pkcs11rs-connector \
+  --features embedded-virtual-yubihsm -- \
+  --virtual-yubihsm 12345678=/var/lib/pkcs11rs/virtual-yubihsm-12345678 \
+  --virtual-yubihsm 87654321=/var/lib/pkcs11rs/virtual-yubihsm-87654321
+```
+
+For deployment, build the connector with `--release` and the same feature.
+The complete configuration, persistence, locking, and recompilation behavior
+is documented in
+[Embedded virtual YubiHSMs](docs/connector.md#embedded-virtual-yubihsms).
+
+Each configured device runs on its own blocking actor thread, while HTTP tasks
+await bounded Tokio channels and remain asynchronous. The actor uses the same
+core, CBOR state format, persistence coordinator, atomic replacement, and
+sidecar lock as the USB-gadget frontend. Persistence batches changes for at
+most 500 ms by default. Use `--virtual-yubihsm-persistence immediate`, or
+change the shared batching limit with
+`--virtual-yubihsm-batch-delay-ms MILLISECONDS`.
+
+The state directories must be absolute and unique, and configured serials must
+be unique. A USB worker and connector cannot own the same persisted device at
+the same time. When the connector is compiled without embedded support, these
+configuration options are still accepted but ignored with a warning. The
+physical-only connector therefore has no virtual-HSM or persistence dependency
+in its compiled binary.
+
+When embedded support is compiled in, physical discovery is independently
+configurable and defaults to enabled, as before. Pass
+`--hardware-discovery false` for a virtual-only or deliberately empty embedded
+connector. A connector built without embedded support accepts but ignores this
+setting with a warning and always retains normal physical discovery. This keeps
+one configuration file portable without allowing a physical-only build to
+silently expose no devices.
+
 The multi-device API enumerates and addresses each device explicitly:
 
 ```text

@@ -479,6 +479,13 @@ pub(crate) fn validate_p256_public_point(
     CertificateTrust::new(trust_anchors)?.validate_p256_public_point(certificates)
 }
 
+fn sha256_fingerprint(data: &[u8]) -> Fingerprint {
+    let digest = software_key_core::digest::HashAlgorithm::Sha256.digest(data);
+    let mut fingerprint = [0; 32];
+    fingerprint.copy_from_slice(&digest);
+    fingerprint
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,10 +791,4 @@ mod tests {
             crate::certificate_builder::p256_public_point(leaf_key.verifying_key())
         );
     }
-}
-fn sha256_fingerprint(data: &[u8]) -> Fingerprint {
-    software_key_core::digest::HashAlgorithm::Sha256
-        .digest(data)
-        .try_into()
-        .expect("SHA-256 output is 32 bytes")
 }

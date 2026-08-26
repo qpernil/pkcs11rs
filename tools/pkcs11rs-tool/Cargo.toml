@@ -7,6 +7,10 @@ description = "Authoring and validation utility for pkcs11rs binary objects"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[package.metadata.cargo-machete]
+# Used by the shared certificate-bundle source included from the workspace root.
+ignored = ["minicbor"]
+
 [dependencies]
 base64 = "0.22.1"
 const-oid = "0.10.2"
@@ -14,7 +18,6 @@ der = { version = "0.8.1", features = ["alloc", "std"] }
 minicbor = { version = "2.3.0", features = ["alloc"] }
 pkcs8 = { version = "0.11.0", features = ["alloc", "encryption", "std"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
-rustls-pki-types = "1.15.1"
 software-key-core = { path = "../../../software-key-core" }
 spki = { version = "0.8.0", features = ["alloc", "std"] }
 webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring", "std"] }

@@ -14,6 +14,47 @@ and asynchronous nusb dependencies never enter the iOS XCFramework.
 > limits, and the remaining operational controls are listed in
 > [Internet-readiness work](#internet-readiness-work).
 
+## Embedded virtual YubiHSMs
+
+On Unix, the connector can compile `virtual-yubihsm-core` directly into the
+process. Build the release binary with:
+
+```sh
+cargo build --release -p pkcs11rs-connector \
+  --features embedded-virtual-yubihsm
+```
+
+Each `--virtual-yubihsm SERIAL=STATE_DIRECTORY` argument adds one independent
+device. For example, this starts two virtual devices and deliberately disables
+physical USB discovery:
+
+```sh
+target/release/pkcs11rs-connector \
+  --hardware-discovery false \
+  --virtual-yubihsm 12345678=/var/lib/pkcs11rs/yubihsm-12345678 \
+  --virtual-yubihsm 87654321=/var/lib/pkcs11rs/yubihsm-87654321
+```
+
+Serial numbers and absolute state directories must be unique. A missing state
+directory is created with mode `0700`; a missing state file is initialized as
+a factory-default YubiHSM. The state filename is `yubihsm-SERIAL.cbor`, with a
+persistent `yubihsm-SERIAL.lock` sidecar preventing simultaneous connector and
+USB-worker ownership. Do not point two configured processes at the same state
+file.
+
+The same arguments can be retained when switching binaries by recompilation:
+
+| Connector build | Virtual-device arguments | `--hardware-discovery false` |
+| --- | --- | --- |
+| Feature enabled | Start the configured devices | Disables physical discovery |
+| Feature absent | Accepted and ignored with a warning | Accepted and ignored; physical discovery remains enabled |
+
+Mutating commands are persisted in receipt order. The default `batched` policy
+coalesces mutations for at most 500 ms; use
+`--virtual-yubihsm-persistence immediate` when every successful mutation must
+wait for durable storage. The batch bound can be changed with
+`--virtual-yubihsm-batch-delay-ms MILLISECONDS`.
+
 ## Architecture
 
 The connector starts the nusb hot-plug watch before its initial enumeration,
@@ -27,6 +68,40 @@ Each device entry owns an asynchronous access gate and its opened nusb device.
 The gate is held from command submission through USB response completion. This
 means concurrent HTTP requests for one serial block without executing
 concurrently, while separate physical HSMs remain independent.
+
+An optional Unix-only `embedded-virtual-yubihsm` build feature adds headless
+virtual devices to the same registry. Each embedded device owns a dedicated OS
+thread running `virtual-yubihsm-core`. The asynchronous transport sends one
+request through a capacity-one Tokio MPSC channel and awaits its result through
+a one-shot channel. Synchronous cryptography, state locking, and file syncing
+therefore never block a Tokio runtime worker. A received mutation is completed
+and accounted for even if its HTTP requester is cancelled before receiving the
+reply.
+
+Configure an instance by repeating
+`--virtual-yubihsm SERIAL=STATE_DIRECTORY`. Embedded instances use distinct
+absolute state directories and serials. The common persistence policy is
+selected with `--virtual-yubihsm-persistence batched|immediate`; batching uses
+a 500 ms maximum delay unless changed with
+`--virtual-yubihsm-batch-delay-ms`. The actor acquires the same persistent
+sidecar lock as the USB worker before restoring state and releases it only
+after graceful persistence shutdown. This allows the same virtual device state
+to move between connector and USB frontends across separate runs, but forbids
+simultaneous ownership.
+
+All virtual-HSM command, crypto, and durable-state dependencies are optional.
+A connector compiled without the feature still parses these options, logs that
+configured virtual instances are ignored, and continues as a physical-only
+connector. It also accepts but ignores `--hardware-discovery false`, retaining
+normal hardware discovery so an embedded-oriented configuration can safely be
+used by a featureless binary.
+
+Virtual instances are always opt-in. In an embedded-enabled build, local USB
+discovery remains enabled by default but can be disabled independently with
+`--hardware-discovery false`. Consequently that build can expose only physical
+devices, only configured virtual devices, both inventories together, or no
+devices while retaining a live connector endpoint. A featureless build always
+discovers physical devices.
 
 The per-device gate deliberately has no queue timeout: accepted requests wait
 until preceding commands for that device finish. A global Tower concurrency

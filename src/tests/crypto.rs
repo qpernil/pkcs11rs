@@ -541,13 +541,13 @@ pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
 
     fn encode_oaep_db(db: &[u8], seed: &[u8]) -> Vec<u8> {
         let digest = crate::mgf_digest(33, CKM_SHA256 as CK_MECHANISM_TYPE).unwrap();
-        let db_mask = crate::mgf1(seed, db.len(), digest).unwrap();
+        let db_mask = software_key_core::digest::mgf1(digest, seed, db.len()).unwrap();
         let masked_db = db
             .iter()
             .zip(db_mask)
             .map(|(value, mask)| value ^ mask)
             .collect::<Vec<_>>();
-        let seed_mask = crate::mgf1(&masked_db, seed.len(), digest).unwrap();
+        let seed_mask = software_key_core::digest::mgf1(digest, &masked_db, seed.len()).unwrap();
         let mut encoded = vec![0];
         encoded.extend(seed.iter().zip(seed_mask).map(|(value, mask)| value ^ mask));
         encoded.extend(masked_db);
