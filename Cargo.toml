@@ -37,7 +37,6 @@ aes = { version = "0.8.4", features = ["zeroize"] }
 base64 = "0.22.1"
 des = "0.8.1"
 getrandom = "0.4.3"
-ghash = "0.6.0"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 hkdf = "0.13.0"
 hidapi = { version = "2.6.6", optional = true, default-features = false, features = ["linux-static-hidraw", "macos-shared-device", "windows-native"] }
