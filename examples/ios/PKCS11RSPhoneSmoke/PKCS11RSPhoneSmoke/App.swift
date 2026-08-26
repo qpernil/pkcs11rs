@@ -101,7 +101,6 @@ private func connectorConfiguration() -> ConnectorConfiguration {
     let url = environment["PKCS11RS_YUBIHSM_URLS"]
         ?? defaults.string(forKey: connectorURLKey)
         ?? fallbackConnectorURL
-    defaults.set(url, forKey: connectorURLKey)
     let tokenStoragePath = FileManager.default.urls(
         for: .applicationSupportDirectory,
         in: .userDomainMask
