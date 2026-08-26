@@ -449,58 +449,21 @@ pub(crate) fn aes_gmac_parameters(
     Ok(Some(parameters))
 }
 
-fn aes_cmac_double(mut block: [u8; AES_CMAC_LENGTH]) -> [u8; AES_CMAC_LENGTH] {
-    let carry = block[0] >> 7;
-    for index in 0..AES_CMAC_LENGTH - 1 {
-        block[index] = (block[index] << 1) | (block[index + 1] >> 7);
-    }
-    block[AES_CMAC_LENGTH - 1] <<= 1;
-    block[AES_CMAC_LENGTH - 1] ^= 0x87 & 0u8.wrapping_sub(carry);
-    block
-}
-
 fn aes_cmac_with_encryptor(
     data: &[u8],
-    mut encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
+    encrypt: impl FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 ) -> Result<Vec<u8>, Error> {
-    let encrypted_zero = encrypt(&[0; AES_CMAC_LENGTH])?;
-    let subkey = encrypted_zero
-        .as_slice()
-        .try_into()
-        .map(aes_cmac_double)
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let complete = !data.is_empty() && crate::is_multiple_of(data.len(), AES_CMAC_LENGTH);
-    let last_subkey = if complete {
-        subkey
-    } else {
-        aes_cmac_double(subkey)
-    };
-    let block_count = std::cmp::max(1, data.len().div_ceil(AES_CMAC_LENGTH));
-    let mut state = [0; AES_CMAC_LENGTH];
+    use software_key_core::software_symmetric::{AesBlockModeError, aes_cmac_with};
 
-    for block_index in 0..block_count {
-        let start = block_index * AES_CMAC_LENGTH;
-        let available = data.len().saturating_sub(start).min(AES_CMAC_LENGTH);
-        let mut block = [0; AES_CMAC_LENGTH];
-        block[..available].copy_from_slice(&data[start..start + available]);
-        if block_index + 1 == block_count {
-            if !complete {
-                block[available] = 0x80;
+    aes_cmac_with(data, encrypt)
+        .map(|mac| mac.to_vec())
+        .map_err(|error| match error {
+            AesBlockModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+            AesBlockModeError::EncryptBlocks(error) => error,
+            AesBlockModeError::InvalidCounterBits | AesBlockModeError::InputTooLong => {
+                unreachable!("AES-CMAC cannot produce a counter error")
             }
-            for (value, subkey) in block.iter_mut().zip(last_subkey) {
-                *value ^= subkey;
-            }
-        }
-        for (value, previous) in block.iter_mut().zip(state) {
-            *value ^= previous;
-        }
-        let encrypted = encrypt(&block)?;
-        state = encrypted
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    }
-    Ok(state.to_vec())
+        })
 }
 
 pub(crate) fn yubihsm_aes_cmac(

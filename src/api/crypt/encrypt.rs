@@ -3,7 +3,7 @@ use super::shared::{
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
-use ghash::{GHash, universal_hash::UniversalHash};
+use software_key_core::software_symmetric::AesCcmOperation;
 use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
 
 ffi_entry_point! {
@@ -642,45 +642,6 @@ fn software_cbc_mac(key: &[u8], blocks: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(output[output.len() - AES_BLOCK_LENGTH..].to_vec())
 }
 
-fn ghash(key: [u8; AES_BLOCK_LENGTH], aad: &[u8], ciphertext: &[u8]) -> Result<[u8; 16], Error> {
-    let aad_bits = u64::try_from(aad.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
-        .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-    let ciphertext_bits = u64::try_from(ciphertext.len().checked_mul(8).ok_or(CKR_DATA_LEN_RANGE)?)
-        .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
-    let mut hash = GHash::new(&key.into());
-    hash.update_padded(aad);
-    hash.update_padded(ciphertext);
-    let mut lengths = [0; AES_BLOCK_LENGTH];
-    lengths[..8].copy_from_slice(&aad_bits.to_be_bytes());
-    lengths[8..].copy_from_slice(&ciphertext_bits.to_be_bytes());
-    hash.update(&[lengths.into()]);
-    Ok(hash.finalize().into())
-}
-
-fn increment_gcm_counter(counter: &mut [u8; AES_BLOCK_LENGTH]) -> Result<(), Error> {
-    let value = u32::from_be_bytes(
-        counter
-            .get(12..)
-            .and_then(|value| <[u8; 4]>::try_from(value).ok())
-            .ok_or(CKR_FUNCTION_FAILED)?,
-    )
-    .wrapping_add(1);
-    counter[12..].copy_from_slice(&value.to_be_bytes());
-    Ok(())
-}
-
-fn gcm_tag(full_tag: [u8; AES_BLOCK_LENGTH], tag_bits: usize) -> Vec<u8> {
-    let tag_length = tag_bits.div_ceil(8);
-    let mut tag = full_tag[..tag_length].to_vec();
-    if !crate::is_multiple_of(tag_bits, 8) {
-        let mask = 0xff << (8 - tag_bits % 8);
-        if let Some(last) = tag.last_mut() {
-            *last &= mask;
-        }
-    }
-    tag
-}
-
 pub(crate) fn aes_gcm<F>(
     parameters: &GcmParameters,
     input: &[u8],
@@ -690,97 +651,32 @@ pub(crate) fn aes_gcm<F>(
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 {
-    if parameters.iv.is_empty() || parameters.tag_bits > 128 {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
-    let tag_length = parameters.tag_bits.div_ceil(8);
-    let (payload, supplied_tag) = if encrypting {
-        (input, None)
-    } else {
-        if input.len() < tag_length {
-            return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
+    use software_key_core::software_symmetric::{AesGcmError, aes_gcm_with};
+
+    aes_gcm_with(
+        &parameters.iv,
+        &parameters.aad,
+        parameters.tag_bits,
+        input,
+        encrypting,
+        &mut encrypt_blocks,
+    )
+    .map_err(|error| match error {
+        AesGcmError::InvalidIvLength | AesGcmError::InvalidTagLength => {
+            CKR_MECHANISM_PARAM_INVALID.into()
         }
-        let split = input.len() - tag_length;
-        (&input[..split], Some(&input[split..]))
-    };
-    let block_count = payload.len().div_ceil(AES_BLOCK_LENGTH);
-    if block_count > u32::MAX as usize - 2 {
-        return Err(if encrypting {
-            CKR_DATA_LEN_RANGE.into()
-        } else {
-            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
-        });
-    }
-
-    let hash_subkey = encrypt_blocks(&[0; AES_BLOCK_LENGTH])?;
-    let hash_subkey: [u8; AES_BLOCK_LENGTH] = hash_subkey
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let mut initial_counter = if parameters.iv.len() == 12 {
-        let mut counter = [0; AES_BLOCK_LENGTH];
-        counter[..12].copy_from_slice(&parameters.iv);
-        counter[15] = 1;
-        counter
-    } else {
-        ghash(hash_subkey, &[], &parameters.iv)?
-    };
-
-    let counter_capacity = (block_count + 1)
-        .checked_mul(AES_BLOCK_LENGTH)
-        .ok_or_else(|| {
+        AesGcmError::InputTooLong => {
             if encrypting {
-                Error::from(CKR_DATA_LEN_RANGE)
+                CKR_DATA_LEN_RANGE.into()
             } else {
-                Error::from(CKR_ENCRYPTED_DATA_LEN_RANGE)
+                CKR_ENCRYPTED_DATA_LEN_RANGE.into()
             }
-        })?;
-    let mut counter_blocks = Vec::with_capacity(counter_capacity);
-    counter_blocks.extend_from_slice(&initial_counter);
-    for _ in 0..block_count {
-        increment_gcm_counter(&mut initial_counter)?;
-        counter_blocks.extend_from_slice(&initial_counter);
-    }
-    let encrypted_counters = encrypt_blocks(&counter_blocks)?;
-    if encrypted_counters.len() != counter_blocks.len() {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    let mut transformed = Vec::with_capacity(payload.len());
-    for (block, key_stream) in payload
-        .chunks(AES_BLOCK_LENGTH)
-        .zip(encrypted_counters[AES_BLOCK_LENGTH..].chunks(AES_BLOCK_LENGTH))
-    {
-        transformed.extend(
-            block
-                .iter()
-                .zip(key_stream)
-                .map(|(left, right)| left ^ right),
-        );
-    }
-    let ciphertext = if encrypting { &transformed } else { payload };
-    let hash = ghash(hash_subkey, &parameters.aad, ciphertext)?;
-    let mut full_tag = [0; AES_BLOCK_LENGTH];
-    for ((output, mask), value) in full_tag
-        .iter_mut()
-        .zip(&encrypted_counters[..AES_BLOCK_LENGTH])
-        .zip(hash)
-    {
-        *output = mask ^ value;
-    }
-    let expected_tag = gcm_tag(full_tag, parameters.tag_bits);
-    if let Some(supplied_tag) = supplied_tag {
-        if !bool::from(subtle::ConstantTimeEq::ct_eq(
-            expected_tag.as_slice(),
-            supplied_tag,
-        )) {
-            transformed.fill(0);
-            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
         }
-        Ok(transformed)
-    } else {
-        transformed.extend_from_slice(&expected_tag);
-        Ok(transformed)
-    }
+        AesGcmError::CiphertextTooShort => CKR_ENCRYPTED_DATA_LEN_RANGE.into(),
+        AesGcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        AesGcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        AesGcmError::EncryptBlocks(error) => error,
+    })
 }
 
 fn yubihsm_crypt_ecb_blocks(
@@ -850,47 +746,24 @@ fn yubihsm_cbc_mac(
     Ok(iv)
 }
 
-fn aes_ctr<F>(
-    parameters: &CtrParameters,
-    input: &[u8],
-    mut encrypt_blocks: F,
-) -> Result<Vec<u8>, Error>
+fn aes_ctr<F>(parameters: &CtrParameters, input: &[u8], encrypt_blocks: F) -> Result<Vec<u8>, Error>
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 {
-    let block_count = input.len().div_ceil(AES_BLOCK_LENGTH);
-    let counter_capacity = block_count
-        .checked_mul(AES_BLOCK_LENGTH)
-        .ok_or(CKR_DATA_LEN_RANGE)?;
-    let mut counter_blocks = Vec::with_capacity(counter_capacity);
-    let initial = u128::from_be_bytes(parameters.counter_block);
-    let mask = if parameters.counter_bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << parameters.counter_bits) - 1
-    };
-    let fixed = initial & !mask;
-    let initial_counter = initial & mask;
-    for offset in 0..block_count {
-        let offset = offset as u128;
-        let counter = fixed | initial_counter.wrapping_add(offset) & mask;
-        counter_blocks.extend_from_slice(&counter.to_be_bytes());
-    }
-    let key_stream = encrypt_blocks(&counter_blocks)?;
-    if key_stream.len() != counter_blocks.len() {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    Ok(input
-        .iter()
-        .zip(key_stream)
-        .map(|(input, key_stream)| input ^ key_stream)
-        .collect())
-}
+    use software_key_core::software_symmetric::{AesBlockModeError, aes_ctr_with};
 
-#[derive(Clone, Copy)]
-enum CcmOperation {
-    EncryptBlocks,
-    CbcMac,
+    aes_ctr_with(
+        parameters.counter_bits,
+        parameters.counter_block,
+        input,
+        encrypt_blocks,
+    )
+    .map_err(|error| match error {
+        AesBlockModeError::InvalidCounterBits => CKR_MECHANISM_PARAM_INVALID.into(),
+        AesBlockModeError::InputTooLong => CKR_DATA_LEN_RANGE.into(),
+        AesBlockModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        AesBlockModeError::EncryptBlocks(error) => error,
+    })
 }
 
 fn aes_ccm<F>(
@@ -900,112 +773,34 @@ fn aes_ccm<F>(
     mut crypt: F,
 ) -> Result<Vec<u8>, Error>
 where
-    F: FnMut(CcmOperation, &[u8]) -> Result<Vec<u8>, Error>,
+    F: FnMut(AesCcmOperation, &[u8]) -> Result<Vec<u8>, Error>,
 {
-    let expected_input = if encrypting {
-        parameters.data_len
-    } else {
-        parameters
-            .data_len
-            .checked_add(parameters.mac_len)
-            .ok_or(CKR_ENCRYPTED_DATA_LEN_RANGE)?
-    };
-    if input.len() != expected_input {
-        return Err(if encrypting {
-            CKR_DATA_LEN_RANGE.into()
-        } else {
-            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
-        });
-    }
-    let (payload, supplied_tag) = if encrypting {
-        (input, None)
-    } else {
-        (
-            &input[..parameters.data_len],
-            Some(&input[parameters.data_len..]),
-        )
-    };
+    use software_key_core::software_symmetric::{AesCcmError, aes_ccm_with};
 
-    let length_bytes = 15 - parameters.nonce.len();
-    let block_count = parameters.data_len.div_ceil(AES_BLOCK_LENGTH);
-    let counter_capacity = block_count
-        .checked_add(1)
-        .and_then(|blocks| blocks.checked_mul(AES_BLOCK_LENGTH))
-        .ok_or(CKR_DATA_LEN_RANGE)?;
-    let mut counter_blocks = Vec::with_capacity(counter_capacity);
-    for counter in 0..=block_count {
-        let mut block = [0; AES_BLOCK_LENGTH];
-        block[0] = (length_bytes - 1) as u8;
-        block[1..1 + parameters.nonce.len()].copy_from_slice(&parameters.nonce);
-        let encoded = (counter as u64).to_be_bytes();
-        block[AES_BLOCK_LENGTH - length_bytes..]
-            .copy_from_slice(&encoded[encoded.len() - length_bytes..]);
-        counter_blocks.extend_from_slice(&block);
-    }
-    let key_stream = crypt(CcmOperation::EncryptBlocks, &counter_blocks)?;
-    if key_stream.len() != counter_blocks.len() {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    let mut transformed = Vec::with_capacity(payload.len());
-    for (block, key_stream) in payload
-        .chunks(AES_BLOCK_LENGTH)
-        .zip(key_stream[AES_BLOCK_LENGTH..].chunks(AES_BLOCK_LENGTH))
-    {
-        transformed.extend(
-            block
-                .iter()
-                .zip(key_stream)
-                .map(|(input, key_stream)| input ^ key_stream),
-        );
-    }
-    let plaintext = if encrypting {
-        payload
-    } else {
-        transformed.as_slice()
-    };
-
-    let mut mac_input = Zeroizing::new(Vec::new());
-    let mut b0 = [0; AES_BLOCK_LENGTH];
-    b0[0] = u8::from(!parameters.aad.is_empty()) << 6
-        | (((parameters.mac_len - 2) / 2) as u8) << 3
-        | (length_bytes - 1) as u8;
-    b0[1..1 + parameters.nonce.len()].copy_from_slice(&parameters.nonce);
-    let encoded_length = (parameters.data_len as u64).to_be_bytes();
-    b0[AES_BLOCK_LENGTH - length_bytes..]
-        .copy_from_slice(&encoded_length[encoded_length.len() - length_bytes..]);
-    mac_input.extend_from_slice(&b0);
-    if !parameters.aad.is_empty() {
-        if parameters.aad.len() < 0xff00 {
-            mac_input.extend_from_slice(&(parameters.aad.len() as u16).to_be_bytes());
-        } else {
-            mac_input.extend_from_slice(&[0xff, 0xfe]);
-            mac_input.extend_from_slice(&(parameters.aad.len() as u32).to_be_bytes());
+    aes_ccm_with(
+        parameters.data_len,
+        &parameters.nonce,
+        &parameters.aad,
+        parameters.mac_len,
+        input,
+        encrypting,
+        &mut crypt,
+    )
+    .map_err(|error| match error {
+        AesCcmError::InvalidNonceLength | AesCcmError::InvalidTagLength => {
+            CKR_MECHANISM_PARAM_INVALID.into()
         }
-        mac_input.extend_from_slice(&parameters.aad);
-        let padded_length = mac_input.len().next_multiple_of(AES_BLOCK_LENGTH);
-        mac_input.resize(padded_length, 0);
-    }
-    mac_input.extend_from_slice(plaintext);
-    let padded_length = mac_input.len().next_multiple_of(AES_BLOCK_LENGTH);
-    mac_input.resize(padded_length, 0);
-    let mac = crypt(CcmOperation::CbcMac, &mac_input)?;
-    let mac: [u8; AES_BLOCK_LENGTH] = mac.try_into().map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-    let tag = mac[..parameters.mac_len]
-        .iter()
-        .zip(&key_stream[..parameters.mac_len])
-        .map(|(mac, mask)| mac ^ mask)
-        .collect::<Vec<_>>();
-
-    if let Some(supplied_tag) = supplied_tag {
-        if !bool::from(tag.ct_eq(supplied_tag)) {
-            transformed.fill(0);
-            return Err(CKR_ENCRYPTED_DATA_INVALID.into());
+        AesCcmError::InvalidDataLength | AesCcmError::InputTooLong => {
+            if encrypting {
+                CKR_DATA_LEN_RANGE.into()
+            } else {
+                CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+            }
         }
-        Ok(transformed)
-    } else {
-        transformed.extend_from_slice(&tag);
-        Ok(transformed)
-    }
+        AesCcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        AesCcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        AesCcmError::Crypt(error) => error,
+    })
 }
 
 const AES_KEY_WRAP_SEMIBLOCK_LENGTH: usize = 8;
@@ -1657,13 +1452,15 @@ fn crypt(
                                     input,
                                     encrypting,
                                     |operation, blocks| match operation {
-                                        CcmOperation::EncryptBlocks => yubihsm_encrypt_ecb_blocks(
-                                            ctx,
-                                            session_handle,
-                                            *id,
-                                            blocks,
-                                        ),
-                                        CcmOperation::CbcMac => {
+                                        AesCcmOperation::EncryptBlocks => {
+                                            yubihsm_encrypt_ecb_blocks(
+                                                ctx,
+                                                session_handle,
+                                                *id,
+                                                blocks,
+                                            )
+                                        }
+                                        AesCcmOperation::CbcMac => {
                                             yubihsm_cbc_mac(ctx, session_handle, *id, blocks)
                                                 .map(|mac| mac.to_vec())
                                         }
@@ -1772,10 +1569,10 @@ fn crypt(
                             input,
                             encrypting,
                             |operation, blocks| match operation {
-                                CcmOperation::EncryptBlocks => {
+                                AesCcmOperation::EncryptBlocks => {
                                     software_crypt_ecb_blocks(key, blocks, true)
                                 }
-                                CcmOperation::CbcMac => software_cbc_mac(key, blocks),
+                                AesCcmOperation::CbcMac => software_cbc_mac(key, blocks),
                             },
                         ),
                         x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => aes_gcm(
