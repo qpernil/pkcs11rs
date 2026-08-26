@@ -1,7 +1,6 @@
 use super::key::derived_secret_object;
 use super::object::{publish_software_secret_object, validate_unique_template};
 use crate::*;
-use ml_kem::kem::Decapsulate;
 use zeroize::Zeroizing;
 
 const ML_KEM_SHARED_SECRET_LENGTH: usize = 32;
@@ -192,50 +191,38 @@ fn ml_kem_encapsulate(public: &PublicKeyMaterial) -> Result<(Vec<u8>, Zeroizing<
     else {
         return Err(CKR_KEY_TYPE_INCONSISTENT.into());
     };
-    let mut randomness = Zeroizing::new([0u8; 32]);
-    getrandom::fill(randomness.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-    macro_rules! encapsulate {
-        ($params:ty) => {{
-            let encoded = ml_kem::kem::Key::<ml_kem::EncapsulationKey<$params>>::try_from(
-                public_key.as_slice(),
-            )
-            .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-            let key = ml_kem::EncapsulationKey::<$params>::new(&encoded)
-                .map_err(|_| Error::from(CKR_KEY_TYPE_INCONSISTENT))?;
-            let (ciphertext, shared) =
-                key.encapsulate_deterministic(&ml_kem::B32::from(*randomness));
-            Ok((ciphertext.to_vec(), Zeroizing::new(shared.to_vec())))
-        }};
-    }
-    match *parameter_set {
+    let parameter_set = match *parameter_set {
         x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-            encapsulate!(ml_kem::MlKem512)
+            software_key_core::post_quantum::MlKemParameterSet::MlKem512
         }
         x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-            encapsulate!(ml_kem::MlKem768)
+            software_key_core::post_quantum::MlKemParameterSet::MlKem768
         }
         x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-            encapsulate!(ml_kem::MlKem1024)
+            software_key_core::post_quantum::MlKemParameterSet::MlKem1024
         }
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
-    }
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT.into()),
+    };
+    software_key_core::post_quantum::ml_kem_encapsulate(parameter_set, public_key).map_err(
+        |error| match error {
+            software_key_core::post_quantum::MlKemError::RandomnessUnavailable => {
+                CKR_RANDOM_NO_RNG.into()
+            }
+            _ => CKR_KEY_TYPE_INCONSISTENT.into(),
+        },
+    )
 }
 
 fn ml_kem_decapsulate(
     private: &SoftwarePrivateKeyMaterial,
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    macro_rules! decapsulate {
-        ($key:expr, $params:ty) => {{
-            let ciphertext = ml_kem::kem::Ciphertext::<$params>::try_from(ciphertext)
-                .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_LEN_RANGE))?;
-            Ok(Zeroizing::new($key.decapsulate(&ciphertext).to_vec()))
-        }};
-    }
     match private {
-        SoftwarePrivateKeyMaterial::MlKem512(key) => decapsulate!(key, ml_kem::MlKem512),
-        SoftwarePrivateKeyMaterial::MlKem768(key) => decapsulate!(key, ml_kem::MlKem768),
-        SoftwarePrivateKeyMaterial::MlKem1024(key) => decapsulate!(key, ml_kem::MlKem1024),
+        SoftwarePrivateKeyMaterial::MlKem512(key)
+        | SoftwarePrivateKeyMaterial::MlKem768(key)
+        | SoftwarePrivateKeyMaterial::MlKem1024(key) => key
+            .decapsulate(ciphertext)
+            .map_err(|_| CKR_ENCRYPTED_DATA_LEN_RANGE.into()),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT.into()),
     }
 }

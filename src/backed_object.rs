@@ -931,10 +931,11 @@ mod tests {
 
     #[test]
     fn backed_ml_kem_public_key_preserves_material_and_encapsulation_policy() {
-        use ml_kem::kem::KeyExport;
-        let private =
-            ml_kem::DecapsulationKey::<ml_kem::MlKem512>::from_seed(ml_kem::Seed::from([0x42; 64]));
-        let public_key = private.encapsulation_key().to_bytes().to_vec();
+        let private = software_key_core::post_quantum::MlKemPrivateKey::from_seed(
+            software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+            [0x42; 64],
+        );
+        let public_key = private.public_key();
         let object = TokenObject {
             slot_id: Some(7),
             unique_id: "ml-kem-public".to_owned(),

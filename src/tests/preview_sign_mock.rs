@@ -1,6 +1,5 @@
 use crate::pkcs11::*;
 use p256::ecdsa::{DerSignature, Signature, VerifyingKey};
-use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -520,7 +519,10 @@ fn pkcs11_preview_sign_mock_registration_import_derivation_and_signing() {
         CKR_OK as CK_RV
     );
 
-    let digest: [u8; 32] = Sha256::digest(b"pkcs11rs previewSign PKCS #11 mock").into();
+    let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+        .digest(b"pkcs11rs previewSign PKCS #11 mock")
+        .try_into()
+        .unwrap();
     mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN,
         pParameter: std::ptr::null_mut(),
@@ -811,7 +813,10 @@ fn local_fido_storage_restores_preview_sign_keys_across_module_restart() {
         CKR_OK as CK_RV
     );
 
-    let digest: [u8; 32] = Sha256::digest(b"persisted previewSign signing").into();
+    let digest: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+        .digest(b"persisted previewSign signing")
+        .try_into()
+        .unwrap();
     mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_PREVIEW_SIGN,
         pParameter: std::ptr::null_mut(),
@@ -1014,7 +1019,10 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
     let point = read_attribute(session, public_key, CKA_EC_POINT as CK_ATTRIBUTE_TYPE);
     let point = crate::der_octet_string_value(&point).unwrap();
     VerifyingKey::from_sec1_bytes(point).unwrap();
-    let client_data_hash: [u8; 32] = Sha256::digest(b"pkcs11rs resident assertion mock").into();
+    let client_data_hash: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+        .digest(b"pkcs11rs resident assertion mock")
+        .try_into()
+        .unwrap();
     let mut mechanism = CK_MECHANISM {
         mechanism: crate::CKM_PKCS11RS_FIDO_ASSERTION,
         pParameter: std::ptr::null_mut(),
@@ -1098,7 +1106,7 @@ fn pkcs11_mock_resident_credential_assertion_is_one_shot_and_verifiable() {
     let signature = signature.to_bytes();
     let mut signed = authenticator_data;
     signed.extend_from_slice(&client_data_hash);
-    let assertion_digest = Sha256::digest(&signed);
+    let assertion_digest = software_key_core::digest::HashAlgorithm::Sha256.digest(&signed);
     let mut verify_mechanism = CK_MECHANISM {
         mechanism: CKM_ECDSA as CK_MECHANISM_TYPE,
         pParameter: std::ptr::null_mut(),

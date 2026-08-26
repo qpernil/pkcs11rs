@@ -3,8 +3,7 @@ use super::shared::{
 };
 use crate::backed_object::projected_public_key_material;
 use crate::*;
-use software_key_core::software_symmetric::AesCcmOperation;
-use subtle::{ConstantTimeEq, ConstantTimeGreater, ConstantTimeLess};
+use software_key_core::software_symmetric::CcmOperation;
 
 ffi_entry_point! {
     pub fn C_EncryptInit(
@@ -448,6 +447,7 @@ fn yubihsm_rsa_length(algorithm: u8) -> Result<usize, Error> {
 
 pub(crate) const AES_BLOCK_LENGTH: usize = 16;
 const TDES_BLOCK_LENGTH: usize = 8;
+const AES_KEY_WRAP_SEMIBLOCK_LENGTH: usize = 8;
 const YUBIHSM_ECB_CHUNK_LENGTH: usize = 2016;
 const YUBIHSM_CBC_CHUNK_LENGTH: usize = 2000;
 const YUBIHSM_CCM_WRAP_OVERHEAD: usize = 1 + 13 + 16;
@@ -457,55 +457,35 @@ pub(crate) fn software_crypt_ecb_blocks(
     blocks: &[u8],
     encrypting: bool,
 ) -> Result<Vec<u8>, Error> {
-    use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-
-    if !crate::is_multiple_of(blocks.len(), AES_BLOCK_LENGTH) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let mut output = blocks.to_vec();
-    macro_rules! transform {
-        ($cipher:ty) => {{
-            let cipher = <$cipher as KeyInit>::new_from_slice(key)
-                .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-            for block in output.chunks_exact_mut(AES_BLOCK_LENGTH) {
-                let block = aes::cipher::Block::<$cipher>::from_mut_slice(block);
-                if encrypting {
-                    cipher.encrypt_block(block);
-                } else {
-                    cipher.decrypt_block(block);
-                }
-            }
-        }};
-    }
-    match key.len() {
-        16 => transform!(aes::Aes128),
-        24 => transform!(aes::Aes192),
-        32 => transform!(aes::Aes256),
-        _ => return Err(CKR_KEY_SIZE_RANGE.into()),
-    }
-    Ok(output)
+    use software_key_core::software_symmetric::{
+        SoftwareSymmetricError, decrypt_aes_ecb, encrypt_aes_ecb,
+    };
+    let result = if encrypting {
+        encrypt_aes_ecb(key, blocks)
+    } else {
+        decrypt_aes_ecb(key, blocks)
+    };
+    result.map_err(|error| match error {
+        SoftwareSymmetricError::InvalidKeyLength => CKR_KEY_SIZE_RANGE.into(),
+        SoftwareSymmetricError::InvalidDataLength => CKR_DATA_LEN_RANGE.into(),
+        _ => CKR_FUNCTION_FAILED.into(),
+    })
 }
 
 fn software_tdes_ecb_blocks(key: &[u8], blocks: &[u8], encrypting: bool) -> Result<Vec<u8>, Error> {
-    use des::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-
-    if key.len() != 24 {
-        return Err(CKR_KEY_SIZE_RANGE.into());
-    }
-    if !crate::is_multiple_of(blocks.len(), TDES_BLOCK_LENGTH) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let cipher = des::TdesEde3::new_from_slice(key).map_err(|_| CKR_KEY_SIZE_RANGE)?;
-    let mut output = blocks.to_vec();
-    for chunk in output.chunks_exact_mut(TDES_BLOCK_LENGTH) {
-        let block = des::cipher::Block::<des::TdesEde3>::from_mut_slice(chunk);
-        if encrypting {
-            cipher.encrypt_block(block);
-        } else {
-            cipher.decrypt_block(block);
-        }
-    }
-    Ok(output)
+    use software_key_core::software_symmetric::{
+        SoftwareSymmetricError, decrypt_tdes_ecb, encrypt_tdes_ecb,
+    };
+    let result = if encrypting {
+        encrypt_tdes_ecb(key, blocks)
+    } else {
+        decrypt_tdes_ecb(key, blocks)
+    };
+    result.map_err(|error| match error {
+        SoftwareSymmetricError::InvalidKeyLength => CKR_KEY_SIZE_RANGE.into(),
+        SoftwareSymmetricError::InvalidDataLength => CKR_DATA_LEN_RANGE.into(),
+        _ => CKR_FUNCTION_FAILED.into(),
+    })
 }
 
 fn software_tdes_cbc(
@@ -514,35 +494,20 @@ fn software_tdes_cbc(
     input: &[u8],
     encrypting: bool,
 ) -> Result<Vec<u8>, Error> {
-    if !crate::is_multiple_of(input.len(), TDES_BLOCK_LENGTH) {
-        return Err(if encrypting {
-            CKR_DATA_LEN_RANGE.into()
-        } else {
-            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
-        });
-    }
-    let mut previous = *iv;
-    let mut output = Vec::with_capacity(input.len());
-    for chunk in input.chunks_exact(TDES_BLOCK_LENGTH) {
-        let block: [u8; TDES_BLOCK_LENGTH] = chunk.try_into().map_err(|_| CKR_DATA_LEN_RANGE)?;
-        if encrypting {
-            let mixed: [u8; TDES_BLOCK_LENGTH] =
-                std::array::from_fn(|index| block[index] ^ previous[index]);
-            let encrypted = software_tdes_ecb_blocks(key, &mixed, true)?;
-            previous.copy_from_slice(&encrypted);
-            output.extend_from_slice(&encrypted);
-        } else {
-            let decrypted = software_tdes_ecb_blocks(key, &block, false)?;
-            output.extend(
-                decrypted
-                    .iter()
-                    .zip(previous)
-                    .map(|(value, previous)| value ^ previous),
-            );
-            previous = block;
-        }
-    }
-    Ok(output)
+    use software_key_core::software_symmetric::{
+        SoftwareSymmetricError, decrypt_tdes_cbc, encrypt_tdes_cbc,
+    };
+    let result = if encrypting {
+        encrypt_tdes_cbc(key, iv, input)
+    } else {
+        decrypt_tdes_cbc(key, iv, input)
+    };
+    result.map_err(|error| match error {
+        SoftwareSymmetricError::InvalidKeyLength => CKR_KEY_SIZE_RANGE.into(),
+        SoftwareSymmetricError::InvalidDataLength if encrypting => CKR_DATA_LEN_RANGE.into(),
+        SoftwareSymmetricError::InvalidDataLength => CKR_ENCRYPTED_DATA_LEN_RANGE.into(),
+        _ => CKR_FUNCTION_FAILED.into(),
+    })
 }
 
 fn software_tdes_cbc_pad(
@@ -552,20 +517,19 @@ fn software_tdes_cbc_pad(
     encrypting: bool,
 ) -> Result<Vec<u8>, Error> {
     if encrypting {
-        let padding_length = TDES_BLOCK_LENGTH - input.len() % TDES_BLOCK_LENGTH;
-        let padded_length = input
-            .len()
-            .checked_add(padding_length)
-            .ok_or(CKR_DATA_LEN_RANGE)?;
-        let mut padded = Vec::with_capacity(padded_length);
-        padded.extend_from_slice(input);
-        padded.resize(padded_length, padding_length as u8);
+        let padded =
+            software_key_core::software_symmetric::apply_pkcs7_padding(input, TDES_BLOCK_LENGTH)
+                .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
         software_tdes_cbc(key, iv, &padded, true)
     } else {
         if input.is_empty() || !crate::is_multiple_of(input.len(), TDES_BLOCK_LENGTH) {
             return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
         }
-        remove_pkcs7_padding(software_tdes_cbc(key, iv, input, false)?, TDES_BLOCK_LENGTH)
+        software_key_core::software_symmetric::remove_pkcs7_padding(
+            software_tdes_cbc(key, iv, input, false)?,
+            TDES_BLOCK_LENGTH,
+        )
+        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID.into())
     }
 }
 
@@ -617,20 +581,19 @@ fn software_aes_cbc_pad(
     encrypting: bool,
 ) -> Result<Vec<u8>, Error> {
     if encrypting {
-        let padding_length = AES_BLOCK_LENGTH - input.len() % AES_BLOCK_LENGTH;
-        let padded_length = input
-            .len()
-            .checked_add(padding_length)
-            .ok_or(CKR_DATA_LEN_RANGE)?;
-        let mut padded = Zeroizing::new(Vec::with_capacity(padded_length));
-        padded.extend_from_slice(input);
-        padded.resize(padded_length, padding_length as u8);
+        let padded =
+            software_key_core::software_symmetric::apply_pkcs7_padding(input, AES_BLOCK_LENGTH)
+                .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
         software_aes_cbc(key, iv, &padded, true)
     } else {
         if input.is_empty() || !crate::is_multiple_of(input.len(), AES_BLOCK_LENGTH) {
             return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
         }
-        remove_pkcs7_padding(software_aes_cbc(key, iv, input, false)?, AES_BLOCK_LENGTH)
+        software_key_core::software_symmetric::remove_pkcs7_padding(
+            software_aes_cbc(key, iv, input, false)?,
+            AES_BLOCK_LENGTH,
+        )
+        .map_err(|_| CKR_ENCRYPTED_DATA_INVALID.into())
     }
 }
 
@@ -651,9 +614,9 @@ pub(crate) fn aes_gcm<F>(
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 {
-    use software_key_core::software_symmetric::{AesGcmError, aes_gcm_with};
+    use software_key_core::software_symmetric::{GcmError, gcm_with};
 
-    aes_gcm_with(
+    gcm_with(
         &parameters.iv,
         &parameters.aad,
         parameters.tag_bits,
@@ -662,20 +625,20 @@ where
         &mut encrypt_blocks,
     )
     .map_err(|error| match error {
-        AesGcmError::InvalidIvLength | AesGcmError::InvalidTagLength => {
+        GcmError::InvalidIvLength | GcmError::InvalidTagLength => {
             CKR_MECHANISM_PARAM_INVALID.into()
         }
-        AesGcmError::InputTooLong => {
+        GcmError::InputTooLong => {
             if encrypting {
                 CKR_DATA_LEN_RANGE.into()
             } else {
                 CKR_ENCRYPTED_DATA_LEN_RANGE.into()
             }
         }
-        AesGcmError::CiphertextTooShort => CKR_ENCRYPTED_DATA_LEN_RANGE.into(),
-        AesGcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
-        AesGcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
-        AesGcmError::EncryptBlocks(error) => error,
+        GcmError::CiphertextTooShort => CKR_ENCRYPTED_DATA_LEN_RANGE.into(),
+        GcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        GcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        GcmError::BlockOperation(error) => error,
     })
 }
 
@@ -750,19 +713,24 @@ fn aes_ctr<F>(parameters: &CtrParameters, input: &[u8], encrypt_blocks: F) -> Re
 where
     F: FnMut(&[u8]) -> Result<Vec<u8>, Error>,
 {
-    use software_key_core::software_symmetric::{AesBlockModeError, aes_ctr_with};
+    use software_key_core::software_symmetric::{BlockCipherModeError, ctr_with};
 
-    aes_ctr_with(
+    ctr_with(
         parameters.counter_bits,
-        parameters.counter_block,
+        &parameters.counter_block,
         input,
         encrypt_blocks,
     )
     .map_err(|error| match error {
-        AesBlockModeError::InvalidCounterBits => CKR_MECHANISM_PARAM_INVALID.into(),
-        AesBlockModeError::InputTooLong => CKR_DATA_LEN_RANGE.into(),
-        AesBlockModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
-        AesBlockModeError::EncryptBlocks(error) => error,
+        BlockCipherModeError::InvalidBlockSize | BlockCipherModeError::InvalidCounterBits => {
+            CKR_MECHANISM_PARAM_INVALID.into()
+        }
+        BlockCipherModeError::InvalidIvLength | BlockCipherModeError::InvalidDataLength => {
+            CKR_MECHANISM_PARAM_INVALID.into()
+        }
+        BlockCipherModeError::InputTooLong => CKR_DATA_LEN_RANGE.into(),
+        BlockCipherModeError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        BlockCipherModeError::BlockOperation(error) => error,
     })
 }
 
@@ -773,11 +741,11 @@ fn aes_ccm<F>(
     mut crypt: F,
 ) -> Result<Vec<u8>, Error>
 where
-    F: FnMut(AesCcmOperation, &[u8]) -> Result<Vec<u8>, Error>,
+    F: FnMut(CcmOperation, &[u8]) -> Result<Vec<u8>, Error>,
 {
-    use software_key_core::software_symmetric::{AesCcmError, aes_ccm_with};
+    use software_key_core::software_symmetric::{CcmError, ccm_with};
 
-    aes_ccm_with(
+    ccm_with(
         parameters.data_len,
         &parameters.nonce,
         &parameters.aad,
@@ -787,79 +755,20 @@ where
         &mut crypt,
     )
     .map_err(|error| match error {
-        AesCcmError::InvalidNonceLength | AesCcmError::InvalidTagLength => {
+        CcmError::InvalidNonceLength | CcmError::InvalidTagLength => {
             CKR_MECHANISM_PARAM_INVALID.into()
         }
-        AesCcmError::InvalidDataLength | AesCcmError::InputTooLong => {
+        CcmError::InvalidDataLength | CcmError::InputTooLong => {
             if encrypting {
                 CKR_DATA_LEN_RANGE.into()
             } else {
                 CKR_ENCRYPTED_DATA_LEN_RANGE.into()
             }
         }
-        AesCcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
-        AesCcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
-        AesCcmError::Crypt(error) => error,
+        CcmError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        CcmError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        CcmError::BlockOperation(error) => error,
     })
-}
-
-const AES_KEY_WRAP_SEMIBLOCK_LENGTH: usize = 8;
-
-fn aes_key_wrap_rounds<F>(
-    mut a: [u8; AES_KEY_WRAP_SEMIBLOCK_LENGTH],
-    mut r: Vec<u8>,
-    encrypting: bool,
-    crypt_block: &mut F,
-) -> Result<([u8; AES_KEY_WRAP_SEMIBLOCK_LENGTH], Vec<u8>), Error>
-where
-    F: FnMut(&[u8], bool) -> Result<Vec<u8>, Error>,
-{
-    let semiblocks = r.len() / AES_KEY_WRAP_SEMIBLOCK_LENGTH;
-    if encrypting {
-        for round in 0..6 {
-            for index in 0..semiblocks {
-                let mut block = a.to_vec();
-                block.extend_from_slice(
-                    &r[index * AES_KEY_WRAP_SEMIBLOCK_LENGTH
-                        ..(index + 1) * AES_KEY_WRAP_SEMIBLOCK_LENGTH],
-                );
-                let transformed: [u8; AES_BLOCK_LENGTH] = crypt_block(&block, true)?
-                    .try_into()
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-                let counter = semiblocks as u64 * round as u64 + index as u64 + 1;
-                a.copy_from_slice(&transformed[..AES_KEY_WRAP_SEMIBLOCK_LENGTH]);
-                for (byte, counter) in a.iter_mut().zip(counter.to_be_bytes()) {
-                    *byte ^= counter;
-                }
-                r[index * AES_KEY_WRAP_SEMIBLOCK_LENGTH
-                    ..(index + 1) * AES_KEY_WRAP_SEMIBLOCK_LENGTH]
-                    .copy_from_slice(&transformed[AES_KEY_WRAP_SEMIBLOCK_LENGTH..]);
-            }
-        }
-    } else {
-        for round in (0..6).rev() {
-            for index in (0..semiblocks).rev() {
-                let counter = semiblocks as u64 * round as u64 + index as u64 + 1;
-                let mut block = a;
-                for (byte, counter) in block.iter_mut().zip(counter.to_be_bytes()) {
-                    *byte ^= counter;
-                }
-                let mut block = block.to_vec();
-                block.extend_from_slice(
-                    &r[index * AES_KEY_WRAP_SEMIBLOCK_LENGTH
-                        ..(index + 1) * AES_KEY_WRAP_SEMIBLOCK_LENGTH],
-                );
-                let transformed: [u8; AES_BLOCK_LENGTH] = crypt_block(&block, false)?
-                    .try_into()
-                    .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-                a.copy_from_slice(&transformed[..AES_KEY_WRAP_SEMIBLOCK_LENGTH]);
-                r[index * AES_KEY_WRAP_SEMIBLOCK_LENGTH
-                    ..(index + 1) * AES_KEY_WRAP_SEMIBLOCK_LENGTH]
-                    .copy_from_slice(&transformed[AES_KEY_WRAP_SEMIBLOCK_LENGTH..]);
-            }
-        }
-    }
-    Ok((a, r))
 }
 
 pub(crate) fn aes_key_wrap_transform<F>(
@@ -871,43 +780,19 @@ pub(crate) fn aes_key_wrap_transform<F>(
 where
     F: FnMut(&[u8], bool) -> Result<Vec<u8>, Error>,
 {
-    if initial_value.len() != AES_KEY_WRAP_SEMIBLOCK_LENGTH {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
-    if encrypting {
-        if input.len() < AES_BLOCK_LENGTH
-            || !crate::is_multiple_of(input.len(), AES_KEY_WRAP_SEMIBLOCK_LENGTH)
-        {
-            return Err(CKR_DATA_LEN_RANGE.into());
+    use software_key_core::software_symmetric::{KeyWrapError, key_wrap_with};
+    key_wrap_with(input, encrypting, initial_value, &mut crypt_block).map_err(|error| match error {
+        KeyWrapError::InvalidInitialValue => CKR_MECHANISM_PARAM_INVALID.into(),
+        KeyWrapError::InvalidDataLength | KeyWrapError::InputTooLong if encrypting => {
+            CKR_DATA_LEN_RANGE.into()
         }
-        let a = initial_value
-            .try_into()
-            .map_err(|_| Error::from(CKR_MECHANISM_PARAM_INVALID))?;
-        let (a, r) = aes_key_wrap_rounds(a, input.to_vec(), true, &mut crypt_block)?;
-        let mut output = a.to_vec();
-        output.extend_from_slice(&r);
-        return Ok(output);
-    }
-
-    if input.len() < AES_BLOCK_LENGTH + AES_KEY_WRAP_SEMIBLOCK_LENGTH
-        || !crate::is_multiple_of(input.len(), AES_KEY_WRAP_SEMIBLOCK_LENGTH)
-    {
-        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
-    }
-    let a = input[..AES_KEY_WRAP_SEMIBLOCK_LENGTH]
-        .try_into()
-        .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_INVALID))?;
-    let (a, mut r) = aes_key_wrap_rounds(
-        a,
-        input[AES_KEY_WRAP_SEMIBLOCK_LENGTH..].to_vec(),
-        false,
-        &mut crypt_block,
-    )?;
-    if !bool::from(a.ct_eq(initial_value)) {
-        r.fill(0);
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    Ok(r)
+        KeyWrapError::InvalidDataLength | KeyWrapError::InputTooLong => {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
+        }
+        KeyWrapError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        KeyWrapError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        KeyWrapError::BlockOperation(error) => error,
+    })
 }
 
 pub(crate) fn aes_kwp_transform<F>(
@@ -919,83 +804,25 @@ pub(crate) fn aes_kwp_transform<F>(
 where
     F: FnMut(&[u8], bool) -> Result<Vec<u8>, Error>,
 {
-    if alternative_initial_value.len() != 4 {
-        return Err(CKR_MECHANISM_PARAM_INVALID.into());
-    }
-    if encrypting {
-        if input.is_empty() || input.len() > u32::MAX as usize {
-            return Err(CKR_DATA_LEN_RANGE.into());
+    use software_key_core::software_symmetric::{KeyWrapError, key_wrap_with_padding_with};
+    key_wrap_with_padding_with(
+        input,
+        encrypting,
+        alternative_initial_value,
+        &mut crypt_block,
+    )
+    .map_err(|error| match error {
+        KeyWrapError::InvalidInitialValue => CKR_MECHANISM_PARAM_INVALID.into(),
+        KeyWrapError::InvalidDataLength | KeyWrapError::InputTooLong if encrypting => {
+            CKR_DATA_LEN_RANGE.into()
         }
-        let semiblocks = input.len().div_ceil(AES_KEY_WRAP_SEMIBLOCK_LENGTH);
-        let mut a = [0; AES_KEY_WRAP_SEMIBLOCK_LENGTH];
-        a[..4].copy_from_slice(alternative_initial_value);
-        a[4..].copy_from_slice(&(input.len() as u32).to_be_bytes());
-        let mut r = input.to_vec();
-        r.resize(semiblocks * AES_KEY_WRAP_SEMIBLOCK_LENGTH, 0);
-        if semiblocks == 1 {
-            let mut block = a.to_vec();
-            block.extend_from_slice(&r);
-            return crypt_block(&block, true);
+        KeyWrapError::InvalidDataLength | KeyWrapError::InputTooLong => {
+            CKR_ENCRYPTED_DATA_LEN_RANGE.into()
         }
-        let (a, r) = aes_key_wrap_rounds(a, r, true, &mut crypt_block)?;
-        let mut output = a.to_vec();
-        output.extend_from_slice(&r);
-        return Ok(output);
-    }
-
-    if input.len() < AES_BLOCK_LENGTH
-        || !crate::is_multiple_of(input.len(), AES_KEY_WRAP_SEMIBLOCK_LENGTH)
-    {
-        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE.into());
-    }
-    let semiblocks = input.len() / AES_KEY_WRAP_SEMIBLOCK_LENGTH - 1;
-    let mut a: [u8; AES_KEY_WRAP_SEMIBLOCK_LENGTH] = input[..AES_KEY_WRAP_SEMIBLOCK_LENGTH]
-        .try_into()
-        .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_INVALID))?;
-    let mut r = input[AES_KEY_WRAP_SEMIBLOCK_LENGTH..].to_vec();
-    if semiblocks == 1 {
-        let transformed: [u8; AES_BLOCK_LENGTH] = crypt_block(input, false)?
-            .try_into()
-            .map_err(|_| Error::from(CKR_DEVICE_ERROR))?;
-        a.copy_from_slice(&transformed[..AES_KEY_WRAP_SEMIBLOCK_LENGTH]);
-        r.copy_from_slice(&transformed[AES_KEY_WRAP_SEMIBLOCK_LENGTH..]);
-    } else {
-        (a, r) = aes_key_wrap_rounds(a, r, false, &mut crypt_block)?;
-    }
-
-    let message_length = u32::from_be_bytes(
-        a[4..]
-            .try_into()
-            .map_err(|_| Error::from(CKR_ENCRYPTED_DATA_INVALID))?,
-    ) as usize;
-    let minimum_length = (semiblocks - 1) * AES_KEY_WRAP_SEMIBLOCK_LENGTH;
-    let maximum_length = semiblocks * AES_KEY_WRAP_SEMIBLOCK_LENGTH;
-    let mut invalid = !a[..4].ct_eq(alternative_initial_value);
-    invalid |= !(message_length as u64).ct_gt(&(minimum_length as u64));
-    invalid |= (message_length as u64).ct_gt(&(maximum_length as u64));
-    for (index, byte) in r.iter().enumerate() {
-        invalid |= !(index as u64).ct_lt(&(message_length as u64)) & !byte.ct_eq(&0);
-    }
-    if bool::from(invalid) {
-        r.fill(0);
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    r.truncate(message_length);
-    Ok(r)
-}
-
-fn remove_pkcs7_padding(mut plaintext: Vec<u8>, block_length: usize) -> Result<Vec<u8>, Error> {
-    let padding = plaintext.last().copied().unwrap_or_default();
-    let mut invalid = padding.ct_eq(&0) | padding.ct_gt(&(block_length as u8));
-    for (index, byte) in plaintext.iter().rev().take(block_length).enumerate() {
-        invalid |= (index as u8).ct_lt(&padding) & !byte.ct_eq(&padding);
-    }
-    if bool::from(invalid) {
-        plaintext.fill(0);
-        return Err(CKR_ENCRYPTED_DATA_INVALID.into());
-    }
-    plaintext.truncate(plaintext.len() - padding as usize);
-    Ok(plaintext)
+        KeyWrapError::InvalidBlockOutput => CKR_DEVICE_ERROR.into(),
+        KeyWrapError::AuthenticationFailed => CKR_ENCRYPTED_DATA_INVALID.into(),
+        KeyWrapError::BlockOperation(error) => error,
+    })
 }
 
 pub(crate) fn yubihsm_aes_cbc_pad(
@@ -1042,7 +869,8 @@ pub(crate) fn yubihsm_aes_cbc_pad(
     if encrypting {
         Ok(output)
     } else {
-        remove_pkcs7_padding(output, AES_BLOCK_LENGTH)
+        software_key_core::software_symmetric::remove_pkcs7_padding(output, AES_BLOCK_LENGTH)
+            .map_err(|_| CKR_ENCRYPTED_DATA_INVALID.into())
     }
 }
 
@@ -1452,15 +1280,13 @@ fn crypt(
                                     input,
                                     encrypting,
                                     |operation, blocks| match operation {
-                                        AesCcmOperation::EncryptBlocks => {
-                                            yubihsm_encrypt_ecb_blocks(
-                                                ctx,
-                                                session_handle,
-                                                *id,
-                                                blocks,
-                                            )
-                                        }
-                                        AesCcmOperation::CbcMac => {
+                                        CcmOperation::EncryptBlocks => yubihsm_encrypt_ecb_blocks(
+                                            ctx,
+                                            session_handle,
+                                            *id,
+                                            blocks,
+                                        ),
+                                        CcmOperation::CbcMac => {
                                             yubihsm_cbc_mac(ctx, session_handle, *id, blocks)
                                                 .map(|mac| mac.to_vec())
                                         }
@@ -1569,10 +1395,10 @@ fn crypt(
                             input,
                             encrypting,
                             |operation, blocks| match operation {
-                                AesCcmOperation::EncryptBlocks => {
+                                CcmOperation::EncryptBlocks => {
                                     software_crypt_ecb_blocks(key, blocks, true)
                                 }
-                                AesCcmOperation::CbcMac => software_cbc_mac(key, blocks),
+                                CcmOperation::CbcMac => software_cbc_mac(key, blocks),
                             },
                         ),
                         x if x == CKM_AES_GCM as CK_MECHANISM_TYPE => aes_gcm(

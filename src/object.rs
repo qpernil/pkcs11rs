@@ -18,7 +18,11 @@ use crate::{
 };
 use rsa::{BigUint, RsaPublicKey, traits::PublicKeyParts};
 use software_key_core::{
-    post_quantum::{MlDsaParameterSet, ml_dsa_public_key_info as shared_ml_dsa_public_key_info},
+    post_quantum::{
+        MlDsaParameterSet, MlKemParameterSet, MlKemPrivateKey,
+        ml_dsa_public_key_info as shared_ml_dsa_public_key_info,
+        ml_kem_public_key_info as shared_ml_kem_public_key_info,
+    },
     software_key_agreement::SoftwareX25519Key,
     software_signing::{
         EcCurve as SharedEcCurve, SoftwarePublicKey as SharedPublicKey, SoftwareSigningAlgorithm,
@@ -90,9 +94,9 @@ pub(crate) enum PublicKeyMaterial {
 pub(crate) enum SoftwarePrivateKeyMaterial {
     Signing(SoftwareSigningKey),
     X25519(SoftwareX25519Key),
-    MlKem512(ml_kem::DecapsulationKey<ml_kem::MlKem512>),
-    MlKem768(ml_kem::DecapsulationKey<ml_kem::MlKem768>),
-    MlKem1024(ml_kem::DecapsulationKey<ml_kem::MlKem1024>),
+    MlKem512(MlKemPrivateKey),
+    MlKem768(MlKemPrivateKey),
+    MlKem1024(MlKemPrivateKey),
 }
 
 impl std::fmt::Debug for SoftwarePrivateKeyMaterial {
@@ -175,32 +179,25 @@ impl SoftwarePrivateKeyMaterial {
             }),
             Self::MlKem512(key) => Ok(PublicKeyMaterial::MlKem {
                 parameter_set: CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE,
-                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+                public_key: key.public_key(),
             }),
             Self::MlKem768(key) => Ok(PublicKeyMaterial::MlKem {
                 parameter_set: CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE,
-                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+                public_key: key.public_key(),
             }),
             Self::MlKem1024(key) => Ok(PublicKeyMaterial::MlKem {
                 parameter_set: CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE,
-                public_key: ml_kem::kem::KeyExport::to_bytes(key.encapsulation_key()).to_vec(),
+                public_key: key.public_key(),
             }),
         }
     }
 
-    #[allow(deprecated)] // PKCS #11 CKA_VALUE requires expanded ML-KEM private keys.
     pub(crate) fn private_value(&self) -> Option<Vec<u8>> {
         match self {
             Self::Signing(key) => key.private_value().map(|value| value.to_vec()),
             Self::X25519(key) => Some(key.serialized().to_vec()),
-            Self::MlKem512(key) => {
-                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
-            }
-            Self::MlKem768(key) => {
-                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
-            }
-            Self::MlKem1024(key) => {
-                Some(ml_kem::ExpandedKeyEncoding::to_expanded_bytes(key).to_vec())
+            Self::MlKem512(key) | Self::MlKem768(key) | Self::MlKem1024(key) => {
+                Some(key.expanded_private_key().to_vec())
             }
         }
     }
@@ -214,9 +211,9 @@ impl SoftwarePrivateKeyMaterial {
 
     pub(crate) fn ml_kem_seed(&self) -> Option<Vec<u8>> {
         match self {
-            Self::MlKem512(key) => key.to_seed().map(|seed| seed.to_vec()),
-            Self::MlKem768(key) => key.to_seed().map(|seed| seed.to_vec()),
-            Self::MlKem1024(key) => key.to_seed().map(|seed| seed.to_vec()),
+            Self::MlKem512(key) | Self::MlKem768(key) | Self::MlKem1024(key) => {
+                key.seed().map(|seed| seed.to_vec())
+            }
             _ => None,
         }
     }
@@ -1063,24 +1060,13 @@ pub(crate) fn ml_kem_public_key_info(
     parameter_set: CK_ML_KEM_PARAMETER_SET_TYPE,
     public_key: &[u8],
 ) -> Option<Vec<u8>> {
-    macro_rules! encode {
-        ($params:ty) => {{
-            use ml_kem::pkcs8::EncodePublicKey;
-            let key =
-                ml_kem::kem::Key::<ml_kem::EncapsulationKey<$params>>::try_from(public_key).ok()?;
-            ml_kem::EncapsulationKey::<$params>::new(&key)
-                .ok()?
-                .to_public_key_der()
-                .ok()
-                .map(|document| document.as_bytes().to_vec())
-        }};
-    }
-    match parameter_set {
-        x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem512),
-        x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem768),
-        x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => encode!(ml_kem::MlKem1024),
-        _ => None,
-    }
+    let parameter_set = match parameter_set {
+        x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => MlKemParameterSet::MlKem512,
+        x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => MlKemParameterSet::MlKem768,
+        x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => MlKemParameterSet::MlKem1024,
+        _ => return None,
+    };
+    shared_ml_kem_public_key_info(parameter_set, public_key).ok()
 }
 
 pub(crate) fn is_certificate_attribute(attribute_type: CK_ATTRIBUTE_TYPE) -> bool {
@@ -2667,7 +2653,6 @@ pub(crate) fn read_bool_template_attribute(attribute: &CK_ATTRIBUTE) -> Result<b
 #[cfg(test)]
 mod post_quantum_tests {
     use super::*;
-    use sha2::{Digest, Sha256};
 
     #[test]
     fn ml_dsa_44_key_generation_matches_nist_acvp_fips_204() {
@@ -2696,7 +2681,9 @@ mod post_quantum_tests {
         };
         assert_eq!(parameter_set, CKP_ML_DSA_44 as CK_ML_DSA_PARAMETER_SET_TYPE);
         assert_eq!(
-            Sha256::digest(public_key).as_slice(),
+            software_key_core::digest::HashAlgorithm::Sha256
+                .digest(&public_key)
+                .as_slice(),
             crate::parse_hex("838b88b6ac41e2c60698173e08ca173d0b0d2839205806e56a8a3d53195f3a03")
                 .unwrap()
         );
@@ -2714,8 +2701,9 @@ mod post_quantum_tests {
             crate::parse_hex("1F8CB39E9E30BC458A0DC5408884B1187FB217018DF760FA57317703B844A0A9")
                 .unwrap();
         let seed: [u8; 64] = [d, z].concat().try_into().unwrap();
-        let material = SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(
-            ml_kem::Seed::from(seed),
+        let material = SoftwarePrivateKeyMaterial::MlKem512(MlKemPrivateKey::from_seed(
+            MlKemParameterSet::MlKem512,
+            seed,
         ));
         let PublicKeyMaterial::MlKem {
             parameter_set,
@@ -2729,7 +2717,9 @@ mod post_quantum_tests {
             CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE
         );
         assert_eq!(
-            Sha256::digest(public_key).as_slice(),
+            software_key_core::digest::HashAlgorithm::Sha256
+                .digest(&public_key)
+                .as_slice(),
             crate::parse_hex("7e4a2b716a684c1ad33c43c808782da9e1a72f14ccda82723f712d49f53a9f28")
                 .unwrap()
         );

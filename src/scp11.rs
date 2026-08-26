@@ -11,7 +11,6 @@ use p256::{
     elliptic_curve::{Generate, sec1::ToSec1Point},
     pkcs8::{DecodePrivateKey, DecodePublicKey},
 };
-use sha2::{Digest, Sha256};
 use std::fs;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -398,18 +397,14 @@ fn derive_key_material(key_agreement: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error
     if key_agreement.len() != 64 {
         return Err(CKR_DEVICE_ERROR.into());
     }
-    let shared_info = [KEY_USAGE, KEY_TYPE_AES, KEY_LENGTH_AES_128];
     let required = SESSION_KEY_LENGTH * DERIVED_KEY_COUNT;
-    let mut output = Zeroizing::new(Vec::with_capacity(96));
-    for counter in 1u32..=3 {
-        let mut hasher = Sha256::new();
-        hasher.update(key_agreement);
-        hasher.update(counter.to_be_bytes());
-        hasher.update(shared_info);
-        output.extend_from_slice(&hasher.finalize());
-    }
-    output.truncate(required);
-    Ok(output)
+    software_key_core::digest::x963_kdf(
+        software_key_core::digest::HashAlgorithm::Sha256,
+        key_agreement,
+        &[KEY_USAGE, KEY_TYPE_AES, KEY_LENGTH_AES_128],
+        required,
+    )
+    .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 struct AuthenticationResponse<'a> {

@@ -257,7 +257,7 @@ pub fn operations_are_owned_by_their_pkcs11_session() {
     );
 
     assert_eq!(crate::api::C_CloseSession(first_session), CKR_OK as CK_RV);
-    let expected = <sha2::Sha256 as sha2::Digest>::digest(second_input);
+    let expected = crate::MessageDigest::Sha256.digest(&second_input);
     let mut actual = [0u8; 32];
     let mut actual_len = actual.len() as CK_ULONG;
     assert_eq!(
@@ -484,7 +484,7 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
     let private = crate::certificate_builder::rsa_key();
     let public = rsa::RsaPublicKey::from(&private);
     let data = b"padding test";
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
+    let digest = crate::MessageDigest::Sha256.digest(data);
     let pss = crate::encode_rsa_pss(
         &digest,
         private.size(),
@@ -500,7 +500,7 @@ pub fn piv_rsa_padding_round_trips_through_raw_rsa() {
             .unwrap()
     );
 
-    let label = <sha2::Sha256 as sha2::Digest>::digest(b"");
+    let label = crate::MessageDigest::Sha256.digest(b"");
     let encoded = crate::rsa_oaep_pad(
         data,
         private.size(),
@@ -554,7 +554,7 @@ pub fn piv_rsa_unpadding_rejects_malformed_blocks() {
         encoded
     }
 
-    let label_digest = <sha2::Sha256 as sha2::Digest>::digest(b"");
+    let label_digest = crate::MessageDigest::Sha256.digest(b"");
     let seed = [0x42; 32];
     let mut valid_db = label_digest.to_vec();
     valid_db.extend([0, 0, 1]);
@@ -720,7 +720,7 @@ pub fn piv_private_objects_route_rsa_signing_to_the_card_session() {
         ),
         CKR_OK as CK_RV
     );
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(&long_message);
+    let digest = crate::MessageDigest::Sha256.digest(&long_message);
     let digest_info = crate::piv_digest_info(mechanism.mechanism, &digest).unwrap();
     assert_eq!(
         *captured.borrow(),
@@ -810,7 +810,7 @@ pub fn verify_accepts_raw_rsa_and_pss_signatures() {
         CKR_OK as CK_RV
     );
 
-    let mut digest = <sha2::Sha256 as sha2::Digest>::digest(b"RSA-PSS verification").to_vec();
+    let mut digest = crate::MessageDigest::Sha256.digest(b"RSA-PSS verification");
     let pss =
         crate::encode_rsa_pss(&digest, key_size, CKM_SHA256 as CK_MECHANISM_TYPE, 33, 32).unwrap();
     let mut pss_signature = crate::rsa_private_operation(&private_key, &pss).unwrap();
@@ -1245,7 +1245,7 @@ pub fn software_rsa_round_trips_every_supported_signature_form() {
         pParameter: (&mut parameters as *mut CK_RSA_PKCS_PSS_PARAMS).cast(),
         ulParameterLen: std::mem::size_of::<CK_RSA_PKCS_PSS_PARAMS>() as CK_ULONG,
     };
-    let mut digest = <sha2::Sha256 as sha2::Digest>::digest(b"custom PSS parameters").to_vec();
+    let mut digest = crate::MessageDigest::Sha256.digest(b"custom PSS parameters");
     round_trip(&mut mechanism, &mut digest);
 
     assert_eq!(
@@ -1353,7 +1353,7 @@ pub fn verify_accepts_piv_and_openpgp_ecdsa_public_keys() {
     let point = crate::certificate_builder::p256_public_point(signing_key.verifying_key());
     let public_key = point[1..].to_vec();
     let data = b"hardware-backed signature";
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(data);
+    let digest = crate::MessageDigest::Sha256.digest(data);
     let signature: p256::ecdsa::Signature =
         signature::hazmat::PrehashSigner::sign_prehash(&signing_key, &digest).unwrap();
     let signature = crate::piv_ecdsa_signature(signature.to_der().as_bytes(), 32).unwrap();

@@ -319,49 +319,33 @@ fn parse_pbkdf2_parameters(mechanism: &CK_MECHANISM) -> Result<Pbkdf2Parameters<
 }
 
 fn derive_pbkdf2(parameters: &Pbkdf2Parameters<'_>, output: &mut [u8]) -> Result<(), Error> {
-    match parameters.prf {
+    let digest = match parameters.prf {
         x if x == CKP_PKCS5_PBKD2_HMAC_SHA1 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
-            pbkdf2::pbkdf2_hmac::<sha1::Sha1>(
-                parameters.password,
-                parameters.salt,
-                parameters.iterations,
-                output,
-            );
+            MessageDigest::Sha1
         }
         x if x == CKP_PKCS5_PBKD2_HMAC_SHA224 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
-            pbkdf2::pbkdf2_hmac::<sha2::Sha224>(
-                parameters.password,
-                parameters.salt,
-                parameters.iterations,
-                output,
-            );
+            MessageDigest::Sha224
         }
         x if x == CKP_PKCS5_PBKD2_HMAC_SHA256 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
-            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
-                parameters.password,
-                parameters.salt,
-                parameters.iterations,
-                output,
-            );
+            MessageDigest::Sha256
         }
         x if x == CKP_PKCS5_PBKD2_HMAC_SHA384 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
-            pbkdf2::pbkdf2_hmac::<sha2::Sha384>(
-                parameters.password,
-                parameters.salt,
-                parameters.iterations,
-                output,
-            );
+            MessageDigest::Sha384
         }
         x if x == CKP_PKCS5_PBKD2_HMAC_SHA512 as CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE => {
-            pbkdf2::pbkdf2_hmac::<sha2::Sha512>(
-                parameters.password,
-                parameters.salt,
-                parameters.iterations,
-                output,
-            );
+            MessageDigest::Sha512
         }
         _ => return Err(CKR_MECHANISM_PARAM_INVALID.into()),
-    }
+    };
+    let derived = software_key_core::digest::pbkdf2_hmac(
+        digest,
+        parameters.password,
+        parameters.salt,
+        parameters.iterations,
+        output.len(),
+    )
+    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
+    output.copy_from_slice(&derived);
     Ok(())
 }
 
@@ -1161,18 +1145,30 @@ fn software_generate_key_pair(
                     .ok_or(CKR_TEMPLATE_INCOMPLETE)?,
             )
             .map_err(Error::from)?;
-            let mut seed = Zeroizing::new([0u8; 64]);
-            getrandom::fill(seed.as_mut()).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-            let seed = ml_kem::Seed::from(*seed);
             let material = match parameter_set {
                 x if x == CKP_ML_KEM_512 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem512(ml_kem::DecapsulationKey::from_seed(seed))
+                    SoftwarePrivateKeyMaterial::MlKem512(
+                        software_key_core::post_quantum::MlKemPrivateKey::generate(
+                            software_key_core::post_quantum::MlKemParameterSet::MlKem512,
+                        )
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                    )
                 }
                 x if x == CKP_ML_KEM_768 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem768(ml_kem::DecapsulationKey::from_seed(seed))
+                    SoftwarePrivateKeyMaterial::MlKem768(
+                        software_key_core::post_quantum::MlKemPrivateKey::generate(
+                            software_key_core::post_quantum::MlKemParameterSet::MlKem768,
+                        )
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                    )
                 }
                 x if x == CKP_ML_KEM_1024 as CK_ML_KEM_PARAMETER_SET_TYPE => {
-                    SoftwarePrivateKeyMaterial::MlKem1024(ml_kem::DecapsulationKey::from_seed(seed))
+                    SoftwarePrivateKeyMaterial::MlKem1024(
+                        software_key_core::post_quantum::MlKemPrivateKey::generate(
+                            software_key_core::post_quantum::MlKemParameterSet::MlKem1024,
+                        )
+                        .map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?,
+                    )
                 }
                 _ => return Err(CKR_ATTRIBUTE_VALUE_INVALID.into()),
             };
@@ -2162,38 +2158,14 @@ pub(crate) fn hkdf_key_material(
     info: &[u8],
     output_length: usize,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    macro_rules! derive {
-        ($hash:ty) => {{
-            if extract {
-                let (mut prk, hkdf) = hkdf::Hkdf::<$hash>::extract(salt, base_key);
-                if expand {
-                    prk.zeroize();
-                    let mut output = Zeroizing::new(vec![0; output_length]);
-                    hkdf.expand(info, &mut output)
-                        .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                    Ok(output)
-                } else {
-                    let output = Zeroizing::new(prk.to_vec());
-                    prk.zeroize();
-                    Ok(output)
-                }
-            } else {
-                let hkdf = hkdf::Hkdf::<$hash>::from_prk(base_key)
-                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                let mut output = Zeroizing::new(vec![0; output_length]);
-                hkdf.expand(info, &mut output)
-                    .map_err(|_| Error::from(CKR_KEY_SIZE_RANGE))?;
-                Ok(output)
-            }
-        }};
+    if !matches!(
+        digest,
+        MessageDigest::Sha1 | MessageDigest::Sha256 | MessageDigest::Sha384 | MessageDigest::Sha512
+    ) {
+        return Err(CKR_MECHANISM_PARAM_INVALID.into());
     }
-    match digest {
-        MessageDigest::Sha1 => derive!(sha1::Sha1),
-        MessageDigest::Sha256 => derive!(sha2::Sha256),
-        MessageDigest::Sha384 => derive!(sha2::Sha384),
-        MessageDigest::Sha512 => derive!(sha2::Sha512),
-        _ => Err(CKR_MECHANISM_PARAM_INVALID.into()),
-    }
+    software_key_core::digest::hkdf(digest, extract, expand, base_key, salt, info, output_length)
+        .map_err(|_| CKR_KEY_SIZE_RANGE.into())
 }
 
 #[derive(Clone, Copy)]
@@ -2225,26 +2197,8 @@ pub(crate) fn x963_kdf(
     shared_data: &[u8],
     output_length: usize,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let blocks = output_length.div_ceil(digest.size());
-    if output_length == 0 || blocks > u32::MAX as usize {
-        return Err(CKR_KEY_SIZE_RANGE.into());
-    }
-    let input_length = secret
-        .len()
-        .checked_add(std::mem::size_of::<u32>())
-        .and_then(|length| length.checked_add(shared_data.len()))
-        .ok_or(CKR_KEY_SIZE_RANGE)?;
-    let mut output = Zeroizing::new(Vec::with_capacity(output_length));
-    for counter in 1..=blocks {
-        let mut input = Zeroizing::new(Vec::with_capacity(input_length));
-        input.extend_from_slice(secret);
-        input.extend_from_slice(&(counter as u32).to_be_bytes());
-        input.extend_from_slice(shared_data);
-        let block = Zeroizing::new(hash(digest, &input)?);
-        let remaining = output_length - output.len();
-        output.extend_from_slice(&block[..remaining.min(block.len())]);
-    }
-    Ok(output)
+    software_key_core::digest::x963_kdf(digest, secret, shared_data, output_length)
+        .map_err(|_| CKR_KEY_SIZE_RANGE.into())
 }
 
 pub(super) fn derived_secret_object(

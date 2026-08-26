@@ -158,47 +158,10 @@ pub(crate) fn piv_is_hashed_ecdsa(mechanism: CK_MECHANISM_TYPE) -> bool {
 }
 
 pub(crate) fn piv_digest_info(mechanism: CK_MECHANISM_TYPE, digest: &[u8]) -> Option<Vec<u8>> {
-    let prefix: &[u8] = match mechanism {
-        x if x == CKM_SHA1_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA224_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x04, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA256_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x01, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA384_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x02, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA512_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x03, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA3_224_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x2d, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x07, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA3_256_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x08, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA3_384_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x09, 0x05, 0x00,
-        ],
-        x if x == CKM_SHA3_512_RSA_PKCS as CK_MECHANISM_TYPE => &[
-            0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
-            0x0a, 0x05, 0x00,
-        ],
-        _ => return None,
-    };
-    let mut result = prefix.to_vec();
-    result.extend_from_slice(digest);
-    Some(result)
+    if !HASHED_RSA_PKCS_MECHANISMS.contains(&mechanism) {
+        return None;
+    }
+    software_key_core::rsa_signing::digest_info(piv_hash_mechanism(mechanism)?, digest).ok()
 }
 
 pub(crate) fn digest_for_hash_mechanism(
@@ -353,16 +316,7 @@ pub(crate) fn shared_rsa_pss_parameters(
 }
 
 pub(crate) fn mgf1(seed: &[u8], length: usize, digest: MessageDigest) -> Result<Vec<u8>, Error> {
-    let mut output = Vec::with_capacity(length);
-    let mut counter = 0u32;
-    while output.len() < length {
-        let mut input = seed.to_vec();
-        input.extend_from_slice(&counter.to_be_bytes());
-        output.extend_from_slice(hash(digest, &input)?.as_ref());
-        counter = counter.checked_add(1).ok_or(CKR_DATA_LEN_RANGE)?;
-    }
-    output.truncate(length);
-    Ok(output)
+    software_key_core::digest::mgf1(digest, seed, length).map_err(|_| CKR_DATA_LEN_RANGE.into())
 }
 
 pub(crate) fn encode_rsa_pss(
@@ -372,45 +326,21 @@ pub(crate) fn encode_rsa_pss(
     mgf_code: u8,
     salt_length: usize,
 ) -> Result<Vec<u8>, Error> {
-    let hash_digest = digest_for_hash_mechanism(hash_mechanism)?;
-    if digest.len() != hash_digest.size() || salt_length > modulus_size {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let em_bits = modulus_size
-        .checked_mul(8)
-        .and_then(|bits| bits.checked_sub(1))
-        .ok_or(CKR_KEY_SIZE_RANGE)?;
-    let em_len = em_bits.div_ceil(8);
-    if em_len < hash_digest.size() + salt_length + 2 {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let mut salt = vec![0; salt_length];
-    getrandom::fill(&mut salt).map_err(|_| CKR_RANDOM_NO_RNG)?;
-    let mut m_prime = vec![0; 8];
-    m_prime.extend_from_slice(digest);
-    m_prime.extend_from_slice(&salt);
-    let h = hash(hash_digest, &m_prime)?;
-    let mut db = vec![0; em_len - salt_length - h.len() - 2];
-    db.push(1);
-    db.extend_from_slice(&salt);
-    let mask = mgf1(
-        h.as_ref(),
-        em_len - h.len() - 1,
-        mgf_digest(mgf_code, hash_mechanism)?,
-    )?;
-    for (value, mask) in db.iter_mut().zip(mask) {
-        *value ^= mask;
-    }
-    db[0] &= 0xff >> (8 * em_len - em_bits);
-    let mut encoded = db;
-    encoded.extend_from_slice(h.as_ref());
-    encoded.push(0xbc);
-    if encoded.len() < modulus_size {
-        let mut padded = vec![0; modulus_size - encoded.len()];
-        padded.extend_from_slice(&encoded);
-        encoded = padded;
-    }
-    Ok(encoded)
+    let parameters = software_key_core::rsa_signing::RsaPssParameters {
+        hash: digest_for_hash_mechanism(hash_mechanism)?,
+        mgf_hash: mgf_digest(mgf_code, hash_mechanism)?,
+        salt_length,
+    };
+    software_key_core::rsa_signing::pss_encoded_digest(modulus_size * 8, parameters, digest)
+        .map_err(|error| match error {
+            software_key_core::rsa_signing::RsaConstructionError::RandomnessUnavailable => {
+                CKR_RANDOM_NO_RNG.into()
+            }
+            software_key_core::rsa_signing::RsaConstructionError::InvalidKey => {
+                CKR_KEY_SIZE_RANGE.into()
+            }
+            _ => CKR_DATA_LEN_RANGE.into(),
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -770,63 +700,12 @@ fn shared_verification_error(error: SoftwareSigningError) -> Error {
     }
 }
 
-pub(crate) fn der_length(encoded: &[u8], offset: &mut usize) -> Option<usize> {
-    let first = *encoded.get(*offset)?;
-    *offset += 1;
-    match first {
-        0..=0x7f => Some(first as usize),
-        0x81 => {
-            let length = *encoded.get(*offset)? as usize;
-            *offset += 1;
-            (length >= 0x80).then_some(length)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn der_positive_integer<'a>(encoded: &'a [u8], offset: &mut usize) -> Option<&'a [u8]> {
-    if *encoded.get(*offset)? != 0x02 {
-        return None;
-    }
-    *offset += 1;
-    let length = der_length(encoded, offset)?;
-    let value = encoded.get(*offset..offset.checked_add(length)?)?;
-    *offset += length;
-    if value.is_empty() || value[0] & 0x80 != 0 {
-        return None;
-    }
-    if value.len() > 1 && value[0] == 0 {
-        if value[1] & 0x80 == 0 {
-            return None;
-        }
-        Some(&value[1..])
-    } else {
-        Some(value)
-    }
-}
-
 pub(crate) fn ecdsa_der_to_raw(
     signature: &[u8],
     coordinate_length: usize,
 ) -> Result<Vec<u8>, Error> {
-    let mut offset = 0;
-    if signature.get(offset) != Some(&0x30) {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    offset += 1;
-    let sequence_length = der_length(signature, &mut offset).ok_or(CKR_DEVICE_ERROR)?;
-    if offset.checked_add(sequence_length) != Some(signature.len()) {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    let r = der_positive_integer(signature, &mut offset).ok_or(CKR_DEVICE_ERROR)?;
-    let s = der_positive_integer(signature, &mut offset).ok_or(CKR_DEVICE_ERROR)?;
-    if offset != signature.len() || r.len() > coordinate_length || s.len() > coordinate_length {
-        return Err(CKR_DEVICE_ERROR.into());
-    }
-    let mut output = vec![0; coordinate_length * 2];
-    output[coordinate_length - r.len()..coordinate_length].copy_from_slice(r);
-    output[2 * coordinate_length - s.len()..].copy_from_slice(s);
-    Ok(output)
+    software_key_core::software_signing::ecdsa_signature_from_der(signature, coordinate_length)
+        .map_err(|_| CKR_DEVICE_ERROR.into())
 }
 
 pub(crate) fn rsa_operation(
@@ -857,34 +736,22 @@ pub(crate) fn rsa_private_operation(key: &RsaPrivateKey, input: &[u8]) -> Result
 }
 
 pub(crate) fn rsa_pkcs1_encrypt(key: &RsaPublicKey, input: &[u8]) -> Result<Vec<u8>, Error> {
-    let size = key.size();
-    if input.len() > size.saturating_sub(11) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let padding_length = size - input.len() - 3;
-    let mut encoded = vec![0, 2];
-    while encoded.len() < padding_length + 2 {
-        let mut byte = [0];
-        getrandom::fill(&mut byte).map_err(|_| Error::from(CKR_RANDOM_NO_RNG))?;
-        if byte[0] != 0 {
-            encoded.push(byte[0]);
-        }
-    }
-    encoded.push(0);
-    encoded.extend_from_slice(input);
+    let encoded =
+        software_key_core::rsa_signing::rsa_pkcs1v15_pad(input, key.size()).map_err(|error| {
+            match error {
+                software_key_core::rsa_signing::RsaConstructionError::RandomnessUnavailable => {
+                    Error::from(CKR_RANDOM_NO_RNG)
+                }
+                _ => Error::from(CKR_DATA_LEN_RANGE),
+            }
+        })?;
     rsa_public_operation(key, &encoded)
 }
 
 #[cfg(test)]
 pub(crate) fn rsa_pkcs1_sign(key: &RsaPrivateKey, input: &[u8]) -> Result<Vec<u8>, Error> {
-    let size = key.size();
-    if input.len() > size.saturating_sub(11) {
-        return Err(CKR_DATA_LEN_RANGE.into());
-    }
-    let mut encoded = vec![0, 1];
-    encoded.resize(size - input.len() - 1, 0xff);
-    encoded.push(0);
-    encoded.extend_from_slice(input);
+    let encoded = software_key_core::rsa_signing::pkcs1v15_encoded_payload(key.size(), input)
+        .map_err(|_| Error::from(CKR_DATA_LEN_RANGE))?;
     rsa_private_operation(key, &encoded)
 }
 
@@ -896,40 +763,18 @@ pub(crate) fn verify_rsa_pss(
     mgf_code: u8,
     salt_length: usize,
 ) -> Result<bool, Error> {
-    let hash_digest = digest_for_hash_mechanism(hash_mechanism)?;
-    if digest.len() != hash_digest.size() || encoded.len() < hash_digest.size() + salt_length + 2 {
-        return Ok(false);
-    }
-    let em_bits = encoded.len() * 8 - 1;
-    let em_len = em_bits.div_ceil(8);
-    let encoded = if encoded.len() > em_len {
-        &encoded[encoded.len() - em_len..]
-    } else {
-        encoded
+    let parameters = software_key_core::rsa_signing::RsaPssParameters {
+        hash: digest_for_hash_mechanism(hash_mechanism)?,
+        mgf_hash: mgf_digest(mgf_code, hash_mechanism)?,
+        salt_length,
     };
-    if encoded.last() != Some(&0xbc) {
-        return Ok(false);
-    }
-    let h_offset = encoded.len() - hash_digest.size() - 1;
-    let masked_db = &encoded[..h_offset];
-    let h = &encoded[h_offset..h_offset + hash_digest.size()];
-    if masked_db.first().is_some_and(|value| *value & 0x80 != 0) {
-        return Ok(false);
-    }
-    let mask = mgf1(h, masked_db.len(), mgf_digest(mgf_code, hash_mechanism)?)?;
-    let mut db = masked_db.to_vec();
-    for (value, mask) in db.iter_mut().zip(mask) {
-        *value ^= mask;
-    }
-    db[0] &= 0x7f;
-    let separator = db.len() - salt_length - 1;
-    if db.get(separator) != Some(&1) || db[..separator].iter().any(|value| *value != 0) {
-        return Ok(false);
-    }
-    let mut m_prime = vec![0; 8];
-    m_prime.extend_from_slice(digest);
-    m_prime.extend_from_slice(&db[separator + 1..]);
-    Ok(hash(hash_digest, &m_prime)?.as_slice() == h)
+    Ok(software_key_core::rsa_signing::verify_pss_encoded_digest(
+        encoded,
+        encoded.len() * 8,
+        parameters,
+        digest,
+    )
+    .is_ok())
 }
 
 #[cfg(test)]

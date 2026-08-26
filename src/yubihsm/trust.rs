@@ -4,7 +4,6 @@ use p256::{
     PublicKey,
     pkcs8::{DecodePublicKey, EncodePublicKey},
 };
-use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     fs,
@@ -157,7 +156,7 @@ pub(crate) fn fingerprint(encoded_public_point: &[u8]) -> Result<String, Error> 
 }
 
 pub(crate) fn fingerprint_bytes(encoded_public_point: &[u8]) -> Result<[u8; 32], Error> {
-    Ok(Sha256::digest(device_spki(encoded_public_point)?).into())
+    Ok(sha256(&device_spki(encoded_public_point)?))
 }
 
 pub(crate) fn entry_path(
@@ -230,7 +229,7 @@ pub(crate) fn decode_trust_record(encoded: &[u8]) -> Result<Vec<u8>, Error> {
         }
         _ => return Err(CKR_ARGUMENTS_BAD.into()),
     };
-    let actual: [u8; 32] = Sha256::digest(&pinned).into();
+    let actual = sha256(&pinned);
     if !bool::from(actual.ct_eq(&fingerprint)) {
         return Err(CKR_ARGUMENTS_BAD.into());
     }
@@ -428,8 +427,8 @@ mod tests {
     #[test]
     fn fingerprint_is_sha256_of_canonical_spki() {
         let (key, point) = test_key();
-        let expected: String = Sha256::digest(
-            SubjectPublicKeyInfoOwned::from_key(&key)
+        let expected: String = sha256(
+            &SubjectPublicKeyInfoOwned::from_key(&key)
                 .unwrap()
                 .to_der()
                 .unwrap(),
@@ -519,4 +518,10 @@ mod tests {
     fn embedded_yubico_intermediate_is_signed_by_embedded_root() {
         crate::certificate_chain::verify_signed_by(YUBICO_INTERMEDIATE, YUBICO_ROOT).unwrap();
     }
+}
+fn sha256(data: &[u8]) -> [u8; 32] {
+    software_key_core::digest::HashAlgorithm::Sha256
+        .digest(data)
+        .try_into()
+        .expect("SHA-256 output is 32 bytes")
 }

@@ -1286,10 +1286,11 @@ fn yubihsm_device_public_key_enrollment_uses_fingerprinted_cbor_entry() {
     let path = std::path::PathBuf::from(path);
     let record = std::fs::read(&path).unwrap();
     let key = crate::yubihsm::trust::decode_trust_record(&record).unwrap();
-    assert_eq!(
-        <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&key)),
-        fingerprint
-    );
+    let actual: [u8; 32] = crate::MessageDigest::Sha256
+        .digest(&key)
+        .try_into()
+        .unwrap();
+    assert_eq!(actual, fingerprint);
 
     std::fs::remove_file(path).unwrap();
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
@@ -1361,10 +1362,11 @@ fn yubihsm_device_attestation_enrollment_uses_supplied_signer_id() {
     let path = std::path::PathBuf::from(path);
     let record = std::fs::read(&path).unwrap();
     let key = crate::yubihsm::trust::decode_trust_record(&record).unwrap();
-    assert_eq!(
-        <[u8; 32]>::from(<sha2::Sha256 as sha2::Digest>::digest(&key)),
-        fingerprint
-    );
+    let actual: [u8; 32] = crate::MessageDigest::Sha256
+        .digest(&key)
+        .try_into()
+        .unwrap();
+    assert_eq!(actual, fingerprint);
     std::fs::remove_file(path).unwrap();
 
     assert_eq!(crate::api::C_CloseSession(session), CKR_OK as CK_RV);
@@ -1698,7 +1700,7 @@ fn yubihsm_abi_operations_emit_authenticated_device_commands() {
         ),
         CKR_OK as CK_RV
     );
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(hashed_message);
+    let digest = crate::MessageDigest::Sha256.digest(&hashed_message);
     let digest_info = crate::piv_digest_info(sign_mechanism.mechanism, &digest).unwrap();
     {
         let command_log = commands.borrow();

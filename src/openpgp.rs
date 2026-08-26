@@ -8,7 +8,6 @@ use crate::{
     scp03::{CommandApdu, select_application},
 };
 use rsa::{BigUint, RsaPublicKey};
-use sha2::{Digest, Sha256, Sha512};
 
 pub(crate) const OPENPGP_AID: [u8; 6] = [0xd2, 0x76, 0x00, 0x01, 0x24, 0x01];
 pub(crate) const PW1_ONE_SIGNATURE: u8 = 0x00;
@@ -350,20 +349,32 @@ impl KdfParams {
             return Err(CKR_DATA_INVALID.into());
         }
 
-        fn derive<D: Digest>(salted_pin: &[u8], iteration_count: usize) -> Vec<u8> {
-            let mut hasher = D::new();
+        fn derive(
+            algorithm: software_key_core::digest::HashAlgorithm,
+            salted_pin: &[u8],
+            iteration_count: usize,
+        ) -> Vec<u8> {
+            let mut hasher = software_key_core::digest::HashContext::new(algorithm);
             let mut remaining = iteration_count;
             while remaining > 0 {
                 let length = remaining.min(salted_pin.len());
                 hasher.update(&salted_pin[..length]);
                 remaining -= length;
             }
-            hasher.finalize().to_vec()
+            hasher.finalize()
         }
 
         match self.hash_algorithm {
-            0x08 => Ok(derive::<Sha256>(&salted_pin, self.iteration_count as usize)),
-            0x0a => Ok(derive::<Sha512>(&salted_pin, self.iteration_count as usize)),
+            0x08 => Ok(derive(
+                software_key_core::digest::HashAlgorithm::Sha256,
+                &salted_pin,
+                self.iteration_count as usize,
+            )),
+            0x0a => Ok(derive(
+                software_key_core::digest::HashAlgorithm::Sha512,
+                &salted_pin,
+                self.iteration_count as usize,
+            )),
             _ => Err(CKR_DATA_INVALID.into()),
         }
     }

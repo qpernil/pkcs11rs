@@ -1,6 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use der::Decode;
-use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     env,
@@ -301,7 +300,10 @@ fn import_certificates(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>, String> {
             ]
         };
         for certificate in imported {
-            let fingerprint: [u8; 32] = Sha256::digest(&certificate).into();
+            let fingerprint: [u8; 32] = software_key_core::digest::HashAlgorithm::Sha256
+                .digest(&certificate)
+                .try_into()
+                .expect("SHA-256 has a 32-byte output");
             if !fingerprints.insert(fingerprint) {
                 return Err(format!(
                     "certificate input {} contains or repeats a duplicate certificate",
@@ -386,7 +388,7 @@ fn report_certificates(certificates: &[Vec<u8>]) -> Result<(), String> {
     for (index, encoded) in certificates.iter().enumerate() {
         let certificate = Certificate::from_der(encoded)
             .map_err(|error| format!("parse certificate {} for report: {error}", index + 1))?;
-        let fingerprint = Sha256::digest(encoded);
+        let fingerprint = software_key_core::digest::HashAlgorithm::Sha256.digest(encoded);
         let fingerprint = fingerprint
             .iter()
             .map(|byte| format!("{byte:02x}"))

@@ -3,7 +3,6 @@ use crate::{
     CKR_PIN_LOCKED, CKR_USER_PIN_NOT_INITIALIZED, Error, is_multiple_of,
     secure_channel_crypto::{AES_BLOCK_SIZE, Direction, aes_cbc},
 };
-use hmac::{Hmac, Mac};
 use minicbor::{Decoder, Encoder, data::Type};
 use p256::{
     PublicKey, SecretKey,
@@ -11,7 +10,6 @@ use p256::{
     ecdsa::{Signature, VerifyingKey, signature::Verifier},
     elliptic_curve::sec1::ToSec1Point,
 };
-use sha2::{Digest, Sha256};
 use std::{rc::Rc, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
 use zeroize::{Zeroize, Zeroizing};
@@ -47,6 +45,26 @@ const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
 const PERMISSION_PERSISTENT_CREDENTIAL_MANAGEMENT_READ_ONLY: u8 = 0x40;
 const MAX_CTAP_COLLECTION_LENGTH: usize = 4096;
 
+fn sha256(data: impl AsRef<[u8]>) -> [u8; 32] {
+    software_key_core::digest::HashAlgorithm::Sha256
+        .digest(data.as_ref())
+        .try_into()
+        .expect("SHA-256 output is 32 bytes")
+}
+
+fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
+    let mut context = software_key_core::digest::HashContext::new(
+        software_key_core::digest::HashAlgorithm::Sha256,
+    );
+    for part in parts {
+        context.update(part);
+    }
+    context
+        .finalize()
+        .try_into()
+        .expect("SHA-256 output is 32 bytes")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PinUvAuthProtocol {
     One,
@@ -74,14 +92,31 @@ impl PinUvAuthProtocol {
 
     fn derive_shared_secret(self, ecdh_x: &[u8]) -> Result<Zeroizing<Vec<u8>>, CtapError> {
         match self {
-            Self::One => Ok(Zeroizing::new(Sha256::digest(ecdh_x).to_vec())),
+            Self::One => Ok(Zeroizing::new(sha256(ecdh_x).to_vec())),
             Self::Two => {
-                let hkdf = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), ecdh_x);
                 let mut shared = Zeroizing::new(vec![0u8; 64]);
-                hkdf.expand(b"CTAP2 HMAC key", &mut shared[..32])
-                    .map_err(|_| CtapError::Malformed("HMAC key derivation failed"))?;
-                hkdf.expand(b"CTAP2 AES key", &mut shared[32..])
-                    .map_err(|_| CtapError::Malformed("AES key derivation failed"))?;
+                let hmac_key = software_key_core::digest::hkdf(
+                    software_key_core::digest::HashAlgorithm::Sha256,
+                    true,
+                    true,
+                    ecdh_x,
+                    Some(&[0u8; 32]),
+                    b"CTAP2 HMAC key",
+                    32,
+                )
+                .map_err(|_| CtapError::Malformed("HMAC key derivation failed"))?;
+                let aes_key = software_key_core::digest::hkdf(
+                    software_key_core::digest::HashAlgorithm::Sha256,
+                    true,
+                    true,
+                    ecdh_x,
+                    Some(&[0u8; 32]),
+                    b"CTAP2 AES key",
+                    32,
+                )
+                .map_err(|_| CtapError::Malformed("AES key derivation failed"))?;
+                shared[..32].copy_from_slice(&hmac_key);
+                shared[32..].copy_from_slice(&aes_key);
                 Ok(shared)
             }
         }
@@ -144,10 +179,12 @@ impl PinUvAuthProtocol {
         } {
             return Err(CtapError::Malformed("invalid PIN/UV authentication key"));
         }
-        let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(key)
-            .map_err(|_| CtapError::Malformed("invalid PIN/UV authentication key"))?;
-        mac.update(message);
-        let result = mac.finalize().into_bytes();
+        let result = software_key_core::digest::hmac(
+            software_key_core::digest::HashAlgorithm::Sha256,
+            key,
+            message,
+        )
+        .map_err(|_| CtapError::Malformed("invalid PIN/UV authentication key"))?;
         let length = match self {
             Self::One => 16,
             Self::Two => 32,
@@ -421,7 +458,7 @@ impl Client {
         let mut padded_pin = Zeroizing::new(vec![0; 64]);
         padded_pin[..new_pin.len()].copy_from_slice(&new_pin);
         let mut new_pin_enc = protocol.encrypt(&shared_secret, &padded_pin)?;
-        let current_pin_hash = Zeroizing::new(Sha256::digest(&*current_pin).to_vec());
+        let current_pin_hash = Zeroizing::new(sha256(&*current_pin).to_vec());
         let mut pin_hash_enc = protocol.encrypt(&shared_secret, &current_pin_hash[..16])?;
         let mut authenticated =
             Zeroizing::new(Vec::with_capacity(new_pin_enc.len() + pin_hash_enc.len()));
@@ -477,7 +514,7 @@ impl Client {
         )?;
         let authenticator_key = parse_key_agreement_response(&response)?;
         let (platform_key, mut shared_secret) = encapsulate(&authenticator_key, protocol)?;
-        let pin_hash = Zeroizing::new(Sha256::digest(&*pin).to_vec());
+        let pin_hash = Zeroizing::new(sha256(&*pin).to_vec());
         let pin_hash_enc = protocol.encrypt(&shared_secret, &pin_hash[..16])?;
         let request = if info.option("pinUvAuthToken") {
             encode_get_permissioned_token_request(
@@ -537,10 +574,7 @@ impl Client {
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce)
             .map_err(|_| CtapError::Transport(crate::CKR_RANDOM_NO_RNG.into()))?;
-        let mut client_data_hasher = Sha256::new();
-        client_data_hasher.update(b"pkcs11rs previewSign registration v1");
-        client_data_hasher.update(nonce);
-        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let client_data_hash = sha256_parts(&[b"pkcs11rs previewSign registration v1", &nonce]);
         let pin_uv_auth_param = authorization
             .protocol
             .authenticate(&authorization.token, &client_data_hash)?;
@@ -573,10 +607,7 @@ impl Client {
         to_be_signed: &[u8],
         additional_args_cbor: &[u8],
     ) -> Result<Vec<u8>, CtapError> {
-        let mut client_data_hasher = Sha256::new();
-        client_data_hasher.update(b"pkcs11rs previewSign assertion v1");
-        client_data_hasher.update(to_be_signed);
-        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let client_data_hash = sha256_parts(&[b"pkcs11rs previewSign assertion v1", to_be_signed]);
         let pin_uv_auth_param = authorization
             .protocol
             .authenticate(&authorization.token, &client_data_hash)?;
@@ -629,8 +660,7 @@ impl Client {
             PERMISSION_MAKE_CREDENTIAL,
             Some(FIDO2_TEST_RP_ID),
         )?;
-        let client_data_hash: [u8; 32] =
-            Sha256::digest(b"pkcs11rs synthetic FIDO2 hardware credential").into();
+        let client_data_hash = sha256(b"pkcs11rs synthetic FIDO2 hardware credential");
         let pin_uv_auth_param = authorization
             .protocol
             .authenticate(&authorization.token, &client_data_hash)?;
@@ -660,10 +690,7 @@ impl Client {
         let mut nonce = [0_u8; 32];
         getrandom::fill(&mut nonce)
             .map_err(|_| CtapError::Transport(crate::CKR_RANDOM_NO_RNG.into()))?;
-        let mut client_data_hasher = Sha256::new();
-        client_data_hasher.update(b"pkcs11rs previewSign registration v1");
-        client_data_hasher.update(nonce);
-        let client_data_hash: [u8; 32] = client_data_hasher.finalize().into();
+        let client_data_hash = sha256_parts(&[b"pkcs11rs previewSign registration v1", &nonce]);
         let authorization = if pin.is_empty() {
             None
         } else {
@@ -1363,7 +1390,7 @@ fn validate_get_assertion_response(
     let authenticator_data =
         authenticator_data.ok_or(CtapError::Malformed("missing assertion authenticator data"))?;
     if authenticator_data.len() < 37
-        || authenticator_data[..32] != Sha256::digest(rp_id.as_bytes())[..]
+        || authenticator_data[..32] != sha256(rp_id.as_bytes())
         || authenticator_data[32] & 0x05 != 0x05
     {
         return Err(CtapError::Malformed("invalid assertion authenticator data"));
@@ -1513,7 +1540,7 @@ fn parse_attested_credential_data(
     {
         return Err(CtapError::Malformed("missing attested credential data"));
     }
-    let expected_rp_id_hash = Sha256::digest(rp_id.as_bytes());
+    let expected_rp_id_hash = sha256(rp_id.as_bytes());
     if authenticator_data[..32] != expected_rp_id_hash[..] {
         return Err(CtapError::Malformed("unexpected relying-party ID hash"));
     }
@@ -2239,7 +2266,7 @@ mod tests {
         signing_key: &SigningKey,
         rp_id: &str,
     ) -> Vec<u8> {
-        let mut authenticator_data = Sha256::digest(rp_id.as_bytes()).to_vec();
+        let mut authenticator_data = sha256(rp_id.as_bytes()).to_vec();
         authenticator_data.push(0x41);
         authenticator_data.extend_from_slice(&[0; 4]);
         authenticator_data.extend_from_slice(&[0x33; 16]);
@@ -2824,7 +2851,7 @@ mod tests {
         let mut wrong_rp = response.clone();
         let hash_offset = wrong_rp
             .windows(32)
-            .position(|window| window == Sha256::digest(FIDO2_TEST_RP_ID.as_bytes()).as_slice())
+            .position(|window| window == sha256(FIDO2_TEST_RP_ID.as_bytes()).as_slice())
             .unwrap();
         wrong_rp[hash_offset] ^= 1;
         assert!(matches!(
@@ -3254,7 +3281,7 @@ mod tests {
     }
 
     fn get_assertion_response(rp_id: &str, credential_id: &[u8]) -> Vec<u8> {
-        let mut authenticator_data = Sha256::digest(rp_id.as_bytes()).to_vec();
+        let mut authenticator_data = sha256(rp_id.as_bytes()).to_vec();
         authenticator_data.push(0x05);
         authenticator_data.extend_from_slice(&1_u32.to_be_bytes());
         let mut response = Vec::new();
@@ -3309,7 +3336,7 @@ mod tests {
         ));
 
         let mut bad_flags = get_assertion_response("example.com", &credential_id);
-        let hash = Sha256::digest("example.com");
+        let hash = sha256("example.com");
         let offset = bad_flags
             .windows(hash.len())
             .position(|candidate| candidate == hash.as_slice())
@@ -3321,7 +3348,7 @@ mod tests {
         ));
 
         let mut missing_signature = Vec::new();
-        let mut authenticator_data = Sha256::digest("example.com").to_vec();
+        let mut authenticator_data = sha256("example.com").to_vec();
         authenticator_data.push(0x05);
         authenticator_data.extend_from_slice(&0_u32.to_be_bytes());
         Encoder::new(&mut missing_signature)
